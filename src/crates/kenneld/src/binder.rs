@@ -816,16 +816,27 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     let (outcome, reply) = target.map_or_else(
         || (Outcome::Deny, Reply::Data(one(status::DENIED))),
         |socket| {
-            kennel_lib_syscall::net::connect_unix_timeout(
-                std::path::Path::new(&socket.real),
-                AFUNIX_CONNECT_DEADLINE,
-            )
-            .map_or_else(
-                // Granted but unreachable (absent / refused / timed out): never tie up the
-                // looper on a wedged target.
-                |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
-                |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
-            )
+            let real = std::path::Path::new(&socket.real);
+            // Backstop the compiler's control-socket ungrantability rule at the daemon, against the
+            // REAL endpoint (symlink-resolved): never broker a connect to the kenneld control socket,
+            // even if a signed settled policy somehow carries the grant. The compiler refuses it at
+            // install (the loud primary guard); this is the construction-time belt to those braces.
+            let resolved = std::fs::canonicalize(real);
+            if kennel_lib_control::socket::is_control_socket(real)
+                || resolved
+                    .as_deref()
+                    .is_ok_and(kennel_lib_control::socket::is_control_socket)
+            {
+                (Outcome::Deny, Reply::Data(one(status::DENIED)))
+            } else {
+                kennel_lib_syscall::net::connect_unix_timeout(real, AFUNIX_CONNECT_DEADLINE)
+                    .map_or_else(
+                        // Granted but unreachable (absent / refused / timed out): never tie up the
+                        // looper on a wedged target.
+                        |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
+                        |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+                    )
+            }
         },
     );
     writer.emit(
