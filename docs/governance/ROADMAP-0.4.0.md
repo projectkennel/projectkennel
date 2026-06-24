@@ -303,7 +303,61 @@ Self-contained and testable with no broker and no runtime — the contract every
   be authored and validated against them), but a consume of either shape is refused at broker time until
   its handoff is built. af-unix is sufficient for the 0.4.0 headline; the other two are a later increment,
   not a 0.4.0 gap. *(Landed: the af-unix broker, the consumer-side facade dispatch, and the two-kennel
-  provide/consume e2e — `mesh-roundtrip`.)*
+  provide/consume e2e — `mesh-roundtrip`. The provider-side connector handoff it shipped is the
+  `/proc/<pid>/root` form **superseded by W21** — see there before building any further mesh consumer.)*
+
+- **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes W5's `/proc/<pid>/root`).**
+  **[dep, blocker] S.** The keystone correction, and the **blocker for every other mesh consumer** (W6
+  activation, W7 GUI): the W5 broker reaches a provider's endpoint by traversing the provider's mount
+  namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the provider **pid**. That is a
+  namespace-crossing connect in the most privileged process, over a path the provider's view controls, with
+  a **pid-reuse race** between *Ready* and the connect. Frozen design: `07-13-service-catalog.md` §7.13.4b.
+  Replace it with a **host-owned rendezvous point** that names the *capability*, not the provider process —
+  `<runtime>/mesh/<tier>/<name>[.<key>]/`, derived deterministically from `(tier, name, key)`, all
+  signed-catalogue state (none of it the pid; the optional private `key` is appended iff set, the same token
+  that disambiguates a shared public name across policies). `kenneld` **derives and injects** the af-unix
+  endpoint into the provider — no author-chosen path — and binds only that **per-capability** directory into
+  the provider's view (never a shared parent, so a provider cannot reach a sibling's endpoint behind the
+  broker). The provider binds where it is told; the socket inode is the one `kenneld` holds host-side, so the
+  handoff becomes a plain `connect` to that path — **byte-identical to the host-socket facade**
+  (`af_unix_connect` over `socket.real`, §7.6), the same §4.3 fd-broker shape.
+  **Reuse-only — invents no path and touches no privhelper verb.** Each capability's rendezvous bind is
+  **one ordinary `BindMount`** in the provider's `ShimView.binds`, mounted by the existing `materialize_binds`
+  loop that already binds every view path — the privhelper construct half runs it unchanged. The handoff
+  collapses onto the existing `connect_unix_timeout(&real, …)` call the `[[unix.allow]]` facade already uses;
+  the `/proc/<pid>/root` join and the `pid` field **delete** from `svc_connect_handoff` and from
+  `broker::Selected`/the catalogue. Readiness (W6) `stat`s the same host path — the pid leaves the model
+  entirely, the reuse race becoming **structurally absent** rather than mitigated.
+  **Scope.** `svc_connect_handoff` (the connect), the provider-construction per-capability rendezvous bind,
+  the `(tier, name, key)` path derivation (one pure function, shared by construction and broker), dropping
+  `pid` from `Selected`/`CatalogueProvider`, and the **schema change** this entails (a revision of W1's
+  frozen mesh schema, noted honestly): for `af-unix` the provider no longer authors `endpoint` — `kenneld`
+  derives it and injects it via a provider-side `env`, the listen-direction mirror of the consumer's
+  `at`+`env` — and `key` gains a filesystem-safe-charset validation (it now appears in a path; a UUID already
+  complies). The `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a
+  frozen surface. Land it **before** W5's mesh grows more dependents on `pid`/`/proc/<pid>/root` — today it is
+  the one `svc_connect_handoff` call site and two catalogue fields.
+  **Rendezvous ownership on a same-capability collision.** Two equally-enabled providers of one
+  `(tier, name)` with no `key` to separate them contest one rendezvous point. The rule (§7.13.4b, the §7.13.4
+  fail-open doctrine extended one inch): the point has **one owner — the provider the broker resolves the
+  name to**, so construction binds the per-capability directory *only for that selected owner*; the non-owner
+  runs normally and is **shadowed**, not denied (no collapse-to-none DoS, no `kenneld` blow-up, no bind race).
+  RP ownership ≡ broker resolution — the **same** selection, so they cannot disagree. This rides W4's
+  projection (the selection already exists) and W14's topology surface (mark the shadowed provide); default
+  is the stable resolution order, with an optional **incumbency tiebreak** (a `Ready` owner keeps the slot
+  over an equal newcomer across `daemon-reload`) as a fast-follow, not required for correctness.
+  **Scrub the broker to decision-core-plus-shims.** W21 is also the moment to audit the whole `SVC_CONNECT`
+  subsystem (`kenneld::broker` + the `binder::svc_connect*` handlers) against the TCB-reuse discipline, so
+  what remains is *truly* separate logic and thin shims over primitives that already exist — not a parallel
+  implementation of things the codebase already does. The target end-state: the only irreducibly-novel code
+  is `broker::decide` (pure resolution — match a signed consume to a catalogue candidate, no I/O) and the
+  consume-with-wait loop in `svc_connect_activate_wait` (the cycle-safety deadline, §7.13.4a); everything
+  else reduces to a shim — `svc_connect_handoff` → `connect_unix_timeout(derive_rp(…))` (the same call the
+  `[[unix.allow]]` facade uses), the rendezvous mount → one `BindMount` through `materialize_binds`, the
+  readiness probe → a `stat`, request/reply → the existing `kennel-lib-binder::service` codec, audit →
+  `writer.emit`. The deliverable includes the evidence: the `kenneld` inventory/SLOC delta should show the
+  broker subsystem net-*shrinking* (the deleted `/proc/<pid>/root` join and `pid` plumbing) or holding flat
+  with the new logic confined to `decide` — never a second connect/bind/route path beside an existing one.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
@@ -547,6 +601,13 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   (a T1.6-equivalent — the GUI-service kennel's connection to the host compositor, held only to vend
   per-kennel host fds; one ordinary Wayland client to the host, in a confined kennel, required `reason`).
   Plus the compliance-table mapping.
+  **Sequenced after W21 — the threat prose describes the handoff, which W21 reshapes.** The
+  standing-service residual's mitigation must describe the **host-owned rendezvous point** (§7.13.4b), not
+  the `/proc/<pid>/root` namespace-crossing connect the broker does today: W21 *strengthens* this story —
+  it removes the namespace-cross, the provider-controlled endpoint path, and the pid-reuse race — so the
+  T3.10 mitigation and its residuals shift. (A first cut of these entries was written against the old
+  handoff and must not merge ahead of W21; rewrite the mitigation/residual prose against §7.13.4b once it
+  lands.)
 
 - **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M.**
   Land the principle solidly across the corpus, not as a buried backlog note. The mesh provides
@@ -649,17 +710,21 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
    so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
    restart-invalidates-connectors) in W3's contract before W5 implements it.
-2. **Runtime logic — W4 → W5 → W6 → W7**, each built against a frozen contract. Catalogue (the
+2. **Runtime logic — W4 → W5 → W21 → W6 → W7**, each built against a frozen contract. Catalogue (the
    derived projection over W1), then the connector broker (the logic behind W3, resolving against W4),
-   then sidecars (the supervision logic behind W2), then GUI (the first real consumer). W7 gated on the
-   W0 confirms coming back fully clean.
+   then **W21 reshapes W5's provider-side handoff to the host-owned rendezvous point** — a blocker that
+   lands before W6/W7 grow more dependents on the `/proc/<pid>/root`/pid form it deletes — then sidecars
+   (the supervision logic behind W2, whose readiness probe rides W21's rendezvous path), then GUI (the
+   first real consumer). W7 gated on the W0 confirms coming back fully clean.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
    parallel with Thrusts 2/4; slot against capacity.
 4. **Trust + threat — W11 → W12 → W13**, in parallel with Thrust 2; W11 (trust class) before the GUI
-   multi-leg case references it, W12 after the residuals are concrete, W13 (the doc sweep) once the
-   trust class and threat entries give it something canonical to point at.
+   multi-leg case references it, W12 after the residuals are concrete **and after W21** (the standing-service
+   residual's mitigation describes the handoff W21 reshapes — write it against the rendezvous point, not the
+   superseded `/proc/<pid>/root` connect), W13 (the doc sweep) once the trust class and threat entries give
+   it something canonical to point at.
 5. **Operability — W14** after W4 (it reads the catalogue) and W6 (it reads readiness).
 6. **Pre-ship — W15 (red-team) gating, then W16's accuracy pass (also gating); W16's positioning pass
    is a fast-follow after the tag**, all after the whole mesh surface (W1–W7) *and* the harmonised spawn
