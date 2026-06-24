@@ -86,25 +86,6 @@ landed ahead of the runtime W6–W11), and it is the anti-drift discipline appli
 freeze and test the contract, then build consumers against the frozen thing, rather than building
 consumers in parallel and reconciling their assumptions afterward.
 
-### Build state (2026-06-24)
-
-This is a planning artefact written ahead of the build; most of it has since **landed**. Snapshot so the
-prose tense is not mistaken for open work:
-
-- **Merged.** W0 (substrate confirm), W1 (schema) + W8 (spawn-facade contract) (#83), W2 (readiness
-  scaffold) (#84), W3 (`SVC_CONNECT` wire) (#85), W4 (catalogue) (#86–#89), W5 (broker + af-unix handoff)
-  (#90, #92), W6 (supervisor + ondemand activation) (#91, #95), W7 (confined GUI compositor-broker) (#99),
-  W11 (trust class) + W13 (auth-not-attestation sweep) (#102), W14 (mesh topology view) (#100); W17 (version
-  handshake) partial (#94). The mesh runtime, the GUI path, and the topology surface are **shipped**.
-- **Open for 0.4.0.** **W21** (correct the shipped `/proc/<pid>/root` handoff to the host-owned rendezvous
-  point — a post-merge fix, design landed in #103, code owed; **ship-gate**); **W12** (THREATS entries —
-  first cut #101, to be rewritten against W21 then re-landed); **W15** (red-team, ship-gate); **W16** (README
-  accuracy pass, ship-gate; positioning pass a fast-follow). **W9**/**W10** (spawn-surface introspection +
-  unify) track independently of the mesh.
-
-The per-thrust entries below keep their original planning prose; treat the snapshot above as the authority on
-what is built. Status notes inline (`*Landed: …*`, `**Status:**`) are the per-item record.
-
 ### Thrust 0 — Substrate confirms (gating, run FIRST)
 
 The assumptions about **external substrate the project does not control** that the GUI headline (W7)
@@ -256,7 +237,8 @@ Self-contained and testable with no broker and no runtime — the contract every
   consume cycle resolves to double-timeout-then-failed, not deadlock) so W5's broker logic is built to a
   frozen, asserted transaction surface, not one that emerges from the implementation.
 
-- **W17 · Control-plane version handshake (the runtime anti-drift guard).** **[dep] S–M.**
+- **W17 · Control-plane version handshake (the runtime anti-drift guard).** **[dep] S–M.** **Status: not
+  built** (#94 only added this roadmap note; no handshake code in `kennel-lib-control`/`kenneld`).
   *(Added 2026-06-23, from a 0.3.1 field finding.)*
   W1–W3 freeze the contracts test-first — anti-drift at *compile* time. This is its **runtime
   complement:** when two *different builds* of `kennel` and `kenneld` nonetheless talk (a reinstall
@@ -281,7 +263,7 @@ Self-contained and testable with no broker and no runtime — the contract every
 
 ### Thrust 2 — Runtime logic (built against the frozen contracts)
 
-- **W4 · The service catalogue (the derived projection).** **[dep] M.**
+- **W4 · The service catalogue (the derived projection).** **[dep] M.** **Status: merged (#86–#89).**
   `kenneld` assembles the registry from the `[provides]` blocks (W1) of the kennels it knows — a
   projection of signed policy, not authored central state — carrying the W2 readiness states fed by
   construction status. The projection's *shape* is derived; its *membership* (which kennels exist, and
@@ -300,7 +282,8 @@ Self-contained and testable with no broker and no runtime — the contract every
   (the `systemctl daemon-reload` analogue — refresh the catalogue, bring newly-declared eager providers
   online) and on daemon restart; never standing authored state. Full design: `07-13-service-catalog.md`.
 
-- **W5 · The service-connector broker (the logic behind `SVC_CONNECT`).** **[dep] L.** The keystone.
+- **W5 · The service-connector broker (the logic behind `SVC_CONNECT`).** **[dep] L. Status: merged
+  (#90, #92).** The keystone.
   Implements the W3 wire contract: resolve a name against the W4 catalogue, broker a connector to the
   providing kennel — the standing-service sibling of `SPAWN`'s FD-handoff (resolve-and-broker rather
   than mint-and-inject). Carries the three properties W3 specified and tested: deny-by-default
@@ -326,15 +309,14 @@ Self-contained and testable with no broker and no runtime — the contract every
   `/proc/<pid>/root` form **superseded by W21** — see there before building any further mesh consumer.)*
 
 - **W21 · Host-owned rendezvous point for the `af-unix` handoff (supersedes the shipped `/proc/<pid>/root`).**
-  **[debt, ship-gate] S.** A **correction to merged code**, not a forward build item: W4/W5/W6/W7/W14 all
-  **shipped** (PRs #86–#100), and the af-unix handoff among them (#92) reaches a provider's endpoint by
+  **[debt, ship-gate] S. Status: merged (#105; design #103), e2e-proven.** A **correction to merged code**, not a forward build item: the mesh runtime had merged
+  (W4/W5/W14 and W6/W7 in part, #86–#100), and the af-unix handoff among them (#92) reached a provider's endpoint by
   traversing the provider's mount namespace — `connect` to `/proc/<pid>/root/<endpoint>`, keyed on the
   provider **pid**. That is a namespace-crossing connect in the most privileged process, over a path the
-  provider's view controls, with a **pid-reuse race** between *Ready* and the connect. The merged mesh runs
-  on it today; W21 reworks it underneath the built consumers (W6 readiness, W7 GUI rebase onto the
-  rendezvous path) and **must land before 0.4.0 ships** so the release does not ship the weaker handoff — it
-  also gates W12 (the threat prose describes this mechanism). Frozen design: `07-13-service-catalog.md`
-  §7.13.4b.
+  provider's view controls, with a **pid-reuse race** between *Ready* and the connect. The merged mesh ran
+  on it; W21 reworked it underneath the built consumers (W6 readiness, W7 GUI now on the rendezvous path)
+  and carried W12 with it (the threat prose describes this mechanism). Frozen design:
+  `07-13-service-catalog.md` §7.13.4b.
   Replace it with a **host-owned rendezvous point** that names the *capability*, not the provider process —
   `<runtime>/mesh/<tier>/<name>[.<key>]/`, derived deterministically from `(tier, name, key)`, all
   signed-catalogue state (none of it the pid; the optional private `key` is appended iff set, the same token
@@ -358,9 +340,9 @@ Self-contained and testable with no broker and no runtime — the contract every
   derives it and injects it via a provider-side `env`, the listen-direction mirror of the consumer's
   `at`+`env` — and `key` gains a filesystem-safe-charset validation (it now appears in a path; a UUID already
   complies). The `SVC_CONNECT` wire (§7.13.4a) does **not** move: this is broker-internal mechanism below a
-  frozen surface. The shipped surface is still small — one `svc_connect_handoff` call site and two catalogue
-  fields — so the rework is contained; land it before any further mesh shape or consumer accretes on the
-  `pid`/`/proc/<pid>/root` form, and before the 0.4.0 tag.
+  frozen surface. The surface was small when reworked — one `svc_connect_handoff` call site and two
+  catalogue fields — so it landed before any further mesh shape or consumer accreted on the
+  `pid`/`/proc/<pid>/root` form.
   **Rendezvous ownership on a same-capability collision.** Two equally-enabled providers of one
   `(tier, name)` with no `key` to separate them contest one rendezvous point. The rule (§7.13.4b, the §7.13.4
   fail-open doctrine extended one inch): the point has **one owner — the provider the broker resolves the
@@ -386,6 +368,8 @@ Self-contained and testable with no broker and no runtime — the contract every
   one.
 
 - **W6 · Sidecars: async boot-autostart + the borrowed supervisor (the logic behind W2).** **[dep] L.**
+  **Status: partial** — autostart + ondemand activation merged (#91, #95); the consumer-refcount TTL
+  idle-reaping (the *Owed W6 work* note below) is not built.
   The supervision half of W2's declaration schema. `kenneld` autostarts the declared set
   **asynchronously** at its own startup (lifecycle coupled to the daemon, not to any consumer),
   supervised by `kennel-bin-init`'s **already-multi-target facade supervisor** lifted to `kenneld`'s
@@ -411,6 +395,8 @@ Self-contained and testable with no broker and no runtime — the contract every
   design: `07-13-service-catalog.md`.
 
 - **W7 · Confined GUI: a per-kennel nested compositor as a service kennel.** **[dep] L.**
+  **Status: partial** — the nested-compositor render path merged (#99); the pieces the entry marks
+  *"Still designed, not built"* remain.
   A sidecar that `[provides]` GUI capability against the W1 schema: a **rendering leg** (the nested
   compositor) plus a small **Kennel-native file-broker** for interactive file access (the portal is cut; the
   one capability worth keeping is kept in-model — both below). W0 proved the render leg on real hardware,
@@ -515,6 +501,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 0.3.0 deliberately; it lands here.
 
 - **W8 · The facade kennel-spawn interface contract (document the existing surface).** **[dep] M.**
+  **Status: merged (#83).**
   **Documented (2026-06-23): the contract is design §7.12.3a — the three authority regions (`@`-pinned
   template · bounded mutable-field patch · `exec.allow`-gated argv), their independence (the proxy gates
   egress regardless of argv), and the single-host kennel-to-kennel scope bound; the as-built mechanics are
@@ -535,7 +522,8 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   the argv are *independent* (the proxy gates regardless of what argv claims) — state it, so the
   independence is not misread as coupling.
 
-- **W9 · `kennel caps` — the spawn-envelope introspection verb.** **[dep] S.**
+- **W9 · `kennel caps` — the spawn-envelope introspection verb.** **[dep] S. Status: not started**
+  (no `caps` subcommand in `kennel-cli`).
   A read-only projection of the caller's resolved `[spawn.allow]`: the templates it may spawn, each
   template's exposed mutable fields *with their bounds* (so an agent composes a valid request first
   try), and remaining `max_instances`. **Scoped to the caller's own grant** — deny-by-default applied to
@@ -545,6 +533,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   snapshot, not a reservation; the atomic slot-claim at spawn time remains authoritative.
 
 - **W10 · Unify the spawn surface behind one `kennel` shim; split execution into `/usr/libexec`.** **[dep] L.**
+  **Status: not started.**
   One command surface, three binaries — because linkage is a build-time property the cage constraint
   will not let a single ELF straddle (everything in-cage is static; `kennel` on the host is the one
   dynamically-linked thing). The split separates *dispatch* from *execution*:
@@ -614,28 +603,20 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 
 ### Thrust 4 — Trust and threat (the new surface)
 
-- **W11 · The service-kennel trust class + multi-leg exemption.** **[dep] S.**
+- **W11 · The service-kennel trust class + multi-leg exemption.** **[dep] S. Status: merged (#102).**
   Define the operator-declared, signed, non-composable standing-service-kennel category in the
   architecture corpus and the threat model — distinct from both workload kennels and spawn-target
   templates. Home the multi-leg exemption here as a general principle, so it is cited consistently
   rather than restated per-instance (the GUI two-leg case references this, does not redefine it).
 
-- **W12 · THREATS entries + compliance mapping.** **[dep] M.**
-  New residuals into `THREATS.md` and `dist/threats/catalogue.toml`, derived-from-grant the way
-  T3.8/T3.9 are: a **standing-service delegation residual** (longer-lived attack surface than
-  ephemeral spawn; the cross-kennel brokering channel) and the **GUI host-compositor leg**
-  (a T1.6-equivalent — the GUI-service kennel's connection to the host compositor, held only to vend
-  per-kennel host fds; one ordinary Wayland client to the host, in a confined kennel, required `reason`).
-  Plus the compliance-table mapping.
-  **Sequenced after W21 — the threat prose describes the handoff, which W21 reshapes.** The
-  standing-service residual's mitigation must describe the **host-owned rendezvous point** (§7.13.4b), not
-  the `/proc/<pid>/root` namespace-crossing connect the broker does today: W21 *strengthens* this story —
-  it removes the namespace-cross, the provider-controlled endpoint path, and the pid-reuse race — so the
-  T3.10 mitigation and its residuals shift. (A first cut of these entries was written against the old
-  handoff and must not merge ahead of W21; rewrite the mitigation/residual prose against §7.13.4b once it
-  lands.)
+- **W12 · THREATS entries + compliance mapping.** **[dep] M. Status: merged (with #105).** T3.10
+  (standing-service delegation) and T1.12 (GUI host-compositor leg) are in `THREATS.md` +
+  `dist/threats/catalogue.toml` with the compliance-table mapping, the T3.10 mitigation written against
+  the host-owned rendezvous point (§7.13.4b). The first cut (#101, against the `/proc/<pid>/root`
+  handoff) was closed and the entries re-landed with W21 so the prose matches the shipped mechanism.
 
-- **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M.**
+- **W13 · Documentation sweep: "authentication, never attestation."** **[dep] S–M. Status: merged
+  (#102).**
   Land the principle solidly across the corpus, not as a buried backlog note. The mesh provides
   use-capabilities (ssh-side: authenticate, render, transport), never attestation (gpg-side: vouch,
   sign, issue secrets) — because attestation's worth derives from the trust of its origin and the mesh's
@@ -654,7 +635,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 
 ### Thrust 5 — Operability (extends a shipped surface)
 
-- **W14 · Extend the live-topology surface to the mesh.** **[dep] M.**
+- **W14 · Extend the live-topology surface to the mesh.** **[dep] M. Status: merged (#100).**
   W20 shipped `kennel ps` over ephemeral spawns in 0.3.0; 0.4.0 extends it to the standing mesh —
   who-provides-what, who-consumes-what, the catalogue readiness states, and sidecar restart status.
   An extension of a shipped surface, not a new build. A standing mesh cannot be operated blind: a
@@ -672,7 +653,8 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 
 ### Thrust 6 — Pre-ship
 
-- **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M.**
+- **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M. Status: not started** (the
+  2026-06-22 red-team audit covers the 0.3.0 dynamic-spawn surface, not the mesh).
   Same logic as 0.3.0's W19, pointed at the new surface: the W5 connector broker (can a consumer
   reach a service it didn't declare; can resolution be raced; can a restart confuse a consumer); the
   **provide-name namespace gate** (can a self-signed or unverified-origin template claim a reserved
@@ -685,7 +667,7 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
   are a longer-lived attack surface than ephemeral spawn, and two of these are new structural refusals
   whose bug-class is escalation — the review bar rises accordingly.
 
-- **W16 · README + website reconciliation: accuracy, then positioning.** **[dep] M.**
+- **W16 · README + website reconciliation: accuracy, then positioning.** **[dep] M. Status: not started.**
   After 0.4.0 the codebase is a full confinement framework — dynamic spawn, sub-4ms per-task
   isolation, a standing service mesh, confined GUI — while the README and `projectkennel.org` still
   describe a much earlier, smaller thing. The public front door chronically under- and mis-sells what
@@ -736,21 +718,19 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
    contract by W5. W17 is the runtime anti-drift guard on the same control plane, independent of the mesh,
    so it lands whenever capacity allows. Settle the connector lifecycle (consume-with-wait timeout,
    restart-invalidates-connectors) in W3's contract before W5 implements it.
-2. **Runtime logic — W4 → W5 → W6 → W7: MERGED** (#86–#100), each built against a frozen contract.
-   Catalogue (the derived projection over W1), the connector broker (the logic behind W3, resolving against
-   W4), sidecars (the supervision logic behind W2), GUI (the first real consumer). **W21 is the one
-   open thread in this thrust** — a post-merge correction to the shipped provider-side handoff (#92): it
-   reworks `/proc/<pid>/root`→host-owned rendezvous point *underneath* the already-built W6 readiness and W7
-   GUI (which rebase onto the rendezvous path), and must land before the 0.4.0 tag.
+2. **Runtime logic — W4 → W5 → W6 → W7 → W21.** Catalogue (W4, #86–#89) and the connector broker (W5,
+   #90, #92) merged; sidecars (W6) **partial** — autostart + ondemand activation merged (#91, #95), the
+   consumer-refcount TTL idle-reaping owed; confined GUI (W7) **partial** — the nested-compositor render
+   path merged (#99), the rest *"still designed, not built"*; and W21 (#105) merged — the host-owned
+   rendezvous point that replaced the provider-side `/proc/<pid>/root` handoff, e2e-proven. The open work
+   in this thrust is the W6 idle-reaping and the remaining W7 pieces.
 3. **Spawn facade — W8 → W9 → W10**, independent of the mesh (it documents and harmonises the
    *existing* spawn surface, not the new mesh one). W8 (the contract) first — it derives the authority
    model the other two implement against; W9 (`caps`) and W10 (the unified binary) follow. Can run in
    parallel with Thrusts 2/4; slot against capacity.
-4. **Trust + threat — W11 → W12 → W13**, in parallel with Thrust 2; W11 (trust class) before the GUI
-   multi-leg case references it, W12 after the residuals are concrete **and after W21** (the standing-service
-   residual's mitigation describes the handoff W21 reshapes — write it against the rendezvous point, not the
-   superseded `/proc/<pid>/root` connect), W13 (the doc sweep) once the trust class and threat entries give
-   it something canonical to point at.
+4. **Trust + threat — W11 → W12 → W13: merged** (#102, #105). W11 (trust class) and W13 (the doc sweep)
+   in #102; W12 (T3.10/T1.12) landed with W21 (#105), so the standing-service mitigation describes the
+   host-owned rendezvous point, not the superseded `/proc/<pid>/root` connect.
 5. **Operability — W14** after W4 (it reads the catalogue) and W6 (it reads readiness).
 6. **Pre-ship — W15 (red-team) gating, then W16's accuracy pass (also gating); W16's positioning pass
    is a fast-follow after the tag**, all after the whole mesh surface (W1–W7) *and* the harmonised spawn
