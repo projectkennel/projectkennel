@@ -43,6 +43,13 @@ fn run() -> io::Result<()> {
     }
 
     let mut conn = UnixStream::connect(socket_path())?;
+    // W17: the version handshake precedes the request (a same-build CLI/daemon pair, so it accepts).
+    control::client_handshake(
+        &mut conn,
+        kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|e| io::Error::other(e.to_string()))?;
     control::send_request(&mut conn, &Request::AuthorizedKeys { key: offered })?;
     // Any reply other than AuthorizedKeys (e.g. an Error) ⇒ refuse the key.
     let Response::AuthorizedKeys { lines } = control::recv_response(&mut conn)? else {

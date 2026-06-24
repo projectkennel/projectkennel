@@ -318,6 +318,11 @@ impl<'a> Reader<'a> {
         Ok(u32::from_ne_bytes(bytes) as usize)
     }
 
+    fn u32(&mut self) -> Result<u32, WireError> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
+        Ok(u32::from_ne_bytes(bytes))
+    }
+
     fn i32(&mut self) -> Result<i32, WireError> {
         let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
         Ok(i32::from_ne_bytes(bytes))
@@ -673,9 +678,297 @@ pub fn recv_response<R: Read>(r: &mut R) -> io::Result<Response> {
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad response: {e:?}")))
 }
 
+// ---- W17: the control-plane version handshake -----------------------------------------------
+//
+// The first exchange on every control connection, before any request or policy is read. The client
+// sends a [`Preamble`] carrying the **settled-policy schema version** it compiles to (plus a
+// diagnostic build identity); the daemon refuses a client whose schema it cannot parse — a too-new
+// CLI against an older daemon — with a typed remediation ("restart the daemon"), not the cryptic
+// parse error a schema-drift would otherwise surface five layers down (the 0.3.1 field finding).
+//
+// The gate is the *schema* version, not a binary/build version: the wire ABI is frozen by the
+// contract discipline, and what actually drifts is the settled policy the daemon loads. The check
+// mirrors the policy-load gate (`settled_schema_version > SETTLED_SCHEMA_VERSION`) but at the
+// connection boundary, so it fires before a request body or policy file is parsed and for every
+// command, not just `run`. An honest limit: it only binds versions that *have* it — a pre-handshake
+// daemon cannot speak it — so it ends the cryptic-skew class going forward, not retroactively.
+
+/// The connection preamble a client sends first (W17).
+///
+/// Carries the settled-policy schema version it compiles to, and a diagnostic build identity named
+/// in the daemon's refusal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Preamble {
+    /// The newest `settled_schema_version` this client produces (`kennel_lib_policy::SETTLED_SCHEMA_VERSION`).
+    pub schema_version: u32,
+    /// A human-readable build identity (e.g. the package version), for the diagnostic only.
+    pub build: String,
+}
+
+impl Preamble {
+    #[must_use]
+    fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        put_u32(&mut b, self.schema_version);
+        put_str(&mut b, &self.build);
+        b
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(body);
+        Ok(Self {
+            schema_version: r.u32()?,
+            build: r.string()?,
+        })
+    }
+}
+
+/// The daemon's handshake verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Verdict {
+    /// The daemon can parse what this client compiles — proceed to the request.
+    Compatible,
+    /// The client compiles a schema newer than the daemon parses — refused.
+    Incompatible {
+        daemon_schema: u32,
+        client_schema: u32,
+        daemon_build: String,
+    },
+}
+
+impl Verdict {
+    fn encode(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        match self {
+            Self::Compatible => put_u8(&mut b, 0),
+            Self::Incompatible {
+                daemon_schema,
+                client_schema,
+                daemon_build,
+            } => {
+                put_u8(&mut b, 1);
+                put_u32(&mut b, *daemon_schema);
+                put_u32(&mut b, *client_schema);
+                put_str(&mut b, daemon_build);
+            }
+        }
+        b
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, WireError> {
+        let mut r = Reader::new(body);
+        match r.u8()? {
+            0 => Ok(Self::Compatible),
+            1 => Ok(Self::Incompatible {
+                daemon_schema: r.u32()?,
+                client_schema: r.u32()?,
+                daemon_build: r.string()?,
+            }),
+            _ => Err(WireError::BadTag),
+        }
+    }
+}
+
+/// A control-plane version skew the handshake caught.
+///
+/// The daemon cannot parse what this client compiles. Carries both versions and the remedy, so the
+/// caller surfaces "restart the daemon" rather than a cryptic parse failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionSkew {
+    /// The newest schema the daemon parses.
+    pub daemon_schema: u32,
+    /// The schema this client compiles to (newer than the daemon's).
+    pub client_schema: u32,
+    /// The daemon's build identity, for the diagnostic.
+    pub daemon_build: String,
+}
+
+impl std::fmt::Display for VersionSkew {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "kenneld is older than this `kennel`: the daemon parses settled-policy schema v{} \
+             but this CLI compiles v{} (daemon build {}). Restart the daemon to pick up the newer \
+             build: `systemctl --user restart kenneld`",
+            self.daemon_schema, self.client_schema, self.daemon_build
+        )
+    }
+}
+
+impl std::error::Error for VersionSkew {}
+
+/// A handshake failure: a transport error, or a version skew the daemon reported.
+#[derive(Debug)]
+pub enum HandshakeError {
+    /// The connection failed during the handshake.
+    Io(io::Error),
+    /// The daemon refused this client's schema version (the typed remediation).
+    Skew(VersionSkew),
+}
+
+impl std::fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "control handshake failed: {e}"),
+            Self::Skew(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for HandshakeError {}
+
+impl From<io::Error> for HandshakeError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Client side of the W17 handshake: send the preamble, read the daemon's verdict.
+///
+/// Call this once, immediately after connecting, before any request. `schema_version` is this
+/// build's `kennel_lib_policy::SETTLED_SCHEMA_VERSION`; `build` is a diagnostic identity.
+///
+/// # Errors
+/// [`HandshakeError::Skew`] (typed, with the remedy) if the daemon cannot parse this client's
+/// schema, or [`HandshakeError::Io`] on a transport failure or malformed verdict.
+pub fn client_handshake<S: Read + Write>(
+    s: &mut S,
+    schema_version: u32,
+    build: &str,
+) -> Result<(), HandshakeError> {
+    write_frame(
+        s,
+        &Preamble {
+            schema_version,
+            build: build.to_owned(),
+        }
+        .encode(),
+    )?;
+    let verdict = Verdict::decode(&read_frame(s)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad verdict: {e:?}")))?;
+    match verdict {
+        Verdict::Compatible => Ok(()),
+        Verdict::Incompatible {
+            daemon_schema,
+            client_schema,
+            daemon_build,
+        } => Err(HandshakeError::Skew(VersionSkew {
+            daemon_schema,
+            client_schema,
+            daemon_build,
+        })),
+    }
+}
+
+/// Server side of the W17 handshake: read the client's preamble, decide, send the verdict.
+///
+/// The **first** thing the daemon does on a control connection, before reading any request.
+/// `schema_version` is this daemon's `kennel_lib_policy::SETTLED_SCHEMA_VERSION`. Returns `Ok(true)`
+/// to proceed to the request, `Ok(false)` if the client was refused (the verdict has been sent; the
+/// caller drops the connection without parsing anything).
+///
+/// # Errors
+/// [`io::Error`] on a transport failure or a malformed preamble — the caller drops the connection.
+pub fn server_handshake<S: Read + Write>(
+    s: &mut S,
+    schema_version: u32,
+    build: &str,
+) -> io::Result<bool> {
+    let preamble = Preamble::decode(&read_frame(s)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad preamble: {e:?}")))?;
+    // The daemon parses any schema up to its own; a client compiling a NEWER schema is the skew that
+    // bit 0.3.1. Mirror the policy-load gate, but here, before the request body is read.
+    if preamble.schema_version > schema_version {
+        write_frame(
+            s,
+            &Verdict::Incompatible {
+                daemon_schema: schema_version,
+                client_schema: preamble.schema_version,
+                daemon_build: build.to_owned(),
+            }
+            .encode(),
+        )?;
+        return Ok(false);
+    }
+    write_frame(s, &Verdict::Compatible.encode())?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- W17 handshake -----------------------------------------------------------------------
+
+    /// Drive both sides of the handshake over a socketpair (the server in a thread, since each side
+    /// writes then blocks reading the other's frame). Returns (client result, server proceed).
+    fn run_handshake(
+        client_schema: u32,
+        daemon_schema: u32,
+    ) -> (Result<(), HandshakeError>, io::Result<bool>) {
+        use std::os::unix::net::UnixStream;
+        let (mut client, mut server) = UnixStream::pair().expect("socketpair");
+        let srv = std::thread::spawn(move || {
+            server_handshake(&mut server, daemon_schema, "daemon-1.2.3")
+        });
+        let cli = client_handshake(&mut client, client_schema, "cli-1.2.3");
+        (cli, srv.join().expect("server thread"))
+    }
+
+    #[test]
+    fn equal_schema_versions_accept() {
+        let (cli, proceed) = run_handshake(1, 1);
+        assert!(cli.is_ok(), "client accepted");
+        assert!(proceed.expect("server"), "server proceeds to the request");
+    }
+
+    #[test]
+    fn an_older_client_is_accepted_the_daemon_parses_its_schema() {
+        // Client compiles schema v1, daemon parses up to v2 — forward-compatible, accepted.
+        let (cli, proceed) = run_handshake(1, 2);
+        assert!(cli.is_ok());
+        assert!(proceed.expect("server"));
+    }
+
+    #[test]
+    fn a_too_new_client_gets_the_typed_remediation_not_a_parse_error() {
+        // Client compiles schema v3, daemon parses only up to v1 — the 0.3.1 skew. Refused, typed.
+        let (cli, proceed) = run_handshake(3, 1);
+        assert!(
+            !proceed.expect("server"),
+            "server refuses, does not proceed to the request"
+        );
+        let err = cli.expect_err("a too-new client is refused");
+        // Typed (a version skew, not an Io/parse error) and carrying both versions.
+        assert!(
+            matches!(&err, HandshakeError::Skew(s)
+                if s.daemon_schema == 1 && s.client_schema == 3 && s.daemon_build == "daemon-1.2.3"),
+            "got {err:?}"
+        );
+        // The remedy is legible, not a cryptic parse failure five layers down.
+        let msg = err.to_string();
+        assert!(msg.contains("Restart the daemon"), "{msg}");
+        assert!(msg.contains("schema v1"), "{msg}");
+    }
+
+    #[test]
+    fn preamble_and_verdict_round_trip() {
+        let p = Preamble {
+            schema_version: 7,
+            build: "build-xyz".to_owned(),
+        };
+        assert_eq!(Preamble::decode(&p.encode()).expect("preamble"), p);
+        let v = Verdict::Incompatible {
+            daemon_schema: 1,
+            client_schema: 9,
+            daemon_build: "d".to_owned(),
+        };
+        assert_eq!(Verdict::decode(&v.encode()).expect("verdict"), v);
+        assert_eq!(
+            Verdict::decode(&Verdict::Compatible.encode()).expect("ok"),
+            Verdict::Compatible
+        );
+    }
 
     fn round_trip_request(req: &Request) {
         let mut framed = Vec::new();

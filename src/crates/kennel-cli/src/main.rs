@@ -674,15 +674,27 @@ fn read_lines_from(path: &Path, offset: u64) -> io::Result<(Vec<String>, u64)> {
     Ok((lines, len))
 }
 
-/// Connect to the daemon's control socket.
+/// Connect to the daemon's control socket and run the W17 version handshake.
+///
+/// The handshake is the first exchange: it sends this CLI's settled-policy schema version, and a
+/// daemon too old to parse it refuses *here*, with a typed "restart the daemon" remedy, before any
+/// request or policy crosses — so a half-upgraded host fails loudly at the boundary, not as a
+/// cryptic parse error deep in policy loading.
 pub(crate) fn connect() -> Result<UnixStream, String> {
     let path = socket::socket_path();
-    UnixStream::connect(&path).map_err(|e| {
+    let mut conn = UnixStream::connect(&path).map_err(|e| {
         format!(
             "cannot reach kenneld at {} ({e}); is the kenneld.socket user unit enabled?",
             path.display()
         )
-    })
+    })?;
+    control::client_handshake(
+        &mut conn,
+        kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(conn)
 }
 
 /// Send `request` (with any `fds`) as one framed `SCM_RIGHTS` message.

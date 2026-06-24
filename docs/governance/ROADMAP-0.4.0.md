@@ -237,8 +237,17 @@ Self-contained and testable with no broker and no runtime — the contract every
   consume cycle resolves to double-timeout-then-failed, not deadlock) so W5's broker logic is built to a
   frozen, asserted transaction surface, not one that emerges from the implementation.
 
-- **W17 · Control-plane version handshake (the runtime anti-drift guard).** **[dep] S–M.** **Status: not
-  built** (#94 only added this roadmap note; no handshake code in `kennel-lib-control`/`kenneld`).
+- **W17 · Control-plane version handshake (the runtime anti-drift guard).** **[dep] S–M.** **Status:
+  built.** The control socket opens with a one-frame `Preamble`/verdict handshake
+  (`kennel_lib_control::control::{client,server}_handshake`) gating on the settled-policy **schema**
+  version (`SETTLED_SCHEMA_VERSION`) — the axis that actually drifts; the build identity is diagnostic
+  only. A too-new CLI is refused at the boundary with the typed `VersionSkew` remedy before any request
+  or policy is parsed, wired into the CLI `connect()`, `kennel-akc`, and kenneld's `handle_connection`
+  (the first thing on the connection). Test-first corpus (equal accepts, too-new refuses with the
+  remediation not a parse error, older accepts, preamble/verdict round-trip) + e2e-validated on the live
+  CLI↔daemon path. **Complement still owed:** a CI guard that a settled-schema field-set change forces a
+  `SETTLED_SCHEMA_VERSION` bump — the discipline that makes the handshake catch the 0.3.1 class (that bug
+  slipped a field in *without* bumping the version). Homed in `02-6-ipc.md`; CHANGELOG-tracked.
   *(Added 2026-06-23, from a 0.3.1 field finding.)*
   W1–W3 freeze the contracts test-first — anti-drift at *compile* time. This is its **runtime
   complement:** when two *different builds* of `kennel` and `kenneld` nonetheless talk (a reinstall

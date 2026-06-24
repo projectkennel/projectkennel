@@ -6,6 +6,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### IPC protocol changes
+
+- **Control-plane version handshake (W17).** The control socket now opens with a one-frame
+  version preamble before any request: the client sends the settled-policy schema version it
+  compiles to (and a diagnostic build identity), and a daemon that parses an older schema refuses
+  a too-new client at the boundary with a typed *"restart the daemon"* remedy — instead of the
+  cryptic parse error a schema skew surfaced as in 0.3.1 (a half-upgraded host: a newer CLI
+  compiling a field the running older daemon could not read). The gate is the settled-policy
+  *schema* version (what drifts), not a binary version. Within a release both ends are the same
+  build, so it always accepts; it only bites the cross-build case, and only binds versions that
+  have it (a pre-W17 daemon cannot speak it).
+
 ## [0.3.1] — 2026-06-23
 
 **Installer fix.** The 0.3.0 release tarball was unusable: it mirrored the dev source tree and

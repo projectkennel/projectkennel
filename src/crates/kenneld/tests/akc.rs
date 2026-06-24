@@ -24,6 +24,11 @@ fn kennel_akc_queries_kenneld_and_prints_the_forced_command_line() {
     // (comment-free, as sshd's `%t %k` would hand it), reply with the canned line.
     let server = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
+        // The AKC opens with the W17 version handshake (it shares the CLI connect path); a real
+        // daemon answers it before the request. `u32::MAX` accepts any client schema version.
+        let proceed =
+            control::server_handshake(&mut conn, u32::MAX, "test-daemon").expect("handshake");
+        assert!(proceed, "the handshake should accept this client");
         let req = control::recv_request(&mut conn).expect("recv request");
         assert_eq!(
             req,
