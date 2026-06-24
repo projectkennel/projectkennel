@@ -704,8 +704,16 @@ surface behind one `kennel` shim over a `/usr/libexec` host/spawn execution spli
 
 ### Thrust 6 — Pre-ship
 
-- **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M. Status: not started** (the
-  2026-06-22 red-team audit covers the 0.3.0 dynamic-spawn surface, not the mesh).
+- **W15 · Red-team the cross-kennel surface.** **[dep, ship gate] M. Status: COMPLETE
+  ([audit 2026-06-24](audits/2026-06-24-cross-kennel-redteam.md); fixes #120, #121).** Verdict
+  safe-with-fixes: F1 (host control socket reachable via an `fs` grant — the `is_control_socket`
+  refusal was absent from `fs.read`/`fs.write`) closed at two layers (compile refusal + privhelper
+  blind-mask backstop, #120); F2 (provider-name spoofing) refuted (the maintainer-signature gate is
+  backstopped at runtime in `catalogue.rs`/`policy.rs`); F3 (GUI broker DoS) bounded with a
+  concurrency cap + connect rate limit (#120); plus two mesh-robustness fixes from the architectural
+  assessment — M1 strict key matching (a code-to-design fix closing a routing footgun) and M2
+  de-blocking `ondemand` activation (#121). Two residuals recorded for a later dynamic pass
+  (connector-broker resolution race; GUI confidentiality legs) — neither blocks the tag.
   Same logic as 0.3.0's W19, pointed at the new surface: the W5 connector broker (can a consumer
   reach a service it didn't declare; can resolution be raced; can a restart confuse a consumer); the
   **provide-name namespace gate** (can a self-signed or unverified-origin template claim a reserved
