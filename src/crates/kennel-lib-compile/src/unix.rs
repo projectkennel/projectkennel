@@ -97,6 +97,21 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
                 "[[unix.allow]] `{who}` is missing `shim` (the in-view path to bind it at)"
             ));
         }
+        // The host control socket is ungrantable by rule (W10): it is the CLI→daemon trust boundary,
+        // and a kennel that could connect to it could drive the daemon — a privilege escalation, not
+        // a footgun. Unlike the agent shims below (warned, not forbidden), this is a hard refusal,
+        // and it keys on the *target endpoint* (lexically normalised, so a `..` disguise is caught),
+        // never a literal string. It joins the structurally-refused-regardless-of-policy set; the
+        // spawn factory backstops it at construction against the real, symlink-resolved endpoint.
+        if let Some(real) = a.real.as_deref() {
+            if kennel_lib_control::socket::is_control_socket(std::path::Path::new(real)) {
+                errs.push(format!(
+                    "[[unix.allow]] `{who}` targets the kenneld control socket (`{real}`) — the \
+                     CLI→daemon trust boundary. Reaching it from inside a kennel is privilege \
+                     escalation; it is refused by rule, grantable by no policy"
+                ));
+            }
+        }
         // Shimming a real ssh-agent socket is a footgun, not a crime: an exposed agent
         // is a destination-blind signing oracle (§7.10.1) and the [ssh] bastion is the
         // intended path — but the framework warns loudly rather than forbidding it
@@ -183,6 +198,61 @@ mod tests {
             )],
         };
         validate(&policy_with(unix)).expect("valid");
+    }
+
+    #[test]
+    fn a_grant_targeting_the_control_socket_is_refused_by_rule() {
+        // Exact structural form → refused (escalation, not a footgun warning).
+        let unix = UnixSection {
+            default: Some("deny".to_owned()),
+            allow: vec![allow(
+                "ctl",
+                "/run/user/1000/kennel/control.sock",
+                "~/ctl.sock",
+            )],
+            ..UnixSection::default()
+        };
+        let err = validate(&policy_with(unix)).expect_err("refused");
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("control socket"))),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_dotdot_disguised_control_socket_grant_is_still_refused() {
+        // A path-string that differs but normalises to the control socket — a naive string check
+        // would pass; the endpoint check catches it.
+        let unix = UnixSection {
+            default: Some("deny".to_owned()),
+            allow: vec![allow(
+                "sneaky",
+                "/run/user/1000/kennel/../kennel/control.sock",
+                "~/x.sock",
+            )],
+            ..UnixSection::default()
+        };
+        let err = validate(&policy_with(unix)).expect_err("refused");
+        assert!(
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("control socket")))
+        );
+    }
+
+    #[test]
+    fn an_ordinary_agent_socket_grant_is_not_caught_by_the_control_socket_rule() {
+        // The rule must not overcatch: a normal agent shim under the same runtime tree is allowed
+        // (it draws the footgun warning, not the hard refusal).
+        let unix = UnixSection {
+            default: Some("deny".to_owned()),
+            allow: vec![allow(
+                "ssh-agent",
+                "/run/user/1000/kennel/agent.sock",
+                "~/.ssh/agent.sock",
+            )],
+            ..UnixSection::default()
+        };
+        let warnings = validate(&policy_with(unix)).expect("valid (warned, not refused)");
+        assert!(warnings.iter().any(|w| w.contains("SSH agent")));
     }
 
     #[test]

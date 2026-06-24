@@ -14,6 +14,9 @@ repository.workspace = true
 # signature/canonical/keys crypto it signs through, the invariant validator, and the
 # audit schema (single source of truth, shared).
 kennel-lib-policy = { path = "../kennel-lib-policy" }
+# The control-socket path recogniser (W10): the compiler refuses any grant whose target is the
+# kenneld control socket — the CLI→daemon trust boundary — at install (the loud primary guard).
+kennel-lib-control = { path = "../kennel-lib-control" }
 # Source and settled policies are TOML (no JSON); serde derives the schema types.
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
