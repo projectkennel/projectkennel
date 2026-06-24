@@ -11,7 +11,8 @@
 //! - **Request-don't-author.** The caller reaches a capability only if its own signed policy declares
 //!   a `[[consumes]]` for the name; otherwise [`Decision::NoGrant`] (no widening at runtime).
 //! - **Match, don't search.** The expected `shape` must agree and the optional private `key` must
-//!   match *if both sides set one* (§7.13.1); a candidate failing either is not eligible.
+//!   match *exactly* — if either side sets a key, both must hold the identical one (§7.13.1); a
+//!   candidate failing either is not eligible.
 //! - **No silent fallback.** The eligible candidates are ordered by the catalogue (per-user before
 //!   per-host); the broker selects the **first** and reports *its* readiness — it never falls back to a
 //!   different provider because the preferred one is down (failover is an explicit non-goal).
@@ -65,8 +66,8 @@ pub fn decide(consumes: &[ConsumeRuntime], catalogue: &Catalogue, name: &str) ->
         return Decision::NoGrant;
     };
     // Select the first eligible candidate — the catalogue orders them per-user before per-host, and
-    // there is no fallback past the preferred one (§7.13.4). Eligible = shape agrees and the key is
-    // compatible (matches if both sides set one, §7.13.1).
+    // there is no fallback past the preferred one (§7.13.4). Eligible = shape agrees and the keys
+    // match exactly — equal, or both absent (§7.13.1).
     let candidates = catalogue.resolve(name);
     let Some(cand) = candidates
         .iter()
@@ -88,14 +89,14 @@ pub fn decide(consumes: &[ConsumeRuntime], catalogue: &Catalogue, name: &str) ->
     }
 }
 
-/// Whether a consumer's optional key is compatible with a provider's — they match unless **both**
-/// sides set a key and the two differ (§7.13.4 step 3: "the optional key to match, if both sides set
-/// one"). A keyed consumer is compatible with a keyless provider, and vice versa.
+/// Whether a consumer's optional key matches a provider's. The key is a private **discriminator**:
+/// if **either** side sets one, the other must hold the **identical** key to match (§7.13.4 step 3) —
+/// strict equality, not a permissive fallback. Both keyless → match (no discriminator in play);
+/// one keyed and one keyless → **no** match (the keyed side demanded a specific peer the other is
+/// not). This is the whole point of the key: a keyed consumer is never brokered to a keyless
+/// (generic) provider, so a generic provider cannot silently swallow traffic a key was set to bind.
 fn key_compatible(consume_key: Option<&str>, provider_key: Option<&str>) -> bool {
-    match (consume_key, provider_key) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    }
+    consume_key == provider_key
 }
 
 #[cfg(test)]
@@ -178,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn key_matches_only_when_both_set_and_equal() {
+    fn key_matches_iff_consumer_and_provider_keys_are_equal() {
         let p = |key| catalogue(&[provider("p", Tier::Host, "x.cap", Shape::AfUnix, key)]);
         // Both set, equal → eligible.
         assert!(matches!(
@@ -198,20 +199,30 @@ mod tests {
             ),
             Decision::NoProvider
         );
-        // Only the consumer keyed (provider public) → compatible (§7.13.4: match required iff both set).
-        assert!(matches!(
+        // Only the consumer keyed (provider keyless) → NO match: a keyed consumer demands that exact
+        // keyed provider and is never brokered to a generic one (§7.13.4, strict equality).
+        assert_eq!(
             decide(
                 &[consume("x.cap", Shape::AfUnix, Some("k1"))],
                 &ready(p(None), "p"),
                 "x.cap"
             ),
-            Decision::Ready(_)
-        ));
-        // Only the provider keyed (consumer public) → compatible.
-        assert!(matches!(
+            Decision::NoProvider
+        );
+        // Only the provider keyed (consumer keyless) → NO match either: the key binds both ways.
+        assert_eq!(
             decide(
                 &[consume("x.cap", Shape::AfUnix, None)],
                 &ready(p(Some("k1")), "p"),
+                "x.cap"
+            ),
+            Decision::NoProvider
+        );
+        // Neither keyed → match (no discriminator in play).
+        assert!(matches!(
+            decide(
+                &[consume("x.cap", Shape::AfUnix, None)],
+                &ready(p(None), "p"),
                 "x.cap"
             ),
             Decision::Ready(_)
