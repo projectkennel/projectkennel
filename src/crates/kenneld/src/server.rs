@@ -63,6 +63,11 @@ pub struct Loaded {
     /// The `SVC_CONNECT` broker matches a consume request against these (request-don't-author). Empty
     /// for a kennel with no `[[consumes]]`.
     pub consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
+    /// The cross-kennel capability mesh provides (§7.13.1): the `[[provides]]` this kennel signed. For
+    /// each `af-unix` provide, construction binds the host-owned rendezvous directory at the in-view
+    /// `dirname(endpoint)`, so the provider's bind at its policy `endpoint` is host-visible (§7.13.4b).
+    /// Empty for a non-provider.
+    pub provides: Vec<kennel_lib_policy::ProvideRuntime>,
     /// The per-kennel D-Bus mediation runtime (§7.7): the enabled buses and their compiled
     /// allow/deny tables. Empty (no bus enabled) for a kennel with no `[dbus]` policy.
     pub dbus: kennel_lib_policy::DbusRuntime,
@@ -317,11 +322,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Record a provider's running host pid and drive it to `Ready` (§7.13.6) — the supervisor calls
-    /// this when construction seals, so the broker can reach the provider's endpoint for a connector.
-    pub fn note_provider_ready(&self, provider: &str, pid: u32) {
+    /// Drive a provider to `Ready` (§7.13.6) — the supervisor calls this when construction seals.
+    pub fn note_provider_ready(&self, provider: &str) {
         if let Ok(mut guard) = self.catalogue.lock() {
-            guard.note_constructed(provider, pid);
+            guard.note_constructed(provider);
         }
     }
 
@@ -793,7 +797,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     tier: p.tier.as_str().to_owned(),
                     enablement: p.enablement.as_str().to_owned(),
                     readiness: p.readiness.as_str().to_owned(),
-                    pid: p.pid.unwrap_or(0),
                 });
             }
         }
@@ -922,6 +925,7 @@ where
                 Some(instance),
                 &crate::spawn::noop_constructor(),
                 parent_alive.as_deref(),
+                None, // a spawn target is not a mesh provider
             );
         });
     }
@@ -950,7 +954,7 @@ pub fn dispatch_request<P, L>(
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
-            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor, None),
+            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor, None, None),
             Err(e) => {
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
                 Response::Error(e)
@@ -1057,7 +1061,7 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
 /// so the test exercises the same wiring production does, not a hand-built replica.
 // allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
 // block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_kennel<P, L>(
     shared: &Shared<P, L>,
     req: &StartRequest,
@@ -1066,6 +1070,10 @@ pub fn run_kennel<P, L>(
     preloaded: Option<kennel_lib_policy::SettledPolicy>,
     constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
     parent_alive: Option<&std::sync::atomic::AtomicBool>,
+    // `Some(tier)` when the supervisor brings up a mesh provider (§7.13.6): each af-unix `[[provides]]`
+    // gets the host rendezvous directory bound at its in-view `dirname(endpoint)` (§7.13.4b). `None`
+    // for a plain `kennel run`, which provides nothing over the mesh.
+    provider_tier: Option<crate::catalogue::Tier>,
 ) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
@@ -1416,6 +1424,53 @@ pub fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
+    // Provider rendezvous points (§7.13.4b): for each af-unix `[[provides]]`, bind the host
+    // rendezvous directory `<runtime>/mesh/<tier>/<name>[.key]/` at the in-view `dirname(endpoint)`,
+    // so the socket the provider binds at its policy `endpoint` is the inode the broker connects
+    // host-side. Built for a supervised mesh provider (`provider_tier`), before the view's binds move
+    // into the `Spec`.
+    if let Some(tier) = provider_tier {
+        if let Some(view) = loaded.plan.view.as_mut() {
+            for p in &loaded.provides {
+                if p.shape != kennel_lib_policy::settled::Shape::AfUnix {
+                    continue;
+                }
+                let key = p.key.as_deref();
+                let host_dir = crate::mesh::host_rp_dir(tier, &p.name, key);
+                // kenneld owns the rendezvous directory; create it (0700) and clear any stale socket
+                // before construction binds it in and the provider binds afresh at its endpoint.
+                if let Err(e) = std::fs::create_dir_all(&host_dir) {
+                    eprintln!(
+                        "kenneld: provider `{}`: mesh rendezvous dir {}: {e}",
+                        req.kennel,
+                        host_dir.display()
+                    );
+                    continue;
+                }
+                let _ = std::fs::set_permissions(
+                    &host_dir,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                );
+                let _ = std::fs::remove_file(crate::mesh::host_rp_socket(
+                    tier,
+                    &p.name,
+                    key,
+                    &p.endpoint,
+                ));
+                // Bind the host directory at the in-view parent of the policy endpoint.
+                let Some(target) = std::path::Path::new(&p.endpoint).parent() else {
+                    continue;
+                };
+                view.binds.push(kennel_lib_spawn::plan::BindMount {
+                    source: host_dir,
+                    target: target.to_path_buf(),
+                    writable: true,
+                    exclusive: false,
+                });
+            }
+        }
+    }
+
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
@@ -2233,6 +2288,7 @@ mod tests {
                 unix: kennel_lib_policy::UnixRuntime::default(),
                 binder: kennel_lib_policy::BinderRuntime::default(),
                 consumes: Vec::new(),
+                provides: Vec::new(),
                 dbus: kennel_lib_policy::DbusRuntime::default(),
                 groups: Vec::new(),
                 audit: kennel_lib_policy::AuditRuntime::default(),

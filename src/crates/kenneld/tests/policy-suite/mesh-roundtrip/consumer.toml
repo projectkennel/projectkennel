@@ -4,7 +4,7 @@
 # Declares `[[consumes]]` for `test.mesh.echo` (af-unix) at an `at` socket in its own
 # view. kenneld materialises that socket via the af-unix facade (one mechanism, two
 # resolutions); the workload connects to it, and kenneld resolves the capability,
-# socket-activates the cold provider, reaches its endpoint through /proc/<pid>/root,
+# socket-activates the cold provider, connects its host rendezvous point (§7.13.4b),
 # and splices. The workload — `facade-mesh-probe connect` — sends `ping` and exits 0
 # iff it reads `pong` back: the brokered connector reached a running provider across
 # the kennel boundary. Exit code IS the case verdict.

@@ -68,12 +68,14 @@ reference anywhere in the surface — resolution happens at runtime, by name, ag
 (§7.13.4).
 
 **The shape says the transport; each side says where.** `shape` names *how* the capability is carried
-(§7.13.2) but not *where* it lives. A `[[provides]]` says where its capability is exposed in the provider's
-own view — a bus name for `dbus-name`, a registered node for `binder-connector`. For `af-unix` the listen
-path is **not author-chosen**: `kenneld` derives the host-owned rendezvous point (§7.13.4b) and names it to
-the provider through a provider-side **`env`**, the listen-direction mirror of the consumer's `at`+`env`
-below — so neither side guesses a path and the broker owns the only address that matters. A `[[consumes]]`
-declares **`at`** — the standing endpoint the
+(§7.13.2) but not *where* it lives. A `[[provides]]` declares its **`endpoint`** — where, in the provider's
+own view, the capability is exposed (an `af-unix` socket path it listens on, a bus name for `dbus-name`, a
+registered node for `binder-connector`). For `af-unix`, `kenneld` decides only the *host* side of that
+socket (the rendezvous point it binds at the endpoint's directory, §7.13.4b); the in-kennel `endpoint`
+itself is the provider's own policy. An `af-unix` `endpoint` is **optional**: omitted, it defaults to
+`/run/<name>[.<key>]/sock`; supplied, it must be an absolute path under `/run` with a subdirectory (so the
+directory `kenneld` binds is a `/run` subdir, never bare `/run`). A `[[consumes]]` declares **`at`** — the
+standing endpoint the
 broker presents in the consumer's own view for the workload to *act against*: an `af-unix` socket the
 workload connects to, named to it by the optional **`env`** (a Wayland client reads `WAYLAND_DISPLAY`). The
 two are independent and per-view: the provider's `endpoint` is absent from the consumer's view (§4.2) and the
@@ -353,84 +355,37 @@ this frozen surface (§7.13.4); this section freezes the surface.
 ## 7.13.4b The rendezvous point — how the broker reaches an `af-unix` endpoint
 
 The wire (§7.13.4a) freezes *what* the broker attaches on `OK` — for `af-unix`, a **connected fd** to the
-provider, the byte path `kenneld` then steps out of (§4.3). This section freezes *how* `kenneld` obtains that
-fd, because the obvious mechanism is the wrong one. A provider listens at its `endpoint` in **its own**
-mount namespace (§7.13.1); the broker runs in `kenneld`'s. The tempting bridge is to reach the listener
-*through* the provider — `connect` to `/proc/<pid>/root/<endpoint>`, traversing the provider's namespace from
-the host the way bring-up reaches a kennel's binderfs to claim binder node 0. That works, but it puts a
-**namespace-crossing connect in the most privileged process**, keyed on the provider's **pid**: the endpoint
-then resolves *through the provider's view*, so a provider controls what sits at that path (a symlink, a
-socket pointing elsewhere), and the pid is a **reuse race** — between *Ready* and the `connect` the provider
-can exit and its pid recycle to an unrelated host process. The provider is a trusted service kennel
-(§7.13.5), but the broker should not have to lean on that trust for a primitive it can avoid entirely.
+provider, the byte path `kenneld` then steps out of (§4.3). This section freezes *where* that fd connects: a
+host-owned **rendezvous point**.
 
-It avoids it by **owning both the endpoint and the directory it lives in.** For `af-unix` the listen path is
-**not author-chosen**: `kenneld` derives it deterministically and injects it into the provider's environment —
-the listen-direction mirror of how a consumer learns its `at` (§7.13.1), so neither side ever guesses a path.
-The derived path names the **capability**, not the provider process (the name-the-capability principle,
-§7.13.1): `<runtime>/mesh/<tier>/<name>[.<key>]/`. Every component is signed-catalogue state, never run
-state. `tier` (`user`/`host`) is the cascade layer the provider is enabled at (§7.13.6); `name` is the
-capability's public identifier; the optional private **`key`** (§7.13.1) is appended **iff it is set** —
-exactly when it is part of the capability's identity, since a shared public `name` offered by more than one
-policy is told apart by `key` (§7.13.4). So two providers of one public name land on **distinct** rendezvous
-points precisely when they are distinguishable at all (a different `key`, or a different `tier`); an identical
-`(tier, name, key)` means they claim the *same* capability instance, and one rendezvous point for it is
-correct rather than a clash — the broker selects which serves it (§7.13.4). The **pid is the one identifier
-deliberately absent**. A single policy still cannot declare a `name` twice (§7.13.3), so a provider offering
-one name under several keys is not yet reachable; appending `[.<key>]` now lets that case land later without
-re-cutting the path.
+A provider listens at its policy `endpoint` inside its own view (§7.13.1). `kenneld` owns the host location
+of that socket, a per-capability directory under its runtime root, derived from signed-catalogue state:
 
-When that same-capability claim is made by **two equally-enabled providers** — same `tier`, same `name`,
-neither keyed (the only contestable case: a `key` or a tier difference already separates them, and a reserved
-name admits one authorised claimant, §7.13.5) — the rendezvous point has exactly **one owner: the provider
-the broker resolves the name to.** Ownership is not a second decision. The broker already selects a single
-candidate by the §7.13.4 order (per-user over per-host, then a stable tiebreak), and the provider it would
-resolve to is the one whose socket backs the point — so construction binds the per-capability directory for a
-provide **only when this provider is that selected owner**. An equally-enabled non-owner runs normally, every
-*other* provide it offers intact, and only its claim on the contested name is **shadowed** — never denied,
-never collapsed to "no winner, so none" (the name-claim DoS §7.13.4 forbids), never a bind race two providers
-could lose. The shadowing is **legible**, surfaced in the topology view (§7.13.7) the way a multiply-provided
-name already is. RP ownership and resolution therefore cannot disagree: they are the same selection. (The
-floor is the stable order the broker resolves by; a future incumbency tiebreak — a `Ready` owner keeps the
-slot over an equally-ranked newcomer — would additionally keep a `daemon-reload` from moving a live socket,
-but is not required for correctness.)
+    <runtime>/mesh/<tier>/<name>[.<key>]/
 
-The directory is **per-capability**, and the isolation is load-bearing: `kenneld` binds *only* a provider's
-own capability directory into its view — never a shared parent — so a provider sees its own rendezvous socket
-and no sibling's, and cannot reach another provider's endpoint behind the broker's back (the deny-by-default
-the whole surface rests on). The provider binds its socket within the directory it is handed; the inode it
-creates **is the one `kenneld` holds** on the host side, because a bind mount is one inode set seen from two
-namespaces. The broker's handoff is then a plain `connect` to that host path — **byte-identical to the
-host-socket facade** that brokers a `[[unix.allow]]` socket (§7.6), the same §4.3 fd-broker shape, with no
-namespace traversal, no `/proc/<pid>/root`, and no provider pid anywhere in the path. (`key` is an
-author-chosen token, so it is validated to a filesystem-safe charset where the rest of the provide is
-checked, §7.13.3 — a UUID, the canonical key, already complies.)
+`tier` (`user`/`host`) is the cascade layer the provider is enabled at (§7.13.6); `name` is the capability's
+public identifier; the optional private **`key`** (§7.13.1) is appended when set, the determinator that tells
+apart a public `name` offered by more than one policy (§7.13.4) — a different `key` or `tier` gives a distinct
+directory, and an identical `(tier, name, key)` names one capability instance. At construction `kenneld`
+binds this directory at the provider's in-view `dirname(endpoint)`; the provider binds its socket at its own
+`endpoint` within it, and the inode it creates is the one `kenneld` holds host-side (a bind mount is one inode
+set seen from two namespaces). The broker resolves the same directory from `(tier, name, key)`, joins the
+policy `endpoint`'s basename, and connects — the §4.3 fd-broker, the connect the host-socket facade already
+makes for a `[[unix.allow]]` socket (§7.6). The bind is one ordinary entry in the provider's view-bind list,
+mounted by `materialize_binds` like every other view path; the provider binds under its own `[fs]` grant.
+`key` is validated to a filesystem-safe charset where the rest of the provide is checked (§7.13.3).
 
-Three properties fall out, and they are why this is the frozen shape:
+**Per-capability isolation.** `kenneld` binds a provider's own capability directory alone, not a shared
+parent, so a provider sees only its own rendezvous socket; a cross-kennel reach is brokered, deny-by-default.
 
-- **The pid leaves the model.** It is not a broker input, not a catalogue field, and not a readiness input:
-  the supervisor's *pending → ready* probe (§7.13.7) `stat`s the same host rendezvous path for the socket to
-  appear, rather than watching a pid. The reuse race is not mitigated — it is **structurally absent**, there
-  being no pid to recycle.
-- **Construction and the broker never communicate.** The view-construction step binds
-  `<runtime>/mesh/<tier>/<name>[.<key>]/` into the provider's view; the broker computes the *same* path from
-  `(tier, name, key)` to `connect`. Two
-  pure derivations of one deterministic function over signed state — no handoff of an allocated path, no
-  shared mutable rendezvous table, no skew window. The catalogue stays a **projection, never authored
-  state** (§7.13.4).
-- **It reuses the substrate whole.** Each capability's rendezvous bind is **one ordinary entry** in the
-  provider's view-bind list — the same machinery (`materialize_binds`) that mounts every other path of every
-  view, and the same construction path the privhelper already runs: **no new privileged verb, no second
-  connect path**. The provider side is the listen-direction mirror of the host-socket facade's
-  `{ shim, name, real }` triple the consumer side already rides (§7.13.4): the provider's **injected**
-  endpoint is the in-view `shim`, the host rendezvous path is the `real` the broker connects.
-
-What this asks of a provider is only that it **bind where it is told**: it reads its injected endpoint (the
-provider-side mirror of the consumer's `at`+`env`, §7.13.1) and listens there, the way a Wayland client reads
-`WAYLAND_DISPLAY`. It authors **no** path — for `af-unix` the schema carries the env var to populate, not a
-filesystem location — so there is nothing for an author to mis-place and nothing for the broker to validate
-against an author's choice. The endpoint's parent is framework-supplied, exactly as `$HOME` and `/etc`
-already are in every view; with this, its basename is too.
+**Ownership of a shared name.** Two equally-enabled providers of one `(tier, name)` with no `key` to separate
+them resolve to one rendezvous point, owned by the provider the broker resolves the name to (per-user over
+per-host, then a stable tiebreak, §7.13.4). Construction binds the directory for that selected owner; an
+equally-enabled non-owner runs with its other provides intact and its claim on the contested name shadowed,
+surfaced in the topology view (§7.13.7) as a multiply-provided name. Ownership and resolution are one
+selection. (A reserved name admits one authorised claimant, §7.13.5, so the contestable case is an unkeyed
+public name. A single policy declares a `name` once, §7.13.3; the `[.<key>]` slot carries the per-key case a
+later release reaches.)
 
 ## 7.13.5 The reserved namespace and the service-kennel trust class
 

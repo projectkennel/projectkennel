@@ -322,11 +322,24 @@ fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
         .provides
         .iter()
         .filter_map(|p| {
+            use kennel_lib_policy::settled::Shape;
+            let name = p.name.clone()?;
+            let shape = p.shape?;
+            let key = p.key.clone();
+            // An omitted `af-unix` endpoint defaults to `/run/<name>[.key]/sock` (§7.13.4b); other
+            // shapes author a required endpoint, so a missing one drops the provide (caught at compile).
+            let endpoint = match p.endpoint.clone() {
+                Some(e) => e,
+                None if shape == Shape::AfUnix => {
+                    crate::mesh::default_af_unix_endpoint(&name, key.as_deref())
+                }
+                None => return None,
+            };
             Some(ProvideRuntime {
-                name: p.name.clone()?,
-                shape: p.shape?,
-                endpoint: p.endpoint.clone()?,
-                key: p.key.clone(),
+                name,
+                shape,
+                endpoint,
+                key,
             })
         })
         .collect();
@@ -2231,6 +2244,23 @@ mod tests {
         assert_eq!(c.at.as_deref(), Some("$XDG_RUNTIME_DIR/wayland-0"));
         // No mesh ⇒ empty runtime, omitted from the canonical form (back-compat).
         assert!(translate_mesh(&SourcePolicy::default()).is_empty());
+
+        // An omitted af-unix endpoint is defaulted to /run/<name>[.key]/sock (§7.13.4b).
+        let defaulted = SourcePolicy {
+            provides: vec![ProvidesEntry {
+                name: Some("org.x.cache".to_owned()),
+                shape: Some(Shape::AfUnix),
+                key: Some("K1".to_owned()),
+                reason: Some("a reason".to_owned()),
+                ..ProvidesEntry::default()
+            }],
+            ..SourcePolicy::default()
+        };
+        let m = translate_mesh(&defaulted);
+        assert_eq!(
+            m.provides.first().expect("one provide").endpoint,
+            "/run/org.x.cache.K1/sock"
+        );
     }
 
     fn translate_audit_str(src: &str) -> Result<AuditRuntime, PolicyError> {

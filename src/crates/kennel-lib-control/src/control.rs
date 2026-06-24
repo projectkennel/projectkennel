@@ -244,8 +244,6 @@ pub struct MeshProvider {
     pub enablement: String,
     /// The provider's readiness (`pending` / `ready` / `failed`).
     pub readiness: String,
-    /// The running provider's host pid, or `0` when not running (readiness is not `ready`).
-    pub pid: u32,
 }
 
 /// A malformed control message.
@@ -528,7 +526,6 @@ impl Response {
                     put_str(&mut b, &p.tier);
                     put_str(&mut b, &p.enablement);
                     put_str(&mut b, &p.readiness);
-                    put_u32(&mut b, p.pid);
                 }
             }
         }
@@ -599,7 +596,6 @@ impl Response {
                         tier: r.string()?,
                         enablement: r.string()?,
                         readiness: r.string()?,
-                        pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
                     });
                 }
                 Ok(Self::Mesh(providers))
@@ -747,7 +743,6 @@ mod tests {
                 tier: "user".to_owned(),
                 enablement: "ondemand".to_owned(),
                 readiness: "ready".to_owned(),
-                pid: 4242,
             },
             MeshProvider {
                 capability: "com.acme.vault".to_owned(),
@@ -756,7 +751,6 @@ mod tests {
                 tier: "host".to_owned(),
                 enablement: "autorun".to_owned(),
                 readiness: "failed".to_owned(),
-                pid: 0,
             },
         ]));
     }

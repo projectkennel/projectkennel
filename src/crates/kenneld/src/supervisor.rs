@@ -157,6 +157,7 @@ where
     L: PolicyLoader + Send + Sync + 'static,
 {
     let id = prov.provider;
+    let tier = prov.tier;
     let mut restarts: u32 = 0;
     loop {
         // Construct the provider on a sub-thread — `run_kennel` blocks until the provider exits, like
@@ -186,6 +187,7 @@ where
                 None,
                 &crate::spawn::noop_constructor(),
                 None,
+                Some(tier),
             );
         });
         // Read the construction outcome from the sink to drive readiness: `Started` → ready, then park
@@ -193,8 +195,8 @@ where
         let mut clean = false;
         loop {
             match recv_response(&mut client) {
-                Ok(Response::Started { pid, .. }) => {
-                    shared.note_provider_ready(&id, pid);
+                Ok(Response::Started { .. }) => {
+                    shared.note_provider_ready(&id);
                 }
                 Ok(Response::Exited { code }) => {
                     clean = code == 0;

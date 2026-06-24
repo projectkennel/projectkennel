@@ -689,11 +689,11 @@ fn svc_connect_activate_wait(
     }
 }
 
-/// Broker the connector to a `Ready` provider (§7.13.4a). The af-unix shape reaches the provider's
-/// endpoint socket through its mount namespace (`/proc/<pid>/root`, the move
-/// [`crate::acquire_binder_node0`] uses) and hands the consumer the **connected fd** — the §4.3
-/// fd-broker, the same shape as the af-unix facade. Other shapes' handoff lands later; a connect
-/// failure (provider gone, wrong endpoint) is reported `UNAVAILABLE`, never a wedged looper.
+/// Broker the connector to a `Ready` provider (§7.13.4b). The af-unix shape connects to the host
+/// rendezvous point — the directory derived from `(tier, name, key)` plus the policy `endpoint`'s
+/// basename — and hands the consumer the connected fd (the §4.3 fd-broker, as [`af_unix_connect`]
+/// does for a `[[unix.allow]]` socket). Other shapes' handoff lands later; a connect failure
+/// (provider not yet bound, gone) is reported `UNAVAILABLE`, never a wedged looper.
 fn svc_connect_handoff(
     writer: &Writer,
     incoming: &Incoming,
@@ -703,16 +703,6 @@ fn svc_connect_handoff(
 ) -> Reply {
     use kennel_lib_policy::settled::Shape;
 
-    let Some(pid) = sel.pid else {
-        return emit_svc_connect(
-            writer,
-            incoming,
-            ctx,
-            name,
-            Outcome::Error,
-            status::UNAVAILABLE,
-        );
-    };
     if sel.shape != Shape::AfUnix {
         return emit_svc_connect(
             writer,
@@ -723,14 +713,11 @@ fn svc_connect_handoff(
             status::UNAVAILABLE,
         );
     }
-    // The endpoint is an absolute path in the provider's own view; reach it through `/proc/<pid>/root`.
-    let endpoint = sel.endpoint.trim_start_matches('/');
-    let path = std::path::Path::new("/proc")
-        .join(pid.to_string())
-        .join("root")
-        .join(endpoint);
+    // The host rendezvous socket: kenneld's derived directory + the provider's policy endpoint leaf,
+    // the same inode bound into the provider's view (§7.13.4b). A plain connect, the §4.3 fd-broker.
+    let path = crate::mesh::host_rp_socket(sel.tier, name, sel.key.as_deref(), &sel.endpoint);
     kennel_lib_syscall::net::connect_unix_timeout(&path, AFUNIX_CONNECT_DEADLINE).map_or_else(
-        // Granted but unreachable (provider gone / wrong endpoint): never tie up the looper.
+        // Granted but unreachable (provider not yet bound / gone): never tie up the looper.
         |_| {
             emit_svc_connect(
                 writer,

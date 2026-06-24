@@ -20,9 +20,35 @@
 
 use std::collections::BTreeSet;
 
-use crate::source::SourcePolicy;
+use crate::source::{Shape, SourcePolicy};
 use kennel_lib_policy::settled::RESERVED_PREFIX;
 use kennel_lib_policy::PolicyError;
+
+/// The per-capability directory component for a provide rendezvous: `<name>`, or `<name>.<key>` when
+/// a private key is set (§7.13.4b).
+fn provide_dir_component(name: &str, key: Option<&str>) -> String {
+    key.map_or_else(|| name.to_owned(), |k| format!("{name}.{k}"))
+}
+
+/// The default in-view `endpoint` for an `af-unix` provide that omits one (§7.13.4b): a `sock` socket
+/// in a per-capability `/run` subdirectory `kenneld` binds its rendezvous directory at.
+#[must_use]
+pub fn default_af_unix_endpoint(name: &str, key: Option<&str>) -> String {
+    format!("/run/{}/sock", provide_dir_component(name, key))
+}
+
+/// Whether an author-supplied `af-unix` `endpoint` is a safe rendezvous bind target: absolute, under
+/// `/run`, with a subdirectory (so `dirname(endpoint)` is a `/run` subdir, never bare `/run`), and no
+/// `..` traversal.
+fn af_unix_endpoint_under_run(endpoint: &str) -> bool {
+    let path = std::path::Path::new(endpoint);
+    path.is_absolute()
+        && path.starts_with("/run")
+        && path.components().count() >= 4
+        && !path
+            .components()
+            .any(|c| c.as_os_str() == std::ffi::OsStr::new(".."))
+}
 
 /// Validate the `[[provides]]` / `[[consumes]]` entries of a resolved source policy.
 ///
@@ -68,11 +94,32 @@ pub fn validate(
                 who(p.name.as_deref())
             ));
         }
-        if p.endpoint.as_deref().unwrap_or("").is_empty() {
-            errs.push(format!(
+        // An `af-unix` endpoint is optional — `kenneld` defaults it to `/run/<name>[.key]/sock`
+        // (§7.13.4b). When supplied, it must be a safe rendezvous bind target: absolute, under `/run`,
+        // with a subdirectory, since construction binds `dirname(endpoint)` into the view. Other
+        // shapes author a required `endpoint` (a bus name, a node).
+        match p.shape {
+            Some(Shape::AfUnix) => {
+                if let Some(e) = p
+                    .endpoint
+                    .as_deref()
+                    .filter(|e| !af_unix_endpoint_under_run(e))
+                {
+                    errs.push(format!(
+                        "[[provides]] `{}` endpoint `{e}` must be an absolute path under `/run` with \
+                         a subdirectory (e.g. `/run/<dir>/<sock>`) — `kenneld` binds \
+                         `dirname(endpoint)` at construction (§7.13.4b); omit it for the \
+                         `/run/<name>[.key]/sock` default",
+                        who(p.name.as_deref())
+                    ));
+                }
+            }
+            // Other (deferred) shapes author a required `endpoint` (a bus name, a node).
+            Some(_) if p.endpoint.as_deref().unwrap_or("").is_empty() => errs.push(format!(
                 "[[provides]] `{}` is missing `endpoint`",
                 who(p.name.as_deref())
-            ));
+            )),
+            _ => {} // valid af-unix endpoint, a present other-shape endpoint, or a missing shape
         }
         if p.reason.as_deref().unwrap_or("").is_empty() {
             errs.push(format!(
@@ -126,10 +173,10 @@ mod tests {
     }
 
     fn provide(name: &str) -> ProvidesEntry {
+        // A well-formed af-unix provide omits `endpoint` (§7.13.4b): kenneld defaults it.
         ProvidesEntry {
             name: Some(name.to_owned()),
             shape: Some(Shape::AfUnix),
-            endpoint: Some("$XDG_RUNTIME_DIR/x".to_owned()),
             reason: Some("a reason".to_owned()),
             ..ProvidesEntry::default()
         }
@@ -219,15 +266,52 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_provide_endpoint_rejects() {
+    fn an_omitted_af_unix_endpoint_is_valid_and_defaults() {
+        // af-unix may omit `endpoint`; kenneld defaults it to /run/<name>[.key]/sock (§7.13.4b).
+        let p = policy_with(vec![provide("build-cache")], vec![]);
+        assert!(validate(&p, false).expect("valid").is_empty());
+        assert_eq!(
+            default_af_unix_endpoint("build-cache", None),
+            "/run/build-cache/sock"
+        );
+        assert_eq!(
+            default_af_unix_endpoint("org.x.wl", Some("K1")),
+            "/run/org.x.wl.K1/sock"
+        );
+    }
+
+    #[test]
+    fn an_af_unix_endpoint_outside_run_rejects() {
+        for bad in [
+            "/tmp/x.sock",
+            "$XDG_RUNTIME_DIR/x",
+            "/run/x.sock",
+            "/run/../etc/x/y",
+        ] {
+            let p = policy_with(
+                vec![ProvidesEntry {
+                    endpoint: Some((*bad).to_owned()),
+                    ..provide("build-cache")
+                }],
+                vec![],
+            );
+            assert!(
+                err_has(&p, false, "under `/run`"),
+                "endpoint {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn an_af_unix_endpoint_under_run_with_a_subdir_is_accepted() {
         let p = policy_with(
             vec![ProvidesEntry {
-                endpoint: None,
+                endpoint: Some("/run/mesh/echo.sock".to_owned()),
                 ..provide("build-cache")
             }],
             vec![],
         );
-        assert!(err_has(&p, false, "missing `endpoint`"));
+        assert!(validate(&p, false).expect("valid").is_empty());
     }
 
     #[test]

@@ -11,8 +11,8 @@
 //!
 //! No binder, no node 0 from the probe's view: the consumer connects to an ordinary socket and the
 //! provider serves an ordinary socket. kenneld's facade + broker bridge the two behind the scenes
-//! (the consumer's `at` is a facade listener; on connect kenneld resolves the capability, reaches the
-//! running provider's endpoint through `/proc/<pid>/root`, and splices). So a successful round-trip
+//! (the consumer's `at` is a facade listener; on connect kenneld resolves the capability, connects the
+//! provider's host rendezvous point, and splices). So a successful round-trip
 //! proves the brokered connector actually reaches a *running provider across the kennel boundary*.
 
 #![forbid(unsafe_code)]

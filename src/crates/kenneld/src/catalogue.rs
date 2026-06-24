@@ -155,12 +155,10 @@ pub struct CatalogueProvider {
     pub tier: Tier,
     /// Eager (`autorun`) or lazy (`ondemand`) bring-up.
     pub enablement: Enablement,
-    /// The provider's readiness — a connect bridges only at [`Readiness::Ready`] (§7.13.4a).
+    /// The provider's readiness — a connect bridges only at [`Readiness::Ready`] (§7.13.4a). The
+    /// broker reaches the provider through the host rendezvous point it derives from `(tier, name,
+    /// key)` and the policy `endpoint` basename (§7.13.4b).
     pub readiness: Readiness,
-    /// The running provider's host pid, set by the supervisor when construction seals (§7.13.6) —
-    /// `Some` exactly when [`Readiness::Ready`]. The broker reaches the provider's endpoint socket
-    /// through `/proc/<pid>/root` to hand the consumer a connector (§7.13.4a). `None` when not running.
-    pub pid: Option<u32>,
     /// The capabilities this provider offers, post-gate.
     pub offers: Vec<ProvideRuntime>,
 }
@@ -182,9 +180,6 @@ pub struct Candidate<'a> {
     pub enablement: Enablement,
     /// The provider's current readiness.
     pub readiness: Readiness,
-    /// The running provider's host pid (`Some` exactly when `Ready`) — the broker reaches its endpoint
-    /// socket through `/proc/<pid>/root` for the connector handoff (§7.13.4a).
-    pub pid: Option<u32>,
 }
 
 /// The service catalogue: a name → provider(s) projection over the enabled set (§7.13.4).
@@ -241,7 +236,6 @@ impl Catalogue {
                         tier: prov.tier,
                         enablement: prov.enablement,
                         readiness: Readiness::Pending,
-                        pid: None,
                         offers,
                     },
                 );
@@ -283,7 +277,6 @@ impl Catalogue {
                     tier: p.tier,
                     enablement: p.enablement,
                     readiness: p.readiness,
-                    pid: p.pid,
                 })
             })
             .collect()
@@ -313,22 +306,17 @@ impl Catalogue {
         let p = self.providers.get_mut(provider)?;
         let next = p.readiness.on(event)?;
         p.readiness = next;
-        if next != Readiness::Ready {
-            p.pid = None; // a non-running provider has no live pid for the broker to reach
-        }
         Some(next)
     }
 
-    /// Record a provider's running host pid and drive it `Pending → Ready` (§7.13.6): the supervisor
-    /// calls this when construction seals. Returns the new readiness, or `None` if there is no such
-    /// provider or it was not pending. The pid is what the broker reaches the endpoint through.
-    pub fn note_constructed(&mut self, provider: &str, pid: u32) -> Option<Readiness> {
+    /// Drive a provider `Pending → Ready` (§7.13.6): the supervisor calls this when construction
+    /// seals. Returns the new readiness, or `None` if there is no such provider or it was not pending.
+    pub fn note_constructed(&mut self, provider: &str) -> Option<Readiness> {
         let p = self.providers.get_mut(provider)?;
         let next = p
             .readiness
             .on(kennel_lib_control::readiness::Event::ConstructionSucceeded)?;
         p.readiness = next;
-        p.pid = Some(pid);
         Some(next)
     }
 
@@ -622,7 +610,6 @@ mod tests {
         assert_eq!(p.tier, Tier::User);
         assert_eq!(p.enablement, Enablement::Ondemand);
         assert_eq!(p.readiness, Readiness::Pending); // catalogued but not yet running
-        assert_eq!(p.pid, None);
         assert_eq!(p.offers.len(), 2);
         assert!(p.offers.iter().any(|o| o.name == "doe.john.cache"));
         assert!(p.offers.iter().any(|o| o.name == "doe.john.build"));

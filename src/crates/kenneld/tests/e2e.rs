@@ -370,6 +370,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         None,
         &kenneld::spawn::noop_constructor(),
         None,
+        None,
     );
 
     if bring_up_skipped(&recv_response(&mut client).expect("a first response")) {
@@ -516,6 +517,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         &mut server,
         None,
         &kenneld::spawn::noop_constructor(),
+        None,
         None,
     );
 
@@ -671,6 +673,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
                 None,
                 &kenneld::spawn::noop_constructor(),
                 None,
+                None,
             );
         });
         let first = recv_response(&mut client).expect("a first response");
@@ -824,6 +827,7 @@ fn run_ttl_kennel(
         &mut server,
         None,
         &kenneld::spawn::noop_constructor(),
+        None,
         None,
     );
     let elapsed = started_at.elapsed();
@@ -1069,6 +1073,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
             None,
             &kenneld::spawn::noop_constructor(),
             None,
+            None,
         );
         reader.join().expect("pty reader thread")
     });
@@ -1156,6 +1161,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
             &mut server1,
             None,
             &kenneld::spawn::noop_constructor(),
+            None,
             None,
         );
         drop(run_shared);

@@ -19,20 +19,25 @@
 use kennel_lib_control::readiness::Readiness;
 use kennel_lib_policy::settled::{ConsumeRuntime, Shape};
 
-use crate::catalogue::Catalogue;
+use crate::catalogue::{Catalogue, Tier};
 
 /// The provider the broker selected for a consume — what the connector handoff needs.
+///
+/// It resolves the host rendezvous point: the triple `(tier, name, key)` for the directory and the
+/// policy `endpoint` for the socket leaf (§7.13.4b).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selected {
     /// The provider kennel to connect to (and, when lazy, socket-activate).
     pub provider: String,
     /// The transport to broker.
     pub shape: Shape,
-    /// Where the capability is exposed in the provider's own view (the bridge target).
+    /// The tier the provider was enabled at — part of the host rendezvous directory (§7.13.4b).
+    pub tier: Tier,
+    /// The optional private key — appended to the rendezvous directory when set (§7.13.4b).
+    pub key: Option<String>,
+    /// The provider's policy-authored in-view `endpoint`; its basename is the rendezvous socket leaf
+    /// the provider binds and the broker connects (§7.13.4b).
     pub endpoint: String,
-    /// The running provider's host pid (`Some` once `Ready`) — the broker reaches its endpoint socket
-    /// through `/proc/<pid>/root` for the af-unix connector handoff (§7.13.4a).
-    pub pid: Option<u32>,
 }
 
 /// The broker's decision for one `SVC_CONNECT` (§7.13.4a). The handler maps each to a reply status.
@@ -72,8 +77,9 @@ pub fn decide(consumes: &[ConsumeRuntime], catalogue: &Catalogue, name: &str) ->
     let selected = Selected {
         provider: cand.provider.to_owned(),
         shape: cand.shape,
+        tier: cand.tier,
+        key: cand.key.map(ToOwned::to_owned),
         endpoint: cand.endpoint.to_owned(),
-        pid: cand.pid,
     };
     match cand.readiness {
         Readiness::Ready => Decision::Ready(selected),
@@ -222,8 +228,9 @@ mod tests {
             Decision::Pending(Selected {
                 provider: "p".to_owned(),
                 shape: Shape::AfUnix,
+                tier: Tier::Host,
+                key: None,
                 endpoint: "/run/p.sock".to_owned(),
-                pid: None,
             })
         );
         // Ready → Ready(selected).
