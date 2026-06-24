@@ -31,6 +31,7 @@
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -43,6 +44,22 @@ const POLL: Duration = Duration::from_millis(50);
 
 /// The private runtime-dir root under which each compositor gets its own `XDG_RUNTIME_DIR`.
 const RUNTIME_ROOT: &str = "/tmp/compositor-broker";
+
+/// Ceiling on concurrently-live nested compositors.
+///
+/// Each accepted connection spawns a thread and a compositor process; without a bound, a consumer
+/// can fork-bomb the GUI kennel by spamming connect/disconnect. The kennel's own cgroup caps the
+/// total damage, so this is the in-budget-churn backstop, not the only bound — generous for real
+/// use (this many simultaneous GUI windows is already a lot) while refusing a flood.
+const MAX_LIVE_COMPOSITORS: usize = 64;
+
+/// Token-bucket rate limit on *new* compositors: the sustained connects/sec a consumer may drive,
+/// after an initial burst. The concurrency cap bounds how many compositors run at once; this bounds
+/// how fast they can be cycled — a connect/disconnect flood (spawn-then-kill churn) thrashes process
+/// creation in the GUI kennel even while staying under the live ceiling. Generous for real use
+/// (open a handful of GUI apps in a burst); a flood is throttled, not served.
+const RATE_BURST: f64 = 32.0;
+const RATE_REFILL_PER_SEC: f64 = 8.0;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -76,12 +93,47 @@ fn main() -> ExitCode {
     eprintln!("compositor-broker: listening at {listen}, compositor {compositor:?}");
 
     let compositor = Arc::new(compositor);
+    let live = Arc::new(AtomicUsize::new(0));
+    let mut tokens = RATE_BURST;
+    let mut last_refill = Instant::now();
     let mut id: u64 = 0;
     for incoming in listener.incoming() {
         let Ok(conn) = incoming else { continue };
         id = id.wrapping_add(1);
+        // Rate-limit new compositors (token bucket): refill by elapsed time, capped at the burst,
+        // then require a whole token. The accept loop is single-threaded, so no synchronisation is
+        // needed. A flood that outruns the refill is dropped (the consumer retries) before it can
+        // spawn — this caps connect/disconnect *churn* the live ceiling alone would let through.
+        let now = Instant::now();
+        tokens = now
+            .duration_since(last_refill)
+            .as_secs_f64()
+            .mul_add(RATE_REFILL_PER_SEC, tokens)
+            .min(RATE_BURST);
+        last_refill = now;
+        if tokens < 1.0 {
+            eprintln!("compositor-broker: [{id}] connect rate exceeded — connection refused");
+            continue; // `conn` drops here, closing it
+        }
+        tokens -= 1.0;
+        // Bound concurrent compositors so a consumer cannot fork-bomb the GUI kennel by spamming
+        // connections. `fetch_add` reserves a slot; if we were already at the ceiling we give it
+        // back and drop the connection (the consumer retries) rather than queue it — a wedged
+        // compositor must not back up the accept loop. Soft cap: a brief over-count under a burst
+        // of simultaneous accepts is harmless.
+        if live.fetch_add(1, Ordering::SeqCst) >= MAX_LIVE_COMPOSITORS {
+            live.fetch_sub(1, Ordering::SeqCst);
+            eprintln!(
+                "compositor-broker: [{id}] at capacity ({MAX_LIVE_COMPOSITORS} live) — connection refused"
+            );
+            continue; // `conn` drops here, closing it
+        }
         let compositor = Arc::clone(&compositor);
-        thread::spawn(move || serve(conn, id, &compositor));
+        let live = Arc::clone(&live);
+        thread::spawn(move || {
+            serve(conn, id, &compositor);
+            live.fetch_sub(1, Ordering::SeqCst); // release the slot when the window folds
+        });
     }
     ExitCode::SUCCESS
 }

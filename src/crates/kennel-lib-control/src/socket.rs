@@ -87,6 +87,52 @@ pub fn is_control_socket(candidate: &Path) -> bool {
     false
 }
 
+/// Whether granting `candidate` as a filesystem bind would **expose** a control socket — i.e.
+/// `candidate` is the socket itself or any ancestor directory that contains it.
+///
+/// [`is_control_socket`] guards the `[[unix.allow]]` path, which names the socket *leaf*. A
+/// filesystem grant (`fs.read`/`fs.write`) instead names a *directory*, and binding a directory
+/// exposes everything beneath it — so granting `/run/user/<uid>/kennel` (or `/run/user/<uid>`,
+/// or `/run`) drags the control socket into the view even though none of those *is* the socket.
+/// This is the ancestor-aware form the fs gate needs: the control socket is ungrantable by rule
+/// (the CLI→daemon trust boundary, §socket docs / W10), so any grant that would expose it is
+/// refused. Matches both this user's real socket (covering a non-standard `$XDG_RUNTIME_DIR`) and
+/// the structural `/run/user/<digits>/kennel/control.sock` chain for any uid. Lexical only;
+/// runtime symlink / cascade-mount disguises of a bind *source* are the construction-time guard's
+/// job (the deferred anchored bind-source resolution).
+#[must_use]
+pub fn grant_exposes_control_socket(candidate: &Path) -> bool {
+    // Structural chain for ANY uid: `norm`'s components must be a *prefix* of
+    // `/run/user/<digits>/kennel/control.sock`, so every ancestor (`/run`, `/run/user`,
+    // `/run/user/<n>`, `…/kennel`) and the socket itself are caught.
+    const CHAIN: [&str; 5] = ["run", "user", "<uid>", "kennel", "control.sock"];
+    let norm = lexical_normalize(candidate);
+    // This user's real socket: `norm` is an ancestor-or-equal of it (component-wise `starts_with`).
+    if socket_path().starts_with(&norm) {
+        return true;
+    }
+    let mut comps = norm.components();
+    if comps.next() != Some(Component::RootDir) {
+        return false; // not absolute — cannot be an ancestor of the absolute socket path
+    }
+    for (depth, c) in comps.enumerate() {
+        let Some(label) = CHAIN.get(depth) else {
+            return false; // longer than the chain — not an ancestor
+        };
+        let seg = c.as_os_str();
+        let ok = match *label {
+            "<uid>" => seg
+                .to_str()
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())),
+            lit => seg == lit,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 /// Obtain the control listener: the socket-activation fd if present, else a
 /// freshly-bound socket at [`socket_path`].
 ///
@@ -164,6 +210,47 @@ mod tests {
         )));
         assert!(!is_control_socket(Path::new("/home/u/kennel/control.sock")));
         assert!(!is_control_socket(Path::new("/run/user/1000/control.sock")));
+    }
+
+    #[test]
+    fn grant_exposing_the_control_socket_is_refused_at_every_ancestor() {
+        // The socket itself, and every directory ancestor that would drag it into a view, are all
+        // refused — this is the fs-grant gap the unix.allow leaf-check missed (W15 F1).
+        for p in [
+            "/run/user/1000/kennel/control.sock",
+            "/run/user/1000/kennel",
+            "/run/user/1000",
+            "/run/user",
+            "/run",
+            "/",
+            "/run/user/0/kennel",              // any uid, not just this one
+            "/run/user/1000/kennel/../kennel", // `..`-disguised ancestor
+        ] {
+            assert!(
+                grant_exposes_control_socket(Path::new(p)),
+                "{p} should be refused — it exposes the control socket"
+            );
+        }
+    }
+
+    #[test]
+    fn grant_does_not_overcatch_sibling_or_unrelated_paths() {
+        // A sibling runtime subtree, a non-digit uid, a deeper non-socket path, an unrelated tree,
+        // and a relative path must all pass — only paths that genuinely expose the socket are caught.
+        for p in [
+            "/run/systemd",
+            "/run/user/abc/kennel",
+            "/run/user/1000/kennel/agent.sock",
+            "/run/user/1000/proxy",
+            "/home/u/work",
+            "/usr/share",
+            "run/user/1000/kennel", // not absolute → not an ancestor of the absolute socket
+        ] {
+            assert!(
+                !grant_exposes_control_socket(Path::new(p)),
+                "{p} should pass — it does not expose the control socket"
+            );
+        }
     }
 
     #[test]

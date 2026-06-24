@@ -320,6 +320,20 @@ pub fn loaded_from_settled(
     let substituted = kennel_lib_spawn::substitute(verified, subst).map_err(|e| e.to_string())?;
     let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
         .map_err(|e| e.to_string())?;
+    // Backstop the control-socket ungrantability at the privileged factory (W15 F1). The compiler
+    // refuses an `fs` grant that would expose the control socket (the loud primary guard), but a
+    // grant written with the deferred `<uid>` placeholder resolves only at `substitute`, *after*
+    // that lexical check — so it can still land the daemon's runtime dir in the view. The fix keeps
+    // the privhelper a dumb applier (no searching the constructed tree — that is where TOCTOU /
+    // symlink-race bugs live): the *unprivileged* daemon, which knows its own socket path, simply
+    // adds it to the view's blind-mask list. The privhelper over-mounts an empty file there after
+    // building the view, exactly as it already does for the T2.8 trust manifests, so a `connect(2)`
+    // hits a plain file (`ENOTSOCK`) however the tree was bound. `materialize_masks` is a no-op when
+    // no grant placed the runtime dir in the view, so this costs nothing on the common path.
+    if let Some(view) = plan.view.as_mut() {
+        view.mask_paths
+            .push(kennel_lib_control::socket::socket_path());
+    }
     // Resolve the policy's supplementary groups to GIDs and membership-check them (§7.4): kenneld
     // runs as the operator, so a group the operator is not in is refused — the privileged seal could
     // otherwise over-grant. The kennel always drops to exactly this set (empty ⇒ none at all).
@@ -553,6 +567,26 @@ mod tests {
             .load(Path::new("/nonexistent/policy"), &subst())
             .expect_err("must fail");
         assert!(err.contains("cannot read policy"), "got {err}");
+    }
+
+    #[test]
+    fn loaded_from_settled_masks_the_control_socket() {
+        // The privhelper backstop to F1: whatever the policy's fs grants, the constructed view's
+        // blind-mask list carries the daemon's control socket, so the privileged factory over-mounts
+        // an empty file there — the socket is neutralised however the tree was bound (closing the
+        // `<uid>`-placeholder path the lexical compile guard cannot see).
+        let settled = kennel_lib_policy::settled::sample_settled();
+        let loaded = loaded_from_settled(&settled, &subst()).expect("loads");
+        let view = loaded
+            .plan
+            .view
+            .expect("a home-shadowing policy has a view");
+        assert!(
+            view.mask_paths
+                .contains(&kennel_lib_control::socket::socket_path()),
+            "the control socket must be in the view's blind-mask list: {:?}",
+            view.mask_paths
+        );
     }
 
     #[test]
