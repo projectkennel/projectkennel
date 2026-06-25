@@ -259,6 +259,20 @@ Within typically-granted project trees:
 
 ---
 
+## T1.14 — Host rootfs visibility: the unnarrowed `/usr` tree
+
+**Definition.** A workload whose view binds the entire host `/usr` read-only sees the complete installed-package set, development headers, locally-installed software under `/usr/local`, kernel source under `/usr/src`, and every file the host administrator has placed anywhere under `/usr`. None of this is executable (Landlock `FS_EXECUTE` gates that), but it is **readable**: the workload can enumerate the host's installed software, read header files for vulnerability research, and map the host's configuration — reconnaissance that requires no privilege escalation and no escape.
+
+**Attack pattern.** A compromised or malicious workload `readdir`-walks `/usr` to fingerprint the host (installed packages, kernel headers, locally-built tools), identifies software versions with known vulnerabilities, and exfiltrates the inventory via an allowed egress channel. The attack requires only `FS_READ` — no execute, no write, no privilege. The host's sprawl is the reconnaissance surface; narrowing it reduces the attainable detail.
+
+**Mitigation in Project Kennel (W2).** The `base-confined` template's filesystem floor uses **construction-by-absence** (§4.2): instead of binding `/usr/**`, it binds only the curated base subtrees a dynamically-linked workload needs (`/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/lib64`, `/usr/libexec`, `/usr/share`). Everything else under `/usr` is simply not mounted — absent from the view, not present-but-denied. The exec-implies-visible invariant ensures every `exec.allow` entry and its full closure (symlink target, library dependencies) is reachable even when the path falls outside the curated base. The `dev-headers` fragment adds `/usr/include` and `/usr/src` back for build workloads that need them. The `base-bwrap` and `base-flatpak` reference templates bracket the posture: `base-bwrap` is the unnarrowed `/usr` (the bubblewrap stance), `base-flatpak` is the curated base (the flatpak stance, W2's target).
+
+**Residuals.** The curated base is visible — the workload can read shared libraries, terminfo, zoneinfo, CA certificates, and the binary search path. This is the accepted, precedent-backed residual (flatpak's runtime exposes the same surface). The filesystem floor prevents data leakage; the real enforcement is at `exec.allow|deny` (Landlock `FS_EXECUTE` determines what can actually run). Locally-installed software under `/usr/local` and `/opt` is absent by default (opt-in via template delta).
+
+**MITRE ATT&CK.** T1083 (File and Directory Discovery), T1518 (Software Discovery).
+
+---
+
 # Family 2 — Posture degradation (T2.1–T2.8)
 
 This family captures what workloads do *to the user's host configuration and to the artefacts they produce*, distinct from what they do to access resources. The posture-degradation threats are the direct consequence of the optimisation-pressure thesis for AI agents (design document §1.2) and the friction-routing-around behaviour for human-driven workloads (developers configuring containers permissively because narrow configuration didn't work).

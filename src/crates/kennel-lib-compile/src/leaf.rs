@@ -831,13 +831,13 @@ threats.exposed = ["T1.8"]
             .expect("write")
             .iter()
             .any(|p| p == "~/projects/myproj/**"));
-        // The inherited system read paths survive.
+        // The inherited system read paths survive (W2: curated base, not /usr/**).
         assert!(fs
             .read
             .as_ref()
             .expect("read")
             .iter()
-            .any(|p| p == "/usr/**"));
+            .any(|p| p == "/usr/bin/**"));
         let proxy = eff.net.expect("net").proxy.expect("net.proxy");
         assert!(proxy
             .allow

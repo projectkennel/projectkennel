@@ -53,11 +53,23 @@ path = ["/usr/bin", "/usr/local/bin", "/bin"]
 # The constructed view (fs.home, below): $HOME is a fresh tmpfs into which only
 # granted paths are bound. Non-granted paths do not exist in the view (T1.1).
 [fs]
-# Read baseline: the system files any dynamically-linked workload needs. A usable
-# template/leaf adds its project paths.
+# Read baseline: the curated base every dynamically-linked workload needs
+# (§4.2 construction-by-absence, W2). Only these subtrees are bound into the
+# view; everything else under /usr (headers, source, /usr/local) is simply not
+# present. The filesystem floor prevents data leakage; the real enforcement is
+# at exec.allow|deny (Landlock FS_EXECUTE). Absent subtrees on this host (e.g.
+# /usr/lib64 on usrmerge distros, /usr/libexec on Debian) are silently skipped.
 read = [
-    "/usr/**", "/lib/**", "/lib64/**",
-    "/etc/ssl/**", "/etc/pki/**",        # TLS root CAs (vanilla, bound read-only)
+    # The curated /usr base (W2):
+    "/usr/bin/**", "/usr/sbin/**",        # binary search path (Landlock gates exec)
+    "/usr/lib/**",                        # shared libraries, locale, multiarch
+    "/usr/lib64/**",                      # 64-bit lib path (Fedora/RHEL; skipped if absent)
+    "/usr/libexec/**",                    # helper binaries (git-core etc; skipped if absent)
+    "/usr/share/**",                      # arch-independent data (terminfo, zoneinfo, CAs, locale)
+    # usrmerge compat:
+    "/lib/**", "/lib64/**",
+    # TLS root CAs + linker config (not under /usr):
+    "/etc/ssl/**", "/etc/pki/**",
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
     # update-alternatives symlink farm: many tools (awk→gawk, vi, editor, pager,
     # java, …) are reached via /usr/bin/<tool> -> /etc/alternatives/<tool> -> real
@@ -236,7 +248,8 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
+
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "c/hxn+WRwFGpq9a6cFQNhgofG+oOLoluPTHvhv4a96McYTiibHss317TG6M8vYs8TlJjdKLT0Cbo0xycSeJnBg=="
+signature = "DuRCJ5gMAwAw43X7wQBDULMeZPFR+eYbKx7dyor+/WdwHR8VNtm+01xYLnULdTzvyU+CK7RuEfLMl3a7pMvLDA=="

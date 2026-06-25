@@ -1,0 +1,30 @@
+# ============================================================================
+# Fragment: dev-headers  (Development headers + kernel source)
+#
+# A composable capability bundle (05-templates.md §5.10): Adds /usr/src and
+# /usr/include back into the view (read-only). These are absent from the
+# curated base (W2 construction-by-absence) and only needed by build/compile
+# workloads. Include this fragment in templates that compile C/C++/Rust code
+# against system headers.
+#
+#   include = ["dev-headers@v1"]
+#
+# Additive-only (§5.10): every entry is an [[fs.read.add]] delta. Composing
+# this widens the read view only; the cage (net/fs.write/exec/ceilings) is
+# untouched.
+# ============================================================================
+
+name = "dev-headers"
+
+[[fs.read.add]]
+path = "/usr/include/**"
+reason = "C/C++ system headers (absent from the W2 curated base)"
+
+[[fs.read.add]]
+path = "/usr/src/**"
+reason = "kernel headers and source trees (absent from the W2 curated base)"
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "n/HOTDp7jgIeAW7x6yRNQbPZKF2SpnbPZfQgZstdWc15IfYfZos+0gVjIikqj+XCuipKtbGzgxB18TUCwKatAg=="
