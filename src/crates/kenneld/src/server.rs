@@ -249,8 +249,17 @@ struct KennelMeta {
     broker: Option<crate::pty_broker::PtyBroker>,
     /// The mesh capability names this kennel's settled `[[consumes]]` declares — the W6 idle-reap
     /// census (§7.13.6): an ondemand provider is kept alive while any running kennel consumes one of
-    /// its capabilities. Empty for a kennel with no `[[consumes]]`.
-    consumed: Vec<String>,
+    /// its capabilities. The shape and required flag are carried for the consumer topology leg
+    /// (`kennel list`). Empty for a kennel with no `[[consumes]]`.
+    consumed: Vec<ConsumedEntry>,
+}
+
+/// One entry in `KennelMeta::consumed`: the name, expected shape, and whether the
+/// dependency is required.
+struct ConsumedEntry {
+    name: String,
+    shape: String,
+    required: bool,
 }
 
 /// The mutable shared state: the context allocator and the kennel registry.
@@ -675,15 +684,15 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Record the mesh capability names this kennel consumes, once its policy is loaded — the W6
-    /// idle-reap census (§7.13.6) reads it to keep an ondemand provider alive while a consumer runs.
-    fn note_consumes(&self, name: &str, consumed: Vec<String>) {
+    /// Record the mesh capabilities this kennel consumes, once its policy is loaded — the W6
+    /// idle-reap census (§7.13.6) and the consumer topology leg (`kennel list`) read this.
+    fn note_consumes(&self, name: &str, entries: Vec<ConsumedEntry>) {
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(meta) = reg.kennels.get_mut(name) {
-            meta.consumed = consumed;
+            meta.consumed = entries;
         }
     }
 
@@ -696,7 +705,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.kennels
             .values()
-            .any(|m| m.consumed.iter().any(|c| capabilities.contains(c)))
+            .any(|m| m.consumed.iter().any(|c| capabilities.contains(&c.name)))
     }
 
     /// Mark `provider` idle-reaped (§7.13.6) — the TTL handler records this before killing the cgroup,
@@ -824,6 +833,15 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     .broker
                     .as_ref()
                     .is_some_and(crate::pty_broker::PtyBroker::is_attached),
+                consumed: meta
+                    .consumed
+                    .iter()
+                    .map(|c| control::ConsumedCapability {
+                        name: c.name.clone(),
+                        shape: c.shape.clone(),
+                        required: c.required,
+                    })
+                    .collect(),
             })
             .collect();
         drop(reg);
@@ -1411,7 +1429,15 @@ pub fn run_kennel<P, L>(
     // kennel runs, any ondemand provider it consumes is kept alive.
     shared.note_consumes(
         &req.kennel,
-        loaded.consumes.iter().map(|c| c.name.clone()).collect(),
+        loaded
+            .consumes
+            .iter()
+            .map(|c| ConsumedEntry {
+                name: c.name.clone(),
+                shape: c.shape.as_str().to_owned(),
+                required: c.required,
+            })
+            .collect(),
     );
     // Prepare D-Bus mediation (§7.7): pair each enabled bus's compiled table with the real bus
     // address and the in-view socket the facade presents. Stateless, like the unix shims.

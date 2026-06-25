@@ -294,6 +294,12 @@ fn list() -> Result<ExitCode, String> {
                 println!("no running kennels");
             } else {
                 print_topology(&kennels);
+                // The consumer leg (W6, §7.13.6): who-consumes-what, parallel to the provider
+                // mesh view below. Only printed when any kennel has consumed capabilities.
+                if kennels.iter().any(|k| !k.consumed.is_empty()) {
+                    println!();
+                    print_consumers(&kennels);
+                }
             }
         }
         Response::Error(message) => return Err(message),
@@ -350,6 +356,26 @@ fn print_mesh(providers: &[control::MeshProvider]) {
             "{:<32} {:<16} {:<9} {:<11} {:<9} {:<5}",
             r.capability, r.provider, r.readiness, r.shape, r.enablement, r.tier
         );
+    }
+}
+
+/// Render the consumer leg (W6, §7.13.6 topology): one row per consumer→capability, sorted by
+/// kennel then capability name, with the expected shape and required/optional status.
+fn print_consumers(kennels: &[control::KennelInfo]) {
+    println!(
+        "{:<32} {:<32} {:<16} {}",
+        "CONSUMER", "CAPABILITY", "SHAPE", "REQUIRED"
+    );
+    let mut rows: Vec<(&str, &control::ConsumedCapability)> = Vec::new();
+    for k in kennels {
+        for c in &k.consumed {
+            rows.push((&k.kennel, c));
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    for (kennel, c) in rows {
+        let req = if c.required { "yes" } else { "no" };
+        println!("{kennel:<32} {:<32} {:<16} {req}", c.name, c.shape);
     }
 }
 
@@ -1394,6 +1420,7 @@ mod tests {
             pid: 100 + u32::from(ctx),
             running: true,
             attached: false,
+            consumed: vec![],
         };
         // Two top-level kennels (ctx 7, 3), one child of 7, and an orphan spawn whose parent (99)
         // is not in the listing. Input order is deliberately scrambled.
