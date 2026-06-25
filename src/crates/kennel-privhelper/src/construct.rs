@@ -45,8 +45,6 @@ use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 use kennel_lib_syscall::spawn::fexecve;
 use kennel_lib_syscall::unistd::{real_gid, real_uid};
 
-use crate::wire::EgressPayload;
-
 /// The loopback interface name (`lo`). The kennel's own addresses are added to `lo` on BOTH
 /// sides of the boundary: inside the kennel's own net-ns (where the workload sees them) and,
 /// as a mirror, on the host `lo` (so an operator's `ss`/`lsof` maps a kennel address back to
@@ -200,18 +198,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     add_loopback_via_helper(&half.loopback, half.ctx)?;
     if !egress_bytes.is_empty() {
         tracer.step(&format!(
-            "construct: attaching egress BPF ({} bytes) to cgroup",
+            "construct: attaching egress BPF ({} bytes) via privhelper-bpf",
             egress_bytes.len()
         ));
-        let payload = EgressPayload::decode(egress_bytes)
-            .map_err(|e| io::Error::other(format!("egress payload decode: {e:?}")))?;
-        let resp = crate::exec::attach_egress_programs(&half.cgroup, &payload);
-        if resp.status != crate::wire::Status::Ok {
-            return Err(io::Error::other(format!(
-                "egress attach refused (code {})",
-                resp.refusal
-            )));
-        }
+        attach_egress_via_helper(&half.cgroup, egress_bytes)?;
     }
 
     // 1a-bis. Ensure the binder filesystem is available BEFORE the construction child tries
@@ -586,7 +576,7 @@ fn pop_stdio_fds(fds: &mut Vec<OwnedFd>, present: bool) -> io::Result<Option<[Ow
 }
 
 /// Add each host-`lo` mirror address by exec'ing the `{net_admin}` `kennel-privhelper-net`
-/// sub-helper — the common factory holds **no** `CAP_NET_ADMIN` of its own (W14), so the one
+/// sub-helper — the common factory holds **no** `CAP_NET_ADMIN` of its own, so the one
 /// construction step that touches the host network is delegated to a binary that carries that
 /// single capability. The sub-helper re-loads the caller's reserved scope and re-validates each
 /// address against the per-kennel subnet before the netlink op (the factory does not trust the
@@ -616,6 +606,36 @@ fn add_loopback_via_helper(addrs: &[LoopbackAddr], ctx: u16) -> io::Result<()> {
                 lb.addr, lb.prefix
             )));
         }
+    }
+    Ok(())
+}
+
+/// Attach the per-kennel egress BPF by exec'ing the `{bpf,net_admin}` `kennel-privhelper-bpf`
+/// sub-helper — the common factory holds **no** `CAP_BPF` of its own. Reached only for
+/// `net.mode = host` (a non-empty egress payload); the cgroup path rides argv and the payload
+/// (the allow/deny ruleset) rides stdin. The sub-helper re-checks that the caller owns the
+/// target cgroup before the attach (the delegation boundary moves with the privilege).
+fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    let bpf_helper = kennel_lib_config::Deployment::load()
+        .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-bpf: {e}")))?
+        .privhelper_bpf();
+    let mut child = std::process::Command::new(&bpf_helper)
+        .arg("attach")
+        .arg(cgroup)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| io::Error::new(e.kind(), format!("exec {}: {e}", bpf_helper.display())))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("kennel-privhelper-bpf stdin missing"))?
+        .write_all(egress_bytes)?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "kennel-privhelper-bpf attach failed ({status})"
+        )));
     }
     Ok(())
 }

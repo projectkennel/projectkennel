@@ -18,20 +18,13 @@ kennel-lib-spawn = { path = "../kennel-lib-spawn" }
 # itself (never the wire), so a compromised operator cannot choose what runs as the
 # kennel's uid 0 (07-2; sec review: trusted init source).
 kennel-lib-config = { path = "../kennel-lib-config" }
-# Only pulled in (and only then is clang needed at build time) when the
-# bpf-egress feature is on; a plain `cargo build` of the helper stays clang-free.
-kennel-lib-bpf = { path = "../kennel-lib-bpf", optional = true }
+# The egress-BPF attach lives in the kennel-privhelper-bpf sub-helper; this crate links no
+# BPF code and needs no clang.
 
 [features]
-# Egress BPF setup (Op::SetupEgress). Embeds the cgroup BPF programs, so it
-# requires clang at build time; the installed helper is built with it. Off by
-# default to keep plain builds and the unprivileged test suite clang-free.
-bpf-egress = ["dep:kennel-lib-bpf", "kennel-lib-bpf/embed-programs"]
-
-# Tests that need privilege (real cgroup/address/BPF ops). Implies bpf-egress so
-# the egress e2e test can attach real programs. Run via:
+# Tests that need privilege (real cgroup / address ops). Run via:
 #   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features e2e
-e2e = ["bpf-egress"]
+e2e = []
 
 [dev-dependencies]
 # The integration tests use the effective-uid primitive to skip the

@@ -11,8 +11,8 @@ repository.workspace = true
 
 [dependencies]
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
-# The cgroup egress programs + maps, embedded at build time (needs clang) — the only
-# place CAP_BPF lives, kept off the common factory entirely.
+# The cgroup egress programs + maps, embedded at build time (needs clang). This is the
+# only binary that links the BPF code, so CAP_BPF is confined to it.
 kennel-lib-bpf = { path = "../kennel-lib-bpf", features = ["embed-programs"] }
 # The shared gating + the wire EgressPayload/Response types (no BPF code of its own).
 kennel-privhelper = { path = "../kennel-privhelper" }

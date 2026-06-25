@@ -480,12 +480,20 @@ impl Deployment {
         self.resolve_bin(self.privhelper.as_deref(), "kennel-privhelper")
     }
 
-    /// The `{net_admin}` bind-mirror sub-helper (W14): adds/removes a kennel's host-`lo`
+    /// The `{net_admin}` bind-mirror sub-helper: adds/removes a kennel's host-`lo`
     /// loopback address. Invoked only by the privhelper factory, only when a policy binds
     /// mirrored ports, so the common factory carries no network capability.
     #[must_use]
     pub fn privhelper_net(&self) -> PathBuf {
         self.resolve_bin(None, "kennel-privhelper-net")
+    }
+
+    /// The `{bpf,net_admin}` host-mode egress sub-helper: loads + attaches the cgroup
+    /// egress BPF. Invoked only by the privhelper factory, only for `net.mode = host`, so
+    /// `CAP_BPF` never sits on the common factory.
+    #[must_use]
+    pub fn privhelper_bpf(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-bpf")
     }
 
     /// The per-kennel egress proxy.

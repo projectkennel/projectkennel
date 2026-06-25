@@ -12,8 +12,7 @@ repository.workspace = true
 [dependencies]
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The shared gating: the subkennel allocation lookup (`alloc`) and the reserved-scope
-# address validation (`validate`). (To be slimmed to a `kennel-privhelper-core` lib so this
-# thin helper does not link the factory; tracked in the W14 build plan.)
+# address validation (`validate`).
 kennel-privhelper = { path = "../kennel-privhelper" }
 
 [lints]
