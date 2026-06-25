@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.4 · 2026-06-25
+Version 0.5 · 2026-06-26
 
 Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
@@ -244,6 +244,18 @@ Within typically-granted project trees:
 **Residuals.** The GUI-service kennel is trusted with one host-compositor leg — the scoped, threat-tagged residual of the confined-GUI design. The framework confines what the *kennel* reaches; it does not constrain what the host compositor itself exposes to a legitimate client, so the leg's reach is bounded by the host compositor's own client isolation, which the framework does not own (the same shape as T1.6's "explicit grants can re-expose specific services" and T1.11's "a browser the policy grants is trusted with its own sessions"). The leg is held by a confined kennel under a required `reason`, not by an unconfined host process; the residual is the concentration of host display-reach into one reasoned place, not its removal.
 
 **MITRE ATT&CK.** T1021 (Remote Services), T1185 (Browser Session Hijacking — partial analogue: a held session to a host display service).
+
+## T1.13 — Abstract-socket namespace escape via host net mode
+
+**Definition.** A workload in `net.mode = "host"` with `abstract = "allow"` shares the host's abstract-socket namespace unconditionally — direct access to host-side X11, the D-Bus session bus, and any daemon binding an abstract socket, with no Landlock, proxy, or BPF gate in the path. Abstract sockets are scoped to the **network** namespace, not the mount namespace; sharing `CLONE_NEWNET` with the host removes the boundary entirely.
+
+**Attack pattern.** This is distinct from T1.6 (host-network *egress* reachability): it is an IPC escape below the proxy layer, not an egress one. A workload connects to an abstract socket (`\0/tmp/.X11-unix/X0`, `\0/tmp/dbus-*`, `\0/run/user/<uid>/bus`) and reaches the host's X11 display (screen capture, input injection), the host's D-Bus session bus (arbitrary method calls on the user's behalf), or any daemon that binds an abstract socket — all without any file-path mediation, Landlock rule, or proxy interception. The attack surface is the full set of abstract sockets in the host's network namespace.
+
+**Mitigation in Project Kennel.** The combination `abstract = "allow"` + `net.mode = "host"` is a **hard compile error** (W8): the compiler refuses the policy with a typed diagnostic citing this threat ID, not a warning and not a runtime check. `abstract = "allow"` is valid only when the kennel owns its `CLONE_NEWNET` — `net.mode` is `none`, `constrained`, or `unconstrained`. In that configuration the per-kennel network namespace is the structural control: the kennel's abstract-socket namespace is empty by construction (no host daemon binds there), so the workload cannot reach host-side abstract sockets regardless of Landlock ABI. Landlock ABI 6+ `Scope::ABSTRACT_UNIX_SOCKET` scoping is defence-in-depth on top of the net-ns boundary, never a substitute.
+
+**Residuals.** On pre-ABI-6 kernels with an own net-ns, the Landlock abstract scope is silently absent — the net-ns boundary is the only control. The compiler warns when `abstract = "allow"` is accepted, noting that defence-in-depth requires ABI ≥ 6. The structural safety argument (empty abstract namespace in an own net-ns) holds regardless of ABI; the warning is informational, not a safety gap.
+
+**MITRE ATT&CK.** T1021 (Remote Services), T1559 (Inter-Process Communication).
 
 ---
 

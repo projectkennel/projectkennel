@@ -15,10 +15,14 @@
 //! - **`default` is not `"allow"` once resolved.** Default-deny is structural (the
 //!   shim only contains what is bound in, §7.6.2); a resolved `default = "allow"`
 //!   would contradict that and is refused.
-//! - **`abstract` is `"deny"` or absent.** Abstract-namespace sockets are denied
-//!   unconditionally by the always-on Landlock scope (§7.6.3); `abstract = "allow"`
-//!   cannot be honoured, so a policy claiming it is refused rather than silently lied
-//!   to. (A future ABI-gated escape hatch may revisit this.)
+//! - **`abstract` is `"deny"`, absent, or `"allow"` (W8 escape hatch).**
+//!   Abstract-namespace sockets are denied by default by the always-on Landlock
+//!   scope (§7.6.3, ABI 6+). `abstract = "allow"` is accepted when the kennel
+//!   owns its `CLONE_NEWNET` (`net.mode` ≠ `"host"`) — the net-ns boundary is
+//!   the structural control; ABI-6 scoping is defence-in-depth. The combination
+//!   `abstract = "allow"` + `net.mode = "host"` is a **hard compile error**
+//!   (T1.13): host mode shares the host's network namespace, so abstract sockets
+//!   reach the host namespace directly.
 //! - **Every `[[unix.allow]]` has `real` and `shim`.** A shim is a bind mount from a
 //!   real host path to a path in the view; both ends are required.
 //! - **A `[[unix.allow]]` that shims an SSH or GPG agent is a *footgun*, warned not
@@ -71,13 +75,50 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         Some(other) => errs.push(format!("[unix] default `{other}` is not deny/allow")),
     }
 
+    // Resolve net.mode from the source policy: absent → "constrained" (the default).
+    let net_mode = policy
+        .net
+        .as_ref()
+        .and_then(|n| n.mode.as_deref())
+        .unwrap_or("constrained");
+
     match unix.abstract_ns.as_deref() {
         None | Some("deny") => {}
-        Some("allow") => errs.push(
-            "[unix] abstract = \"allow\" is not supported: abstract-namespace sockets are denied \
-             by the always-on Landlock scope (§7.6.3)"
-                .to_owned(),
-        ),
+        Some("allow") => {
+            // abstract = "allow" is valid ONLY when the kennel owns its CLONE_NEWNET
+            // (net.mode = none / constrained / unconstrained). A host-mode kennel
+            // shares the host's network namespace — abstract sockets reach the host
+            // namespace directly (X11, D-Bus session bus, arbitrary daemon IPC),
+            // below Landlock, the proxy, and BPF. That combination is a hard compile
+            // error citing T1.13.
+            if net_mode == "host" {
+                errs.push(
+                    "[unix] abstract = \"allow\" with net.mode = \"host\" is a hard compile error: \
+                     host mode shares CLONE_NEWNET with the host, so abstract-namespace sockets \
+                     reach the host namespace directly — X11, the D-Bus session bus, and any \
+                     daemon binding an abstract socket — with no Landlock, proxy, or BPF gate \
+                     in the path. This is an IPC escape below the proxy layer (T1.13). \
+                     abstract = \"allow\" is valid only when the kennel owns its CLONE_NEWNET \
+                     (net.mode = none / constrained / unconstrained)"
+                        .to_owned(),
+                );
+            }
+            // When accepted (non-host mode): the Landlock ABI-6 abstract scope is the
+            // defence-in-depth gate. On pre-ABI-6 kernels the scope silently does
+            // nothing, so the net-ns boundary is the ONLY control. Warn the operator.
+            // (We don't have the live ABI here — the warning is informational, keyed
+            // on the grant existing rather than the runtime ABI, because compile runs
+            // on any host and the settled artefact deploys to another.)
+            if net_mode != "host" {
+                warnings.push(
+                    "[unix] abstract = \"allow\" accepted: abstract-namespace sockets are \
+                     permitted within the kennel's own network namespace. Defence-in-depth \
+                     requires Landlock ABI ≥ 6 (Scope::ABSTRACT_UNIX_SOCKET); on older kernels \
+                     the network-namespace boundary is the only control"
+                        .to_owned(),
+                );
+            }
+        }
         Some(other) => errs.push(format!("[unix] abstract `{other}` is not deny/allow")),
     }
 
@@ -267,15 +308,75 @@ mod tests {
         );
     }
 
+    // ─── W8: abstract = "allow" escape hatch ──────────────────────────────────
+
+    /// Helper: build a policy with both `[unix]` and `[net]` sections.
+    fn policy_with_net(unix: UnixSection, net_mode: Option<&str>) -> SourcePolicy {
+        use crate::source::NetSection;
+        SourcePolicy {
+            unix: Some(unix),
+            net: net_mode.map(|m| NetSection {
+                mode: Some(m.to_owned()),
+                ..NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        }
+    }
+
     #[test]
-    fn abstract_allow_is_refused_as_unsupported() {
+    fn abstract_allow_accepted_with_constrained_mode() {
         let unix = UnixSection {
             abstract_ns: Some("allow".to_owned()),
             ..UnixSection::default()
         };
-        let err = validate(&policy_with(unix)).expect_err("refused");
+        let warnings = validate(&policy_with_net(unix, Some("constrained")))
+            .expect("abstract=allow with constrained mode should compile");
+        assert!(warnings.iter().any(|w| w.contains("abstract = \"allow\" accepted")));
+    }
+
+    #[test]
+    fn abstract_allow_accepted_with_net_none() {
+        let unix = UnixSection {
+            abstract_ns: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
+        let warnings = validate(&policy_with_net(unix, Some("none")))
+            .expect("abstract=allow with net.mode=none should compile");
+        assert!(warnings.iter().any(|w| w.contains("ABI")));
+    }
+
+    #[test]
+    fn abstract_allow_accepted_with_unconstrained_mode() {
+        let unix = UnixSection {
+            abstract_ns: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
+        validate(&policy_with_net(unix, Some("unconstrained")))
+            .expect("abstract=allow with unconstrained mode should compile");
+    }
+
+    #[test]
+    fn abstract_allow_without_explicit_net_mode_is_accepted() {
+        // No [net] section → defaults to "constrained" → owns CLONE_NEWNET → accepted.
+        let unix = UnixSection {
+            abstract_ns: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
+        validate(&policy_with(unix))
+            .expect("abstract=allow with default (constrained) mode should compile");
+    }
+
+    #[test]
+    fn abstract_allow_with_host_mode_is_hard_error() {
+        let unix = UnixSection {
+            abstract_ns: Some("allow".to_owned()),
+            ..UnixSection::default()
+        };
+        let err = validate(&policy_with_net(unix, Some("host")))
+            .expect_err("abstract=allow with host mode must be a hard compile error");
         assert!(
-            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("Landlock scope")))
+            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("T1.13"))),
+            "error must cite T1.13: {err:?}"
         );
     }
 

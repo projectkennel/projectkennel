@@ -137,6 +137,11 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         summary: "re-pin a policy's template to a newer version (with review)",
         usage: "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     },
+    CommandSpec {
+        name: "inspect",
+        summary: "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
+        usage: "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
+    },
 ];
 
 // ─── Help rendering ──────────────────────────────────────────────────────────

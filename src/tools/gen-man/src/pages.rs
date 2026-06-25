@@ -193,6 +193,11 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "re-pin a policy's template to a newer version (with review)",
         "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     ),
+    (
+        "inspect",
+        "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
+        "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -413,6 +418,14 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
                     ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
                     ("--template-dir D", "Add a directory to the template search path (repeatable)."),
                     ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
+                ],
+            },
+            Command {
+                usage: SYNC_POLICY[11].2, summary: SYNC_POLICY[11].1,
+                options: &[
+                    ("--unix", "Show AF_UNIX socket grants (§7.6)."),
+                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
+                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
                 ],
             },
         ],

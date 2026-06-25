@@ -1,7 +1,7 @@
 //! `kennel-policy` — the policy-authoring verb sub-binary (W10).
 //!
 //! Handles all `kennel policy <verb>` sub-verbs: compile, validate, sign, lint,
-//! risks, diff, upgrade, show, edit, generate, list.
+//! risks, diff, upgrade, show, edit, generate, list, inspect.
 //! Installed at `/usr/libexec/kennel/policy`; reached through `kennel policy ...`.
 
 #![forbid(unsafe_code)]
@@ -46,8 +46,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),
         "upgrade" => kennel_cli::policy::upgrade(rest),
+        "inspect" => kennel_cli::policy::policy_inspect(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
         )),
     }
 }
+

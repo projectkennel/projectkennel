@@ -81,6 +81,7 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),
         "upgrade" => kennel_cli::policy::upgrade(rest),
+        "inspect" => kennel_cli::policy::policy_inspect(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
         )),

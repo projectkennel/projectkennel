@@ -13,7 +13,7 @@
 # scope = "in"  : a threat Project Kennel addresses (Families 1/2/3/5).
 # scope = "out" : deliberately out of scope (the X-series, THREATS.md "Family 4").
 
-catalogue_version = "0.4"
+catalogue_version = "0.5"
 
 # ── Family 1 — Reconnaissance and exfiltration ──────────────────────────────
 
@@ -100,6 +100,13 @@ family = 1
 scope = "in"
 title = "GUI service: the host-compositor leg"
 residual = "The GUI-service kennel holds one host-compositor leg (a T1.6-equivalent), the scoped, reason-required residual of the confined-GUI design; it confines what the kennel reaches, not what the host compositor exposes to a legitimate client."
+
+[[threat]]
+id = "T1.13"
+family = 1
+scope = "in"
+title = "Abstract-socket namespace escape via host net mode"
+residual = "The combination abstract=allow + net.mode=host is a hard compile error (T1.13, W8). With an own net-ns the abstract namespace is empty by construction; Landlock ABI-6 scoping is defence-in-depth. On pre-ABI-6 kernels the net-ns boundary is the only control (warned at compile)."
 
 # ── Family 2 — Posture degradation ──────────────────────────────────────────
 
