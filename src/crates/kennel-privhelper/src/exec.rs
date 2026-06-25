@@ -9,8 +9,6 @@
 //! privileged work routes through `kennel-lib-syscall` (netlink); this crate stays
 //! `#![forbid(unsafe_code)]`.
 
-use std::ffi::CString;
-
 use crate::validate::{validate_addr, AddrRequest, Refusal, ReservedScope};
 use crate::wire::{Op, Request, Response};
 
@@ -86,17 +84,23 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     if let Err(r) = validate_addr(&areq, scope) {
         return Response::refused(refusal_code(&r));
     }
-    // Validation passed; resolve the interface and perform the netlink op.
-    let Ok(cname) = CString::new(req.interface.clone()) else {
-        return Response::protocol();
+    // The factory holds no CAP_NET_ADMIN; delegate the teardown netlink delete to the
+    // kennel-privhelper-net sub-helper (which re-validates and performs it on the host `lo`).
+    let net_helper = match kennel_lib_config::Deployment::load() {
+        Ok(d) => d.privhelper_net(),
+        Err(_) => return Response::internal(0),
     };
-    let ifindex = match kennel_lib_syscall::netlink::if_index(&cname) {
-        Ok(i) => i,
-        Err(e) => return Response::internal(errno_of(&e)),
-    };
-    // The only standalone address op is the teardown delete; the add is folded into construct.
-    match kennel_lib_syscall::netlink::del_address(ifindex, req.addr, req.prefix) {
-        Ok(()) => Response::ok(),
+    match std::process::Command::new(net_helper)
+        .args([
+            "del",
+            &req.ctx.to_string(),
+            &req.addr.to_string(),
+            &req.prefix.to_string(),
+        ])
+        .status()
+    {
+        Ok(s) if s.success() => Response::ok(),
+        Ok(_) => Response::internal(0),
         Err(e) => Response::internal(errno_of(&e)),
     }
 }

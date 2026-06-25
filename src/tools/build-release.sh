@@ -113,8 +113,9 @@ glibc ${glibc:-unknown}, so the target host needs a glibc at least that new.
 ## Install
     sudo ./install.sh
 
-Installs the binaries under /usr/libexec/kennel (the privhelper setuid-root), the
-vendor config under /usr/lib/kennel, the per-user systemd units, the AppArmor userns
+Installs the binaries under /usr/libexec/kennel (the privhelper factory file-capped
+cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin, with its capability-split sub-helpers),
+the vendor config under /usr/lib/kennel, the per-user systemd units, the AppArmor userns
 grant, the maintainer trust-store key, and the signed reference templates under
 /etc/kennel/templates. Relocate with --prefix DIR; preview with --dry-run.
 
@@ -126,7 +127,7 @@ grant, the maintainer trust-store key, and the signed reference templates under
 
 ## Verify (from this unpacked directory, BEFORE installing)
     sha256sum -c SHA256SUMS                       # every shipped file, incl. the trust key
-    ls -l /usr/libexec/kennel/kennel-privhelper   # after install: expect -rwsr-xr-x root root
+    getcap /usr/libexec/kennel/kennel-privhelper  # after install: cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin
 
 Contents: install.sh, bin/ (every binary, flat), dist/ (config, systemd, apparmor,
 threats, vendor), keys/*.pub, templates/<name>/, fragments/<name>/, man/, SHA256SUMS.
