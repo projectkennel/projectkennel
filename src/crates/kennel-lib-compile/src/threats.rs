@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn embedded_catalogue_parses_and_is_nonempty() {
         let cat = Catalogue::embedded().expect("embedded catalogue must parse");
-        assert_eq!(cat.version, "0.3");
+        assert_eq!(cat.version, "0.4");
         assert!(
             cat.entries().count() >= 29,
             "expected the in-scope families"
