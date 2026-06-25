@@ -25,6 +25,7 @@ use crate::{
 /// `<name>@<version>.toml` (the installed layout) and then `<name>/policy.toml`
 /// (the in-tree source layout), so the same resolver serves both.
 pub struct FsTemplateSource {
+    /// The template search directories (the template cascade).
     pub dirs: Vec<PathBuf>,
 }
 
@@ -250,6 +251,7 @@ impl TempSettled {
         Ok(Self { path })
     }
 
+    /// The path to the temporary settled file.
     pub fn path(&self) -> &Path {
         &self.path
     }
