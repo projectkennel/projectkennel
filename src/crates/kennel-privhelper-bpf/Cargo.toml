@@ -1,0 +1,25 @@
+[package]
+name = "kennel-privhelper-bpf"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel host-mode egress sub-helper: loads + attaches the per-kennel cgroup egress BPF and pins its maps (CAP_BPF + CAP_NET_ADMIN), gated on the caller owning the target cgroup. Invoked only by the kennel-privhelper construct orchestration, and only for net.mode=host."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# The cgroup egress programs + maps, embedded at build time (needs clang) — the only
+# place CAP_BPF lives, kept off the common factory entirely.
+kennel-lib-bpf = { path = "../kennel-lib-bpf", features = ["embed-programs"] }
+# The shared gating + the wire EgressPayload/Response types (no BPF code of its own).
+kennel-privhelper = { path = "../kennel-privhelper" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kennel-privhelper-bpf"
+path = "src/main.rs"

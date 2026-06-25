@@ -23,6 +23,7 @@ members = [
     # The split sub-helpers: each carries one capability for one scoped, feature-conditional
     # construction step, invoked only by the kennel-privhelper construct orchestration (W14).
     "src/crates/kennel-privhelper-net",
+    "src/crates/kennel-privhelper-bpf",
     # The unprivileged operator CLI (its own crate so the daemon TCB does not carry
     # the CLI's deps — serde_json, the trust-manifest reader, arg parsing).
     "src/crates/kennel-cli",
