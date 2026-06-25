@@ -173,8 +173,9 @@ W4 format.
 **[operability] S.**
 
 The 0.4.0 topology surface shows who-*provides*-what; the consumer side is owed. Each running kennel's
-`[[consumes]]` is held in `KennelMeta.consumed` but used only for the W6-era idle-reap census — it is
-never carried in `Response::Mesh` / `KennelInfo`, so `kennel list` cannot show it. The data is already
+`[[consumes]]` is held in `KennelMeta.consumed` but used only for the idle-reap census (the ondemand
+provider keep-alive) — it is never carried in `Response::Mesh` / `KennelInfo`, so `kennel list` cannot
+show it. The data is already
 present at construction; this is plumbing it through to the client.
 
 Each running kennel's active `[[consumes]]` becomes visible: capability name, shape, required/optional, and
