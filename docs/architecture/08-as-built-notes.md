@@ -8,8 +8,9 @@ that shaped the build, and the build/test gotchas that bite.
 
 This chapter is **as-built only** — it carries no roadmap. The design and architecture
 chapters are the source of truth for what each shipped feature does; designed-but-unbuilt
-work lives in the current release's [ROADMAP](../governance/ROADMAP-0.4.0.md) (in flight) and
-the [backlog](../governance/BACKLOG.md) (parked or declined), never here.
+work lives in the [backlog](../governance/BACKLOG.md) (parked or declined) and, while a
+release is in flight, in that release's `ROADMAP-<version>.md` under `docs/governance/`
+(retired into the corpus once the release ships) — never here.
 
 ## 8.2 Implementation lessons (apply these to the rest)
 

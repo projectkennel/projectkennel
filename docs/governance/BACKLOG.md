@@ -1,6 +1,6 @@
 # Project Kennel — backlog / parking lot
 
-Status: **standing** · Last touched: 2026-06-22
+Status: **standing** · Last touched: 2026-06-25
 
 > The parking lot for work that is **not on any release roadmap** and should not be carried from one to
 > the next. Three kinds live here: items **declined on principle** (mostly risk, little reward — re-open
@@ -123,6 +123,33 @@ documentation sweep.
 - **Sidecar dependency graphs** — if flat consume-with-wait proves insufficient and explicit
   inter-sidecar ordering is genuinely needed (it should not be).
 - **macOS service mesh** — the port's Mach-port analogue of the connector broker; tracked, not scheduled.
+- **README + website positioning rewrite — the lead-framing pass.** The accuracy reconciliation shipped
+  (every public claim true against the as-built tree); what remains is the deliberate rewrite of the *lead
+  framing* so the reference-monitor model, deny-by-default, construction-by-absence, and "full per-task
+  isolation made cheap enough to be disposable" are legible to a reader who feels the agent-isolation pain.
+  Where not stale the material is accurate-but-flat — technically true, strategically mute. The governing
+  invariant carries: **never overclaim** (a first-class defect equal to a security bug) — precise
+  description is the strong pitch, residuals named not hidden (T1.6, the GUI AF_UNIX leg, R2 delegated
+  composition, the host-mode caveats). Deliberately **not a release gate**: positioning copy cannot be
+  "done" the way a passing corpus is, and gating a release on prose is process theatre. Promote when a
+  positioning pass is scheduled.
+- **Live-topology surface — the consumer side (who-consumes-what).** The mesh topology view projects
+  who-*provides*-what (readiness / shape / enablement / tier / pid); the consumer half — each running
+  kennel's `[[consumes]]` — is loaded into its `KennelData` but not held in the registry, so surfacing it
+  needs a `KennelMeta` field set in `run_kennel`. Deferred to keep the increment off the construction hot
+  path. Promote when the demand side is wanted: a flaked dependency is already visible provider-side
+  (`failed` readiness), this completes the picture with who-reaches-for-what.
+- **Cross-kennel red-team — the two dynamic-pass residuals.** The static red-team closed safe-with-fixes;
+  two residuals were recorded for a later *dynamic* (runtime) pass — the connector-broker resolution race
+  and the GUI confidentiality legs — neither blocking the tag. They are written up in
+  [`audits/2026-06-24-cross-kennel-redteam.md`](audits/2026-06-24-cross-kennel-redteam.md); promote when a
+  dynamic red-team is scheduled.
+- **Writable-bind SOURCE symlink guard (`persist`-gated).** A writable bind's *source* resolution follows
+  symlinks; the fix is an **anchored** runtime guard — `openat2 RESOLVE_NO_SYMLINKS` past the shallowest
+  writable ancestor, then bind `/proc/self/fd/N` (no new `unsafe`). It is narrow: gated behind
+  `[fs.home].persist` (a writable home is ephemeral by default), so the exposure exists only for an opt-in
+  persistent writable home. The BPF-DoS half of the original finding is already solid — do **not** add
+  eviction. Maintainer-deferred; promote when the `persist` exposure is taken on.
 - **Small designed-but-unbuilt pieces (parked from the old `08-as-built-notes` roadmap).** Each is a
   convenience or a low-level hardening with a working path today — recorded so they are neither
   re-proposed nor lost, none blocking a release: the `[env].template` / `[fs.home].template` file-seed
@@ -130,4 +157,6 @@ documentation sweep.
   deferred bits (§7.6 — the ABI-gated `abstract = "allow"` escape hatch and the
   `--dry-run`/`inspect` shim output); `kennel_meta` BPF-map **read-only sealing + `magic`/`abi` readback**
   (`02-7-bpf-abi.md` — written once by loader convention, not yet frozen with `BPF_F_RDONLY_PROG`); and
-  the removed-from-schema `fs.scrub` / `fs.home.sanitise` design (§7.4.5 — revive only on a concrete need).
+  the removed-from-schema `fs.scrub` / `fs.home.sanitise` design (§7.4.5 — revive only on a concrete need);
+  and the **rendezvous-ownership incumbency tiebreak** (§7.13.4b — a `Ready` owner keeps the slot over an
+  equal newcomer across `daemon-reload`; the default stable-resolution order is correct without it).
