@@ -118,6 +118,16 @@ substrate's job).
   to defend.
 - **`/var` the flatpak way** — stays absent; synthesize only the bits a workload needs (`/var/run` →
   `/run`, `/var/tmp` as tmpfs), explicitly, never a host `/var` bind.
+- **Ship the two ecosystem baselines as reference templates.** Land `base-bwrap` and `base-flatpak`
+  beside `base-confined`, each encoding the respective tool's *view stance* as a Kennel policy —
+  `base-bwrap`: whole host `/usr` ro + usrmerge, all-namespaces (net `none`), `--dev`/`--proc`/`--tmpfs`,
+  permissive-exec, no egress proxy (plain bubblewrap, the unnarrowed bracket); `base-flatpak`: the
+  curated-runtime narrowing this workstream measures, plus flatpak's seccomp filter and the D-Bus/portal
+  mediation the IDBus facade already provides. They make the baseline **concrete and runnable**, not just
+  prose — the narrowed floor is anchored against `base-flatpak` and bracketed by `base-bwrap`. Loud
+  headers mark them **reference baselines, not recommended starts**: they still run under Kennel's
+  non-optional invariants (Landlock from the grants, the binder gateway, `no_new_privs`), so the
+  comparison is in *posture*, not in defeating the reference monitor.
 
 The 0.4.0 `/usr/libexec/kennel` blacklist was the down-payment on this. Lands the **host-rootfs
 visibility threat entry** — and the residual it records is now precisely *flatpak's* (a curated base is
@@ -346,6 +356,57 @@ primary control) and a reference to the W8 compile-time refusal. Cross-reference
 **Exit:** `THREATS.md` carries the new entry with a stable ID; the `[unix]`/`[net]` design sections
 reference it; the W8 compile error cites it. (Bumps the threat-catalogue version.)
 
+### W14 · Privhelper: setuid-root → file capabilities (setcap)
+
+**[security] M.**
+
+The privhelper is installed **setuid-root (mode 4755)** — the one privileged component. Setuid means the
+whole pre-drop codepath runs with **euid 0 and the full root capability set**, though the helper needs
+only a handful of capabilities; the entire window is LPE surface (the privilege-origin survey's
+"minimized setuid helper" row; Firejail's CVE history is the cautionary tale for the setuid shape). Move
+it to **file capabilities**: pin exactly the caps the construct path needs onto the binary (`setcap`), so
+it runs with **no euid 0** and only those caps — least-privilege of the privileged helper, the refinement
+the code and the AppArmor profile already anticipate ("file capabilities are a documented alternative",
+`dist/apparmor/kenneld`; `construct.rs` is already written "setcap/setuid leave the real uid as the
+operator").
+
+Honestly scoped — **not** a one-line install change:
+
+- **Enumerate and minimise the host-side file-cap set.** The construct path already names its caps in
+  prose: `CAP_SETUID`/`CAP_SETGID` (write the id-maps), `CAP_SETFCAP` (the single-write `uid_map` quirk),
+  `CAP_SYS_PTRACE` (reach into the operator-owned child userns), the egress loader's
+  `CAP_BPF`/`CAP_NET_ADMIN`, and the `modprobe` path's `CAP_SYS_MODULE`. **The central question is whether
+  host `CAP_SYS_ADMIN` is avoidable** — mounts run *inside* the cloned userns, where the owner holds it
+  intrinsically, so the host *file* may not need it at all. If so the win is large (no near-root cap on
+  the binary); verify against the real construct path before claiming it.
+- **Rework the in-process privilege transitions from the `seteuid` idiom to `capset`.** `construct.rs`
+  raises/drops privilege via `seteuid(0)`/`setuid(op)` today (setuid gives all caps at euid 0); under
+  setcap it raises *specific* effective caps from the permitted set and lowers them explicitly. Same
+  fences, different mechanism.
+- **Solve the `modprobe` exec under setcap.** Setuid gives `modprobe` root naturally; setcap does not —
+  caps do not cross `execve` to a non-fcap binary without **ambient** capabilities. Either set ambient
+  `CAP_SYS_MODULE` before the exec, or drop the runtime `modprobe` dependency (boot-time `binderfs` load
+  covers the common case). Decide deliberately — do not silently regress binder auto-load.
+- **Install + portability.** `install.sh` swaps `chmod 4755` for `setcap <set> kennel-privhelper`, with
+  **xattr-support detection** and a setuid fallback for filesystems that cannot carry file caps (the
+  reason setuid is the universal default). Confirm the AppArmor `userns` grant still inherits across
+  `exec` onto an fcap binary (the profile attaches by path, independent of setuid/setcap — verify, do not
+  assume).
+- **Doc + threat update.** Re-home the privilege model across the corpus to setcap (the AppArmor profile
+  comment, the release `RELEASE.md`, the `bubblewrap-vs-kennel-mapping` privilege-origin row that lists
+  Kennel under setuid, T3.1). Last cycle's cleanup made the corpus correctly say *setuid*; this makes
+  file caps **real**, so the corpus moves with the code — and this time the file-caps claim is true.
+
+**Honest benefit, not overclaimed:** setcap removes the euid-0 window and shrinks the pre-drop blast
+radius to the named set — a real least-privilege gain. It does **not** escape the privileged-helper risk
+class (a retained `CAP_SYS_ADMIN` is near-root regardless; even without it, the helper is still the TCB's
+privileged locus). The bet stays "small, single-purpose, signed-policy-gated helper" — setcap sharpens it.
+
+**Exit:** the installed privhelper carries a minimised file-cap set (no setuid bit) on xattr-capable
+filesystems, with a setuid fallback where file caps are unsupported; construction — including binder load
+and the BPF egress path — passes e2e on the hardened-kernel + AppArmor path; the corpus privilege model
+reads setcap.
+
 ## Sequencing
 
 ```
@@ -362,11 +423,13 @@ W1  (connectors+D-Bus)── L,  Part A → B → C ─────────�
 W9  (kennel-compose)  ── M,  after W2 + W1, ship gate ────────────►
 W10 (CLI split)       ── M,  after W9, ship gate ─────────────────►
 W11 (dynamic red-team)── S,  after W1, ship gate ─────────────────►
+W14 (privhelper setcap)── M, independent (security) ──────────────►
 ```
 
 W1 is the only deep dependency chain (A→B→C). W8 lands before W13 so the threat ID can be cited in the
 compile diagnostic. W2 completes before W9 so the composer does not seed the `/usr/**` floor it replaces.
-The three ship gates — W9, W10, W11 — all block the tag.
+W14 is independent of the mesh and slots against capacity. The three ship gates — W9, W10, W11 — all block
+the tag.
 
 ## Exit criteria
 
@@ -392,10 +455,13 @@ The three ship gates — W9, W10, W11 — all block the tag.
   every confirmed finding fixed (W11, ship gate).
 - The stale `resolve.rs` comments are accurate to as-built (W12); `THREATS.md` carries the abstract-socket
   namespace-escape entry with a stable ID cited by the W8 diagnostic (W13).
+- The installed privhelper carries a minimised file-cap set with no setuid bit (setuid fallback only where
+  file caps are unsupported); construction passes e2e on the hardened-kernel + AppArmor path; the corpus
+  privilege model reads setcap (W14).
 
 CHANGELOG records every stable-surface change — the two newly-brokered connector shapes, the
-`dbus-broker@v1` template, the OpenSSH key format, the `kennel inspect` verb, the split CLI binaries, and
-the new threat-catalogue entry (+ version bump).
+`dbus-broker@v1` template, the OpenSSH key format, the `kennel inspect` verb, the split CLI binaries, the
+new threat-catalogue entry (+ version bump), and the privhelper privilege model moving setuid → setcap.
 
 ## Parked work
 
