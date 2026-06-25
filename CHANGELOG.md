@@ -85,7 +85,7 @@ grant* — held, with one fs-grant escape on the control socket found and closed
 ### Threat catalogue
 
 - The **service-kennel trust class** is homed and its standing-service residuals catalogued and
-  risk-derived (**T3.10**, **T1.12**), with the **authentication-never-attestation** boundary made
+  risk-derived (**T3.10**, **T1.12**), published at catalogue **v0.4**, with the **authentication-never-attestation** boundary made
   explicit (§4.3): the mesh confers capabilities to *use*, never attestation — there is no secrets
   broker and no signing service. The 2026-06-24 cross-kennel red-team audit is recorded.
 

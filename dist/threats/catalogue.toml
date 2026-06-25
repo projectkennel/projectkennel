@@ -13,7 +13,7 @@
 # scope = "in"  : a threat Project Kennel addresses (Families 1/2/3/5).
 # scope = "out" : deliberately out of scope (the X-series, THREATS.md "Family 4").
 
-catalogue_version = "0.3"
+catalogue_version = "0.4"
 
 # ── Family 1 — Reconnaissance and exfiltration ──────────────────────────────
 

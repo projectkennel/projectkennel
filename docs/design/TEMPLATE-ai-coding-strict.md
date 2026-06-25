@@ -57,7 +57,7 @@ This is the actual TOML file Project Kennel consumes, with extensive comments on
 # Inherits: base-confined
 # Version: 4
 # Maintainer: <project signing key>
-# Threat catalogue version: THREATS.md v0.3
+# Threat catalogue version: THREATS.md v0.4
 #
 # This template provides strict confinement for AI coding agents operating
 # against a single project tree. User policies typically extend this with

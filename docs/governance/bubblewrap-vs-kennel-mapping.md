@@ -1,6 +1,6 @@
 # Bubblewrap and Project Kennel: same layer, different reference-monitor discipline
 
-*Reconciled against THREATS.md v0.3 and the design corpus. Unlike the MicroVM comparison (different
+*Reconciled against THREATS.md v0.4 and the design corpus. Unlike the MicroVM comparison (different
 layer, different trust zone), bubblewrap is Kennel's **nearest neighbour**: same layer (userspace
 confinement of untrusted local code), same trust zone (the developer's own machine), same mechanism
 family (unprivileged Linux namespaces). bwrap is what an informed reviewer will compare Kennel to. This
