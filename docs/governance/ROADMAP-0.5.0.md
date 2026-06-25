@@ -403,6 +403,16 @@ only — `lib.rs:812` `bpf_egress = net.mode == Host`), and the `[fs.write].excl
   `CAP_SYS_ADMIN`. Invoked **only** when a policy uses exclusive binds; absent that feature, the
   near-root cap is never installed/loaded.
 
+**One orchestrator.** The construction *sequence* is load-bearing — the host-`lo` addr before the egress
+attach before the clone; the exclusive over-mount only *after* the child has built its view and
+`pivot_root`ed away from the source (§2.7) — and it lives in exactly one place: the main
+`kennel-privhelper`'s `construct`. That is the **sole** caller of the sub-helpers. `kenneld` talks only to
+the main helper; `construct` keeps its sequence and swaps each inline privileged op for an `exec` of
+`privhelper-net` / `-bpf` / `-mounts` at the right point (each gains its caps from its *own* file caps
+across the `exec`, so the main helper — `{setuid,setgid,setfcap}` — needs none of them to invoke them). The
+sub-helpers are **never** invoked by `kenneld` directly: the critical ordering can't be reassembled from
+outside, so it isn't exposed there.
+
 **Gating — possession must not equal abuse.** Each helper validates its *narrow* operation against the
 caller's reserved scope before any privileged syscall, exactly as the current factory does (the
 `validate` module, the cgroup-ownership check, the addr-subnet check): `privhelper-net` adds only an
