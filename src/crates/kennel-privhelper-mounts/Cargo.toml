@@ -1,0 +1,25 @@
+[package]
+name = "kennel-privhelper-mounts"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel exclusive-bind sub-helper: over-mounts (and releases) the opaque sentinel tmpfs that shadows an fs.exclusive path host-side (CAP_SYS_ADMIN), gated on the caller owning the path. Invoked only by the kennel-privhelper construct orchestration, and only for a policy with exclusive binds."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# The shared subkennel-allocation gate.
+kennel-privhelper = { path = "../kennel-privhelper" }
+
+[dev-dependencies]
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kennel-privhelper-mounts"
+path = "src/main.rs"
