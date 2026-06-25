@@ -148,11 +148,12 @@ install_binaries() {
 	# ports, so the common factory holds no network capability.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-net" "$libexec/kennel-privhelper-net"
 	run setcap cap_net_admin+ep "$libexec/kennel-privhelper-net"
-	# The host-mode egress sub-helper: cap_bpf + cap_net_admin (loads + attaches the cgroup
-	# egress BPF). The main privhelper execs it only for net.mode=host, so CAP_BPF stays off
-	# the common factory.
+	# The host-mode egress sub-helper: cap_bpf (load), cap_net_admin (cgroup-network attach), and
+	# cap_perfmon (the cgroup-sockaddr programs read kernel context, which the verifier gates on
+	# CAP_PERFMON under kernel.unprivileged_bpf_disabled). The main privhelper execs it only for
+	# net.mode=host, so these stay off the common factory.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-bpf" "$libexec/kennel-privhelper-bpf"
-	run setcap cap_bpf,cap_net_admin+ep "$libexec/kennel-privhelper-bpf"
+	run setcap cap_bpf,cap_net_admin,cap_perfmon+ep "$libexec/kennel-privhelper-bpf"
 	# The exclusive-bind sub-helper: cap_sys_admin (the host-mount-namespace over-mount that
 	# shadows an fs.exclusive path). The main privhelper execs it only for a policy with
 	# exclusive binds, so the near-root capability stays off the common factory.
