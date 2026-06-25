@@ -57,7 +57,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         key_size: 4,
         value_size: 64,
         max_entries: 1,
-        map_flags: 0,
+        map_flags: F_RDONLY_PROG,
     },
     MapSpec {
         name: "deny_v4",
@@ -421,7 +421,12 @@ pub fn freeze_maps(
     maps: &BTreeMap<String, OwnedFd>,
     names: &[&str],
 ) -> io::Result<()> {
-    todo!()
+    for name in names {
+        if let Some(fd) = maps.get(*name) {
+            sys::map_freeze(fd.as_fd())?;
+        }
+    }
+    Ok(())
 }
 
 /// Insert into one of the kennel's shared maps (from `create_maps(KENNEL_MAPS)`), if present.
