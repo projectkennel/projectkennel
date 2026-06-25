@@ -18,10 +18,16 @@ kennel-lib-spawn = { path = "../kennel-lib-spawn" }
 # itself (never the wire), so a compromised operator cannot choose what runs as the
 # kennel's uid 0 (07-2; sec review: trusted init source).
 kennel-lib-config = { path = "../kennel-lib-config" }
-# The egress-BPF attach lives in the kennel-privhelper-bpf sub-helper; this crate links no
-# BPF code and needs no clang.
+# Linked only by the kennel-privhelper-bpf binary (which gates on the bpf-egress feature via its
+# required-features). It embeds the cgroup egress programs, so it needs clang at build time — a
+# plain build of the factory and the net/mounts sub-helpers stays clang-free.
+kennel-lib-bpf = { path = "../kennel-lib-bpf", optional = true }
 
 [features]
+# Builds the kennel-privhelper-bpf binary (which requires it): pulls kennel-lib-bpf and embeds the
+# cgroup egress programs (clang at build time).
+bpf-egress = ["dep:kennel-lib-bpf", "kennel-lib-bpf/embed-programs"]
+
 # Tests that need privilege (real cgroup / address ops). Run via:
 #   sudo -E env PATH=$PATH cargo test -p kennel-privhelper --features e2e
 e2e = []
@@ -35,6 +41,23 @@ kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 [lints]
 workspace = true
 
+# The privhelper factory.
 [[bin]]
 name = "kennel-privhelper"
 path = "src/main.rs"
+
+# The capability-split sub-helpers: one binary per privileged construction step, each installed
+# with only its own file capability. The factory execs them; its own binary carries none of their
+# code. The BPF helper is the only one needing clang, so it is gated behind bpf-egress.
+[[bin]]
+name = "kennel-privhelper-net"
+path = "src/bin/privhelper-net.rs"
+
+[[bin]]
+name = "kennel-privhelper-mounts"
+path = "src/bin/privhelper-mounts.rs"
+
+[[bin]]
+name = "kennel-privhelper-bpf"
+path = "src/bin/privhelper-bpf.rs"
+required-features = ["bpf-egress"]

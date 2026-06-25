@@ -79,19 +79,19 @@ build_arch() {
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
 	# Host-side, dynamic (glibc). `-p kennel-cli` builds the host execution unit (`kennel-host`).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus \
-		-p kennel-privhelper -p kennel-privhelper-net -p kennel-privhelper-mounts
+		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus
 	# In-kennel, static (`+crt-static`): these run inside the constructed view, which has no host
 	# ld.so. reproducible-build.sh prepends its remap to this RUSTFLAGS, so the build stays reproducible.
 	# `kennel-shim` is static too — one `kennel` artifact dispatches host-side and in-cage (W10).
 	KENNEL_PROFILE=release RUSTFLAGS="-C target-feature=+crt-static" \
 		"$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
 		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim
-	# kennel-privhelper-bpf embeds the cgroup egress BPF programs (its kennel-lib-bpf
-	# embed-programs dependency), so it needs clang and builds on its own — separate from the
-	# build above so embed-programs is not enabled on kenneld's kennel-lib-bpf.
+	# The privhelper package, with bpf-egress so its kennel-privhelper-bpf binary builds (the
+	# feature embeds the cgroup egress programs, needing clang). One package build emits all four
+	# binaries — the factory and the net/mounts/bpf sub-helpers. Built separately from kenneld so
+	# embed-programs is not unified onto kenneld's kennel-lib-bpf.
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kennel-privhelper-bpf
+		-p kennel-privhelper --features bpf-egress
 
 	rel="$ROOT/target/$triple/release"
 	glibc="$(glibc_floor "$rel/kenneld")"

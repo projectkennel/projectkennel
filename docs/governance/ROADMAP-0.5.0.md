@@ -387,6 +387,7 @@ Honestly scoped — **not** a one-line install change:
   caps do not cross `execve` to a non-fcap binary without **ambient** capabilities. Either set ambient
   `CAP_SYS_MODULE` before the exec, or drop the runtime `modprobe` dependency (boot-time `binderfs` load
   covers the common case). Decide deliberately — do not silently regress binder auto-load.
+  ***NEW FINDING:*** the ONLY thing that needs doing is to add the following to /etc/modprobe.d/kennel-binder.conf: "alias fs-binder binder_linux" in the install.sh - the next time the kernel is looking for the 'binder' fs module, modprobe will simply pick it up. Verified on Ubuntu 26.04 LTS, by simply doing "# mount -t binder binder /dev/binderfs"
 - **Install + portability.** `install.sh` swaps `chmod 4755` for `setcap <set> kennel-privhelper`, with
   **xattr-support detection** and a setuid fallback for filesystems that cannot carry file caps (the
   reason setuid is the universal default). Confirm the AppArmor `userns` grant still inherits across
