@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: pure-compute  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # A single-leg SPAWN target (§7.12): an agent holding [spawn] may instantiate
 # this to run untrusted code that REACHES NOTHING. `net.mode = "none"` (no egress

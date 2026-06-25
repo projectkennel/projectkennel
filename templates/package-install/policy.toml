@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: package-install  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # Installing packages from a specific registry, time-bounded. The threat is the
 # post-install / setup script (T1.2): it runs as the user with whatever the package

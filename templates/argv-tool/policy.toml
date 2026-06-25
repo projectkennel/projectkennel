@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: argv-tool  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # A SPAWN target (§7.12) that delegates *what runs* to the caller. The template
 # fixes the cage — `net.mode = "none"` (no egress leg), no filesystem write grant,

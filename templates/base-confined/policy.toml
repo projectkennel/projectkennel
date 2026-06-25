@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: base-confined  (v1)  — the floor every kennel stands on.
 # Inherits: nothing — this is the root of every confined template.
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # The minimal confined posture: no_new_privs, setuid/setgid/setcap denial, the
 # constructed-$HOME view, proxy-only egress, the cloud-metadata + link-local

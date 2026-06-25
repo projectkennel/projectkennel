@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: scratch-fs  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # A single-leg SPAWN target (§7.12): data shuffling WITHOUT reach. `net.mode =
 # "none"` (no egress leg) and no persistence; the one leg is a writable scratch

@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: true-tool  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # The empty-workload SPAWN target (§7.12): `/bin/true` — start, do nothing,
 # exit 0. It reaches NOTHING (`net.mode = "none"`, no fs write, no second

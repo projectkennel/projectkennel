@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: net-fetch  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # A single-leg SPAWN target (§7.12): reach WITHOUT code. `net.mode = "constrained"`
 # (frozen — the proxy is the egress gate) is the one leg; no workspace write grant
