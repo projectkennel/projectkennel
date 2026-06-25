@@ -104,6 +104,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-compose"
+version = "0.4.0"
+dependencies = [
+ "kennel-lib-compile",
+ "kennel-lib-policy",
+ "termion",
+]
+
+[[package]]
 name = "kennel-facade"
 version = "0.4.0"
 dependencies = [
@@ -346,6 +355,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "numtoa"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
+
+[[package]]
 name = "object"
 version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -433,6 +448,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "termion"
+version = "4.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
+dependencies = [
+ "libc",
+ "numtoa",
 ]
 
 [[package]]
