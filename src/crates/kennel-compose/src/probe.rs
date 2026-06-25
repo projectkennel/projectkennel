@@ -6,12 +6,15 @@
 // Resolution contexts (the key design distinction):
 //   CLI `<binary>` argument  → resolved against CWD + PATH (operator intent)
 //   #!/usr/bin/env <prog>    → resolved against PATH (same host, same PATH)
-//   BUT: non-standard paths  → emit fs.read.add + exec.path (carry consequences)
 //
 // The probe does NOT walk DT_NEEDED: Landlock FS_EXECUTE gates only execve(),
 // not mmap(), so shared libraries need only fs.read — which base-confined already
 // grants on /usr/**, /lib/**, /lib64/**. We reuse resolve_loaders() from
 // kennel-lib-policy::libresolve for the PT_INTERP extraction.
+//
+// The probe does NOT hardcode the template's fs.read floor. Whether a path is
+// covered by the base template is the compiler's problem — build_settled() will
+// tell us. The probe just reports what it found.
 
 use std::path::{Path, PathBuf};
 
@@ -24,14 +27,11 @@ pub struct ProbeResult {
     pub workload: String,
     /// `exec.allow` entries: the workload + interpreter chain + loaders.
     pub exec_allow: Vec<String>,
-    /// Additional `exec.path` directories beyond base-confined's default.
-    pub extra_exec_path: Vec<String>,
-    /// Additional `fs.read` grants needed (paths outside the base floor).
+    /// Additional `fs.read` grants needed (paths the probe discovered are
+    /// outside the usual system dirs).
     pub extra_fs_read: Vec<FsGrant>,
     /// Whether the workload is a script (changes comment style in output).
     pub is_script: bool,
-    /// The interpreter for the comment header (e.g. "python3 script").
-    pub interpreter_name: Option<String>,
     /// Warnings/advisories for the operator.
     pub warnings: Vec<String>,
 }
@@ -43,12 +43,11 @@ pub struct FsGrant {
     pub reason: String,
 }
 
-/// The base-confined template's `fs.read` floor — paths covered by default.
-/// If a resolved binary/interpreter falls outside these, we need an extra grant.
-const BASE_FS_READ_PREFIXES: &[&str] = &["/usr/", "/lib/", "/lib64/", "/bin/", "/etc/", "/proc/", "/sys/"];
-
-/// The base-confined template's `exec.path`.
-const BASE_EXEC_PATH: &[&str] = &["/usr/bin", "/usr/local/bin", "/bin"];
+/// Standard system directories — paths under these are typically already
+/// covered by any confined template. We only emit extra fs.read grants for
+/// paths OUTSIDE these prefixes. This is an advisory heuristic; the real
+/// authority is the compiled template.
+const SYSTEM_PREFIXES: &[&str] = &["/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/"];
 
 /// Probe a workload (binary or script) and produce the `exec.allow` seed.
 pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
@@ -60,11 +59,9 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         .map_err(|e| format!("{}: {e}", abs.display()))?;
 
     let mut exec_allow: Vec<String> = Vec::new();
-    let mut extra_exec_path: Vec<String> = Vec::new();
     let mut extra_fs_read: Vec<FsGrant> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut is_script = false;
-    let mut interpreter_name: Option<String> = None;
 
     if let Some(rest) = data.strip_prefix(b"#!") {
         // --- Script ---
@@ -86,15 +83,14 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
                 .find(|t| !t.starts_with('-'))
                 .ok_or("#!/usr/bin/env with no program name")?;
 
-            interpreter_name = Some((*prog).to_owned());
             exec_allow.push("/usr/bin/env".to_owned());
 
             // Resolve <prog> via PATH.
             match resolve_via_path(prog) {
                 Some(resolved) => {
                     let resolved_str = resolved.to_string_lossy().into_owned();
-                    check_floor(&resolved_str, &mut extra_exec_path, &mut extra_fs_read,
-                                &format!("{prog} interpreter (resolved from #!/usr/bin/env {prog})"));
+                    note_if_non_system(&resolved_str, &mut extra_fs_read,
+                                       &format!("{prog} interpreter (resolved from #!/usr/bin/env {prog})"));
                     exec_allow.push(resolved_str);
                 }
                 None => {
@@ -106,13 +102,9 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
             }
         } else {
             // #!/usr/bin/python3, #!/bin/sh, etc.
-            let basename = Path::new(shebang_binary)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned());
-            interpreter_name = basename;
             exec_allow.push(shebang_binary.to_owned());
-            check_floor(shebang_binary, &mut extra_exec_path, &mut extra_fs_read,
-                        &format!("shebang interpreter {shebang_binary}"));
+            note_if_non_system(shebang_binary, &mut extra_fs_read,
+                               &format!("shebang interpreter {shebang_binary}"));
         }
     } else if data.starts_with(b"\x7fELF") {
         // --- ELF binary ---
@@ -129,11 +121,9 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         ));
     }
 
-    // The workload itself goes on exec.allow (scripts need execute on themselves
-    // for the kernel's execve of the shebang path).
+    // The workload itself goes on exec.allow.
     exec_allow.push(abs_str.clone());
-    check_floor(&abs_str, &mut extra_exec_path, &mut extra_fs_read,
-                "probed workload");
+    note_if_non_system(&abs_str, &mut extra_fs_read, "probed workload");
 
     // Deduplicate exec_allow preserving order.
     let mut seen = std::collections::HashSet::new();
@@ -142,10 +132,8 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
     Ok(ProbeResult {
         workload: abs_str,
         exec_allow,
-        extra_exec_path,
         extra_fs_read,
         is_script,
-        interpreter_name,
         warnings,
     })
 }
@@ -162,36 +150,24 @@ fn resolve_via_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Check whether a resolved path falls outside base-confined's `fs.read` floor.
-/// If so, add the containing directory to `extra_exec_path` and an `[[fs.read.add]]`
-/// grant for the parent tree.
-fn check_floor(
+/// If a path is outside the standard system directories, note it as an extra
+/// fs.read that the operator should review. This is advisory — the real
+/// authority is the compiled effective policy from the template chain.
+fn note_if_non_system(
     path: &str,
-    extra_exec_path: &mut Vec<String>,
     extra_fs_read: &mut Vec<FsGrant>,
     reason_context: &str,
 ) {
-    if BASE_FS_READ_PREFIXES.iter().any(|pfx| path.starts_with(pfx)) {
-        return; // covered by the base template
+    if SYSTEM_PREFIXES.iter().any(|pfx| path.starts_with(pfx)) {
+        return;
     }
 
-    // Path is outside the base floor — the kennel needs explicit grants.
     if let Some(parent) = Path::new(path).parent() {
-        let parent_str = parent.to_string_lossy().into_owned();
-
-        // Add exec.path entry if not already covered.
-        if !BASE_EXEC_PATH.iter().any(|p| *p == parent_str) {
-            if !extra_exec_path.contains(&parent_str) {
-                extra_exec_path.push(parent_str.clone());
-            }
-        }
-
-        // Add fs.read grant for the parent tree.
-        let glob = format!("{parent_str}/**");
+        let glob = format!("{}/**", parent.to_string_lossy());
         if !extra_fs_read.iter().any(|g| g.path == glob) {
             extra_fs_read.push(FsGrant {
                 path: glob,
-                reason: format!("{reason_context} (resolved from compose host — review whether this is correct for the kennel)"),
+                reason: format!("{reason_context} — review whether this path is correct for the kennel"),
             });
         }
     }
@@ -204,18 +180,15 @@ mod tests {
 
     #[test]
     fn probes_a_real_elf_binary() {
-        // /bin/sh is present on every test host.
         let Ok(sh) = std::fs::canonicalize("/bin/sh") else {
-            return; // skip if /bin/sh missing
+            return;
         };
         let result = probe(&sh).expect("probe /bin/sh");
         assert!(!result.is_script, "/bin/sh is an ELF, not a script");
-        assert!(result.interpreter_name.is_none());
         assert!(
             result.exec_allow.contains(&sh.to_string_lossy().into_owned()),
             "exec_allow includes the binary"
         );
-        // Dynamic binary should have a loader.
         assert!(
             result.exec_allow.iter().any(|e| e.contains("ld-")),
             "exec_allow includes the dynamic loader: {:?}",
@@ -233,7 +206,6 @@ mod tests {
         }
         let result = probe(&script).expect("probe script");
         assert!(result.is_script);
-        assert_eq!(result.interpreter_name.as_deref(), Some("sh"));
         assert!(
             result.exec_allow.iter().any(|e| e == "/bin/sh" || e.ends_with("/dash") || e.ends_with("/bash")),
             "exec_allow includes the interpreter: {:?}",
@@ -252,7 +224,6 @@ mod tests {
         }
         let result = probe(&script).expect("probe env script");
         assert!(result.is_script);
-        assert_eq!(result.interpreter_name.as_deref(), Some("sh"));
         assert!(
             result.exec_allow.contains(&"/usr/bin/env".to_owned()),
             "exec_allow includes /usr/bin/env: {:?}",
@@ -262,26 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn floor_check_emits_grants_for_non_standard_paths() {
-        let mut extra_exec_path = Vec::new();
-        let mut extra_fs_read = Vec::new();
+    fn non_system_path_notes_extra_fs_read() {
+        let mut extra = Vec::new();
+        note_if_non_system("/usr/bin/python3", &mut extra, "test");
+        assert!(extra.is_empty(), "system path should not produce extra grants");
 
-        // A path under /usr — covered, no extra grants.
-        check_floor("/usr/bin/python3", &mut extra_exec_path, &mut extra_fs_read, "test");
-        assert!(extra_exec_path.is_empty());
-        assert!(extra_fs_read.is_empty());
-
-        // A path under /home — NOT covered.
-        check_floor("/home/user/.venv/bin/python3", &mut extra_exec_path, &mut extra_fs_read, "test");
+        note_if_non_system("/home/user/.venv/bin/python3", &mut extra, "test");
         assert!(
-            extra_exec_path.contains(&"/home/user/.venv/bin".to_owned()),
-            "extra_exec_path: {:?}",
-            extra_exec_path
-        );
-        assert!(
-            extra_fs_read.iter().any(|g| g.path == "/home/user/.venv/bin/**"),
-            "extra_fs_read: {:?}",
-            extra_fs_read.iter().map(|g| &g.path).collect::<Vec<_>>()
+            extra.iter().any(|g| g.path == "/home/user/.venv/bin/**"),
+            "non-system path should produce extra grants: {:?}",
+            extra.iter().map(|g| &g.path).collect::<Vec<_>>()
         );
     }
 
@@ -295,4 +256,3 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 }
-
