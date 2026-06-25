@@ -108,6 +108,7 @@ name = "kennel-compose"
 version = "0.4.0"
 dependencies = [
  "kennel-lib-compile",
+ "kennel-lib-config",
  "kennel-lib-policy",
  "termion",
 ]
