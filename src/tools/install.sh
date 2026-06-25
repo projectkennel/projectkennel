@@ -153,6 +153,11 @@ install_binaries() {
 	# the common factory.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-bpf" "$libexec/kennel-privhelper-bpf"
 	run setcap cap_bpf,cap_net_admin+ep "$libexec/kennel-privhelper-bpf"
+	# The exclusive-bind sub-helper: cap_sys_admin (the host-mount-namespace over-mount that
+	# shadows an fs.exclusive path). The main privhelper execs it only for a policy with
+	# exclusive binds, so the near-root capability stays off the common factory.
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-mounts" "$libexec/kennel-privhelper-mounts"
+	run setcap cap_sys_admin+ep "$libexec/kennel-privhelper-mounts"
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is

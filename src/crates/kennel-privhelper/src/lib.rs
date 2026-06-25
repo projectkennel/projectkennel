@@ -41,7 +41,6 @@ pub mod addr;
 pub mod alloc;
 pub mod client;
 pub mod construct;
-pub mod exclusive;
 pub mod exec;
 pub mod validate;
 pub mod wire;

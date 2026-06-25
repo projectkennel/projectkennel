@@ -285,6 +285,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-privhelper-mounts"
+version = "0.4.0"
+dependencies = [
+ "kennel-lib-syscall",
+ "kennel-privhelper",
+]
+
+[[package]]
 name = "kennel-privhelper-net"
 version = "0.4.0"
 dependencies = [

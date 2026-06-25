@@ -496,6 +496,15 @@ impl Deployment {
         self.resolve_bin(None, "kennel-privhelper-bpf")
     }
 
+    /// The `{sys_admin}` exclusive-bind sub-helper: over-mounts (and releases) the sentinel
+    /// tmpfs that shadows an `fs.exclusive` path host-side. Invoked only by the privhelper
+    /// factory, only for a policy with exclusive binds, so `CAP_SYS_ADMIN` never sits on the
+    /// common factory.
+    #[must_use]
+    pub fn privhelper_mounts(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-mounts")
+    }
+
     /// The per-kennel egress proxy.
     #[must_use]
     pub fn netproxy(&self) -> PathBuf {

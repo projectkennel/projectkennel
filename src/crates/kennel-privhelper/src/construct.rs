@@ -397,32 +397,31 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
 
-    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
-    // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
-    // a snapshot independent of this shadow, so only the operator side is shadowed. Done while we
-    // still hold root; verified against `op_uid` (the helper never over-mounts a path the operator
-    // does not own — overreach). Best-effort per path: a failure degrades that path to a plain
-    // writable bind (always permitted), logged, never fatal.
-    if !exclusive_sources.is_empty() {
-        let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
-        for src in &exclusive_sources {
-            if let Err(e) = crate::exclusive::mount_exclusive(src, op_uid) {
-                eprintln!("kennel-privhelper: exclusive bind not enforced: {e}");
-            }
-        }
-    }
-    drop(built_r);
-
-    // Drop straight back to the operator now that the maps are written and any over-mount is up:
-    // the parent escalated ONLY for those. setgid before setuid (the uid drop to a non-zero value
-    // is what clears the capability sets — capabilities(7)); for its brief remaining life (report
-    // the pid, then exit) the factory parent is the unprivileged operator, never a long-lived
-    // host-root process (sec review: minimise the privileged window). A no-op when the operator is
-    // root (the root-test case, op_uid == 0).
+    // Drop straight back to the operator now that the maps are written: the parent escalated ONLY
+    // for the map write. setgid before setuid (the uid drop to a non-zero value is what clears the
+    // capability sets — capabilities(7)); for its brief remaining life (the exclusive over-mount,
+    // then report the pid and exit) the factory parent is the unprivileged operator, never a
+    // long-lived host-root process (sec review: minimise the privileged window). A no-op when the
+    // operator is root (the root-test case, op_uid == 0).
     kennel_lib_syscall::unistd::set_gid(op_gid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setgid({op_gid}): {e}")))?;
     kennel_lib_syscall::unistd::set_uid(op_uid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setuid({op_uid}): {e}")))?;
+
+    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
+    // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
+    // a snapshot independent of this shadow, so only the operator side is shadowed. Delegated to the
+    // `{sys_admin}` kennel-privhelper-mounts sub-helper — the common factory holds no
+    // `CAP_SYS_ADMIN` — and run *after* the drop to the operator, so the helper inherits the
+    // operator's real uid for its allocation gate and its owner check. Best-effort per path: a
+    // failure degrades that path to a plain writable bind (always permitted), logged, never fatal.
+    if !exclusive_sources.is_empty() {
+        let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
+        for src in &exclusive_sources {
+            over_mount_exclusive_via_helper(src);
+        }
+    }
+    drop(built_r);
 
     // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
     // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
@@ -638,6 +637,31 @@ fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io
         )));
     }
     Ok(())
+}
+
+/// Over-mount the exclusive-bind sentinel on `src` by exec'ing the `{sys_admin}`
+/// `kennel-privhelper-mounts` sub-helper — the common factory holds **no** `CAP_SYS_ADMIN` of
+/// its own. Best-effort: a failure (including an unresolvable helper) leaves the path a plain
+/// writable bind, logged, never fatal — so the construction never fails on the over-mount.
+fn over_mount_exclusive_via_helper(src: &std::path::Path) {
+    let helper = match kennel_lib_config::Deployment::load() {
+        Ok(d) => d.privhelper_mounts(),
+        Err(e) => {
+            eprintln!("kennel-privhelper: resolve kennel-privhelper-mounts: {e}");
+            return;
+        }
+    };
+    let ok = std::process::Command::new(&helper)
+        .arg("mount")
+        .arg(src)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!(
+            "kennel-privhelper: exclusive bind not enforced for {}",
+            src.display()
+        );
+    }
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its
