@@ -356,56 +356,86 @@ primary control) and a reference to the W8 compile-time refusal. Cross-reference
 **Exit:** `THREATS.md` carries the new entry with a stable ID; the `[unix]`/`[net]` design sections
 reference it; the W8 compile error cites it. (Bumps the threat-catalogue version.)
 
-### W14 · Privhelper: setuid-root → file capabilities (setcap)
+### W14 · Privhelper: setuid-root → a split, capability-gated factory
 
-**[security] M.**
+**[security] L.**
 
-The privhelper is installed **setuid-root (mode 4755)** — the one privileged component. Setuid means the
-whole pre-drop codepath runs with **euid 0 and the full root capability set**, though the helper needs
-only a handful of capabilities; the entire window is LPE surface (the privilege-origin survey's
-"minimized setuid helper" row; Firejail's CVE history is the cautionary tale for the setuid shape). Move
-it to **file capabilities**: pin exactly the caps the construct path needs onto the binary (`setcap`), so
-it runs with **no euid 0** and only those caps — least-privilege of the privileged helper, the refinement
-the code and the AppArmor profile already anticipate ("file capabilities are a documented alternative",
-`dist/apparmor/kenneld`; `construct.rs` is already written "setcap/setuid leave the real uid as the
-operator").
+The privhelper is installed **setuid-root (mode 4755)** — the one privileged component, so its whole
+pre-drop codepath runs with **euid 0 and the full root capability set** (~40 caps) though it needs a
+handful; the window is LPE surface (the privilege-origin survey's "minimized setuid helper" row; Firejail
+is the cautionary tale for the shape). Move to **file capabilities**, and — having traced the construct
+path — **split the rare, potent capabilities out of the common factory** so the everyday privileged window
+carries neither `CAP_SYS_ADMIN` nor `CAP_BPF`.
 
-Honestly scoped — **not** a one-line install change:
+**The structural finding (verified against `construct.rs`).** Almost all privileged construction —
+namespace clone, `uid_map`/`gid_map`, every mount, `pivot_root`, binderfs, the in-ns netlink, `chown` —
+runs **inside the operator-owned user namespace the factory clones into**, where the child holds full caps
+*intrinsically* (a `CLONE_NEWUSER` child does; binderfs is `FS_USERNS_MOUNT`). **None of it needs a host
+file cap.** The only privileged work in the *host* context is narrow: writing the child's id-maps
+(`CAP_SETUID`/`CAP_SETGID`/`CAP_SETFCAP`), the host-`lo` address mirror (`CAP_NET_ADMIN`), and two
+feature-conditional host-namespace operations — the egress BPF attach (`host` mode only,
+`kenneld/src/lib.rs:812` `bpf_egress = net.mode == Host`) and the `[fs.write].exclusive` over-mount.
 
-- **Enumerate and minimise the host-side file-cap set.** The construct path already names its caps in
-  prose: `CAP_SETUID`/`CAP_SETGID` (write the id-maps), `CAP_SETFCAP` (the single-write `uid_map` quirk),
-  `CAP_SYS_PTRACE` (reach into the operator-owned child userns), the egress loader's
-  `CAP_BPF`/`CAP_NET_ADMIN`, and the `modprobe` path's `CAP_SYS_MODULE`. **The central question is whether
-  host `CAP_SYS_ADMIN` is avoidable** — mounts run *inside* the cloned userns, where the owner holds it
-  intrinsically, so the host *file* may not need it at all. If so the win is large (no near-root cap on
-  the binary); verify against the real construct path before claiming it.
-- **Rework the in-process privilege transitions from the `seteuid` idiom to `capset`.** `construct.rs`
-  raises/drops privilege via `seteuid(0)`/`setuid(op)` today (setuid gives all caps at euid 0); under
-  setcap it raises *specific* effective caps from the permitted set and lowers them explicitly. Same
-  fences, different mechanism.
-- **Solve the `modprobe` exec under setcap.** Setuid gives `modprobe` root naturally; setcap does not —
-  caps do not cross `execve` to a non-fcap binary without **ambient** capabilities. Either set ambient
-  `CAP_SYS_MODULE` before the exec, or drop the runtime `modprobe` dependency (boot-time `binderfs` load
-  covers the common case). Decide deliberately — do not silently regress binder auto-load.
-- **Install + portability.** `install.sh` swaps `chmod 4755` for `setcap <set> kennel-privhelper`, with
-  **xattr-support detection** and a setuid fallback for filesystems that cannot carry file caps (the
-  reason setuid is the universal default). Confirm the AppArmor `userns` grant still inherits across
-  `exec` onto an fcap binary (the profile attaches by path, independent of setuid/setcap — verify, do not
-  assume).
-- **Doc + threat update.** Re-home the privilege model across the corpus to setcap (the AppArmor profile
-  comment, the release `RELEASE.md`, the `bubblewrap-vs-kennel-mapping` privilege-origin row that lists
-  Kennel under setuid, T3.1). Last cycle's cleanup made the corpus correctly say *setuid*; this makes
-  file caps **real**, so the corpus moves with the code — and this time the file-caps claim is true.
+**The split — three binaries, each with its own file caps, each gated to its own scope:**
 
-**Honest benefit, not overclaimed:** setcap removes the euid-0 window and shrinks the pre-drop blast
-radius to the named set — a real least-privilege gain. It does **not** escape the privileged-helper risk
-class (a retained `CAP_SYS_ADMIN` is near-root regardless; even without it, the helper is still the TCB's
-privileged locus). The bet stays "small, single-purpose, signed-policy-gated helper" — setcap sharpens it.
+- **`kennel-privhelper`** (the common factory) — **`cap_setuid,cap_setgid,cap_setfcap,cap_net_admin`**.
+  Builds *every* kennel: clone, id-maps, the userns-scoped view/binderfs/pivot, the host-`lo` mirror, and
+  teardown (`del-addr`). **No `CAP_SYS_ADMIN`, no `CAP_BPF`.** This is the window almost every spawn opens.
+- **`kennel-privhelper-bpf`** (host-mode egress only) — **`cap_bpf,cap_net_admin`**. Loads + attaches the
+  cgroup egress programs and pins their maps. Invoked **only** when `net.mode = host` (rare,
+  `reason`-required, isolation-reducing by design), so `CAP_BPF` — a verifier-bug LPE surface — never sits
+  on the common path. This is the recently-folded `SetupEgress` op un-folded into its own fcap binary.
+- **`kennel-privhelper-mounts`** (exclusive binds only) — **`cap_sys_admin`**. The host-namespace
+  `[fs.write].exclusive` over-mount and its `umount2` teardown — the one operation that *must* run in the
+  operator's mount-ns (it shadows the operator-side source, §2.7) and so can't borrow a userns's
+  `CAP_SYS_ADMIN`. Invoked **only** when a policy uses exclusive binds; absent that feature, the
+  near-root cap is never installed/loaded.
 
-**Exit:** the installed privhelper carries a minimised file-cap set (no setuid bit) on xattr-capable
-filesystems, with a setuid fallback where file caps are unsupported; construction — including binder load
-and the BPF egress path — passes e2e on the hardened-kernel + AppArmor path; the corpus privilege model
-reads setcap.
+**Gating — possession must not equal abuse.** Each helper validates its *narrow* operation against the
+caller's reserved scope before any privileged syscall, exactly as the current factory does (the
+`validate` module, the cgroup-ownership check, the addr-subnet check): `privhelper-bpf` attaches only to a
+cgroup the **caller owns** (`exec.rs` `REFUSAL_CGROUP_NOT_OWNED`); `privhelper-mounts` over-mounts only a
+path the **caller owns** (`exclusive.rs` `check_owned_dir`). So holding `CAP_BPF` or `CAP_SYS_ADMIN` in a
+split helper grants only that helper's one scoped job, not a general primitive — the split narrows *what
+each cap can do*, not just *where it lives*.
+
+The supporting moves:
+
+- **Drop the runtime `modprobe`** (the `CAP_SYS_MODULE` + ambient-cap-across-`execve` problem): load
+  `binder_linux` at install (`install.sh` + `/etc/modules-load.d/kennel.conf`), so it's present every boot
+  and the factory never module-loads. *(Decided.)*
+- **Pin BPF maps into the system `/sys/fs/bpf`** (already mounted at boot) instead of self-mounting a
+  bpffs under `/run/user` — `BPF_OBJ_PIN` needs `CAP_BPF`, not `CAP_SYS_ADMIN`, so even the pin stays
+  within `privhelper-bpf`'s set.
+- **Rework the in-process privilege transitions from the `seteuid(0)` idiom to `capset`** (setuid gave
+  all caps at euid 0; setcap raises specific effective caps from the permitted set). Same fences,
+  different mechanism.
+- **Install + portability.** `install.sh` `setcap`s each binary with its set, with **xattr-support
+  detection** and a **setuid fallback** for filesystems that can't carry file caps (the universal default,
+  why setuid exists). Confirm the AppArmor `userns` grant still inherits across `exec` onto an fcap binary
+  (the profile attaches by path — verify, don't assume).
+- **Doc + threat update.** Re-home the privilege model across the corpus to the split-setcap model (the
+  AppArmor profile, `RELEASE.md`, the `bubblewrap-vs-kennel-mapping` privilege-origin row, T3.1). **Fold in
+  the stale `cgroup-BPF-enforces-constrained-egress` comments** — host-only in fact — across
+  `base-confined`/`containerised-service`/their READMEs, `templates/README`, `EXEC-SUMMARY`, and the
+  `ai-coding-strict` worked example (the net-ns is the boundary in non-`host` modes; verify the bind/
+  `INADDR_ANY` path before rewriting those claims).
+
+**Honest benefit, not overclaimed.** The common factory drops from the full ~40-cap root set to **four
+named caps, with `CAP_SYS_ADMIN` and `CAP_BPF` absent** — a real reduction, and the two near-root caps are
+quarantined to rare-path, scope-gated helpers rather than carried on every spawn. It is **not** zero-
+privilege: `CAP_SETUID`/`CAP_SETGID` (become any uid) and `CAP_NET_ADMIN` remain potent. The helper is
+still the TCB's privileged locus; the bet stays "small, single-purpose, signed-policy-gated" — the split
+sharpens it. *(Setcap is the simpler stance's honest superior, not the only honest stance — setuid remains
+the portability fallback.)*
+
+**Exit:** the common `kennel-privhelper` installs with `{setuid,setgid,setfcap,net_admin}` and **no**
+`CAP_SYS_ADMIN`/`CAP_BPF`; `privhelper-bpf` (`{bpf,net_admin}`) and `privhelper-mounts` (`{sys_admin}`)
+carry their caps and are reachable only for `host`-mode egress and exclusive binds respectively, each
+scope-gated; binder loads at install, BPF pins into `/sys/fs/bpf`; a setuid fallback covers
+no-file-cap filesystems; construction — common path, host-mode egress, and exclusive binds — passes e2e on
+the hardened-kernel + AppArmor path; the corpus privilege model (and the stale egress-BPF comments) read
+true.
 
 ## Sequencing
 
