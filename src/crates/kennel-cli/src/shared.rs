@@ -316,6 +316,15 @@ pub fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
 }
 
 /// Load a trust store: every `<key_id>.pub` under each directory.
+///
+/// Accepts two formats per file (W4):
+/// - **OpenSSH**: `ssh-ed25519 <base64-blob> [comment]` — the standard format
+///   produced by `ssh-keygen`. The key id is the file stem; the comment is
+///   informational.
+/// - **Legacy**: raw base64 of the 32-byte Ed25519 public key (the pre-W4 format).
+///
+/// Detection: if the file starts with `ssh-ed25519 `, parse OpenSSH; else try
+/// raw base64.
 pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
     let mut keys = kennel_lib_policy::KeySet::new();
     for dir in dirs {
@@ -332,8 +341,17 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
             };
             let contents = std::fs::read_to_string(&path)
                 .map_err(|e| format!("reading {}: {e}", path.display()))?;
-            keys.insert_b64(key_id, contents.trim())
-                .map_err(|e| format!("key {}: {e}", path.display()))?;
+            if kennel_lib_policy::openssh::is_openssh_public(&contents) {
+                let (pubkey_bytes, _comment) =
+                    kennel_lib_policy::openssh::parse_public_key(&contents)
+                        .map_err(|e| format!("key {}: {e}", path.display()))?;
+                keys.insert(key_id, &pubkey_bytes)
+                    .map_err(|e| format!("key {}: {e}", path.display()))?;
+            } else {
+                // Legacy raw base64 format.
+                keys.insert_b64(key_id, contents.trim())
+                    .map_err(|e| format!("key {}: {e}", path.display()))?;
+            }
         }
     }
     Ok(keys)
@@ -341,21 +359,38 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
 
 // ─── Signing keys ────────────────────────────────────────────────────────────
 
-/// Load a signing key from a file holding the base64 of a 32-byte Ed25519 seed.
+/// Load a signing key from a file.
+///
+/// Accepts two formats (W4):
+/// - **OpenSSH**: `-----BEGIN OPENSSH PRIVATE KEY-----` PEM envelope (the standard
+///   format produced by `ssh-keygen -t ed25519`). Must be unencrypted.
+/// - **Legacy**: raw base64 of the 32-byte Ed25519 seed (the pre-W4 format).
+///
+/// The key id is derived from the file stem in both cases.
 pub fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, String> {
     let shown = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
-    let seed = kennel_lib_policy::b64::decode(text.trim().as_bytes())
-        .ok_or_else(|| format!("key {shown} is not valid base64"))?;
     let key_id = path
         .file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| format!("cannot derive a key id from {shown}"))?;
-    kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
-        .map_err(|e| format!("loading key {shown}: {e}"))
+    if kennel_lib_policy::openssh::is_openssh_private(&text) {
+        let (seed, _comment) = kennel_lib_policy::openssh::parse_private_key(&text)
+            .map_err(|e| format!("key {shown}: {e}"))?;
+        kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
+            .map_err(|e| format!("loading key {shown}: {e}"))
+    } else {
+        // Legacy raw base64 format.
+        let seed = kennel_lib_policy::b64::decode(text.trim().as_bytes())
+            .ok_or_else(|| format!("key {shown} is not valid base64"))?;
+        kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
+            .map_err(|e| format!("loading key {shown}: {e}"))
+    }
 }
 
-/// The signing key to use when `--key` was omitted: the sole `*.key` in the user key dir.
+/// The signing key to use when `--key` was omitted: the sole signing key in the
+/// user key dir. Searches for both OpenSSH private keys (no extension, PEM
+/// content) and legacy `*.key` files (raw base64 seed).
 pub fn default_signing_key() -> Result<PathBuf, String> {
     let dir = default_key_dir();
     let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_or_else(
@@ -364,7 +399,20 @@ pub fn default_signing_key() -> Result<PathBuf, String> {
             entries
                 .flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("key"))
+                .filter(|p| {
+                    // Legacy: *.key files.
+                    if p.extension().and_then(|x| x.to_str()) == Some("key") {
+                        return true;
+                    }
+                    // OpenSSH: files with no extension that are not .pub and are files.
+                    if p.extension().is_none() && p.is_file() {
+                        // Quick content check: must start with the PEM marker.
+                        if let Ok(head) = std::fs::read_to_string(p) {
+                            return kennel_lib_policy::openssh::is_openssh_private(&head);
+                        }
+                    }
+                    false
+                })
                 .collect()
         },
     );

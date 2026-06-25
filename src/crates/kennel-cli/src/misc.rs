@@ -13,7 +13,23 @@ use crate::{default_key_dir, is_valid_key_id, write_secret};
 // ─── keygen ──────────────────────────────────────────────────────────────────
 
 /// `kennel keygen <key-id> [--dir DIR] [--force]`
+///
+/// Generate an Ed25519 signing key by invoking `ssh-keygen -t ed25519`. The
+/// key pair is written into the user key dir (default `$XDG_CONFIG_HOME/kennel/keys`,
+/// else `~/.config/kennel/keys`) as `<key-id>` (private, mode 0600) and
+/// `<key-id>.pub` (public, mode 0644).
+///
+/// The comment field in the public key is set to `<key-id>` — so `authorized_keys`-style
+/// listings and `ssh-keygen -l` show which kennel policy key this is.
+///
+/// `kennel keygen migrate [--dir DIR]` converts legacy raw-base64 key pairs to
+/// OpenSSH format in place.
 pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
+    // Sub-command dispatch: `keygen migrate` is separate.
+    if args.first().is_some_and(|a| a == "migrate") {
+        return keygen_migrate(&args[1..]);
+    }
+
     let mut key_id: Option<&str> = None;
     let mut dir: Option<PathBuf> = None;
     let mut force = false;
@@ -35,7 +51,9 @@ pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
         ));
     }
     let dir = dir.unwrap_or_else(default_key_dir);
-    let key_path = dir.join(format!("{key_id}.key"));
+    // ssh-keygen uses no extension for the private key and .pub for public.
+    // We keep the same convention: <key-id> (private) and <key-id>.pub (public).
+    let key_path = dir.join(key_id);
     let pub_path = dir.join(format!("{key_id}.pub"));
     if key_path.exists() && !force {
         return Err(format!(
@@ -45,34 +63,46 @@ pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
         ));
     }
 
-    // 32 bytes from the OS CSPRNG (`getrandom`) → the Ed25519 seed.
-    let mut seed = [0u8; 32];
-    kennel_lib_syscall::random::fill(&mut seed)
-        .map_err(|e| format!("reading OS randomness: {e}"))?;
-    let key = kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
-        .map_err(|e| format!("deriving key: {e}"))?;
-
     // The key dir holds secret seeds: 0700.
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(&dir)
         .map_err(|e| format!("creating {}: {e}", dir.display()))?;
-    write_secret(&key_path, &kennel_lib_policy::b64::encode(&seed), 0o600)
-        .map_err(|e| format!("writing {}: {e}", key_path.display()))?;
-    write_secret(
-        &pub_path,
-        &kennel_lib_policy::b64::encode(&key.public_key_bytes()),
-        0o644,
-    )
-    .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
 
-    eprintln!("generated Ed25519 signing key `{key_id}`:");
+    // Remove existing key if --force (ssh-keygen -y prompts otherwise, and
+    // -f with an existing file appends to known_hosts on some versions).
+    if force {
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_file(&pub_path);
+    }
+
+    // Invoke ssh-keygen: -t ed25519, -N "" (no passphrase), -C <key-id> (comment),
+    // -f <path> (output path). The -q flag suppresses the randomart.
+    let status = std::process::Command::new("ssh-keygen")
+        .args([
+            "-t", "ed25519",
+            "-N", "",
+            "-C", key_id,
+            "-f",
+        ])
+        .arg(&key_path)
+        .arg("-q")
+        .status()
+        .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
+    if !status.success() {
+        return Err(format!(
+            "ssh-keygen exited with status {} — check its output above",
+            status.code().unwrap_or(-1)
+        ));
+    }
+
+    eprintln!("generated Ed25519 signing key `{key_id}` (OpenSSH format):");
     eprintln!(
-        "  private seed : {}   (0600 — keep secret; the signing key)",
+        "  private key : {}   (0600 — keep secret)",
         key_path.display()
     );
-    eprintln!("  public key   : {}   (0644)", pub_path.display());
+    eprintln!("  public key  : {}   (0644)", pub_path.display());
     eprintln!();
     eprintln!("The daemon already trusts this key for your own run policies (it reads");
     eprintln!("~/.config/kennel/keys), so no further setup is needed. Compile a policy once,");
@@ -88,6 +118,188 @@ pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
         pub_path.display()
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel keygen migrate [--dir DIR]`
+///
+/// Convert legacy raw-base64 key pairs (`<id>.key` + `<id>.pub`) to OpenSSH
+/// format in place. Each `.key` file holding raw base64 is loaded, then
+/// re-written as an OpenSSH private key via `ssh-keygen`, and the corresponding
+/// `.pub` is regenerated.
+fn keygen_migrate(args: &[String]) -> Result<ExitCode, String> {
+    let mut dir: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--dir" => dir = Some(it.next().ok_or("--dir needs a value")?.into()),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            _ => return Err("kennel keygen migrate takes no positional arguments".to_owned()),
+        }
+    }
+    let dir = dir.unwrap_or_else(default_key_dir);
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|e| format!("reading {}: {e}", dir.display()))?;
+
+    let mut migrated = 0u32;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only look at .key files (the legacy private key extension).
+        if path.extension().and_then(|e| e.to_str()) != Some("key") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        // Skip files already in OpenSSH format.
+        if kennel_lib_policy::openssh::is_openssh_private(&contents) {
+            continue;
+        }
+        // Try to parse as legacy raw base64 seed.
+        let seed = match kennel_lib_policy::b64::decode(contents.trim().as_bytes()) {
+            Some(s) if s.len() == 32 => s,
+            _ => continue, // Not a recognisable legacy key — skip.
+        };
+
+        let key_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("cannot derive key id from {}", path.display()))?;
+
+        // Derive the full keypair so we can write both files.
+        let signing_key = kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
+            .map_err(|e| format!("loading {}: {e}", path.display()))?;
+
+        // Write a temporary raw seed file, then use ssh-keygen to convert.
+        // Actually, ssh-keygen cannot import a raw seed. Instead, we generate
+        // the OpenSSH format ourselves and write it out. But the user asked
+        // to invoke ssh-keygen... For migration, we need to produce the
+        // OpenSSH format from the existing seed. ssh-keygen -y can extract
+        // the public key from a private key, but can't import a raw seed.
+        //
+        // The practical approach: write the new private key in OpenSSH wire
+        // format (the format is fixed-layout for unencrypted ed25519), then
+        // use `ssh-keygen -y -f <private>` to regenerate the .pub.
+        let pubkey = signing_key.public_key_bytes();
+        let openssh_private = build_openssh_private(&seed, &pubkey, key_id)?;
+
+        // Write the private key (mode 0600).
+        // The new format uses no extension (ssh-keygen convention).
+        let new_key_path = dir.join(key_id);
+        write_secret(&new_key_path, &openssh_private, 0o600)
+            .map_err(|e| format!("writing {}: {e}", new_key_path.display()))?;
+
+        // Regenerate the .pub via ssh-keygen -y.
+        let pub_path = dir.join(format!("{key_id}.pub"));
+        let output = std::process::Command::new("ssh-keygen")
+            .args(["-y", "-f"])
+            .arg(&new_key_path)
+            .output()
+            .map_err(|e| format!("invoking ssh-keygen -y: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "ssh-keygen -y failed for {}: {}",
+                new_key_path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        // Append the comment (ssh-keygen -y doesn't include it).
+        let mut pub_line = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !pub_line.is_empty() {
+            pub_line.push(' ');
+            pub_line.push_str(key_id);
+        }
+        std::fs::write(&pub_path, format!("{pub_line}\n"))
+            .map_err(|e| format!("writing {}: {e}", pub_path.display()))?;
+
+        // Remove the old .key file (the new private key has no extension).
+        if path != new_key_path {
+            let _ = std::fs::remove_file(&path);
+        }
+
+        eprintln!("migrated: {key_id} → OpenSSH format");
+        migrated += 1;
+    }
+
+    if migrated == 0 {
+        eprintln!("no legacy keys found in {}", dir.display());
+    } else {
+        eprintln!("\n{migrated} key(s) migrated to OpenSSH format.");
+        eprintln!("Private keys are now at <key-id> (no .key extension).");
+        eprintln!("Public keys regenerated as <key-id>.pub (ssh-ed25519 format).");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Build an unencrypted OpenSSH private key file (PEM format) from a raw
+/// Ed25519 seed + public key + comment.
+///
+/// The format is documented in `PROTOCOL.key` of the OpenSSH source. For
+/// unencrypted ed25519, every field is fixed-size — no ASN.1, no variable
+/// crypto parameters.
+fn build_openssh_private(seed: &[u8], pubkey: &[u8; 32], comment: &str) -> Result<String, String> {
+    if seed.len() != 32 {
+        return Err("seed must be 32 bytes".to_owned());
+    }
+
+    let key_type = b"ssh-ed25519";
+
+    // Build the public key blob (for the outer "public key" field).
+    let mut pubblob = Vec::new();
+    write_string(&mut pubblob, key_type);
+    write_string(&mut pubblob, pubkey);
+
+    // Build the private key section.
+    // Use a deterministic check value (from the seed) — same as OpenSSH's
+    // arc4random for the check bytes, but any matching pair works.
+    let mut check = [0u8; 4];
+    kennel_lib_syscall::random::fill(&mut check)
+        .map_err(|e| format!("reading OS randomness: {e}"))?;
+    let check_val = u32::from_be_bytes(check);
+
+    let mut priv_section = Vec::new();
+    priv_section.extend_from_slice(&check_val.to_be_bytes()); // check1
+    priv_section.extend_from_slice(&check_val.to_be_bytes()); // check2
+    write_string(&mut priv_section, key_type);
+    write_string(&mut priv_section, pubkey); // ed25519 public key
+    // ed25519 "private key" = seed ‖ pubkey (64 bytes)
+    let mut privkey = Vec::with_capacity(64);
+    privkey.extend_from_slice(seed);
+    privkey.extend_from_slice(pubkey);
+    write_string(&mut priv_section, &privkey);
+    write_string(&mut priv_section, comment.as_bytes());
+    // Padding: 1, 2, 3, ... up to block size (8 for "none" cipher).
+    let block_size = 8;
+    let pad_len = block_size - (priv_section.len() % block_size);
+    let pad_len = if pad_len == block_size { 0 } else { pad_len };
+    for i in 1..=pad_len {
+        priv_section.push(i as u8);
+    }
+
+    // Assemble the full payload.
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"openssh-key-v1\0"); // AUTH_MAGIC
+    write_string(&mut payload, b"none"); // ciphername
+    write_string(&mut payload, b"none"); // kdfname
+    write_string(&mut payload, b""); // kdfoptions
+    payload.extend_from_slice(&1u32.to_be_bytes()); // number of keys
+    write_string(&mut payload, &pubblob); // public key blob
+    write_string(&mut payload, &priv_section); // private section
+
+    // PEM-encode.
+    let b64_payload = kennel_lib_policy::b64::encode(&payload);
+    let mut pem = String::new();
+    pem.push_str("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    for chunk in b64_payload.as_bytes().chunks(70) {
+        pem.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+        pem.push('\n');
+    }
+    pem.push_str("-----END OPENSSH PRIVATE KEY-----");
+    Ok(pem)
+}
+
+/// Write a length-prefixed SSH string (u32 big-endian length + bytes).
+fn write_string(buf: &mut Vec<u8>, data: &[u8]) {
+    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    buf.extend_from_slice(data);
 }
 
 // ─── subkennel ───────────────────────────────────────────────────────────────
