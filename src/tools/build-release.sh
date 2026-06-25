@@ -10,9 +10,11 @@
 # `bpf-egress` feature; that bytecode is arch-independent cgroup-sockaddr code, so
 # the host clang builds it for either target).
 #
-# Cross-compilation uses the rustup target's std plus the `aarch64-linux-gnu-gcc`
-# linker configured in .cargo/config.toml (resolved via PATH). Add the target with
-# `rustup target add aarch64-unknown-linux-gnu` and have the cross toolchain on PATH.
+# Cross-compilation uses the rustup target's std plus a cross-linker. For the non-host target,
+# build_arch exports `CARGO_TARGET_<triple>_LINKER=<arch>-linux-gnu-gcc`, so the build works the
+# same whether the host is x86_64 or aarch64 (.cargo/config.toml only pins the aarch64 linker, which
+# is correct on an x86_64 host but native on aarch64). Add the targets with `rustup target add
+# {x86_64,aarch64}-unknown-linux-gnu` and have both `{x86_64,aarch64}-linux-gnu-gcc` on PATH.
 #
 # Determinism: binaries are built through reproducible-build.sh (path remap +
 # SOURCE_DATE_EPOCH + the release profile's codegen-units=1), and each tarball is
@@ -62,6 +64,17 @@ build_arch() {
 	local triple="$1" arch name rel glibc stage dest b p d n tar
 	arch="${triple%%-*}"
 	name="kennel-${VERSION}-${SHA}-${arch}-linux-gnu"
+
+	# Cross-linker: when the target arch differs from the build host, point cargo at the matching
+	# `<arch>-linux-gnu-gcc` so the link step is not the host `cc` (which rejects e.g. `-m64`). This
+	# makes the build host-arch-agnostic — it works building x86_64 on aarch64 and vice versa — where
+	# .cargo/config.toml only pins the aarch64 linker (correct on an x86_64 host, but native-on-aarch64
+	# left x86_64 to fall through to `cc`). A native target sets nothing and uses the default.
+	if [ "$arch" != "$(uname -m)" ]; then
+		local lvar="CARGO_TARGET_$(printf '%s' "$triple" | tr 'a-z.-' 'A-Z__')_LINKER"
+		export "$lvar=${arch}-linux-gnu-gcc"
+		echo "==> [$triple] cross-link: $lvar=${arch}-linux-gnu-gcc" >&2
+	fi
 
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
 	# Host-side, dynamic (glibc). `-p kennel-cli` builds the host execution unit (`kennel-host`).
