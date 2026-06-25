@@ -88,6 +88,7 @@ Almost every crate carries `#![forbid(unsafe_code)]`. The entire `unsafe` surfac
 | Path | What |
 |---|---|
 | [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
+| [NON-EXEC-SUMMARY.md](docs/design/NON-EXEC-SUMMARY.md) | The security stance and trust boundaries; the technical companion to the exec summary. |
 | [THREATS.md](docs/design/THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
 | [docs/design/](docs/design/) | The design corpus — threat model, policy surface, template system, the spawn and mesh models, enforcement architecture. An implementation-independent specification. |
 | [docs/architecture/](docs/architecture/) | The reference implementation's architecture — process model, IPC, API surfaces, crate decomposition, trust boundaries, supervision, latency. |

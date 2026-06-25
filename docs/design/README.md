@@ -31,7 +31,8 @@ implementation-independent. The as-built *how* lives under
   reference for what Kennel does and does not defend.
 - **[Front matter](00-frontmatter.md)** — the terminology, the threat-ID scheme, and the
   notation the chapters assume. Skim once; refer back as needed.
-- The two-page version for circulation is **[EXEC-SUMMARY.md](EXEC-SUMMARY.md)**.
+- The two-page version for circulation is **[EXEC-SUMMARY.md](EXEC-SUMMARY.md)**; its technical
+  companion — the security stance and trust boundaries — is **[NON-EXEC-SUMMARY.md](NON-EXEC-SUMMARY.md)**.
 
 ## Reading guide by audience
 
