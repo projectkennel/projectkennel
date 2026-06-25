@@ -6,7 +6,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
-## [0.4.0] — 2026-06-26
+## [0.4.0] — 2026-06-25
 
 **The service mesh.** Confined kennels now offer capabilities to one another and consume them
 **by name**, every cross-kennel connection operator-declared, `kenneld`-brokered, and

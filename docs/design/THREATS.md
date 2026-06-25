@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.4 · 2026-06-26
+Version 0.4 · 2026-06-25
 
 Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
