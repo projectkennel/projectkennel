@@ -128,8 +128,20 @@ fn parse_args(args: &[String]) -> Result<(Op, u16, IpAddr, u8), u8> {
         Some("del") => Op::Del,
         _ => return Err(usage()),
     };
-    let ctx: u16 = args.get(2).ok_or_else(usage)?.parse().map_err(|_| usage())?;
-    let addr: IpAddr = args.get(3).ok_or_else(usage)?.parse().map_err(|_| usage())?;
-    let prefix: u8 = args.get(4).ok_or_else(usage)?.parse().map_err(|_| usage())?;
+    let ctx: u16 = args
+        .get(2)
+        .ok_or_else(usage)?
+        .parse()
+        .map_err(|_| usage())?;
+    let addr: IpAddr = args
+        .get(3)
+        .ok_or_else(usage)?
+        .parse()
+        .map_err(|_| usage())?;
+    let prefix: u8 = args
+        .get(4)
+        .ok_or_else(usage)?
+        .parse()
+        .map_err(|_| usage())?;
     Ok((op, ctx, addr, prefix))
 }

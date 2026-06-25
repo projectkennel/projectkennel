@@ -142,6 +142,13 @@ install_binaries() {
 	# privilege boundary; everything else runs as the user.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper" "$libexec/kennel-privhelper"
 	run chmod 4755 "$libexec/kennel-privhelper"
+	# The bind-mirror network sub-helper (W14): NOT setuid — it carries the single file
+	# capability cap_net_admin, the only privilege its one scoped op (add/remove a kennel's
+	# host-lo loopback address) needs. The main privhelper execs it only when a policy binds
+	# mirrored ports, so the common factory holds no network capability. (The setcap-vs-setuid
+	# fallback for filesystems without xattr support lands with the full install rework.)
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-net" "$libexec/kennel-privhelper-net"
+	run setcap cap_net_admin+ep "$libexec/kennel-privhelper-net"
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is

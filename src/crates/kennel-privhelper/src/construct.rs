@@ -45,7 +45,6 @@ use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 use kennel_lib_syscall::spawn::fexecve;
 use kennel_lib_syscall::unistd::{real_gid, real_uid};
 
-use crate::validate::{validate_addr, AddrRequest, ReservedScope};
 use crate::wire::EgressPayload;
 
 /// The loopback interface name (`lo`). The kennel's own addresses are added to `lo` on BOTH
@@ -173,9 +172,12 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //     net-ns, no in-ns copy). Each address is re-validated against the caller's reserved
     //     subnet — the operator does not get to pick arbitrary addresses — then added on `lo`;
     //     the egress BPF, if present, is attached to the kennel cgroup (ownership re-checked).
-    let Some(scope) = crate::alloc::load(real_uid()) else {
+    // Gate (defence in depth; `main.rs` gates `construct` on the same allocation): the caller
+    // must hold a subkennel allocation. The per-address subnet validation now lives in the
+    // `kennel-privhelper-net` sub-helper, which re-loads the scope and validates itself.
+    if crate::alloc::load(real_uid()).is_none() {
         return Err(io::Error::other("caller has no reserved scope"));
-    };
+    }
     tracer.step(&format!(
         "construct: adding {} host loopback address(es) (ctx {})",
         half.loopback.len(),
@@ -195,7 +197,7 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             "construct: euid={euid} {cap_eff} addrs={addrs:?} ns=host-add"
         ));
     }
-    add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
+    add_loopback_via_helper(&half.loopback, half.ctx)?;
     if !egress_bytes.is_empty() {
         tracer.step(&format!(
             "construct: attaching egress BPF ({} bytes) to cgroup",
@@ -583,34 +585,37 @@ fn pop_stdio_fds(fds: &mut Vec<OwnedFd>, present: bool) -> io::Result<Option<[Ow
     Ok(Some([next()?, next()?, next()?]))
 }
 
-/// Validate each loopback address against the caller's reserved `scope`, then add it on `lo`
-/// via netlink (host net namespace, the helper's `cap_net_admin`). The operator supplies the
-/// addresses but the factory does not trust them: one outside the per-kennel subnet is refused
-/// — the same [`validate_addr`] gate the standalone `add-addr` op used before this fold.
-fn add_loopback_addresses(
-    addrs: &[LoopbackAddr],
-    ctx: u16,
-    scope: &ReservedScope,
-) -> io::Result<()> {
+/// Add each host-`lo` mirror address by exec'ing the `{net_admin}` `kennel-privhelper-net`
+/// sub-helper — the common factory holds **no** `CAP_NET_ADMIN` of its own (W14), so the one
+/// construction step that touches the host network is delegated to a binary that carries that
+/// single capability. The sub-helper re-loads the caller's reserved scope and re-validates each
+/// address against the per-kennel subnet before the netlink op (the factory does not trust the
+/// operator-supplied addresses; the gate moves with the privilege). One exec per address; an
+/// empty list — the common no-bind case (100% of ephemeral spawns) — execs nothing, so the
+/// network helper is never even invoked.
+fn add_loopback_via_helper(addrs: &[LoopbackAddr], ctx: u16) -> io::Result<()> {
     if addrs.is_empty() {
         return Ok(());
     }
-    let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
-    let ifindex = kennel_lib_syscall::netlink::if_index(&cname)?;
+    let net_helper = kennel_lib_config::Deployment::load()
+        .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-net: {e}")))?
+        .privhelper_net();
     for lb in addrs {
-        let req = AddrRequest {
-            ctx,
-            interface: LOOPBACK.to_owned(),
-            addr: lb.addr,
-            prefix: lb.prefix,
-        };
-        if let Err(refusal) = validate_addr(&req, scope) {
+        let status = std::process::Command::new(&net_helper)
+            .args([
+                "add",
+                &ctx.to_string(),
+                &lb.addr.to_string(),
+                &lb.prefix.to_string(),
+            ])
+            .status()
+            .map_err(|e| io::Error::new(e.kind(), format!("exec {}: {e}", net_helper.display())))?;
+        if !status.success() {
             return Err(io::Error::other(format!(
-                "loopback address {} refused: {refusal}",
-                lb.addr
+                "kennel-privhelper-net add {}/{} on lo failed ({status})",
+                lb.addr, lb.prefix
             )));
         }
-        kennel_lib_syscall::netlink::add_address(ifindex, lb.addr, lb.prefix)?;
     }
     Ok(())
 }

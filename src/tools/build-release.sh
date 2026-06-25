@@ -79,7 +79,7 @@ build_arch() {
 	echo "==> [$triple] building release binaries (reproducible, offline, locked)" >&2
 	# Host-side, dynamic (glibc). `-p kennel-cli` builds the host execution unit (`kennel-host`).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus
+		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus -p kennel-privhelper-net
 	# In-kennel, static (`+crt-static`): these run inside the constructed view, which has no host
 	# ld.so. reproducible-build.sh prepends its remap to this RUSTFLAGS, so the build stays reproducible.
 	# `kennel-shim` is static too — one `kennel` artifact dispatches host-side and in-cage (W10).

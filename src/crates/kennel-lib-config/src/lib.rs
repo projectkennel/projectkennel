@@ -480,6 +480,14 @@ impl Deployment {
         self.resolve_bin(self.privhelper.as_deref(), "kennel-privhelper")
     }
 
+    /// The `{net_admin}` bind-mirror sub-helper (W14): adds/removes a kennel's host-`lo`
+    /// loopback address. Invoked only by the privhelper factory, only when a policy binds
+    /// mirrored ports, so the common factory carries no network capability.
+    #[must_use]
+    pub fn privhelper_net(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-net")
+    }
+
     /// The per-kennel egress proxy.
     #[must_use]
     pub fn netproxy(&self) -> PathBuf {
