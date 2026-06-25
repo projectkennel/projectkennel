@@ -6,8 +6,52 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-06-26
+
+**The service mesh.** Confined kennels now offer capabilities to one another and consume them
+**by name**, every cross-kennel connection operator-declared, `kenneld`-brokered, and
+deny-by-default. The catalogue is *derived* from the signed `[[provides]]` blocks of enabled
+kennels — a projection of signed policy, never authored central state — so it cannot drift from
+reality. On this substrate ships the **confined GUI**: a graphical app reaches a real desktop
+through a per-kennel **nested Wayland compositor** run as a GUI-service kennel, completing 0.3.0's
+X11 removal with no portal and no raw host-compositor socket. The cross-kennel surface was
+red-teamed before ship ([audit](docs/governance/audits/2026-06-24-cross-kennel-redteam.md)): the
+strong claim — *no kennel reaches another's services or the host control surface beyond its signed
+grant* — held, with one fs-grant escape on the control socket found and closed. Verified on Linux
+6.17 against the installed stack.
+
+### Policy schema changes
+
+- **`[[provides]]` / `[[consumes]]`** — the cross-kennel capability mesh. A provider offers a
+  capability by `name` + typed `shape` (`af-unix` / `dbus-name` / `binder-connector`) + `endpoint`
+  + optional private `key`; a consumer reaches one by `name` + `shape` + `at` + `env` + `key` +
+  `required`. Resolution is a **runtime** act against the catalogue, deny-by-default; nothing in a
+  declaration points at another kennel. The reserved **`org.projectkennel.*`** namespace is
+  claimable only by a maintainer-signed template (a self-signed reserved provide is dropped *and*
+  its policy refused); host admins may reserve further namespaces via root-owned **`[[reserved]]`**.
+  Carried in the settled policy (`MeshRuntime`).
+- **`[service]`** — supervision discipline for a service kennel: `restart` (`always`/`on-failure`/
+  `never`) + `backoff` + `max_attempts` (≥ 1). Paired with the readiness state machine
+  (`pending`/`ready`/`failed`).
+
+### CLI changes
+
+- **One `kennel` command, two contexts.** A static `kennel` shim installs to `/usr/bin`; the host
+  execution unit and the in-cage spawn unit move under `/usr/libexec/kennel` and
+  `/usr/libexec/kennel-facades`. Host-side `kennel` is the operator command; **inside a
+  spawn-capable kennel the same `kennel` dispatches `run` / `caps` over the binder** — the
+  `facade-spawn` binary name is **retired**. `/usr/libexec/kennel` is masked from every constructed
+  view (the host control surface is ungrantable).
+- **`kennel list`** carries the cross-kennel **mesh topology** — which kennels provide and consume
+  which capabilities, with provider readiness.
+
 ### IPC protocol changes
 
+- **`SVC_CONNECT`** (Node 0 facade verb) — resolves a consumer's signed `[[consumes]]` against the
+  catalogue to a single provider (shape-checked, key-matched, deny-by-default, consume-with-wait for
+  an on-demand provider), then brokers an `af-unix` connector through a **host-owned rendezvous
+  point** and returns the connected fd. `kenneld` stays control-plane: it never parses the protocol
+  that rides the connector.
 - **Control-plane version handshake (W17).** The control socket now opens with a one-frame
   version preamble before any request: the client sends the settled-policy schema version it
   compiles to (and a diagnostic build identity), and a daemon that parses an older schema refuses
@@ -17,6 +61,46 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   *schema* version (what drifts), not a binary version. Within a release both ends are the same
   build, so it always accepts; it only bites the cross-build case, and only binds versions that
   have it (a pre-W17 daemon cannot speak it).
+
+### Runtime & enforcement
+
+- **The catalogue and broker.** `kenneld` derives the catalogue from the enabled kennels'
+  `[[provides]]` (per-host `/etc/kennel` and per-user `~/.config/kennel`, per-user winning),
+  keeping **every** provider of a shared name (a second claimant adds a candidate, never empties a
+  name). The `key` is a strict discriminator: if either side sets one, both must hold the identical
+  key. There is **no failover** past the preferred provider.
+- **Sidecars & lifecycle.** An `autorun` sidecar set starts with the daemon under its signed
+  restart policy (crash-loop-bounded → declared-but-failed); an `ondemand` provider is
+  **socket-activated on first consume** and **idle-reaped** when no consumer kennel runs.
+- **Confined GUI.** A GUI-service kennel runs `compositor-broker`, spawning a per-connection inner
+  compositor (bring-your-own `cage`/Weston/sway, host-independent — proven on stock GNOME) reached
+  as the `org.projectkennel.wayland` mesh capability; the single host-compositor leg is af-unix
+  brokered, the host's other clients absent by construction. The broker is bounded (a concurrency
+  cap and a connect rate limit).
+- **The host control socket is ungrantable by rule.** The CLI→daemon control socket cannot be
+  exposed into any view — refused on the `[[unix.allow]]` path at compile and construction, on the
+  `fs.read`/`fs.write` path at compile, and over-mounted blind by the privhelper as a structural
+  backstop (W15).
+
+### Threat catalogue
+
+- The **service-kennel trust class** is homed and its standing-service residuals catalogued and
+  risk-derived (**T3.10**, **T1.12**), published at catalogue **v0.4**, with the **authentication-never-attestation** boundary made
+  explicit (§4.3): the mesh confers capabilities to *use*, never attestation — there is no secrets
+  broker and no signing service. The 2026-06-24 cross-kennel red-team audit is recorded.
+
+### Fixed
+
+- **Privhelper binder-module load.** The env-stripped privhelper invoked `modprobe` by bare name
+  (no `PATH`) → `ENOENT` → the binder module never loaded → `boot-sync: kennel-bin-init did not
+  report ready`. Now an absolute `/sbin/modprobe`.
+
+### Docs & hygiene
+
+- The README, the website, and the design/architecture corpus are reconciled to the as-built 0.4.0
+  tree (accuracy pass — every public claim defensible against the substrate), and a corpus-wide
+  sweep cleared built features still wearing "roadmap" labels. Single-version `W##` work-item tags
+  stay out of the durable docs (roadmap only).
 
 ## [0.3.1] — 2026-06-23
 

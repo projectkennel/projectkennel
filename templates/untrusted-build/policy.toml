@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: untrusted-build  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # Building from source you do not trust (a cloned repo's `make`, a downloaded
 # tarball's `./configure && make`). The threats are the build script itself

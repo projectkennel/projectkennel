@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: echo-tool  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # The minimal demonstrable SPAWN target (§7.12): a single-leg tool that echoes
 # its stdin to its stdout via `/bin/cat`. It reaches NOTHING — `net.mode = "none"`

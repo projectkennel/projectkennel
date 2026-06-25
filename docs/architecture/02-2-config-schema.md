@@ -392,7 +392,7 @@ framework_invariants_asserted = [ "cap.no_new_privs", "..." ]  # ids the compile
 
 [provenance]
 schema_version = 1
-threat_catalogue_version = "0.3"
+threat_catalogue_version = "0.4"
 compiler_version = "0.4.2"
 
 [provenance.install_constants]

@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: containerised-service  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # A long-lived local service for development — a Postgres, a Redis, a message
 # broker, an internal API. There is NO container runtime here: the kennel itself

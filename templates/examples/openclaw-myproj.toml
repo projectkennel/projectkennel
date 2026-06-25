@@ -1,7 +1,7 @@
 # ============================================================================
 # Leaf policy: openclaw on a single project   (~/.config/kennel/kennels/openclaw-myproj.toml)
 # Derives from: ai-coding-strict@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # WHAT THIS IS
 #   openclaw is an open-source, autonomous coding agent — it reads your code,

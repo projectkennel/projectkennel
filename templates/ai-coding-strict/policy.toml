@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: ai-coding-strict  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # Strict confinement for an AI coding agent on a single project tree. Adds, on
 # top of base-confined: the interpreters/tools an agent needs, the common package

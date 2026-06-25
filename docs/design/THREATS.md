@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.3 · 2026-06-21
+Version 0.4 · 2026-06-26
 
 Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
@@ -495,7 +495,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 **Mitigation in Project Kennel.** MCP servers invoked from within a kennel inherit that kennel's policy by default — the MCP server runs as a child process within the same kennel and is subject to the same constraints. For MCP servers that legitimately need capabilities the kennel does not grant (e.g., an MCP server that needs access to a database the kennel cannot reach), the framework supports per-MCP-server sub-kennels with their own policy, communicating with the parent kennel via brokered AF_UNIX sockets. Each MCP server's capabilities are then explicit and reviewable.
 
-**Residuals.** MCP servers run outside any kennel — the typical case for installed MCP servers as of this catalogue (v0.3) — operate with full uid capabilities. Project Kennel's mitigation requires the user to opt in to running MCP servers inside kennels; the default MCP server installation pattern does not.
+**Residuals.** MCP servers run outside any kennel — the typical case for installed MCP servers as of this catalogue (v0.4) — operate with full uid capabilities. Project Kennel's mitigation requires the user to opt in to running MCP servers inside kennels; the default MCP server installation pattern does not.
 
 **MITRE ATT&CK.** T1199 (Trusted Relationship), T1071 (Application Layer Protocol).
 

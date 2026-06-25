@@ -1,7 +1,7 @@
 # ============================================================================
 # Spawn template: pyhello-tool  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # The interpreter-startup SPAWN target (§7.12): `python3 -c "print('hello')"` —
 # the canonical "hello world" workload whose cost is dominated by the CPython

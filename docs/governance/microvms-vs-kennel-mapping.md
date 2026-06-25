@@ -1,6 +1,6 @@
 # AWS Lambda MicroVMs and Project Kennel: different layers, different trust zones
 
-*Reconciled against THREATS.md v0.3. AWS Lambda MicroVMs (announced 2026-06-22) isolate user- and
+*Reconciled against THREATS.md v0.4. AWS Lambda MicroVMs (announced 2026-06-22) isolate user- and
 AI-generated code per user/session using Firecracker VM-level isolation. This document maps what that
 boundary closes and what it does not, by T-number — the same closed/bounded/out-of-scope discipline as
 the openclaw mapping — and states plainly where the two systems sit relative to each other. MicroVMs are

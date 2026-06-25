@@ -1,7 +1,7 @@
 # ============================================================================
 # Template: inspect-only  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.3
+# Threat catalogue: THREATS.md v0.4
 #
 # Reading a directory to decide whether to trust it — grep/cat/less over a freshly
 # cloned repo — WITHOUT giving its build system any chance to run. Network off,
