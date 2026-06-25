@@ -88,32 +88,46 @@ first real consumer of them.
 kennel template is signed and ships; a policy-suite case exercises a `dbus-name` consume end-to-end; the
 per-kennel `host-dbus` operator delegate is retired in favour of the brokered service kennel.
 
-### W2 · Filesystem view floor: measure-then-narrow
+### W2 · Filesystem view floor: narrow `/usr` to the flatpak base stance
 
 **[security, quality] M.**
 
-The base templates grant `fs.read = ["/usr/**", …]` wholesale (`base-confined`), so every constructed
-view sees the entire host `/usr` — every binary, the whole library tree, locale data, certificates, the
-loader closure — a host-rootfs information-leak surface into every kennel. `/var` is absent entirely.
-Neither is a principled minimal view; both are legacy approximations. The backlog names this as "a
-measure-then-narrow exercise that earns its own release slot." This is that slot, and the 0.4.0
-`/usr/libexec/kennel` blacklist was its down-payment.
+Today the whole host `/usr` is recursively bind-mounted read-only into every view (`base-confined`'s
+`fs.read = ["/usr/**", …]` + the bind beneath it), so the complete host tree is *present* in the view —
+`/usr/local`, `/usr/src`, every dev header, the full installed-package set — with Landlock gating reads
+on top. That is semantically bubblewrap's plain `--ro-bind /usr /usr`: the **unnarrowed** end of the
+ecosystem. `/var` is absent; the synthetic `/etc` (six vanilla files) and the curated `/dev` already
+match the established stance and need no change.
 
-**Measure first** — the floor must be *derived* from what workloads actually resolve, or it ships a
-default that mysteriously breaks TLS or the terminal:
+The stance to mimic is the one shipped at scale and therefore **needing no novel defense — flatpak's**:
+a confined app never sees the host `/usr`; it runs against a **curated base** (the loader + core lib
+closure, `ca-certificates`, `terminfo`, locale/`gconv`, the base toolchain) with the host's sprawl simply
+**not present**. W2 narrows Kennel's default view to that shape — applied to the host `/usr` (Kennel
+confines host binaries linked against host libraries, so it curates the host tree down to the
+base-equivalent subset rather than swapping in a runtime image; image-backed workloads remain the OCI
+substrate's job).
 
-- Instrument the runtime to record which paths under `/usr` workloads resolve (loader closure, `execve`
-  targets, `open` of `/usr/share/**`). Run against the in-tree policy suite and representative workloads.
-- Derive a principled floor: the loader + its lib closure, the specific `/usr/share` subtrees that break
-  things without them (`terminfo`, `ca-certificates`, locale/`gconv` data), the facade binaries under
-  `/usr/libexec/kennel`. The `**` glob becomes an explicit curated set.
-- Evaluate `/var` the same way — add only the subtrees workloads legitimately need, explicitly.
-- Pin the **minimal-view floor** as a design-corpus principle beside §4.2, the concrete floor in the base
-  templates, and a **threat entry** (host-rootfs info-leak into views).
+- **Narrow at the mount, not just the grant.** Bind only the curated base subtrees into the view, so the
+  sprawl is **absent** (construction-by-absence, §4.2), not merely read-denied — closing the
+  `readdir`-still-enumerates gap a Landlock-only narrowing leaves (§7.4.3). The `/usr/**` glob collapses
+  to that explicit set at both layers.
+- **Anchor to precedent, validate by measurement.** The base set is anchored to the flatpak runtime /
+  bwrap-ecosystem base (the precedent that needs no defense), and **measurement confirms** it against the
+  policy suite and representative workloads — measurement is the safety net that the precedent-anchored
+  floor does not break the loader, TLS, or the terminal, not a from-scratch derivation we would then have
+  to defend.
+- **`/var` the flatpak way** — stays absent; synthesize only the bits a workload needs (`/var/run` →
+  `/run`, `/var/tmp` as tmpfs), explicitly, never a host `/var` bind.
 
-**Exit:** the base templates grant an explicit, measured minimal `/usr` floor (and a considered `/var`)
-rather than `/usr/**`; the threat entry is written; the policy suite passes on the tightened floor; the
-floor and its principle are documented in the design corpus.
+The 0.4.0 `/usr/libexec/kennel` blacklist was the down-payment on this. Lands the **host-rootfs
+visibility threat entry** — and the residual it records is now precisely *flatpak's* (a curated base is
+visible), the accepted, precedent-backed one, not "the whole host `/usr`". Concretises §4.2's
+minimal-view floor with that precedent target.
+
+**Exit:** the base templates bind **and** grant a curated `/usr` base anchored to the flatpak/bwrap base
+stance, with host sprawl absent from the view; measurement confirms the policy suite and representative
+workloads pass on the narrowed floor; `/var` is handled the flatpak way; the floor and its precedent
+anchor are documented beside §4.2; the threat entry is written.
 
 ### W3 · `RESOLVE_NO_SYMLINKS` on writable-bind sources
 
