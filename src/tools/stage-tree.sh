@@ -52,7 +52,7 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$DEST" ] || { echo "stage-tree.sh: --dest is required" >&2; exit 2; }
 
-# The payload's binaries, grouped by their INSTALL DESTINATION (W10's three-dir layout). The build
+# The payload's binaries, grouped by their INSTALL DESTINATION (the three-dir layout). The build
 # puts host-dynamic bins in REL (host glibc) and in-kennel static bins in STAT (`+crt-static`: they
 # run inside an arbitrary image root with no host `ld.so`). The payload encodes the destination in
 # the staging subdir — install.sh places each verbatim:
@@ -80,7 +80,7 @@ for b in $HOST_REL_BINS;    do install -m 0755 "$REL/$b"  "$DEST/bin/$b";     do
 for b in $HOST_STAT_BINS;   do install -m 0755 "$STAT/$b" "$DEST/bin/$b";     done
 for b in $FACADE_STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; done
 
-# The unified `kennel` surface (W10): one static shim on PATH dispatches to two execution units, under
+# The unified `kennel` surface: one static shim on PATH dispatches to two execution units, under
 # their context names — `kennel` (shim, → /usr/bin), `host` (dynamic, host-side), `spawn` (static, in-cage).
 install -m 0755 "$STAT/kennel"       "$DEST/pathbin/kennel"
 install -m 0755 "$REL/kennel-host"   "$DEST/bin/host"

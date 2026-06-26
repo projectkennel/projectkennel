@@ -25,7 +25,7 @@ Standing constraints carried from 0.4.0:
   a TCB crate, the growth is measured (`gen-inventory`) and justified, never assumed.
 - **Authentication, never attestation.** Unchanged and load-bearing for W1: a `dbus-broker` service
   kennel carries *use*-capabilities (route a call to an authorised destination), never attestation.
-- **Never overclaim.** W4/W5 (keys, docs) and W10 (CLI) are public-facing surface; every claim ships
+- **Never overclaim.** W4/W5 (keys, docs) are public-facing surface; every claim ships
   true against the as-built tree or it does not ship.
 
 ## What this release is *not*
@@ -276,33 +276,21 @@ skeleton for CI.
 template/fragment/key selection and produces a compilable signed policy; both pass `kennel policy validate`
 before writing.
 
-### W10 · Split the `kennel` host CLI by keyword
+### W10 · Split the `kennel` host CLI by keyword — declined after measurement
 
-**[structural, ship-gate] M.**
+**[structural] M. Prototyped and reverted.**
 
-`kennel-host` is the largest binary by far and growing — one monolith handling every host verb
-(`run`, `attach`, `review`, `release`, `stop`, `list`, `daemon-reload`, the `policy` sub-tree,
-`keygen`, `subkennel`, `audit`, `oci`). The static `kennel` front-shim (0.4.0 W10) makes a clean split
-straightforward: the shim already detects context by the presence of the `kenneld` control socket
-(present ⇒ host side; absent ⇒ in-kennel ⇒ `kennel-facades/spawn`, keywords irrelevant). On the host side
-the keyword selects the sub-binary.
+Splitting the growing `kennel-host` monolith by keyword into `kennel-run`/`kennel-policy`/`kennel-oci`/
+`kennel-misc` behind the existing `kennel` shim looked attractive, so it was implemented and **measured**.
+Because every sub-binary re-links the shared core (daemon connection, the control/config/policy libraries),
+the split *tripled* the deployed size — one 3.2 MB `kennel-host` became 8.8 MB across four binaries — for
+at best a ~20% reduction in any single binary and **no functional gain** (the shim dispatches the same
+either way). So it was reverted: the host CLI stays one `kennel-host` execution unit behind the shim, which
+detects host-vs-cage context and execs `kennel-host` (host side) or `kennel-facades/spawn` (in-kennel). The
+`kennel-cli` library extraction (verb modules + shared helpers) is kept — it is good organisation
+independent of the split.
 
-- `kennel-run` — runtime verbs that talk to the daemon (`run`, `attach`, `stop`, `list`, `review`,
-  `release`, `daemon-reload`).
-- `kennel-policy` — authoring verbs (`compile`, `validate`, `sign`, `lint`, `risks`, `diff`, `upgrade`,
-  `show`, `generate`, and `inspect` once W8 adds it).
-- `kennel-oci` — the OCI substrate verbs.
-- `kennel-misc` — smaller verbs without their own binary yet (`keygen`, `subkennel`, `audit`); graduate
-  out as they grow.
-
-`kennel` retains only dispatch + in-kennel detection. `kennel-compose` is fully disjunct and not part of
-this split. Ship gate ordering: `kennel-compose` (W9) calls `kennel policy validate`, so the
-`kennel-policy` sub-binary must exist first — W10 lands after W9. The verb buckets above are reconciled to
-the *actual* host verb set (there is no `ps`; mesh/topology is under `list`).
-
-**Exit:** `kennel-run`, `kennel-policy`, `kennel-oci`, `kennel-misc` exist as separate installed binaries;
-`kennel` dispatches correctly by context and keyword (and to `kennel-facades/spawn` in-kennel); the
-installed binary layout is updated in `07-paths.md`.
+**Outcome:** declined. One `kennel-host` unit, the lean context-detecting shim; no per-keyword binaries.
 
 ### W11 · Pre-ship dynamic red-team pass
 
@@ -461,7 +449,7 @@ W5  (key docs)        ── S,  after W4 ────────────�
 W2  (fs floor)        ── M,  measure-first, informs W9 ───────────►
 W1  (connectors+D-Bus)── L,  Part A → B → C ──────────────────────►
 W9  (kennel-compose)  ── M,  after W2 + W1, ship gate ────────────►
-W10 (CLI split)       ── M,  after W9, ship gate ─────────────────►
+W10 (CLI split)       ── declined after measurement (tripled disk) ►
 W11 (dynamic red-team)── S,  after W1, ship gate ─────────────────►
 W14 (privhelper setcap)── M, independent (security) ──────────────►
 W15 (privhelper stderr)── S, after W14 (diagnostic debt it exposed) ►
@@ -469,8 +457,8 @@ W15 (privhelper stderr)── S, after W14 (diagnostic debt it exposed) ►
 
 W1 is the only deep dependency chain (A→B→C). W8 lands before W13 so the threat ID can be cited in the
 compile diagnostic. W2 completes before W9 so the composer does not seed the `/usr/**` floor it replaces.
-W14 is independent of the mesh and slots against capacity. The three ship gates — W9, W10, W11 — all block
-the tag.
+W14 is independent of the mesh and slots against capacity. The ship gates — W9 and W11 — block the tag
+(W10's keyword split was prototyped and declined, so it no longer gates).
 
 ## Exit criteria
 
@@ -490,8 +478,8 @@ the tag.
   typed error citing the W13 threat ID, and `kennel inspect --unix` is implemented (W8).
 - `kennel-compose <binary>` and `kennel-compose --compose` both produce a compilable (signed, for
   `--compose`) policy that passes `kennel policy validate` before writing (W9).
-- `kennel-run` / `kennel-policy` / `kennel-oci` / `kennel-misc` exist as separate installed binaries and
-  `kennel` dispatches correctly by context and keyword (W10).
+- The `kennel` host CLI ships as a single `kennel-host` unit behind the context-detecting shim; the
+  keyword split was prototyped, measured (tripled disk for no functional gain), and declined (W10).
 - The dynamic red-team pass on the connector-broker race and the GUI confidentiality legs is complete and
   every confirmed finding fixed (W11, ship gate).
 - The stale `resolve.rs` comments are accurate to as-built (W12); `THREATS.md` carries the abstract-socket

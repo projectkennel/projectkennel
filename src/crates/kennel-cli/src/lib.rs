@@ -1,15 +1,12 @@
-//! `kennel-cli` — the library crate backing all host-side CLI binaries.
+//! `kennel-cli` — the library crate backing the host-side `kennel` CLI.
 //!
-//! After the W10 split, this crate provides:
-//! - Shared helpers: daemon connection, key loading, policy resolution, trust store
-//! - Verb modules: `run`, `policy`, `oci`, `review`, `runtime`, `misc`
-//!
-//! Each sub-binary (`kennel-run`, `kennel-policy`, `kennel-oci`, `kennel-misc`) imports
-//! from this crate and dispatches its subset of verbs.
+//! Provides the shared helpers (daemon connection, key loading, policy resolution, trust
+//! store) and the verb modules (`run`, `policy`, `oci`, `review`, `runtime`, `misc`). The
+//! `kennel-host` execution unit dispatches them; the `kennel` shim execs it host-side.
 
 #![forbid(unsafe_code)]
 
-// The verb modules — each sub-binary dispatches into these.
+// The verb modules — the `kennel-host` unit dispatches into these.
 pub mod misc;
 pub mod oci;
 pub mod policy;
