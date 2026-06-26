@@ -47,14 +47,9 @@ pub fn parse_public_key(line: &str) -> Result<([u8; 32], String), String> {
         ));
     }
     let blob_b64 = parts.next().ok_or("missing base64 blob in public key")?;
-    let comment = parts
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_owned();
+    let comment = parts.next().unwrap_or("").trim().to_owned();
 
-    let blob = b64::decode(blob_b64.as_bytes())
-        .ok_or("invalid base64 in public key")?;
+    let blob = b64::decode(blob_b64.as_bytes()).ok_or("invalid base64 in public key")?;
     let pubkey = parse_pubkey_blob(&blob)?;
     Ok((pubkey, comment))
 }
@@ -95,17 +90,18 @@ fn parse_pubkey_blob(blob: &[u8]) -> Result<[u8; 32], String> {
 /// Returns a message describing the failure.
 pub fn parse_private_key(pem: &str) -> Result<([u8; 32], String), String> {
     // Extract the base64 payload between the PEM markers.
-    let start = pem.find(PEM_BEGIN)
+    let start = pem
+        .find(PEM_BEGIN)
         .ok_or("not an OpenSSH private key (missing BEGIN marker)")?
-        + PEM_BEGIN.len();
-    let end = pem.find(PEM_END)
+        .saturating_add(PEM_BEGIN.len());
+    let end = pem
+        .find(PEM_END)
         .ok_or("not an OpenSSH private key (missing END marker)")?;
     let b64_body: String = pem[start..end]
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
-    let payload = b64::decode(b64_body.as_bytes())
-        .ok_or("invalid base64 in private key PEM")?;
+    let payload = b64::decode(b64_body.as_bytes()).ok_or("invalid base64 in private key PEM")?;
 
     parse_private_payload(&payload)
 }
@@ -133,7 +129,7 @@ fn parse_private_payload(data: &[u8]) -> Result<([u8; 32], String), String> {
     if !data.starts_with(AUTH_MAGIC) {
         return Err("invalid OpenSSH private key (bad magic)".to_owned());
     }
-    let rest = &data[AUTH_MAGIC.len()..];
+    let rest = data.get(AUTH_MAGIC.len()..).unwrap_or_default();
 
     // ciphername
     let (cipher, rest) = read_string(rest).ok_or("truncated ciphername")?;
@@ -184,7 +180,10 @@ fn parse_private_payload(data: &[u8]) -> Result<([u8; 32], String), String> {
     // ed25519 public key (32 bytes) — skip, we use the seed
     let (pubkey, priv_rest) = read_string(priv_rest).ok_or("truncated ed25519 pubkey")?;
     if pubkey.len() != 32 {
-        return Err(format!("ed25519 pubkey must be 32 bytes, got {}", pubkey.len()));
+        return Err(format!(
+            "ed25519 pubkey must be 32 bytes, got {}",
+            pubkey.len()
+        ));
     }
 
     // ed25519 "private key" (64 bytes = seed‖pubkey)
@@ -196,7 +195,7 @@ fn parse_private_payload(data: &[u8]) -> Result<([u8; 32], String), String> {
         ));
     }
     let mut seed = [0u8; 32];
-    seed.copy_from_slice(&privkey[..32]);
+    seed.copy_from_slice(privkey.get(..32).ok_or("truncated ed25519 seed")?);
 
     // comment
     let (comment_bytes, _) = read_string(priv_rest).ok_or("truncated comment")?;
@@ -210,7 +209,7 @@ fn parse_private_payload(data: &[u8]) -> Result<([u8; 32], String), String> {
 /// Read a 4-byte big-endian u32 from the front of `data`.
 fn read_u32(data: &[u8]) -> Option<(u32, &[u8])> {
     let (bytes, rest) = data.split_at_checked(4)?;
-    let val = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let val = u32::from_be_bytes(bytes.try_into().ok()?);
     Some((val, rest))
 }
 
@@ -225,11 +224,13 @@ fn read_string(data: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// Detect whether a key file contains an OpenSSH public key (`ssh-ed25519 ...`).
+#[must_use]
 pub fn is_openssh_public(text: &str) -> bool {
     text.trim_start().starts_with("ssh-ed25519 ")
 }
 
 /// Detect whether a key file contains an OpenSSH private key (PEM envelope).
+#[must_use]
 pub fn is_openssh_private(text: &str) -> bool {
     text.trim_start().starts_with(PEM_BEGIN)
 }
@@ -244,7 +245,11 @@ mod tests {
         let pubkey = [42u8; 32];
         let mut blob = Vec::new();
         // key type string
-        blob.extend_from_slice(&(KEY_TYPE.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(KEY_TYPE.len())
+                .expect("KEY_TYPE len fits u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(KEY_TYPE);
         // public key
         blob.extend_from_slice(&32u32.to_be_bytes());
@@ -258,7 +263,11 @@ mod tests {
     fn parse_public_key_with_comment() {
         let pubkey = [7u8; 32];
         let mut blob = Vec::new();
-        blob.extend_from_slice(&(KEY_TYPE.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(KEY_TYPE.len())
+                .expect("KEY_TYPE len fits u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(KEY_TYPE);
         blob.extend_from_slice(&32u32.to_be_bytes());
         blob.extend_from_slice(&pubkey);
@@ -275,7 +284,11 @@ mod tests {
     fn parse_public_key_without_comment() {
         let pubkey = [1u8; 32];
         let mut blob = Vec::new();
-        blob.extend_from_slice(&(KEY_TYPE.len() as u32).to_be_bytes());
+        blob.extend_from_slice(
+            &u32::try_from(KEY_TYPE.len())
+                .expect("KEY_TYPE len fits u32")
+                .to_be_bytes(),
+        );
         blob.extend_from_slice(KEY_TYPE);
         blob.extend_from_slice(&32u32.to_be_bytes());
         blob.extend_from_slice(&pubkey);
@@ -298,7 +311,9 @@ mod tests {
     fn detects_openssh_format() {
         assert!(is_openssh_public("ssh-ed25519 AAAA== comment"));
         assert!(!is_openssh_public("AAAA=="));
-        assert!(is_openssh_private("-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n-----END OPENSSH PRIVATE KEY-----"));
+        assert!(is_openssh_private(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\ndata\n-----END OPENSSH PRIVATE KEY-----"
+        ));
         assert!(!is_openssh_private("AAAA=="));
     }
 }

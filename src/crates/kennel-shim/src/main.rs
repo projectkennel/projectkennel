@@ -1,9 +1,9 @@
-//! `kennel` — the unified command shim (W10).
+//! `kennel` — the unified command shim.
 //!
 //! The one name a user or agent types, in either context. It holds **no authority** and does no
 //! work of its own: it detects context and `exec`s the right execution unit, replacing itself.
 //!
-//! ## Host-side keyword dispatch (W10)
+//! ## Host-side keyword dispatch
 //!
 //! On the host side, the first argument (keyword) selects the sub-binary:
 //!
@@ -31,7 +31,7 @@ use std::process::{Command, ExitCode};
 
 /// The sub-binary directory on the host side.
 const HOST_DIR: &str = "/usr/libexec/kennel";
-/// The legacy monolith host unit (transition — kept during 0.5.0).
+/// The combined host unit (handles keywords with no dedicated sub-binary).
 const HOST_UNIT: &str = "/usr/libexec/kennel/host";
 /// The statically-linked in-cage spawn-requester execution unit.
 const SPAWN_UNIT: &str = "/usr/libexec/kennel-facades/spawn";
@@ -47,7 +47,7 @@ fn keyword_binary(keyword: &str) -> &'static str {
         "oci" => "oci",
         // Misc verbs → kennel-misc.
         "keygen" | "subkennel" | "audit" => "misc",
-        // Unknown keywords → try the legacy host unit for forward compatibility.
+        // Unknown keywords → try the combined host unit for forward compatibility.
         _ => "host",
     }
 }
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
         print_help();
         return ExitCode::SUCCESS;
     }
-    let first = args[0].to_str().unwrap_or("");
+    let first = args.first().and_then(|a| a.to_str()).unwrap_or("");
     if first == "--help" || first == "-h" || first == "help" {
         print_help();
         return ExitCode::SUCCESS;
@@ -73,7 +73,7 @@ fn main() -> ExitCode {
     let _sub_err = Command::new(&sub_path).args(&args).exec();
 
     // Sub-binary not found (not yet installed, or wrong platform) → fall back to the
-    // monolith host unit (transition path).
+    // combined host unit.
     let _host_err = Command::new(HOST_UNIT).args(&args).exec();
 
     // Host side unreachable → we're in a cage. Try the spawn unit.

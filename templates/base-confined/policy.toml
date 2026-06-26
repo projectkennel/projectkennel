@@ -54,13 +54,13 @@ path = ["/usr/bin", "/usr/local/bin", "/bin"]
 # granted paths are bound. Non-granted paths do not exist in the view (T1.1).
 [fs]
 # Read baseline: the curated base every dynamically-linked workload needs
-# (§4.2 construction-by-absence, W2). Only these subtrees are bound into the
+# (§4.2 construction-by-absence). Only these subtrees are bound into the
 # view; everything else under /usr (headers, source, /usr/local) is simply not
 # present. The filesystem floor prevents data leakage; the real enforcement is
 # at exec.allow|deny (Landlock FS_EXECUTE). Absent subtrees on this host (e.g.
 # /usr/lib64 on usrmerge distros, /usr/libexec on Debian) are silently skipped.
 read = [
-    # The curated /usr base (W2):
+    # The curated /usr base:
     "/usr/bin/**", "/usr/sbin/**",        # binary search path (Landlock gates exec)
     "/usr/lib/**",                        # shared libraries, locale, multiarch
     "/usr/lib64/**",                      # 64-bit lib path (Fedora/RHEL; skipped if absent)
@@ -247,6 +247,7 @@ deny = [
 #   nofile = "8192"
 #   nproc  = "512"
 #   core   = "0"
+
 
 
 [signature]

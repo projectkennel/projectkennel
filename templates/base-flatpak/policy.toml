@@ -8,12 +8,12 @@
 # │ base subtrees of /usr are present (loader, core libs, terminfo,       │
 # │ zoneinfo, CAs). The host's sprawl (/usr/local, /usr/src, /usr/include)│
 # │ is absent. Use this to compare posture against base-confined/base-    │
-# │ bwrap, or as a reference for what the W2 floor achieves.              │
+# │ bwrap, or as a reference for what the curated floor achieves.         │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
 # Posture:
 #   - Curated /usr base: /usr/bin, /usr/sbin, /usr/lib, /usr/lib64,
-#     /usr/libexec, /usr/share — same as base-confined (W2)
+#     /usr/libexec, /usr/share — same as base-confined
 #   - Permissive exec (flatpak does not exec-gate within the runtime)
 #   - Net mode none (flatpak portals handle network; not modelled here)
 #   - Flatpak seccomp filter (matched to flatpak's default)
@@ -21,7 +21,7 @@
 #   - Still runs under Kennel's non-optional invariants: Landlock, no_new_privs,
 #     setuid/setgid/setcap denial, binder gateway.
 #
-# See docs/design/04-trust-boundaries.md §4.2 and the W2 workstream.
+# See docs/design/04-trust-boundaries.md §4.2.
 # ============================================================================
 
 template_name = "base-flatpak"
@@ -46,9 +46,9 @@ deny_writable = true
 path = ["/usr/bin", "/usr/sbin", "/bin"]
 
 
-# --- Filesystem (the curated base — matching W2) ---------------------------
+# --- Filesystem (the curated base) ---------------------------
 [fs]
-# The W2 curated base: only the subtrees a dynamically-linked workload needs.
+# The curated base: only the subtrees a dynamically-linked workload needs.
 # Matches base-confined exactly — construction-by-absence (§4.2).
 read = [
     "/usr/bin/**", "/usr/sbin/**",
@@ -126,6 +126,7 @@ deny = [
     "init_module", "finit_module", "delete_module",
     "personality",
 ]
+
 
 
 

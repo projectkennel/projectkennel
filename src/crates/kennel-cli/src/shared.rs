@@ -1,8 +1,7 @@
 //! Shared helpers for all host-side CLI binaries.
 //!
 //! Daemon connection, key loading, policy/template/trust-store resolution,
-//! exit-code mapping, lexopt helpers, and the command tables. Previously
-//! in `main.rs`; extracted for the W10 split.
+//! exit-code mapping, lexopt helpers, and the command tables.
 
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
@@ -160,11 +159,13 @@ pub fn print_policy_help() {
 }
 
 /// Whether `args` contains a help request (`--help`/`-h`).
+#[must_use]
 pub fn wants_help(args: &[String]) -> bool {
     args.iter().any(|a| a == "--help" || a == "-h")
 }
 
 /// The usage line for `verb` from a spec table, as a `kennel …` error string.
+#[must_use]
 pub fn usage_of(table: &[CommandSpec], verb: &str) -> String {
     table.iter().find(|c| c.name == verb).map_or_else(
         || format!("unknown command `{verb}` — run `kennel --help`"),
@@ -175,6 +176,11 @@ pub fn usage_of(table: &[CommandSpec], verb: &str) -> String {
 // ─── Daemon connection ───────────────────────────────────────────────────────
 
 /// Connect to the daemon's control socket and run the version handshake.
+///
+/// # Errors
+///
+/// Returns a message if the control socket cannot be reached or the version
+/// handshake with the daemon fails.
 pub fn connect() -> Result<UnixStream, String> {
     let path = socket::socket_path();
     let mut conn = UnixStream::connect(&path).map_err(|e| {
@@ -193,11 +199,12 @@ pub fn connect() -> Result<UnixStream, String> {
 }
 
 /// Send `request` (with any `fds`) as one framed `SCM_RIGHTS` message.
-pub fn send(
-    conn: &UnixStream,
-    request: &Request,
-    fds: &[BorrowedFd<'_>],
-) -> Result<(), String> {
+///
+/// # Errors
+///
+/// Returns a message if encoding the request frame fails or the `SCM_RIGHTS`
+/// send on the socket fails.
+pub fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<(), String> {
     let mut framed = Vec::new();
     control::write_frame(&mut framed, &request.encode())
         .map_err(|e| format!("encoding request: {e}"))?;
@@ -207,6 +214,7 @@ pub fn send(
 }
 
 /// Map a daemon-reported exit code to a process `ExitCode` (clamped to a byte).
+#[must_use]
 pub fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
@@ -214,6 +222,10 @@ pub fn exit_code(code: i32) -> ExitCode {
 // ─── Lexopt helpers ──────────────────────────────────────────────────────────
 
 /// Read the next required value for `flag` from a lexopt parser.
+///
+/// # Errors
+///
+/// Returns a message if `flag` has no following value.
 pub fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, String> {
     p.value()
         .map(PathBuf::from)
@@ -221,6 +233,7 @@ pub fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, Strin
 }
 
 /// Format an unexpected lexopt arg into a usage error for `verb`.
+#[must_use]
 pub fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &str) -> String {
     let what = match arg {
         lexopt::Arg::Long(s) => format!("unknown flag `--{s}`"),
@@ -233,6 +246,11 @@ pub fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &st
 // ─── Policy resolution ───────────────────────────────────────────────────────
 
 /// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
+///
+/// # Errors
+///
+/// Returns a message if `arg` is neither an existing file nor a valid policy
+/// name, or if no matching policy file is found under any policy directory.
 pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
     let literal = Path::new(arg);
     if literal.exists() {
@@ -295,6 +313,7 @@ pub fn is_valid_policy_name(name: &str) -> bool {
 }
 
 /// Default settled-policy path: `<policy-dir>/<name>.settled.toml`.
+#[must_use]
 pub fn default_settled_path(policy_path: &Path, name: &str) -> PathBuf {
     let dir = policy_path.parent().unwrap_or_else(|| Path::new("."));
     dir.join(format!("{name}.settled.toml"))
@@ -322,14 +341,19 @@ pub fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
 
 /// Load a trust store: every `<key_id>.pub` under each directory.
 ///
-/// Accepts two formats per file (W4):
+/// Accepts two formats per file:
 /// - **OpenSSH**: `ssh-ed25519 <base64-blob> [comment]` — the standard format
 ///   produced by `ssh-keygen`. The key id is the file stem; the comment is
 ///   informational.
-/// - **Legacy**: raw base64 of the 32-byte Ed25519 public key (the pre-W4 format).
+/// - **Legacy**: raw base64 of the 32-byte Ed25519 public key.
 ///
 /// Detection: if the file starts with `ssh-ed25519 `, parse OpenSSH; else try
 /// raw base64.
+///
+/// # Errors
+///
+/// Returns a message if a `.pub` file cannot be read, fails to parse as either
+/// an OpenSSH or legacy public key, or cannot be inserted into the key set.
 pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
     let mut keys = kennel_lib_policy::KeySet::new();
     for dir in dirs {
@@ -366,12 +390,18 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
 
 /// Load a signing key from a file.
 ///
-/// Accepts two formats (W4):
+/// Accepts two formats:
 /// - **OpenSSH**: `-----BEGIN OPENSSH PRIVATE KEY-----` PEM envelope (the standard
 ///   format produced by `ssh-keygen -t ed25519`). Must be unencrypted.
-/// - **Legacy**: raw base64 of the 32-byte Ed25519 seed (the pre-W4 format).
+/// - **Legacy**: raw base64 of the 32-byte Ed25519 seed.
 ///
 /// The key id is derived from the file stem in both cases.
+///
+/// # Errors
+///
+/// Returns a message if the file cannot be read, a key id cannot be derived
+/// from its stem, the key fails to parse (OpenSSH or legacy base64), or the
+/// seed cannot be loaded into a signing key.
 pub fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, String> {
     let shown = path.display();
     let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
@@ -393,9 +423,15 @@ pub fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, St
     }
 }
 
-/// The signing key to use when `--key` was omitted: the sole signing key in the
-/// user key dir. Searches for both OpenSSH private keys (no extension, PEM
-/// content) and legacy `*.key` files (raw base64 seed).
+/// The signing key to use when `--key` was omitted.
+///
+/// The sole signing key in the user key dir. Searches for both OpenSSH private
+/// keys (no extension, PEM content) and legacy `*.key` files (raw base64 seed).
+///
+/// # Errors
+///
+/// Returns a message if the user key dir contains no signing key, or more than
+/// one (the caller must then pass `--key` to disambiguate).
 pub fn default_signing_key() -> Result<PathBuf, String> {
     let dir = default_key_dir();
     let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_or_else(
@@ -455,6 +491,7 @@ pub fn default_key_dir() -> PathBuf {
 // ─── Error codes ─────────────────────────────────────────────────────────────
 
 /// Map a compile-time [`kennel_lib_policy::PolicyError`] to a CLI exit code.
+#[must_use]
 pub const fn policy_error_code(err: &kennel_lib_policy::PolicyError) -> u8 {
     use kennel_lib_policy::PolicyError as E;
     match err {
@@ -475,6 +512,7 @@ pub const fn policy_error_code(err: &kennel_lib_policy::PolicyError) -> u8 {
 // ─── Key ID validation ───────────────────────────────────────────────────────
 
 /// A key id is both a filename and the signature `key_id`.
+#[must_use]
 pub fn is_valid_key_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -485,6 +523,11 @@ pub fn is_valid_key_id(s: &str) -> bool {
 }
 
 /// Write base64 `text` (plus a trailing newline) to `path`, creating it with `mode`.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if the file cannot be opened/created, written, or
+/// have its permissions set.
 pub fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;

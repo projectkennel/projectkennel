@@ -11,9 +11,7 @@
 
 use std::process::ExitCode;
 
-use kennel_cli::{
-    print_help, print_policy_help, wants_help, usage_of, COMMANDS, POLICY_VERBS,
-};
+use kennel_cli::{print_help, print_policy_help, usage_of, wants_help, COMMANDS, POLICY_VERBS};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -90,11 +88,11 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
 
 #[cfg(test)]
 mod tests {
-    use kennel_cli::{
-        is_valid_policy_name, policy_name_from_path, resolve_policy, COMMANDS, POLICY_VERBS,
-    };
     use kennel_cli::policy::{
         is_source_policy, newest_template_version, policy_kind, rewrite_template_base, TempSettled,
+    };
+    use kennel_cli::{
+        is_valid_policy_name, policy_name_from_path, resolve_policy, COMMANDS, POLICY_VERBS,
     };
     use std::path::Path;
 

@@ -51,12 +51,11 @@ const SYSTEM_PREFIXES: &[&str] = &["/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/
 
 /// Probe a workload (binary or script) and produce the `exec.allow` seed.
 pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
-    let abs = std::fs::canonicalize(workload)
-        .map_err(|e| format!("{}: {e}", workload.display()))?;
+    let abs =
+        std::fs::canonicalize(workload).map_err(|e| format!("{}: {e}", workload.display()))?;
     let abs_str = abs.to_string_lossy().into_owned();
 
-    let data = std::fs::read(&abs)
-        .map_err(|e| format!("{}: {e}", abs.display()))?;
+    let data = std::fs::read(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
 
     let mut exec_allow: Vec<String> = Vec::new();
     let mut extra_fs_read: Vec<FsGrant> = Vec::new();
@@ -79,7 +78,9 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         if shebang_binary == "/usr/bin/env" {
             // #!/usr/bin/env <prog> [flags...]
             // Strip -S and other flags to find the program name.
-            let prog = tokens.iter().skip(1)
+            let prog = tokens
+                .iter()
+                .skip(1)
                 .find(|t| !t.starts_with('-'))
                 .ok_or("#!/usr/bin/env with no program name")?;
 
@@ -89,8 +90,11 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
             match resolve_via_path(prog) {
                 Some(resolved) => {
                     let resolved_str = resolved.to_string_lossy().into_owned();
-                    note_if_non_system(&resolved_str, &mut extra_fs_read,
-                                       &format!("{prog} interpreter (resolved from #!/usr/bin/env {prog})"));
+                    note_if_non_system(
+                        &resolved_str,
+                        &mut extra_fs_read,
+                        &format!("{prog} interpreter (resolved from #!/usr/bin/env {prog})"),
+                    );
                     exec_allow.push(resolved_str);
                 }
                 None => {
@@ -103,13 +107,16 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         } else {
             // #!/usr/bin/python3, #!/bin/sh, etc.
             exec_allow.push(shebang_binary.to_owned());
-            note_if_non_system(shebang_binary, &mut extra_fs_read,
-                               &format!("shebang interpreter {shebang_binary}"));
+            note_if_non_system(
+                shebang_binary,
+                &mut extra_fs_read,
+                &format!("shebang interpreter {shebang_binary}"),
+            );
         }
     } else if data.starts_with(b"\x7fELF") {
         // --- ELF binary ---
         // Use resolve_loaders to extract the PT_INTERP (dynamic loader).
-        let resolution = libresolve::resolve_loaders(&[abs_str.clone()]);
+        let resolution = libresolve::resolve_loaders(std::slice::from_ref(&abs_str));
         for loader in &resolution.loaders {
             exec_allow.push(loader.clone());
         }
@@ -153,11 +160,7 @@ fn resolve_via_path(name: &str) -> Option<PathBuf> {
 /// If a path is outside the standard system directories, note it as an extra
 /// fs.read that the operator should review. This is advisory — the real
 /// authority is the compiled effective policy from the template chain.
-fn note_if_non_system(
-    path: &str,
-    extra_fs_read: &mut Vec<FsGrant>,
-    reason_context: &str,
-) {
+fn note_if_non_system(path: &str, extra_fs_read: &mut Vec<FsGrant>, reason_context: &str) {
     if SYSTEM_PREFIXES.iter().any(|pfx| path.starts_with(pfx)) {
         return;
     }
@@ -167,7 +170,9 @@ fn note_if_non_system(
         if !extra_fs_read.iter().any(|g| g.path == glob) {
             extra_fs_read.push(FsGrant {
                 path: glob,
-                reason: format!("{reason_context} — review whether this path is correct for the kennel"),
+                reason: format!(
+                    "{reason_context} — review whether this path is correct for the kennel"
+                ),
             });
         }
     }
@@ -186,7 +191,9 @@ mod tests {
         let result = probe(&sh).expect("probe /bin/sh");
         assert!(!result.is_script, "/bin/sh is an ELF, not a script");
         assert!(
-            result.exec_allow.contains(&sh.to_string_lossy().into_owned()),
+            result
+                .exec_allow
+                .contains(&sh.to_string_lossy().into_owned()),
             "exec_allow includes the binary"
         );
         assert!(
@@ -207,7 +214,10 @@ mod tests {
         let result = probe(&script).expect("probe script");
         assert!(result.is_script);
         assert!(
-            result.exec_allow.iter().any(|e| e == "/bin/sh" || e.ends_with("/dash") || e.ends_with("/bash")),
+            result
+                .exec_allow
+                .iter()
+                .any(|e| e == "/bin/sh" || e.ends_with("/dash") || e.ends_with("/bash")),
             "exec_allow includes the interpreter: {:?}",
             result.exec_allow
         );
@@ -220,7 +230,8 @@ mod tests {
         let script = dir.join(format!("kennel-compose-test-env-{}", std::process::id()));
         {
             let mut f = std::fs::File::create(&script).expect("create script");
-            f.write_all(b"#!/usr/bin/env sh\necho hello\n").expect("write");
+            f.write_all(b"#!/usr/bin/env sh\necho hello\n")
+                .expect("write");
         }
         let result = probe(&script).expect("probe env script");
         assert!(result.is_script);
@@ -236,7 +247,10 @@ mod tests {
     fn non_system_path_notes_extra_fs_read() {
         let mut extra = Vec::new();
         note_if_non_system("/usr/bin/python3", &mut extra, "test");
-        assert!(extra.is_empty(), "system path should not produce extra grants");
+        assert!(
+            extra.is_empty(),
+            "system path should not produce extra grants"
+        );
 
         note_if_non_system("/home/user/.venv/bin/python3", &mut extra, "test");
         assert!(
@@ -252,7 +266,10 @@ mod tests {
         let file = dir.join(format!("kennel-compose-test-plain-{}", std::process::id()));
         std::fs::write(&file, b"just some text\n").expect("write");
         let err = probe(&file).unwrap_err();
-        assert!(err.contains("not an ELF") || err.contains("script"), "error: {err}");
+        assert!(
+            err.contains("not an ELF") || err.contains("script"),
+            "error: {err}"
+        );
         let _ = std::fs::remove_file(&file);
     }
 }

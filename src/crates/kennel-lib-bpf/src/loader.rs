@@ -405,10 +405,11 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
     Ok(maps)
 }
 
-/// Freeze the named maps so that neither userspace nor BPF programs can update them
-/// after population. Maps created with `BPF_F_RDONLY_PROG` already prevent BPF-side
-/// writes; freezing additionally prevents userspace writes — the belt-and-braces
-/// sealing `02-7-bpf-abi.md` specifies for `kennel_meta_map`.
+/// Freeze the named maps so neither userspace nor BPF programs can update them.
+///
+/// Maps created with `BPF_F_RDONLY_PROG` already prevent BPF-side writes; freezing
+/// additionally prevents userspace writes — the belt-and-braces sealing
+/// `02-7-bpf-abi.md` specifies for `kennel_meta_map`.
 ///
 /// Only maps whose names appear in `names` are frozen; the caller decides which maps
 /// are write-once (the meta map) vs. legitimately updated at runtime (the ringbuf).
@@ -417,10 +418,7 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
 ///
 /// Returns the OS error if a freeze is rejected (e.g. the map is already frozen or
 /// the caller lacks `CAP_BPF`).
-pub fn freeze_maps(
-    maps: &BTreeMap<String, OwnedFd>,
-    names: &[&str],
-) -> io::Result<()> {
+pub fn freeze_maps(maps: &BTreeMap<String, OwnedFd>, names: &[&str]) -> io::Result<()> {
     for name in names {
         if let Some(fd) = maps.get(*name) {
             sys::map_freeze(fd.as_fd())?;
@@ -1129,7 +1127,7 @@ mod root_tests {
         if skip_if_unprivileged("meta_map_is_read_only_after_freeze") {
             return;
         }
-        // Create the maps (kennel_meta_map now carries BPF_F_RDONLY_PROG).
+        // Create the maps (kennel_meta_map carries BPF_F_RDONLY_PROG).
         let maps = create_maps(KENNEL_MAPS).expect("create_maps");
         let meta_fd = maps.get("kennel_meta_map").expect("meta map present");
 
@@ -1148,15 +1146,11 @@ mod root_tests {
         // A userspace write after freeze must be rejected (EPERM).
         // SAFETY: same geometry as above.
         let result = unsafe { sys::map_update(meta_fd.as_fd(), &key, &value, sys::BPF_ANY) };
-        assert!(
-            result.is_err(),
-            "a write to a frozen map must be rejected"
-        );
-        let err = result.unwrap_err();
+        assert!(result.is_err(), "a write to a frozen map must be rejected");
         assert_eq!(
-            err.raw_os_error(),
+            result.err().and_then(|e| e.raw_os_error()),
             Some(libc::EPERM),
-            "frozen map write should return EPERM, got {err}"
+            "frozen map write should return EPERM"
         );
     }
 }

@@ -675,7 +675,7 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
                 format!("create_bind_target {}: {e}", dest.display()),
             )
         })?;
-        // W3: for writable binds, resolve the source with RESOLVE_NO_SYMLINKS
+        // For writable binds, resolve the source with RESOLVE_NO_SYMLINKS
         // (openat2) so a source that symlink-escapes the granted tree is refused
         // before the mount is applied — closing the writable-bind-source
         // symlink-aliasing class (0.4.0 F1 residual). The returned O_PATH fd is
@@ -697,13 +697,12 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
                     e.kind(),
                     format!(
                         "writable bind source {}: {e} (symlink in path? \
-                         RESOLVE_NO_SYMLINKS refuses symlink-aliased sources, W3)",
+                         RESOLVE_NO_SYMLINKS refuses symlink-aliased sources)",
                         b.source.display(),
                     ),
                 )
             })?;
-            let fd_path =
-                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+            let fd_path = PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
             mount::bind(&fd_path, &dest, true).map_err(|e| {
                 io::Error::new(
                     e.kind(),
@@ -871,8 +870,7 @@ pub fn attach_egress(
         populate_egress_maps(&l, plan)?;
         // Seal the write-once meta map (§02-7-bpf-abi.md), consistent with the
         // privhelper's production path.
-        kennel_lib_bpf::freeze_maps(&l.maps, &["kennel_meta_map"])
-            .map_err(SpawnError::Syscall)?;
+        kennel_lib_bpf::freeze_maps(&l.maps, &["kennel_meta_map"]).map_err(SpawnError::Syscall)?;
         l.attach(cgroup, spec.attach_type)
             .map_err(SpawnError::Syscall)?;
         loaded.push(l);

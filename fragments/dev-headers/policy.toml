@@ -3,7 +3,7 @@
 #
 # A composable capability bundle (05-templates.md §5.10): Adds /usr/src and
 # /usr/include back into the view (read-only). These are absent from the
-# curated base (W2 construction-by-absence) and only needed by build/compile
+# curated base (construction-by-absence) and only needed by build/compile
 # workloads. Include this fragment in templates that compile C/C++/Rust code
 # against system headers.
 #
@@ -18,13 +18,14 @@ name = "dev-headers"
 
 [[fs.read.add]]
 path = "/usr/include/**"
-reason = "C/C++ system headers (absent from the W2 curated base)"
+reason = "C/C++ system headers (absent from the curated base)"
 
 [[fs.read.add]]
 path = "/usr/src/**"
-reason = "kernel headers and source trees (absent from the W2 curated base)"
+reason = "kernel headers and source trees (absent from the curated base)"
+
 
 [signature]
 algorithm = "ed25519"
 key_id = "kennel-maint-2026"
-signature = "n/HOTDp7jgIeAW7x6yRNQbPZKF2SpnbPZfQgZstdWc15IfYfZos+0gVjIikqj+XCuipKtbGzgxB18TUCwKatAg=="
+signature = "VCUWmcIkepCSkarJ7rNTGNHqDQuaaJoujAln76/hgOHwKJRnmLr0OdRa2xgFR2ZHDJw0ywjn5wdbEvCiKNXvCQ=="

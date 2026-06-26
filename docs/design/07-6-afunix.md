@@ -126,7 +126,7 @@ Linux's AF_UNIX has two namespaces: filesystem-path sockets (covered by Landlock
 
 The fallback is the documented path below ABI 6 only; on a supported kernel the native scoping supersedes it entirely.
 
-**`abstract = "allow"` escape hatch (W8).** The default denial can be opted out of with `abstract = "allow"` in the `[unix]` section, but only when the kennel owns its `CLONE_NEWNET` (`net.mode` = `none` / `constrained` / `unconstrained`). In that configuration the per-kennel network namespace is the structural control: the kennel's abstract-socket namespace is empty by construction (no host daemon binds there). The combination `abstract = "allow"` + `net.mode = "host"` is a **hard compile error** — host mode shares `CLONE_NEWNET` with the host, so abstract sockets reach the host namespace directly (T1.13). Landlock ABI-6 abstract scoping is defence-in-depth on top of the net-ns boundary, never a substitute.
+**`abstract = "allow"` escape hatch.** The default denial can be opted out of with `abstract = "allow"` in the `[unix]` section, but only when the kennel owns its `CLONE_NEWNET` (`net.mode` = `none` / `constrained` / `unconstrained`). In that configuration the per-kennel network namespace is the structural control: the kennel's abstract-socket namespace is empty by construction (no host daemon binds there). The combination `abstract = "allow"` + `net.mode = "host"` is a **hard compile error** — host mode shares `CLONE_NEWNET` with the host, so abstract sockets reach the host namespace directly (T1.13). Landlock ABI-6 abstract scoping is defence-in-depth on top of the net-ns boundary, never a substitute.
 
 ## 7.6.4 Policy primitives
 

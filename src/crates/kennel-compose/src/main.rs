@@ -1,4 +1,4 @@
-// kennel-compose — standalone policy-authoring tool (W9).
+// kennel-compose — standalone policy-authoring tool.
 //
 // A fully standalone binary (separate optional install, not part of the
 // `kennel` dispatch tree) that emits a leaf policy TOML the operator owns
@@ -24,12 +24,11 @@ mod templates;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kennel_lib_compile::{LeafPolicy, NetAllow};
 use kennel_lib_compile::leaf::{
-    ExecLeaf, FsLeaf, LifecycleLeaf, NetAllowDelta, NetLeaf, NetProxyLeaf, PathEntry,
-    PathListDelta,
+    ExecLeaf, FsLeaf, LifecycleLeaf, NetAllowDelta, NetLeaf, NetProxyLeaf, PathEntry, PathListDelta,
 };
 use kennel_lib_compile::source::LifecycleSection;
+use kennel_lib_compile::{LeafPolicy, NetAllow};
 
 /// Parsed command-line arguments.
 struct Args {
@@ -87,6 +86,8 @@ fn run(args: Args) -> ExitCode {
         eprintln!("warning: {warning}");
     }
 
+    let is_script = probe_result.is_script;
+
     // Build a LeafPolicy directly from the probe result.
     let leaf = if args.no_prompts {
         build_leaf_from_probe(&args.name, &probe_result)
@@ -100,7 +101,7 @@ fn run(args: Args) -> ExitCode {
         }
     };
 
-    emit_leaf(&leaf, &args)
+    emit_leaf(&leaf, &args, is_script)
 }
 
 /// Mode B: interactive policy composition from templates + fragments on the
@@ -115,17 +116,24 @@ fn run_compose(args: &Args) -> ExitCode {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    // Discover available templates and fragments from the live system.
-    let available_templates = templates::discover_templates(&args.template_dirs);
-    let available_fragments = templates::discover_fragments(&args.template_dirs);
+    // Discover available templates and fragments from the live system. Both the
+    // explicit `--template-dir` roots and the `--trust-dir` trust-store roots are
+    // searched: a trust-store directory holds the trusted templates an operator
+    // composes against.
+    let mut search_dirs = args.template_dirs.clone();
+    search_dirs.extend(args.trust_dirs.iter().cloned());
+    let available_templates = templates::discover_templates(&search_dirs);
+    let available_fragments = templates::discover_fragments(&search_dirs);
 
     if available_templates.is_empty() && available_fragments.is_empty() {
         eprintln!("kennel-compose: no templates or fragments found in the search path");
         eprintln!("  searched: ~/.config/kennel/templates/, /etc/kennel/templates/, /usr/lib/kennel/templates/");
-        for d in &args.template_dirs {
+        for d in args.template_dirs.iter().chain(&args.trust_dirs) {
             eprintln!("  searched: {}", d.display());
         }
-        eprintln!("  install kennel templates or use --template-dir to point at a template directory");
+        eprintln!(
+            "  install kennel templates or use --template-dir to point at a template directory"
+        );
         return ExitCode::from(2);
     }
 
@@ -141,8 +149,18 @@ fn run_compose(args: &Args) -> ExitCode {
     } else {
         eprintln!("Available templates:\n");
         for (i, t) in base_candidates.iter().enumerate() {
-            let marker = if t.name == "base-confined" { " (root)" } else { "" };
-            eprintln!("  {:>2}. {:<30} {}{}", i + 1, t.reference(), t.description, marker);
+            let marker = if t.name == "base-confined" {
+                " (root)"
+            } else {
+                ""
+            };
+            eprintln!(
+                "  {:>2}. {:<30} {}{}",
+                i + 1,
+                t.reference(),
+                t.description,
+                marker
+            );
         }
         eprintln!();
         write!(stdout, "Base template [1]: ").unwrap_or(());
@@ -151,7 +169,10 @@ fn run_compose(args: &Args) -> ExitCode {
         stdin.lock().read_line(&mut line).unwrap_or(0);
         let choice = line.trim();
         if choice.is_empty() {
-            base_candidates.first().map(|t| t.reference()).unwrap_or_else(|| "base-confined@v1".to_owned())
+            base_candidates
+                .first()
+                .map(|t| t.reference())
+                .unwrap_or_else(|| "base-confined@v1".to_owned())
         } else if let Ok(n) = choice.parse::<usize>() {
             if n >= 1 && n <= base_candidates.len() {
                 base_candidates[n - 1].reference()
@@ -174,7 +195,11 @@ fn run_compose(args: &Args) -> ExitCode {
             eprintln!("  {:>2}. {:<30} {}", i + 1, f.reference(), f.description);
         }
         eprintln!();
-        write!(stdout, "Include fragments (comma-separated numbers, or blank for none): ").unwrap_or(());
+        write!(
+            stdout,
+            "Include fragments (comma-separated numbers, or blank for none): "
+        )
+        .unwrap_or(());
         stdout.flush().unwrap_or(());
         let mut line = String::new();
         stdin.lock().read_line(&mut line).unwrap_or(0);
@@ -213,7 +238,9 @@ fn run_compose(args: &Args) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    emit_leaf(&leaf, args)
+    // Mode B composes from templates only — there is no probed workload, so the
+    // script-vs-binary distinction does not apply.
+    emit_leaf(&leaf, args, false)
 }
 
 /// Build a LeafPolicy from probe results with all-default (maximally restrictive)
@@ -241,7 +268,10 @@ fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> LeafP
 }
 
 /// Build a LeafPolicy from probe + interactive input.
-fn build_leaf_interactive(name: &str, probe_result: &probe::ProbeResult) -> Result<LeafPolicy, String> {
+fn build_leaf_interactive(
+    name: &str,
+    probe_result: &probe::ProbeResult,
+) -> Result<LeafPolicy, String> {
     let mut leaf = build_leaf_from_probe(name, probe_result);
 
     // Override template base interactively.
@@ -298,11 +328,17 @@ fn ask_capabilities(leaf: &mut LeafPolicy) -> Result<(), String> {
     }
 
     // Home write.
-    write!(stdout, "Home directory write path (e.g. ~/projects/myproj/**, blank for none): ")
-        .map_err(|e| e.to_string())?;
+    write!(
+        stdout,
+        "Home directory write path (e.g. ~/projects/myproj/**, blank for none): "
+    )
+    .map_err(|e| e.to_string())?;
     stdout.flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    stdin.lock().read_line(&mut line).map_err(|e| e.to_string())?;
+    stdin
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     let home_path = line.trim();
     if !home_path.is_empty() {
         let fs = leaf.fs.get_or_insert_with(FsLeaf::default);
@@ -373,7 +409,7 @@ fn populate_fs_from_probe(leaf: &mut LeafPolicy, probe_result: &probe::ProbeResu
 
 /// Serialise the LeafPolicy to TOML and write it. If templates are available,
 /// validate the output by feeding it through the compile pipeline.
-fn emit_leaf(leaf: &LeafPolicy, args: &Args) -> ExitCode {
+fn emit_leaf(leaf: &LeafPolicy, args: &Args, is_script: bool) -> ExitCode {
     // Validate the leaf's own structure first.
     if let Err(e) = leaf.validate() {
         eprintln!("kennel-compose: generated policy has structural errors: {e}");
@@ -391,7 +427,15 @@ fn emit_leaf(leaf: &LeafPolicy, args: &Args) -> ExitCode {
     };
 
     // Prepend a comment header (basic_toml doesn't emit comments).
-    let kind = if leaf.exec.is_some() { "probed" } else { "composed" };
+    let kind = if leaf.exec.is_some() {
+        if is_script {
+            "probed script"
+        } else {
+            "probed binary"
+        }
+    } else {
+        "composed"
+    };
     let header = format!(
         "# Generated by kennel-compose ({kind}).\n\
          # Review and tighten before use.\n\n"
@@ -420,7 +464,10 @@ fn ask_line(prompt: &str) -> Result<String, String> {
     write!(io::stdout(), "{prompt}").map_err(|e| e.to_string())?;
     io::stdout().flush().map_err(|e| e.to_string())?;
     let mut line = String::new();
-    io::stdin().lock().read_line(&mut line).map_err(|e| e.to_string())?;
+    io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
     Ok(line.trim().to_owned())
 }
 
@@ -466,10 +513,7 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
-    let name = positionals
-        .first()
-        .ok_or("missing kennel name")?
-        .clone();
+    let name = positionals.first().ok_or("missing kennel name")?.clone();
 
     let binary = if compose {
         if positionals.len() > 1 {
@@ -515,8 +559,7 @@ fn resolve_binary(raw: &str) -> Result<PathBuf, String> {
 
     // Relative path (contains `/` — e.g. `./run.sh`, `../scripts/app.py`).
     if raw.contains('/') {
-        return std::fs::canonicalize(path)
-            .map_err(|e| format!("{raw}: {e}"));
+        return std::fs::canonicalize(path).map_err(|e| format!("{raw}: {e}"));
     }
 
     // Bare name — search $PATH.

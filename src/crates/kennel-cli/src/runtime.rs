@@ -10,6 +10,11 @@ use kennel_lib_control::control::{self, Request, Response};
 use crate::{connect, send};
 
 /// `kennel stop <name>`
+///
+/// # Errors
+///
+/// Returns a message if the arguments are not exactly one `<name>`, the daemon
+/// cannot be reached, or the daemon reports an error stopping the kennel.
 pub fn stop(args: &[String]) -> Result<ExitCode, String> {
     let [name] = args else {
         return Err("usage: kennel stop <name>".to_owned());
@@ -33,6 +38,11 @@ pub fn stop(args: &[String]) -> Result<ExitCode, String> {
 }
 
 /// `kennel list`
+///
+/// # Errors
+///
+/// Returns a message if the daemon cannot be reached, sends an unexpected
+/// response, or reports an error for the list or mesh queries.
 pub fn list() -> Result<ExitCode, String> {
     let mut conn = connect()?;
     send(&conn, &Request::List, &[])?;
@@ -69,6 +79,11 @@ pub fn list() -> Result<ExitCode, String> {
 }
 
 /// `kennel daemon-reload`
+///
+/// # Errors
+///
+/// Returns a message if the daemon cannot be reached, sends an unexpected
+/// response, or reports an error while reloading.
 pub fn daemon_reload() -> Result<ExitCode, String> {
     let mut conn = connect()?;
     send(&conn, &Request::DaemonReload, &[])?;
@@ -108,8 +123,8 @@ fn print_mesh(providers: &[control::MeshProvider]) {
 /// kennel then capability name, with the expected shape and required/optional status.
 fn print_consumers(kennels: &[control::KennelInfo]) {
     println!(
-        "{:<32} {:<32} {:<16} {}",
-        "CONSUMER", "CAPABILITY", "SHAPE", "REQUIRED"
+        "{:<32} {:<32} {:<16} REQUIRED",
+        "CONSUMER", "CAPABILITY", "SHAPE"
     );
     let mut rows: Vec<(&str, &control::ConsumedCapability)> = Vec::new();
     for k in kennels {
@@ -125,6 +140,7 @@ fn print_consumers(kennels: &[control::KennelInfo]) {
 }
 
 /// Parse a spawn topology name.
+#[must_use]
 pub fn spawn_parent_ctx(name: &str) -> Option<u16> {
     name.strip_prefix("spawn-")?.split_once('-')?.0.parse().ok()
 }
@@ -132,6 +148,7 @@ pub fn spawn_parent_ctx(name: &str) -> Option<u16> {
 type Row<'a> = (&'a control::KennelInfo, &'static str, bool);
 
 /// Order the running kennels as a what-spawned-what tree.
+#[must_use]
 pub fn topology_rows(kennels: &[control::KennelInfo]) -> Vec<Row<'_>> {
     use std::collections::{BTreeMap, HashSet};
     let present: HashSet<u16> = kennels.iter().map(|k| k.ctx).collect();

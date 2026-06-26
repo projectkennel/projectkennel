@@ -24,10 +24,17 @@ use crate::{default_key_dir, is_valid_key_id, write_secret};
 ///
 /// `kennel keygen migrate [--dir DIR]` converts legacy raw-base64 key pairs to
 /// OpenSSH format in place.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid (unknown flag, bad key id,
+/// duplicate key id), if the target key already exists without `--force`, if the
+/// key directory cannot be created, or if `ssh-keygen` is missing or exits
+/// non-zero.
 pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
     // Sub-command dispatch: `keygen migrate` is separate.
     if args.first().is_some_and(|a| a == "migrate") {
-        return keygen_migrate(&args[1..]);
+        return keygen_migrate(args.get(1..).unwrap_or_default());
     }
 
     let mut key_id: Option<&str> = None;
@@ -80,12 +87,7 @@ pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
     // Invoke ssh-keygen: -t ed25519, -N "" (no passphrase), -C <key-id> (comment),
     // -f <path> (output path). The -q flag suppresses the randomart.
     let status = std::process::Command::new("ssh-keygen")
-        .args([
-            "-t", "ed25519",
-            "-N", "",
-            "-C", key_id,
-            "-f",
-        ])
+        .args(["-t", "ed25519", "-N", "", "-C", key_id, "-f"])
         .arg(&key_path)
         .arg("-q")
         .status()
@@ -137,8 +139,7 @@ fn keygen_migrate(args: &[String]) -> Result<ExitCode, String> {
         }
     }
     let dir = dir.unwrap_or_else(default_key_dir);
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
 
     let mut migrated = 0u32;
     for entry in entries.flatten() {
@@ -216,7 +217,7 @@ fn keygen_migrate(args: &[String]) -> Result<ExitCode, String> {
         }
 
         eprintln!("migrated: {key_id} → OpenSSH format");
-        migrated += 1;
+        migrated = migrated.saturating_add(1);
     }
 
     if migrated == 0 {
@@ -260,18 +261,19 @@ fn build_openssh_private(seed: &[u8], pubkey: &[u8; 32], comment: &str) -> Resul
     priv_section.extend_from_slice(&check_val.to_be_bytes()); // check2
     write_string(&mut priv_section, key_type);
     write_string(&mut priv_section, pubkey); // ed25519 public key
-    // ed25519 "private key" = seed ‖ pubkey (64 bytes)
+                                             // ed25519 "private key" = seed ‖ pubkey (64 bytes)
     let mut privkey = Vec::with_capacity(64);
     privkey.extend_from_slice(seed);
     privkey.extend_from_slice(pubkey);
     write_string(&mut priv_section, &privkey);
     write_string(&mut priv_section, comment.as_bytes());
     // Padding: 1, 2, 3, ... up to block size (8 for "none" cipher).
-    let block_size = 8;
-    let pad_len = block_size - (priv_section.len() % block_size);
+    let block_size = 8usize;
+    let pad_len = block_size.saturating_sub(priv_section.len() % block_size);
     let pad_len = if pad_len == block_size { 0 } else { pad_len };
     for i in 1..=pad_len {
-        priv_section.push(i as u8);
+        // `pad_len` is at most `block_size` (8), so the index fits in a `u8`.
+        priv_section.push(u8::try_from(i).unwrap_or(0));
     }
 
     // Assemble the full payload.
@@ -298,7 +300,11 @@ fn build_openssh_private(seed: &[u8], pubkey: &[u8; 32], comment: &str) -> Resul
 
 /// Write a length-prefixed SSH string (u32 big-endian length + bytes).
 fn write_string(buf: &mut Vec<u8>, data: &[u8]) {
-    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    // SSH strings are u32-length-prefixed. Every caller here passes a small,
+    // fixed-size field (key type, 32-byte key, short comment), so the length
+    // always fits in a `u32`; clamp defensively rather than truncate.
+    let len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
 }
 
@@ -319,6 +325,11 @@ struct Alloc {
 }
 
 /// `kennel subkennel <add|check> ...`
+///
+/// # Errors
+///
+/// Returns a message if no recognised sub-command (`add` or `check`) is given,
+/// or if the dispatched sub-command fails.
 pub fn subkennel(args: &[String]) -> Result<ExitCode, String> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "add" => subkennel_add(rest),
@@ -571,6 +582,13 @@ const AUDIT_STEMS: &[&str] = &[
 ];
 
 /// `kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]`
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid (unknown flag, missing flag
+/// value, bad kennel name, unknown `--resource`, unparseable `--since`
+/// duration), the system clock is before the Unix epoch, or an audit log file
+/// cannot be read.
 pub fn audit(args: &[String]) -> Result<ExitCode, String> {
     let mut kennel: Option<&str> = None;
     let mut resource: Option<&str> = None;
@@ -665,6 +683,11 @@ fn resource_stem(token: &str) -> Option<&'static str> {
 }
 
 /// Parse a human duration to seconds.
+///
+/// # Errors
+///
+/// Returns a message if the numeric part does not parse, or if the value times
+/// its unit multiplier overflows `u64`.
 pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let (num, mult) = [('s', 1u64), ('m', 60), ('h', 3_600), ('d', 86_400)]

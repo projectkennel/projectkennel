@@ -684,7 +684,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Record the mesh capabilities this kennel consumes, once its policy is loaded — the W6
+    /// Record the mesh capabilities this kennel consumes, once its policy is loaded. The
     /// idle-reap census (§7.13.6) and the consumer topology leg (`kennel list`) read this.
     fn note_consumes(&self, name: &str, entries: Vec<ConsumedEntry>) {
         let mut reg = self

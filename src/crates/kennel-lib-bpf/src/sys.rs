@@ -353,9 +353,10 @@ pub fn obj_get(path: &CStr) -> io::Result<OwnedFd> {
     owned_fd(ret)
 }
 
-/// Freeze a map (`BPF_MAP_FREEZE`): after this call, both userspace and BPF programs
-/// are prevented from updating the map. A map created with `BPF_F_RDONLY_PROG`
-/// already prevents BPF-side writes; freezing additionally prevents userspace writes.
+/// Freeze a map (`BPF_MAP_FREEZE`) so neither userspace nor BPF programs can update it.
+///
+/// A map created with `BPF_F_RDONLY_PROG` already prevents BPF-side writes; freezing
+/// additionally prevents userspace writes.
 ///
 /// # Errors
 ///
@@ -383,4 +384,3 @@ pub fn map_freeze(map: BorrowedFd<'_>) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
-

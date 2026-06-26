@@ -7,7 +7,7 @@
 
 use std::process::ExitCode;
 
-use kennel_cli::{wants_help, usage_of, COMMANDS};
+use kennel_cli::{usage_of, wants_help, COMMANDS};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use kennel_cli::{wants_help, usage_of, print_policy_help, POLICY_VERBS};
+use kennel_cli::{print_policy_help, usage_of, wants_help, POLICY_VERBS};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -52,4 +52,3 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         )),
     }
 }
-

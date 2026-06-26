@@ -7,7 +7,7 @@
 # │ This template encodes bubblewrap's plain --ro-bind /usr /usr posture: │
 # │ the complete host /usr is present (the unnarrowed bracket). Use this  │
 # │ only to compare posture against base-confined/base-flatpak, or as a  │
-# │ compatibility fallback for workloads that break on the W2 curated     │
+# │ compatibility fallback for workloads that break on the curated        │
 # │ base. Prefer base-confined for new work.                             │
 # └─────────────────────────────────────────────────────────────────────────┘
 #
@@ -20,7 +20,7 @@
 #   - Still runs under Kennel's non-optional invariants: Landlock, no_new_privs,
 #     setuid/setgid/setcap denial, binder gateway.
 #
-# See docs/design/04-trust-boundaries.md §4.2 and the W2 workstream.
+# See docs/design/04-trust-boundaries.md §4.2.
 # ============================================================================
 
 template_name = "base-bwrap"
@@ -118,6 +118,7 @@ deny = [
     "init_module", "finit_module", "delete_module",
     "personality",
 ]
+
 
 
 

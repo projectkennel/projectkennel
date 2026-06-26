@@ -15,7 +15,7 @@
 //! - **`default` is not `"allow"` once resolved.** Default-deny is structural (the
 //!   shim only contains what is bound in, §7.6.2); a resolved `default = "allow"`
 //!   would contradict that and is refused.
-//! - **`abstract` is `"deny"`, absent, or `"allow"` (W8 escape hatch).**
+//! - **`abstract` is `"deny"`, absent, or `"allow"` (escape hatch).**
 //!   Abstract-namespace sockets are denied by default by the always-on Landlock
 //!   scope (§7.6.3, ABI 6+). `abstract = "allow"` is accepted when the kennel
 //!   owns its `CLONE_NEWNET` (`net.mode` ≠ `"host"`) — the net-ns boundary is
@@ -58,6 +58,9 @@ use kennel_lib_policy::PolicyError;
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per hard problem
 /// (a malformed grant or an unhonourable `default`/`abstract`).
+// allow(too_many_lines): one cohesive validation pass over the `[unix]` section — the
+// per-grant checks share the accumulated diagnostics and cannot split without threading state.
+#[allow(clippy::too_many_lines)]
 pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
     let Some(unix) = &policy.unix else {
         return Ok(Vec::new());
@@ -308,7 +311,7 @@ mod tests {
         );
     }
 
-    // ─── W8: abstract = "allow" escape hatch ──────────────────────────────────
+    // ─── abstract = "allow" escape hatch ──────────────────────────────────
 
     /// Helper: build a policy with both `[unix]` and `[net]` sections.
     fn policy_with_net(unix: UnixSection, net_mode: Option<&str>) -> SourcePolicy {
@@ -331,7 +334,9 @@ mod tests {
         };
         let warnings = validate(&policy_with_net(unix, Some("constrained")))
             .expect("abstract=allow with constrained mode should compile");
-        assert!(warnings.iter().any(|w| w.contains("abstract = \"allow\" accepted")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("abstract = \"allow\" accepted")));
     }
 
     #[test]

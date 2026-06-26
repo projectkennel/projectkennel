@@ -106,14 +106,14 @@ id = "T1.13"
 family = 1
 scope = "in"
 title = "Abstract-socket namespace escape via host net mode"
-residual = "The combination abstract=allow + net.mode=host is a hard compile error (T1.13, W8). With an own net-ns the abstract namespace is empty by construction; Landlock ABI-6 scoping is defence-in-depth. On pre-ABI-6 kernels the net-ns boundary is the only control (warned at compile)."
+residual = "The combination abstract=allow + net.mode=host is a hard compile error (T1.13). With an own net-ns the abstract namespace is empty by construction; Landlock ABI-6 scoping is defence-in-depth. On pre-ABI-6 kernels the net-ns boundary is the only control (warned at compile)."
 
 [[threat]]
 id = "T1.14"
 family = 1
 scope = "in"
 title = "Host rootfs visibility: the unnarrowed /usr tree"
-residual = "The curated base (W2) binds only /usr/bin, /usr/sbin, /usr/lib, /usr/lib64, /usr/libexec, /usr/share — construction-by-absence (§4.2). /usr/local, /usr/src, /usr/include, /opt are absent by default. The accepted residual is the flatpak runtime surface: shared libraries, terminfo, zoneinfo, CAs, and the binary search path. Enforcement is at exec.allow|deny (Landlock FS_EXECUTE), not the view."
+residual = "The curated base binds only /usr/bin, /usr/sbin, /usr/lib, /usr/lib64, /usr/libexec, /usr/share — construction-by-absence (§4.2). /usr/local, /usr/src, /usr/include, /opt are absent by default. The accepted residual is the flatpak runtime surface: shared libraries, terminfo, zoneinfo, CAs, and the binary search path. Enforcement is at exec.allow|deny (Landlock FS_EXECUTE), not the view."
 
 # ── Family 2 — Posture degradation ──────────────────────────────────────────
 

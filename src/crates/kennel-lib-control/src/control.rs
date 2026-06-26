@@ -499,10 +499,7 @@ impl Response {
                     put_u32(&mut b, k.pid);
                     put_u8(&mut b, u8::from(k.running));
                     put_u8(&mut b, u8::from(k.attached));
-                    put_u32(
-                        &mut b,
-                        u32::try_from(k.consumed.len()).unwrap_or(u32::MAX),
-                    );
+                    put_u32(&mut b, u32::try_from(k.consumed.len()).unwrap_or(u32::MAX));
                     for c in &k.consumed {
                         put_str(&mut b, &c.name);
                         put_str(&mut b, &c.shape);

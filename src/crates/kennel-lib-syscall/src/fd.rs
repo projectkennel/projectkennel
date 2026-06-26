@@ -39,7 +39,7 @@ const SYS_OPENAT2: libc::c_long = 437;
 /// `O_PATH` fd.
 ///
 /// If any component of `path` is a symbolic link the call fails with `ELOOP`,
-/// closing the writable-bind-source symlink-aliasing class (W3, 0.4.0 F1
+/// closing the writable-bind-source symlink-aliasing class (0.4.0 F1
 /// residual). The returned fd is safe to use as `/proc/self/fd/N` — its target
 /// is the inode the path resolved to without following any symlink.
 ///
@@ -90,7 +90,8 @@ pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
     }
     // SAFETY: `openat2` returned a non-negative descriptor that we are the
     // sole owner of; wrapping it transfers that ownership for RAII close.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+    let fd = RawFd::try_from(fd).map_err(|_| io::Error::other("openat2 fd out of range"))?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 // ─── FD flag helpers ─────────────────────────────────────────────────────────
@@ -201,7 +202,7 @@ mod tests {
         );
     }
 
-    // ─── W3: open_no_symlinks (openat2 RESOLVE_NO_SYMLINKS) ──────────────────
+    // ─── open_no_symlinks (openat2 RESOLVE_NO_SYMLINKS) ──────────────────
 
     #[test]
     fn open_no_symlinks_succeeds_on_a_real_file() {
