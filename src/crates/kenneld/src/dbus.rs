@@ -63,6 +63,7 @@ const OUTBOUND_DEPTH: usize = 32;
 /// [`spawn_pipe_writer`]) and shared by the node-0 handlers; pipe reader threads feed its inbound
 /// queues via [`DbusRelay::deliver_inbound`].
 pub trait MeshTransactor: Send + Sync {
+    /// Transact a message with the standing dbus-broker on the mesh bus.
     fn transact_broker(&self, code: u32, data: &[u8]) -> std::io::Result<Vec<u8>>;
 }
 
@@ -152,6 +153,8 @@ impl DbusRelay {
         }
     }
 
+    /// Construct a new brokered D-Bus relay that forwards messages to the standing
+    /// dbus-broker via the given MeshTransactor.
     #[must_use]
     pub fn new_brokered(
         transactor: std::sync::Arc<dyn MeshTransactor>,

@@ -1281,6 +1281,7 @@ pub fn run_kennel<P, L>(
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{}`", req.kennel));
+    let mut mesh_bus_guard = MeshBusGuard::new(shared);
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
         Err(resp) => {
@@ -1685,6 +1686,7 @@ pub fn run_kennel<P, L>(
                 let key = p.key.as_deref();
                 match shared.ensure_mesh_bus(tier, &p.name, key) {
                     Ok(device_path) => {
+                        mesh_bus_guard.push(tier, p.name.clone(), p.key.clone());
                         view.binds.push(kennel_lib_spawn::plan::BindMount {
                             source: device_path,
                             target: std::path::PathBuf::from(&p.endpoint),
@@ -1730,6 +1732,7 @@ pub fn run_kennel<P, L>(
             for (tier, name, key, at) in &mesh_consumer_binds {
                 match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
                     Ok(device_path) => {
+                        mesh_bus_guard.push(*tier, name.clone(), key.clone());
                         view.binds.push(kennel_lib_spawn::plan::BindMount {
                             source: device_path,
                             target: std::path::PathBuf::from(at),
@@ -2357,6 +2360,44 @@ fn verify_workload_digest(
             "workload {} sha256 {digest} is not in the policy's accepted set",
             resolved.display()
         ))
+    }
+}
+
+struct MeshBusGuard<'a, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    shared: &'a Shared<P, L>,
+    buses: Vec<(crate::catalogue::Tier, String, Option<String>)>,
+}
+
+impl<'a, P, L> MeshBusGuard<'a, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn new(shared: &'a Shared<P, L>) -> Self {
+        Self {
+            shared,
+            buses: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, tier: crate::catalogue::Tier, name: String, key: Option<String>) {
+        self.buses.push((tier, name, key));
+    }
+}
+
+impl<'a, P, L> Drop for MeshBusGuard<'a, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        for (tier, name, key) in &self.buses {
+            self.shared.release_mesh_bus(*tier, name, key.as_deref());
+        }
     }
 }
 
