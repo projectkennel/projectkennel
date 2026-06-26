@@ -36,6 +36,7 @@ pub mod etc;
 pub mod inbound;
 pub mod inet;
 pub mod mesh;
+pub mod mesh_bus;
 pub mod policy;
 pub mod prompt;
 pub mod proxy;

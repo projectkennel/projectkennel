@@ -575,6 +575,31 @@ impl Connection {
         self.write_only(&write)
     }
 
+    /// Reply to a received transaction with a single binder handle (a
+    /// `BINDER_TYPE_HANDLE` object), then free its inbound buffer. The kernel
+    /// translates `handle` from this endpoint's handle table into the original
+    /// caller's. Used by the mesh bus to hand a provider's node to a consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn reply_with_handle(&self, incoming: &Incoming, handle: u32) -> io::Result<()> {
+        let object = proto::flat_binder_object_handle(handle);
+        let offsets: [u64; 1] = [0]; // the single object sits at offset 0 in `object`
+        let td = TransactionData {
+            flags: 0, // no TF_ACCEPT_FDS — this is a handle, not an fd
+            data_size: len_u64(object.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: object.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, true, &td);
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        self.write_only(&write)
+    }
+
     /// Extract the fd from a `BINDER_TYPE_FD` reply, then free the reply buffer.
     fn take_fd(&self, reply: TransactionData) -> io::Result<OwnedFd> {
         let guard = BufferGuard::new(self, reply.buffer);

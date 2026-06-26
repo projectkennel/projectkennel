@@ -742,15 +742,39 @@ fn svc_connect_handoff(
 ) -> Reply {
     use kennel_lib_policy::settled::Shape;
 
-    if sel.shape != Shape::AfUnix {
-        return emit_svc_connect(
-            writer,
-            incoming,
-            ctx,
-            name,
-            Outcome::Error,
-            status::UNAVAILABLE,
-        );
+    match sel.shape {
+        Shape::AfUnix => {} // handled below
+        Shape::DbusName => {
+            // The dbus-name handoff (W1 Part B): the consumer's filter set was pushed to the
+            // dbus-broker at construction time (REGISTER_CONSUMER). The SVC_CONNECT reply is
+            // OK with no attached object — the IDBus allow-set is already widened.
+            writer.emit(
+                &Event::new(
+                    "binder.svc-connect",
+                    Resource::Binder,
+                    Outcome::Allow,
+                    Source::Kenneld,
+                )
+                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+                .field("name", Value::untrusted(name.to_owned()))
+                .field("provider", Value::untrusted(sel.provider.clone()))
+                .field("shape", Value::untrusted("dbus-name".to_owned()))
+                .field("ctx", Value::Uint(u64::from(ctx))),
+            );
+            return Reply::Data(kennel_lib_binder::service::svc_connect::encode_reply(status::OK));
+        }
+        Shape::BinderConnector => {
+            // The binder-connector handoff is mediated on the mesh bus, not the per-kennel
+            // bus. A SVC_CONNECT here is a programming error by the facade — deny.
+            return emit_svc_connect(
+                writer,
+                incoming,
+                ctx,
+                name,
+                Outcome::Error,
+                status::UNAVAILABLE,
+            );
+        }
     }
     // The host rendezvous socket: kenneld's derived directory + the provider's policy endpoint leaf,
     // the same inode bound into the provider's view (§7.13.4b). A plain connect, the §4.3 fd-broker.

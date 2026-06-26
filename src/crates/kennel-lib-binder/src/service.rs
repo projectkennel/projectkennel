@@ -685,3 +685,335 @@ pub mod svc_connect {
         }
     }
 }
+
+/// The mesh bus wire protocol: the `ADD_SERVICE` and `SVC_CONNECT` verbs spoken on a **mesh
+/// binderfs instance** (the binder analogue of the `af-unix` rendezvous directory, §7.13.4a).
+///
+/// The mesh bus reuses the per-kennel [`verb::ADD_SERVICE`] and [`verb::SVC_CONNECT`] codes but
+/// with a different data layout: on the mesh, `ADD_SERVICE` carries a binder node alongside the
+/// name (sent via [`crate::client::Connection::transact_node`]; the node arrives as a translated
+/// `BINDER_TYPE_HANDLE` for the context manager), and `SVC_CONNECT`'s `OK` reply carries the
+/// provider's handle as a `BINDER_TYPE_HANDLE` object (via [`crate::ctxmgr::Reply::Handle`]).
+///
+/// The name is the `endpoint` from the provider's `[[provides]]` (the public capability
+/// identifier, e.g. `org.projectkennel.dbus-broker`).
+pub mod mesh {
+    /// The hard upper bound on a mesh service name, same as [`super::svc_connect::SVC_NAME_MAX_BYTES`].
+    pub const MESH_NAME_MAX_BYTES: usize = 255;
+
+    /// Encode a mesh `ADD_SERVICE` request data prefix: the bare service name.
+    ///
+    /// The caller sends this via [`crate::client::Connection::transact_node`], which appends the
+    /// binder node object after the name bytes; the handler extracts both with
+    /// [`decode_add_service`].
+    #[must_use]
+    pub fn encode_add_service(name: &str) -> Vec<u8> {
+        name.as_bytes().to_vec()
+    }
+
+    /// Decode a mesh `ADD_SERVICE` request: extract the service name and the trailing binder
+    /// handle (the provider's node, translated by the driver from `BINDER_TYPE_BINDER` to
+    /// `BINDER_TYPE_HANDLE`).
+    ///
+    /// The data layout is `[name: UTF-8 | padding | flat_binder_object(24)]`. The name is
+    /// everything before the last `FLAT_BINDER_OBJECT_SIZE` bytes (minus alignment padding).
+    /// `None` for a short, empty, oversized, or non-UTF-8 name, or a missing/invalid handle
+    /// object (all untrusted, all fail closed).
+    #[must_use]
+    pub fn decode_add_service(data: &[u8]) -> Option<(&str, u32)> {
+        use crate::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+
+        // The object sits at the end; everything before it (minus padding) is the name.
+        let obj_start = data.len().checked_sub(FLAT_BINDER_OBJECT_SIZE)?;
+        let handle = flat_binder_object_handle_value(data.get(obj_start..)?)?;
+
+        // The name ends where alignment padding begins (round up to 8-byte boundary).
+        // Walk backwards from obj_start to find the last non-zero byte before the object,
+        // or use the fact that transact_node pads the name to 8-byte alignment.
+        // The name bytes are everything before the padding; find the padding start.
+        let name_end = (0..obj_start)
+            .rev()
+            .find(|&i| data[i] != 0)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if name_end == 0 || name_end > MESH_NAME_MAX_BYTES {
+            return None;
+        }
+        let name = core::str::from_utf8(data.get(..name_end)?).ok()?;
+        Some((name, handle))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::proto::{
+            flat_binder_object_binder, BINDER_TYPE_HANDLE, FLAT_BINDER_OBJECT_SIZE,
+        };
+
+        /// Build a mock `ADD_SERVICE` payload as `transact_node` would lay it out:
+        /// `[name bytes | padding to 8-byte alignment | flat_binder_object]`.
+        /// The driver translates the BINDER_TYPE_BINDER to BINDER_TYPE_HANDLE for the
+        /// context manager, so we hand-build the translated version.
+        fn mock_add_service_data(name: &str, handle: u32) -> Vec<u8> {
+            let mut buf = name.as_bytes().to_vec();
+            let obj_off = buf.len().next_multiple_of(8);
+            buf.resize(obj_off, 0); // padding
+            // Build a BINDER_TYPE_HANDLE object (the translated form).
+            let mut obj = flat_binder_object_binder(0, 0, 0);
+            // Overwrite the type tag to BINDER_TYPE_HANDLE (as the driver would).
+            obj[..4].copy_from_slice(&BINDER_TYPE_HANDLE.to_ne_bytes());
+            // Set the handle in the union low (offset 8 within the object).
+            obj[8..12].copy_from_slice(&handle.to_ne_bytes());
+            buf.extend_from_slice(&obj);
+            buf
+        }
+
+        #[test]
+        fn add_service_round_trips() {
+            let data = mock_add_service_data("org.projectkennel.dbus-broker", 42);
+            let (name, handle) = decode_add_service(&data).expect("decode");
+            assert_eq!(name, "org.projectkennel.dbus-broker");
+            assert_eq!(handle, 42);
+        }
+
+        #[test]
+        fn add_service_short_name() {
+            let data = mock_add_service_data("x", 7);
+            let (name, handle) = decode_add_service(&data).expect("decode");
+            assert_eq!(name, "x");
+            assert_eq!(handle, 7);
+        }
+
+        #[test]
+        fn add_service_rejects_too_short() {
+            // Shorter than a flat_binder_object — no room for name + object.
+            assert!(decode_add_service(&[0u8; FLAT_BINDER_OBJECT_SIZE - 1]).is_none());
+        }
+
+        #[test]
+        fn add_service_rejects_no_name() {
+            // Just a binder object, no name bytes at all.
+            let obj = [0u8; FLAT_BINDER_OBJECT_SIZE];
+            assert!(decode_add_service(&obj).is_none());
+        }
+
+        #[test]
+        fn add_service_rejects_bad_handle_type() {
+            let mut data = mock_add_service_data("test-svc", 1);
+            // Corrupt the type tag of the trailing object.
+            let obj_start = data.len() - FLAT_BINDER_OBJECT_SIZE;
+            data[obj_start] ^= 0xFF;
+            assert!(decode_add_service(&data).is_none());
+        }
+    }
+}
+
+/// The `dbus-broker@v1` control-channel wire protocol: the verbs `kenneld` speaks on the
+/// broker's acquired node handle (the `binder-connector` from Part A, §7.13.4a).
+///
+/// `kenneld` pushes per-consumer D-Bus filter sets via `REGISTER_CONSUMER` at consumer
+/// construction, and clears them via `UNREGISTER_CONSUMER` at teardown. The broker enforces
+/// the filter set on every relayed D-Bus frame.
+///
+/// **Wire layout (all big-endian):**
+///
+/// `REGISTER_CONSUMER`: `[consumer_id: u16 | bus: u8 | n_talk: u16 | talk₁_len: u16 | talk₁ |
+///   ... | n_call: u16 | call₁_len: u16 | call₁ | ... | n_broadcast: u16 | ... | n_own: u16 |
+///   ... | n_deny_talk: u16 | ...]`
+///
+/// `UNREGISTER_CONSUMER`: `[consumer_id: u16 | bus: u8]`
+///
+/// The `consumer_id` is the kennel's context number (`ctx: u16`). The `bus` byte selects
+/// session (0) or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
+pub mod broker {
+    /// Register a consumer's D-Bus filter set with the broker.
+    pub const REGISTER_CONSUMER: u32 = 1;
+    /// Unregister a consumer (drop its filter set).
+    pub const UNREGISTER_CONSUMER: u32 = 2;
+    /// Relay a D-Bus frame for a registered consumer.
+    pub const RELAY_FRAME: u32 = 3;
+
+    /// Encode a `REGISTER_CONSUMER` request.
+    #[must_use]
+    pub fn encode_register(
+        consumer_id: u16,
+        bus: u8,
+        talk: &[String],
+        call: &[String],
+        broadcast: &[String],
+        own: &[String],
+        deny_talk: &[String],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&consumer_id.to_be_bytes());
+        out.push(bus);
+        put_string_list(&mut out, talk);
+        put_string_list(&mut out, call);
+        put_string_list(&mut out, broadcast);
+        put_string_list(&mut out, own);
+        put_string_list(&mut out, deny_talk);
+        out
+    }
+
+    /// A decoded `REGISTER_CONSUMER` request.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct RegisterConsumer {
+        pub consumer_id: u16,
+        pub bus: u8,
+        pub talk: Vec<String>,
+        pub call: Vec<String>,
+        pub broadcast: Vec<String>,
+        pub own: Vec<String>,
+        pub deny_talk: Vec<String>,
+    }
+
+    /// Decode a `REGISTER_CONSUMER` request. `None` for malformed input.
+    #[must_use]
+    pub fn decode_register(data: &[u8]) -> Option<RegisterConsumer> {
+        let mut cur = data;
+        let id_bytes = take(&mut cur, 2)?;
+        let consumer_id = u16::from_be_bytes([id_bytes[0], id_bytes[1]]);
+        let &bus = take(&mut cur, 1)?.first()?;
+        let talk = take_string_list(&mut cur)?;
+        let call = take_string_list(&mut cur)?;
+        let broadcast = take_string_list(&mut cur)?;
+        let own = take_string_list(&mut cur)?;
+        let deny_talk = take_string_list(&mut cur)?;
+        if !cur.is_empty() {
+            return None; // trailing garbage
+        }
+        Some(RegisterConsumer {
+            consumer_id,
+            bus,
+            talk,
+            call,
+            broadcast,
+            own,
+            deny_talk,
+        })
+    }
+
+    /// Encode an `UNREGISTER_CONSUMER` request: `[consumer_id: u16 | bus: u8]`.
+    #[must_use]
+    pub fn encode_unregister(consumer_id: u16, bus: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(3);
+        out.extend_from_slice(&consumer_id.to_be_bytes());
+        out.push(bus);
+        out
+    }
+
+    /// Decode an `UNREGISTER_CONSUMER` request into `(consumer_id, bus)`.
+    #[must_use]
+    pub fn decode_unregister(data: &[u8]) -> Option<(u16, u8)> {
+        let [a, b, bus] = data else { return None };
+        Some((u16::from_be_bytes([*a, *b]), *bus))
+    }
+
+    /// Encode a `RELAY_FRAME` request: `[consumer_id: u16 | bus: u8 | frame bytes]`.
+    #[must_use]
+    pub fn encode_relay(consumer_id: u16, bus: u8, frame: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(frame.len().saturating_add(3));
+        out.extend_from_slice(&consumer_id.to_be_bytes());
+        out.push(bus);
+        out.extend_from_slice(frame);
+        out
+    }
+
+    /// Decode a `RELAY_FRAME` request into `(consumer_id, bus, frame)`.
+    #[must_use]
+    pub fn decode_relay(data: &[u8]) -> Option<(u16, u8, &[u8])> {
+        let [a, b, bus, frame @ ..] = data else {
+            return None;
+        };
+        Some((u16::from_be_bytes([*a, *b]), *bus, frame))
+    }
+
+    fn put_string_list(out: &mut Vec<u8>, list: &[String]) {
+        let n = u16::try_from(list.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&n.to_be_bytes());
+        for s in list.iter().take(usize::from(n)) {
+            let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
+        }
+    }
+
+    fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = cur.split_at_checked(n)?;
+        *cur = tail;
+        Some(head)
+    }
+
+    fn take_string_list(cur: &mut &[u8]) -> Option<Vec<String>> {
+        let n_bytes = take(cur, 2)?;
+        let n = u16::from_be_bytes([n_bytes[0], n_bytes[1]]);
+        let mut list = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            let len_bytes = take(cur, 2)?;
+            let len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]);
+            let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
+            list.push(s.to_owned());
+        }
+        Some(list)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn register_round_trips() {
+            let talk = vec!["org.freedesktop.portal.Desktop".to_owned()];
+            let call = vec!["org.freedesktop.portal.FileChooser=OpenFile".to_owned()];
+            let broadcast = vec![];
+            let own = vec![];
+            let deny_talk = vec!["org.freedesktop.secrets".to_owned()];
+            let bytes = encode_register(42, 0, &talk, &call, &broadcast, &own, &deny_talk);
+            let got = decode_register(&bytes).expect("decode");
+            assert_eq!(got.consumer_id, 42);
+            assert_eq!(got.bus, 0);
+            assert_eq!(got.talk, talk);
+            assert_eq!(got.call, call);
+            assert!(got.broadcast.is_empty());
+            assert!(got.own.is_empty());
+            assert_eq!(got.deny_talk, deny_talk);
+        }
+
+        #[test]
+        fn register_rejects_trailing_garbage() {
+            let bytes = encode_register(1, 0, &[], &[], &[], &[], &[]);
+            let mut bad = bytes.clone();
+            bad.push(0xFF);
+            assert!(decode_register(&bad).is_none());
+        }
+
+        #[test]
+        fn register_rejects_short() {
+            assert!(decode_register(&[]).is_none());
+            assert!(decode_register(&[0, 1]).is_none()); // missing bus + lists
+        }
+
+        #[test]
+        fn unregister_round_trips() {
+            assert_eq!(decode_unregister(&encode_unregister(7, 1)), Some((7, 1)));
+            assert!(decode_unregister(&[0, 1]).is_none()); // too short
+            assert!(decode_unregister(&[0, 1, 0, 0]).is_none()); // too long
+        }
+
+        #[test]
+        fn relay_round_trips() {
+            let frame = b"hello D-Bus";
+            let bytes = encode_relay(99, 0, frame);
+            let (id, bus, got_frame) = decode_relay(&bytes).expect("decode");
+            assert_eq!(id, 99);
+            assert_eq!(bus, 0);
+            assert_eq!(got_frame, frame);
+        }
+
+        #[test]
+        fn relay_rejects_short() {
+            assert!(decode_relay(&[]).is_none());
+            assert!(decode_relay(&[0, 1]).is_none()); // missing bus
+        }
+    }
+}
