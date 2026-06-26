@@ -1752,6 +1752,11 @@ pub fn run_kennel<P, L>(
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
+    // Capture the D-Bus rules before spec consumes dbus — we'll push them to the
+    // dbus-broker's control node via REGISTER_CONSUMER after the kennel is running.
+    let dbus_session_rules = dbus.session.as_ref().map(|p| p.rules.clone());
+    let dbus_system_rules = dbus.system.as_ref().map(|p| p.rules.clone());
+
     let mut spec = crate::Spec {
         id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -1895,6 +1900,28 @@ pub fn run_kennel<P, L>(
     let pid = kennel.id();
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
+
+    // Push the consumer's D-Bus filter set to the dbus-broker (W1 Part C).
+    // Best-effort: a missing broker or failed push is logged, not fatal — the consumer's
+    // DBUS_* verbs will be denied by the broker until re-registered.
+    if let Some(ref rules) = dbus_session_rules {
+        if let Err(e) = shared.register_dbus_consumer(
+            ctx,
+            kennel_lib_binder::service::dbus::SESSION,
+            rules,
+        ) {
+            eprintln!("kenneld: dbus-broker session registration for ctx={ctx}: {e}");
+        }
+    }
+    if let Some(ref rules) = dbus_system_rules {
+        if let Err(e) = shared.register_dbus_consumer(
+            ctx,
+            kennel_lib_binder::service::dbus::SYSTEM,
+            rules,
+        ) {
+            eprintln!("kenneld: dbus-broker system registration for ctx={ctx}: {e}");
+        }
+    }
     // Hard-reaper race close (§7.12.7): a spawned sibling's construction is async to the SPAWN reply,
     // so the requester can die — and its `reap_children` run — while this build is still in flight,
     // before the cgroup exists for the reaper to `cgroup.kill`. The requester's `SpawnRuntime::Drop`
@@ -2029,6 +2056,10 @@ pub fn run_kennel<P, L>(
     // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
     // nothing, including every spawned kennel itself, which is depth-1).
     shared.reap_children(ctx);
+    // Best-effort: unregister this consumer's D-Bus filter sets from the broker (W1 Part C).
+    // A missing broker or already-gone entry is harmless (the broker returns NOT_FOUND).
+    shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SESSION);
+    shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SYSTEM);
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
