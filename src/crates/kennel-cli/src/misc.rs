@@ -1,7 +1,6 @@
 //! Miscellaneous verbs: `keygen`, `subkennel`, `audit`.
 //!
-//! These are the verbs that belong to `kennel-misc` — smaller verbs without
-//! their own binary yet. They graduate out as they grow (W10 roadmap).
+//! The smaller operator verbs that do not fit the run/policy/oci groups.
 
 use std::io;
 use std::os::unix::fs::DirBuilderExt;

@@ -1,11 +1,9 @@
-//! `kennel-host` — the transition monolith binary.
+//! `kennel-host` — the host-side execution unit of the `kennel` CLI.
 //!
-//! TRANSITION (W10): this binary is kept during the 0.5.0 cycle so existing scripts and
-//! documentation that reference `kennel-host` continue to work. The real work now lives in
-//! the four sub-binaries (`kennel-run`, `kennel-policy`, `kennel-oci`, `kennel-misc`), all
-//! backed by the `kennel_cli` library crate.
-//!
-//! This binary dispatches all verbs, exactly as the pre-split monolith did.
+//! Installed at `/usr/libexec/kennel/host` and reached through the `kennel` shim (which
+//! detects host-vs-cage context). Dispatches every operator verb — `run`, `attach`, `stop`,
+//! `list`, `review`, `release`, `daemon-reload`, `policy`, `oci`, `keygen`, `subkennel`,
+//! `audit` — over the `kennel_cli` library crate.
 
 #![forbid(unsafe_code)]
 

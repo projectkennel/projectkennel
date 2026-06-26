@@ -1,7 +1,6 @@
 //! Runtime verbs that talk to the daemon: `stop`, `list`, `daemon-reload`.
 //!
-//! These are the verbs that belong to `kennel-run` alongside `run`, `attach`,
-//! `review`, and `release`.
+//! The daemon-facing runtime verbs, alongside `run`, `attach`, `review`, and `release`.
 
 use std::process::ExitCode;
 
