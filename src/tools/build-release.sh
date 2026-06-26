@@ -86,8 +86,10 @@ build_arch() {
 	KENNEL_PROFILE=release RUSTFLAGS="-C target-feature=+crt-static" \
 		"$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
 		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim
-	# The privhelper LAST and with its feature, so its build is the bpf-egress one
-	# (a plain workspace build would clobber it; see 08-as-built-notes §8.3).
+	# The privhelper package, with bpf-egress so its kennel-privhelper-bpf binary builds (the
+	# feature embeds the cgroup egress programs, needing clang). One package build emits all four
+	# binaries — the factory and the net/mounts/bpf sub-helpers. Built separately from kenneld so
+	# embed-programs is not unified onto kenneld's kennel-lib-bpf.
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
 		-p kennel-privhelper --features bpf-egress
 
@@ -111,8 +113,9 @@ glibc ${glibc:-unknown}, so the target host needs a glibc at least that new.
 ## Install
     sudo ./install.sh
 
-Installs the binaries under /usr/libexec/kennel (the privhelper setuid-root), the
-vendor config under /usr/lib/kennel, the per-user systemd units, the AppArmor userns
+Installs the binaries under /usr/libexec/kennel (the privhelper factory file-capped
+cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin, with its capability-split sub-helpers),
+the vendor config under /usr/lib/kennel, the per-user systemd units, the AppArmor userns
 grant, the maintainer trust-store key, and the signed reference templates under
 /etc/kennel/templates. Relocate with --prefix DIR; preview with --dry-run.
 
@@ -124,7 +127,7 @@ grant, the maintainer trust-store key, and the signed reference templates under
 
 ## Verify (from this unpacked directory, BEFORE installing)
     sha256sum -c SHA256SUMS                       # every shipped file, incl. the trust key
-    ls -l /usr/libexec/kennel/kennel-privhelper   # after install: expect -rwsr-xr-x root root
+    getcap /usr/libexec/kennel/kennel-privhelper  # after install: cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin
 
 Contents: install.sh, bin/ (every binary, flat), dist/ (config, systemd, apparmor,
 threats, vendor), keys/*.pub, templates/<name>/, fragments/<name>/, man/, SHA256SUMS.

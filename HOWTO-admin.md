@@ -6,9 +6,10 @@ upgrades. For authoring and running policies as a user, see
 [HOWTO.md](HOWTO.md). Reference detail is in the man pages
 (`man kenneld`, `man system.toml`, `man subkennel`) and `docs/`.
 
-The privilege model in one line: **one** privileged component
-(`kennel-privhelper`, setuid-root, file-caps not sudo), bounded to address setup
-and the kennel-construction operation; kenneld and everything else run as the
+The privilege model in one line: **one** privileged factory
+(`kennel-privhelper`, file-capped not sudo) plus its narrow single-capability
+sub-helpers, bounded to the kennel-construction operation and a few host-context
+steps; kenneld and everything else run as the
 user. See [docs/architecture/01-process-model.md](docs/architecture/01-process-model.md).
 
 ---
@@ -41,13 +42,15 @@ root-owned `/etc/kennel` skeleton. Useful flags (`./install.sh --help`):
 Verify the result:
 
 ```sh
-ls -l /usr/libexec/kennel/kennel-privhelper      # expect -rwsr-xr-x root root
+getcap /usr/libexec/kennel/kennel-privhelper     # expect cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin=ep
 sha256sum -c SHA256SUMS                           # in a release tarball
 ```
 
-The eleven installed binaries: `kenneld`, `kennel`, `kennel-akc`,
+The fourteen installed binaries: `kenneld`, `kennel`, `kennel-akc`,
 `host-netproxy`, `host-inetd`, `facade-socks5`, `facade-client`,
-`facade-afunix`, `facade-ssh`, `kennel-bin-init`, `kennel-privhelper`. kenneld
+`facade-afunix`, `facade-ssh`, `kennel-bin-init`, `kennel-privhelper`, and the
+factory's three single-capability sub-helpers `kennel-privhelper-net`,
+`kennel-privhelper-bpf`, `kennel-privhelper-mounts`. kenneld
 resolves the helpers it forks by absolute path from the config cascade (§6), so
 each must be present where `system.toml` says. Each has a man page (`man
 host-inetd`, etc.).

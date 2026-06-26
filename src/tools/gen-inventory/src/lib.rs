@@ -25,6 +25,9 @@ pub mod render;
 pub mod sloc;
 
 /// The three trusted binaries whose dependency closure defines the runtime TCB.
+///
+/// The privhelper's capability-split sub-helpers are extra binaries of the `kennel-privhelper`
+/// crate, so their code is counted within it.
 pub const TCB_ROOTS: [&str; 3] = ["kenneld", "kennel-privhelper", "kennel-bin-init"];
 
 /// One crate's mechanical facts.

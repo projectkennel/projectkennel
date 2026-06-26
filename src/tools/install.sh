@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Project Kennel installer.
 #
-# Installs the runtime binaries, the setuid privhelper, the vendor config, the
+# Installs the runtime binaries, the capability-gated privhelper, the vendor config, the
 # per-user systemd units, the AppArmor userns grant, the /etc/kennel skeleton,
 # the maintainer trust-store key, and the signed reference templates. Two halves:
 #
 #   1. System install (root): all binaries under <libexec> (default
 #      /usr/libexec/kennel, the documented non-PATH helper location, 07-paths.md),
-#      the privhelper setuid-root, the vendor deployment config under
+#      the privhelper factory file-capped (cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin)
+#      with its capability-split sub-helpers, the vendor deployment config under
 #      /usr/lib/kennel, the systemd *user* units, the AppArmor profile, and the
 #      root-owned /etc/kennel directory. Run with sudo.
 #   2. Per-user enable (each user, unprivileged): `systemctl --user enable --now
@@ -138,15 +139,49 @@ install_binaries() {
 	for f in "$bindir"/*;          do [ -f "$f" ] && run install -m 0755 "$f" "$libexec/$(basename "$f")"; done
 	for f in "$pkg_root/facades"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$facades_dir/$(basename "$f")"; done
 	for f in "$pkg_root/pathbin"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$pathbin_dir/$(basename "$f")"; done
-	# The privhelper: setuid root (mode 4755, owner root). This is the one
-	# privilege boundary; everything else runs as the user.
+	# The privhelper factory: file capabilities cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin.
+	# The identity caps write the kennel's uid/gid maps; cap_sys_admin is what the kernel requires
+	# to write a userns map that maps host uid 0 (the `0 0 1` line giving the kennel a real uid 0
+	# for its binderfs and root-owned view) — the map-write gate checks CAP_SYS_ADMIN over the new
+	# namespace. The namespace/view/binderfs work is userns-scoped, and the host-context steps
+	# (host-lo mirror, egress BPF, exclusive over-mount) are delegated to the capability-split
+	# sub-helpers, so cap_net_admin/cap_bpf/cap_perfmon never ride the factory. Where the filesystem
+	# cannot carry file capabilities (no xattr support), fall back to setuid-root.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper" "$libexec/kennel-privhelper"
-	run chmod 4755 "$libexec/kennel-privhelper"
+	if setcap cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin+ep "$libexec/kennel-privhelper" 2>/dev/null; then
+		echo "   kennel-privhelper: file caps cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin (no setuid)"
+	else
+		echo "   kennel-privhelper: file caps unsupported here — setuid-root fallback" >&2
+		run chmod 4755 "$libexec/kennel-privhelper"
+	fi
+	# The bind-mirror network sub-helper: NOT setuid — it carries the single file capability
+	# cap_net_admin, the only privilege its one scoped op (add/remove a kennel's host-lo
+	# loopback address) needs. The main privhelper execs it only when a policy binds mirrored
+	# ports, so the common factory holds no network capability.
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-net" "$libexec/kennel-privhelper-net"
+	run setcap cap_net_admin+ep "$libexec/kennel-privhelper-net"
+	# The host-mode egress sub-helper: cap_bpf (load), cap_net_admin (cgroup-network attach), and
+	# cap_perfmon (the cgroup-sockaddr programs read kernel context, which the verifier gates on
+	# CAP_PERFMON under kernel.unprivileged_bpf_disabled). The main privhelper execs it only for
+	# net.mode=host, so these stay off the common factory.
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-bpf" "$libexec/kennel-privhelper-bpf"
+	run setcap cap_bpf,cap_net_admin,cap_perfmon+ep "$libexec/kennel-privhelper-bpf"
+	# The exclusive-bind sub-helper: cap_sys_admin (the host-mount-namespace over-mount that
+	# shadows an fs.exclusive path). The main privhelper execs it only for a policy with
+	# exclusive binds, so the near-root capability stays off the common factory.
+	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-mounts" "$libexec/kennel-privhelper-mounts"
+	run setcap cap_sys_admin+ep "$libexec/kennel-privhelper-mounts"
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is
 	# NOT setuid: it gains uid 0 only inside the kennel's user namespace.
 	run install -m 0755 -o root -g root "$bindir/kennel-bin-init" "$libexec/kennel-bin-init"
+	# Load the binder kernel module the factory's per-kennel binderfs needs — now, and on every
+	# boot via modules-load.d. The factory does not modprobe at runtime (that needs CAP_SYS_MODULE,
+	# which the file-capability factory does not carry). Best-effort: a host with binder built-in
+	# already lists it; a genuinely binder-less host fails construction later with a clear error.
+	modprobe binder_linux 2>/dev/null || true
+	printf 'binder_linux\n' > /etc/modules-load.d/kennel.conf 2>/dev/null || true
 }
 
 install_config() {
@@ -356,19 +391,24 @@ print_next_steps() {
 	echo
 	echo "Post-install checks:"
 
-	# 1. privhelper setuid-root — the one thing that must be exactly right.
-	local ph="$libexec/kennel-privhelper" perms owner
+	# 1. privhelper factory privilege — the one thing that must be exactly right. Normally the
+	#    file caps cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin; setuid-root is the no-xattr
+	#    fallback. Either is acceptable; no privilege at all means kennels cannot construct.
+	local ph="$libexec/kennel-privhelper" perms owner caps
 	perms="$(stat -c '%A' "$ph" 2>/dev/null || echo '?')"
 	owner="$(stat -c '%U' "$ph" 2>/dev/null || echo '?')"
-	if [ "$owner" = root ] && [ "${perms:3:1}" = s ]; then
-		echo "  [ok]   privhelper is setuid-root ($perms $owner)"
+	caps="$(getcap "$ph" 2>/dev/null | sed 's|^[^ ]* ||')"
+	if [ -n "$caps" ]; then
+		echo "  [ok]   privhelper factory has file caps ($caps)"
+	elif [ "$owner" = root ] && [ "${perms:3:1}" = s ]; then
+		echo "  [ok]   privhelper factory is setuid-root ($perms $owner) — no-xattr fallback"
 	else
-		echo "  [ATTN] privhelper is NOT setuid-root ($perms $owner) — kennels will fail to construct"
-		echo "         fix: sudo chown root $ph && sudo chmod u+s $ph"
+		echo "  [ATTN] privhelper factory has NO privilege ($perms $owner) — kennels will fail to construct"
+		echo "         fix: sudo setcap cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin+ep $ph"
 	fi
 
-	# 2. binder filesystem available (the kennel bus). The privhelper modprobes it at
-	#    construct time, but flag it now so a binder-less kernel is obvious up front.
+	# 2. binder filesystem available (the kennel bus). Loaded here and on boot
+	#    (/etc/modules-load.d/kennel.conf); flag it now so a binder-less kernel is obvious up front.
 	if grep -qw binder /proc/filesystems 2>/dev/null; then
 		echo "  [ok]   binder filesystem registered"
 	elif modinfo binder_linux >/dev/null 2>&1; then

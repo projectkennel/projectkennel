@@ -5,7 +5,7 @@
 # `facade-spawn caps` interrogates it. Prints the requester policy on the last stdout line.
 set -euo pipefail
 CASE_DIR="$1"
-KENNEL="/usr/libexec/kennel/kennel"
+KENNEL="/usr/bin/kennel"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 SUITE_KEY="$CFG/keys/kennel-suite.key"
 SRC="/usr/lib/kennel/templates/echo-tool/policy.toml"

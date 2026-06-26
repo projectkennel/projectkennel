@@ -480,6 +480,31 @@ impl Deployment {
         self.resolve_bin(self.privhelper.as_deref(), "kennel-privhelper")
     }
 
+    /// The `{net_admin}` bind-mirror sub-helper: adds/removes a kennel's host-`lo`
+    /// loopback address. Invoked only by the privhelper factory, only when a policy binds
+    /// mirrored ports, so the common factory carries no network capability.
+    #[must_use]
+    pub fn privhelper_net(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-net")
+    }
+
+    /// The `{bpf,net_admin}` host-mode egress sub-helper: loads + attaches the cgroup
+    /// egress BPF. Invoked only by the privhelper factory, only for `net.mode = host`, so
+    /// `CAP_BPF` never sits on the common factory.
+    #[must_use]
+    pub fn privhelper_bpf(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-bpf")
+    }
+
+    /// The `{sys_admin}` exclusive-bind sub-helper: over-mounts (and releases) the sentinel
+    /// tmpfs that shadows an `fs.exclusive` path host-side. Invoked only by the privhelper
+    /// factory, only for a policy with exclusive binds, so `CAP_SYS_ADMIN` never sits on the
+    /// common factory.
+    #[must_use]
+    pub fn privhelper_mounts(&self) -> PathBuf {
+        self.resolve_bin(None, "kennel-privhelper-mounts")
+    }
+
     /// The per-kennel egress proxy.
     #[must_use]
     pub fn netproxy(&self) -> PathBuf {

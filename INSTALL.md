@@ -2,7 +2,7 @@
 
 This document describes how to build, install, and configure Project Kennel from source on a Linux system.
 
-Installing is two steps: build a self-contained release tarball with `src/tools/build-release.sh`, then install it with the `install.sh` bundled inside. `install.sh` is a **pure installer** — it places a prebuilt payload (the binaries, the vendor config, the systemd units, the AppArmor profile, the trust-store key, and the signed templates) and sets up the setuid-root privhelper. It does **not** build, and it runs only from an unpacked release tree, never from the source checkout.
+Installing is two steps: build a self-contained release tarball with `src/tools/build-release.sh`, then install it with the `install.sh` bundled inside. `install.sh` is a **pure installer** — it places a prebuilt payload (the binaries, the vendor config, the systemd units, the AppArmor profile, the trust-store key, and the signed templates) and file-caps the privhelper factory (setuid-root only where the filesystem cannot carry file caps). It does **not** build, and it runs only from an unpacked release tree, never from the source checkout.
 
 ---
 

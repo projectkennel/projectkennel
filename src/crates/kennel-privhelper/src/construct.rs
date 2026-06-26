@@ -1,13 +1,16 @@
 //! The privhelper **factory**: build a kennel and `fexecve` `kennel-bin-init` into it.
 //!
 //! The construction inversion (`docs/design/07-2-kennel-bin-init.md` §7.2.1): rather than
-//! `kenneld` (the operator) building the sandbox unprivileged, the privhelper — real
-//! root — does *all* privileged construction in its own post-`clone` child, then
-//! `fexecve`s the trusted root-owned `kennel-bin-init` as the kennel's uid-0 PID 1. Doing it
-//! here is what gives the kennel a **real uid 0** (host root mapped `0 0 1`) so the view
-//! root, `/dev`, the library binds, and the binderfs nodes are owned by and display as
-//! root — and what fixes the binderfs `EACCES` (a binderfs instance assigns its nodes to
-//! uid 0 of the mounting userns; with the old pure-identity map there was no uid 0).
+//! `kenneld` (the operator) building the sandbox unprivileged, the privhelper — holding the
+//! factory file capabilities `{cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin}` — does *all*
+//! privileged construction in its own post-`clone` child, then `fexecve`s the trusted root-owned
+//! `kennel-bin-init` as the kennel's uid-0 PID 1. Doing it here is what gives the kennel a **real
+//! uid 0** (host root mapped `0 0 1`) so the view root, `/dev`, the library binds, and the
+//! binderfs nodes are owned by and display as root — and what fixes the binderfs `EACCES` (a
+//! binderfs instance assigns its nodes to uid 0 of the mounting userns; with a pure-identity map
+//! there is no uid 0). Mapping host uid 0 into the new userns is exactly what makes `cap_sys_admin`
+//! load-bearing: the kernel's `uid_map` write gate requires `CAP_SYS_ADMIN` over the target
+//! namespace.
 //!
 //! # Transport
 //!
@@ -23,10 +26,11 @@
 //! # The clone / map handshake
 //!
 //! `clone(NEWUSER|…)` creates the child with **no** identity mapping, so it holds no
-//! capability in the new userns until the parent writes its `uid_map`/`gid_map`. The
-//! child therefore blocks on a pipe until the parent (real root, holding `CAP_SETUID`/
-//! `CAP_SETGID`) has written the `0 0 1`+operator maps and acked; only then does it run
-//! the (privileged) construction and `fexecve`. No operator-controlled code ever runs as
+//! capability in the new userns until the parent writes its `uid_map`/`gid_map`. The child
+//! therefore blocks on a pipe until the parent — which briefly raises its euid to 0 (via
+//! `CAP_SETUID`) and uses `CAP_SETGID`/`CAP_SETFCAP`/`CAP_SYS_ADMIN` to write the `0 0 1`+operator
+//! maps — has written them and acked; only then does it run the (privileged) construction and
+//! `fexecve`. No operator-controlled code ever runs as
 //! userns-0: between `clone` and `fexecve` only this factory code runs, and `kennel-bin-init` is
 //! the trusted root-owned binary the helper resolves from its own root-only config — never a
 //! path or fd the operator supplies (sec review: trusted init source).
@@ -44,9 +48,6 @@ use kennel_lib_syscall::pty::PTY_RETURN_FD;
 use kennel_lib_syscall::scm::{recv_with_fds, send_with_raw_fds, seqpacket_pair};
 use kennel_lib_syscall::spawn::fexecve;
 use kennel_lib_syscall::unistd::{real_gid, real_uid};
-
-use crate::validate::{validate_addr, AddrRequest, ReservedScope};
-use crate::wire::EgressPayload;
 
 /// The loopback interface name (`lo`). The kennel's own addresses are added to `lo` on BOTH
 /// sides of the boundary: inside the kennel's own net-ns (where the workload sees them) and,
@@ -162,20 +163,23 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // The three injected-stdio fds (a non-interactive run), placed last in the fixed order.
     let stdio_fds: Option<[OwnedFd; 3]> = pop_stdio_fds(&mut wire_fds, half.stdio_present)?;
 
-    // 1a. Provision the kennel's host-side network resources — folded into this one op (the
-    //     former separate `add-addr`/`setup-egress` privhelper invocations are gone). Runs as
-    //     the operator with the helper's file caps (`cap_net_admin` + the BPF caps), before any
-    //     privilege change, in the **host** net namespace. This adds the kennel's loopback
-    //     addresses as a MIRROR on the host `lo`: a proxied kennel runs in its OWN net-ns (the
-    //     in-ns copy is added later, in `build_kennel`), and this host-side mirror is what makes
-    //     a kennel address visible to the operator's `ss`/`lsof` and reachable by the host-side
-    //     BIND delegate (§7.5.6/§7.5.7). `mode = host` shares the host `lo` outright (no own
-    //     net-ns, no in-ns copy). Each address is re-validated against the caller's reserved
-    //     subnet — the operator does not get to pick arbitrary addresses — then added on `lo`;
-    //     the egress BPF, if present, is attached to the kennel cgroup (ownership re-checked).
-    let Some(scope) = crate::alloc::load(real_uid()) else {
+    // 1a. Provision the kennel's host-side network resources by delegating to the capability-split
+    //     sub-helpers — the factory itself holds no `cap_net_admin` or BPF caps. Runs as the
+    //     operator, before any privilege change, in the **host** net namespace. This adds the
+    //     kennel's loopback addresses as a MIRROR on the host `lo`: a proxied kennel runs in its OWN
+    //     net-ns (the in-ns copy is added later, in `build_kennel`), and this host-side mirror is
+    //     what makes a kennel address visible to the operator's `ss`/`lsof` and reachable by the
+    //     host-side BIND delegate (§7.5.6/§7.5.7). `mode = host` shares the host `lo` outright (no
+    //     own net-ns, no in-ns copy). Each address is re-validated against the caller's reserved
+    //     subnet inside `kennel-privhelper-net` — the operator does not get to pick arbitrary
+    //     addresses — then added on `lo`; the egress BPF, if present, is attached to the kennel
+    //     cgroup by `kennel-privhelper-bpf` (cgroup ownership re-checked there).
+    // Gate (defence in depth; `main.rs` gates `construct` on the same allocation): the caller
+    // must hold a subkennel allocation. The per-address subnet validation now lives in the
+    // `kennel-privhelper-net` sub-helper, which re-loads the scope and validates itself.
+    if crate::alloc::load(real_uid()).is_none() {
         return Err(io::Error::other("caller has no reserved scope"));
-    };
+    }
     tracer.step(&format!(
         "construct: adding {} host loopback address(es) (ctx {})",
         half.loopback.len(),
@@ -195,29 +199,21 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             "construct: euid={euid} {cap_eff} addrs={addrs:?} ns=host-add"
         ));
     }
-    add_loopback_addresses(&half.loopback, half.ctx, &scope)?;
+    add_loopback_via_helper(&half.loopback, half.ctx)?;
     if !egress_bytes.is_empty() {
         tracer.step(&format!(
-            "construct: attaching egress BPF ({} bytes) to cgroup",
+            "construct: attaching egress BPF ({} bytes) via privhelper-bpf",
             egress_bytes.len()
         ));
-        let payload = EgressPayload::decode(egress_bytes)
-            .map_err(|e| io::Error::other(format!("egress payload decode: {e:?}")))?;
-        let resp = crate::exec::attach_egress_programs(&half.cgroup, &payload);
-        if resp.status != crate::wire::Status::Ok {
-            return Err(io::Error::other(format!(
-                "egress attach refused (code {})",
-                resp.refusal
-            )));
-        }
+        attach_egress_via_helper(&half.cgroup, egress_bytes)?;
     }
 
-    // 1a-bis. Ensure the binder filesystem is available BEFORE the construction child tries
-    //     to mount its per-kennel binderfs instance. `binder_linux` is not auto-loaded on most
-    //     hosts, and the child mounts in an unprivileged userns where it cannot `modprobe` — so
-    //     the failure would otherwise be a cryptic in-child `mount` ENODEV. We are root here
-    //     (pre-clone), so load it now if `/proc/filesystems` does not already list `binder`.
-    ensure_binderfs(&tracer);
+    // 1a-bis. Verify the binder filesystem is registered BEFORE the construction child tries to
+    //     mount its per-kennel binderfs instance — the child mounts in an unprivileged userns and
+    //     the factory carries no CAP_SYS_MODULE, so neither can load the module. It is loaded at
+    //     install and on boot (`/etc/modules-load.d/kennel.conf`); if it is genuinely absent, fail
+    //     fast with a clear message rather than a cryptic in-child `mount` ENODEV.
+    check_binderfs()?;
 
     // 1b. Resolve and open the trusted `kennel-bin-init` from the **root-owned** deployment
     //     cascade (`/usr/lib/kennel` → `/etc/kennel`; never a user-writable dir or the
@@ -270,10 +266,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //    uid — so the operator `kenneld` can open the kennel's binderfs (an `FS_USERNS_MOUNT`
     //    whose `s_user_ns` is this userns) via `/proc/<init>/root`. A root-owned userns denies
     //    the operator that access (the `/proc/<init>/root` EACCES under Yama `ptrace_scope=1`).
-    //    The setuid-root factory therefore drops its *effective* uid to the operator across the
-    //    clone, then restores euid 0 to write the maps. The child still gets full capabilities
-    //    in the new userns (a `CLONE_NEWUSER` child always does), so it self-escalates to the
-    //    kennel's uid 0 for the root-owned construction (below).
+    //    The factory therefore drops its *effective* uid to the operator across the clone, then
+    //    restores euid 0 to write the maps. The child still gets full capabilities in the new
+    //    userns (a `CLONE_NEWUSER` child always does), so it self-escalates to the kennel's uid 0
+    //    for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
                                       // The host sources of the exclusive binds (§2.7), captured before `half` moves into the child;
@@ -379,19 +375,22 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         "construct: cloned PID 1 (host pid {init_pid}); writing identity maps"
     ));
 
-    // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) so the
-    //    setgid/setuid below regain `CAP_SETGID`/`CAP_SETUID`; the saved uid is still 0, so this
-    //    seteuid is permitted. The userns owner is already fixed (operator) at the clone.
+    // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) before the
+    //    map write: the `/proc/<pid>/uid_map` file is owned by global root (the factory holds file
+    //    caps, so its construction child is non-dumpable), so euid 0 is what lets us open it.
+    //    Permitted via `CAP_SETUID` under the setcap factory (and via the saved uid 0 under the
+    //    setuid-root fallback). The userns owner is already fixed (operator) at the clone.
     if op_uid != 0 {
         kennel_lib_syscall::unistd::set_euid(0)
             .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid(0): {e}")))?;
     }
 
-    // Escalate the parent to real root ONLY to write the child's identity maps: mapping
-    //    host uid 0 into the kennel (the `0 0 1` line) requires the writer to own outside uid 0
-    //    (`verify_root_map`, euid 0) and `CAP_SETFCAP` (since Linux 5.12). This does not
-    //    change the userns owner (fixed at clone above). Then release the child and report
-    //    the init host pid to kenneld.
+    // Escalate the parent to uid 0 ONLY to write the child's identity maps. The kernel's `uid_map`
+    //    write gate requires `CAP_SYS_ADMIN` over the new user namespace (checked against the
+    //    opener's creds) — satisfied here by the factory's `cap_sys_admin` at euid 0; and the line
+    //    mapping host uid 0 (`0 0 1`) additionally requires `CAP_SETFCAP` (Linux 5.12+). This does
+    //    not change the userns owner (fixed at clone above). Then release the child and report the
+    //    init host pid to kenneld.
     kennel_lib_syscall::unistd::set_gid(0)
         .map_err(|e| io::Error::new(e.kind(), format!("factory setgid(0): {e}")))?;
     kennel_lib_syscall::unistd::set_uid(0)
@@ -405,32 +404,31 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
 
-    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
-    // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
-    // a snapshot independent of this shadow, so only the operator side is shadowed. Done while we
-    // still hold root; verified against `op_uid` (the helper never over-mounts a path the operator
-    // does not own — overreach). Best-effort per path: a failure degrades that path to a plain
-    // writable bind (always permitted), logged, never fatal.
-    if !exclusive_sources.is_empty() {
-        let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
-        for src in &exclusive_sources {
-            if let Err(e) = crate::exclusive::mount_exclusive(src, op_uid) {
-                eprintln!("kennel-privhelper: exclusive bind not enforced: {e}");
-            }
-        }
-    }
-    drop(built_r);
-
-    // Drop straight back to the operator now that the maps are written and any over-mount is up:
-    // the parent escalated ONLY for those. setgid before setuid (the uid drop to a non-zero value
-    // is what clears the capability sets — capabilities(7)); for its brief remaining life (report
-    // the pid, then exit) the factory parent is the unprivileged operator, never a long-lived
-    // host-root process (sec review: minimise the privileged window). A no-op when the operator is
-    // root (the root-test case, op_uid == 0).
+    // Drop straight back to the operator now that the maps are written: the parent escalated ONLY
+    // for the map write. setgid before setuid (the uid drop to a non-zero value is what clears the
+    // capability sets — capabilities(7)); for its brief remaining life (the exclusive over-mount,
+    // then report the pid and exit) the factory parent is the unprivileged operator, never a
+    // long-lived host-root process (sec review: minimise the privileged window). A no-op when the
+    // operator is root (the root-test case, op_uid == 0).
     kennel_lib_syscall::unistd::set_gid(op_gid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setgid({op_gid}): {e}")))?;
     kennel_lib_syscall::unistd::set_uid(op_uid)
         .map_err(|e| io::Error::new(e.kind(), format!("factory drop setuid({op_uid}): {e}")))?;
+
+    // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
+    // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
+    // a snapshot independent of this shadow, so only the operator side is shadowed. Delegated to the
+    // `{sys_admin}` kennel-privhelper-mounts sub-helper — the common factory holds no
+    // `CAP_SYS_ADMIN` — and run *after* the drop to the operator, so the helper inherits the
+    // operator's real uid for its allocation gate and its owner check. Best-effort per path: a
+    // failure degrades that path to a plain writable bind (always permitted), logged, never fatal.
+    if !exclusive_sources.is_empty() {
+        let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
+        for src in &exclusive_sources {
+            over_mount_exclusive_via_helper(src);
+        }
+    }
+    drop(built_r);
 
     // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
     // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
@@ -452,46 +450,19 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
 
 /// Ensure the `binder` filesystem type is registered, loading `binder_linux` if not.
 ///
-/// binderfs (`FS_USERNS_MOUNT`) is what every kennel mounts for its per-kennel bus, but the
-/// `binder_linux` module is not auto-loaded on a typical host — and the construction child
-/// mounts it in an unprivileged user namespace where `modprobe` is impossible. We run as root
-/// here (before the clone), so we load it once: cheap, idempotent (`modprobe` no-ops if the
-/// module is already in), and gated on `/proc/filesystems` so the common case (already loaded)
-/// costs only a read. Best-effort — a `modprobe` failure is logged, not fatal: a host with
-/// binder built-in (no module) still lists it, and a genuinely binder-less host fails later at
-/// the child's `mount` with a clear ENODEV either way.
-fn ensure_binderfs(tracer: &kennel_lib_config::Tracer) {
+/// binderfs (`FS_USERNS_MOUNT`) is what every kennel mounts for its per-kennel bus. The
+/// `binder_linux` module is loaded at install and on every boot (`/etc/modules-load.d/kennel.conf`);
+/// neither the factory (no `CAP_SYS_MODULE`) nor the construction child (an unprivileged userns) can
+/// load it. If it is genuinely absent, fail fast here with a clear message rather than let the
+/// child's binderfs `mount` fail with a cryptic `ENODEV`. A host with binder built-in lists it too.
+fn check_binderfs() -> io::Result<()> {
     if binderfs_registered() {
-        return;
+        return Ok(());
     }
-    tracer.step("construct: `binder` fs absent from /proc/filesystems — modprobe binder_linux");
-    // The privhelper wipes its own environment on entry (`main.rs`), so it has no `PATH` — a bare
-    // `modprobe` would be `ENOENT`. It is also setuid-root, where a PATH-relative exec is an
-    // injection footgun. So resolve modprobe by absolute path: canonical `/sbin` first (FHS), with a
-    // `/usr/sbin` fallback for layouts that place it there.
-    let Some(modprobe) = ["/sbin/modprobe", "/usr/sbin/modprobe"]
-        .into_iter()
-        .find(|p| std::path::Path::new(p).exists())
-    else {
-        tracer.step("construct: no modprobe in /sbin or /usr/sbin — cannot load binder_linux");
-        return;
-    };
-    match std::process::Command::new(modprobe)
-        .arg("binder_linux")
-        .status()
-    {
-        Ok(s) if s.success() => {
-            if !binderfs_registered() {
-                tracer.step(
-                    "construct: modprobe binder_linux succeeded but `binder` still not registered",
-                );
-            }
-        }
-        Ok(s) => tracer.step(&format!("construct: modprobe binder_linux exited {s}")),
-        Err(e) => tracer.step(&format!(
-            "construct: could not run modprobe binder_linux: {e}"
-        )),
-    }
+    Err(io::Error::other(
+        "binder filesystem not registered: load the `binder_linux` module \
+         (install.sh loads it and writes /etc/modules-load.d/kennel.conf for boot)",
+    ))
 }
 
 /// Whether the kernel has registered the `binder` filesystem (read `/proc/filesystems`).
@@ -583,36 +554,116 @@ fn pop_stdio_fds(fds: &mut Vec<OwnedFd>, present: bool) -> io::Result<Option<[Ow
     Ok(Some([next()?, next()?, next()?]))
 }
 
-/// Validate each loopback address against the caller's reserved `scope`, then add it on `lo`
-/// via netlink (host net namespace, the helper's `cap_net_admin`). The operator supplies the
-/// addresses but the factory does not trust them: one outside the per-kennel subnet is refused
-/// — the same [`validate_addr`] gate the standalone `add-addr` op used before this fold.
-fn add_loopback_addresses(
-    addrs: &[LoopbackAddr],
-    ctx: u16,
-    scope: &ReservedScope,
-) -> io::Result<()> {
+/// Add each host-`lo` mirror address by exec'ing the `{net_admin}` `kennel-privhelper-net`
+/// sub-helper — the common factory holds **no** `CAP_NET_ADMIN` of its own, so the one
+/// construction step that touches the host network is delegated to a binary that carries that
+/// single capability. The sub-helper re-loads the caller's reserved scope and re-validates each
+/// address against the per-kennel subnet before the netlink op (the factory does not trust the
+/// operator-supplied addresses; the gate moves with the privilege). One exec per address; an
+/// empty list — the common no-bind case (100% of ephemeral spawns) — execs nothing, so the
+/// network helper is never even invoked.
+fn add_loopback_via_helper(addrs: &[LoopbackAddr], ctx: u16) -> io::Result<()> {
     if addrs.is_empty() {
         return Ok(());
     }
-    let cname = std::ffi::CString::new(LOOPBACK).map_err(|_| io::Error::other("bad ifname"))?;
-    let ifindex = kennel_lib_syscall::netlink::if_index(&cname)?;
+    let net_helper = kennel_lib_config::Deployment::load()
+        .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-net: {e}")))?
+        .privhelper_net();
     for lb in addrs {
-        let req = AddrRequest {
-            ctx,
-            interface: LOOPBACK.to_owned(),
-            addr: lb.addr,
-            prefix: lb.prefix,
-        };
-        if let Err(refusal) = validate_addr(&req, scope) {
+        let status = std::process::Command::new(&net_helper)
+            .args([
+                "add",
+                &ctx.to_string(),
+                &lb.addr.to_string(),
+                &lb.prefix.to_string(),
+            ])
+            .status()
+            .map_err(|e| io::Error::new(e.kind(), format!("exec {}: {e}", net_helper.display())))?;
+        if !status.success() {
             return Err(io::Error::other(format!(
-                "loopback address {} refused: {refusal}",
-                lb.addr
+                "kennel-privhelper-net add {}/{} on lo failed ({status})",
+                lb.addr, lb.prefix
             )));
         }
-        kennel_lib_syscall::netlink::add_address(ifindex, lb.addr, lb.prefix)?;
     }
     Ok(())
+}
+
+/// Attach the per-kennel egress BPF by exec'ing the `{bpf,net_admin,perfmon}`
+/// `kennel-privhelper-bpf` sub-helper — the common factory holds **no** `CAP_BPF` of its own.
+/// Reached only for `net.mode = host` (a non-empty egress payload); the cgroup path rides argv
+/// and the payload (the allow/deny ruleset) rides stdin. The sub-helper re-checks that the caller
+/// owns the target cgroup before the attach (the delegation boundary moves with the privilege).
+fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write as _;
+    // Mount the per-user bpffs the sub-helper pins the maps into. Only the *mount* needs
+    // `CAP_SYS_ADMIN` (which the factory holds and the bpf sub-helper does not), so the factory
+    // does it here — in the host mount namespace `kenneld` shares — before delegating; the
+    // sub-helper (`CAP_BPF`) then creates the per-kennel pin dir and pins into it.
+    ensure_bpf_pin_bpffs();
+    let bpf_helper = kennel_lib_config::Deployment::load()
+        .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-bpf: {e}")))?
+        .privhelper_bpf();
+    let mut child = std::process::Command::new(&bpf_helper)
+        .arg("attach")
+        .arg(cgroup)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| io::Error::new(e.kind(), format!("exec {}: {e}", bpf_helper.display())))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("kennel-privhelper-bpf stdin missing"))?
+        .write_all(egress_bytes)?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(io::Error::other(format!(
+            "kennel-privhelper-bpf attach failed ({status})"
+        )));
+    }
+    Ok(())
+}
+
+/// Mount the per-user bpffs at [`crate::bpf_pin_root`] that the egress sub-helper pins into.
+///
+/// The bpffs *mount* is the one egress step that needs `CAP_SYS_ADMIN`; the factory holds it
+/// (the bpf sub-helper does not), and mounts here in the host mount namespace so `kenneld` can
+/// `BPF_OBJ_GET` the pinned `audit_ringbuf` to drain it. Idempotent — one bpffs per user serves
+/// all their kennels; the per-kennel pin dir and the pins are created operator-side by the
+/// sub-helper. Best-effort: a mount failure degrades to "no audit drain", never fatal.
+fn ensure_bpf_pin_bpffs() {
+    let base = crate::bpf_pin_root(real_uid());
+    if std::fs::create_dir_all(&base).is_err() {
+        return;
+    }
+    if !kennel_lib_syscall::mount::is_bpffs(&base).unwrap_or(false) {
+        let _ = kennel_lib_syscall::mount::mount_bpffs(&base);
+    }
+}
+
+/// Over-mount the exclusive-bind sentinel on `src` by exec'ing the `{sys_admin}`
+/// `kennel-privhelper-mounts` sub-helper — the common factory holds **no** `CAP_SYS_ADMIN` of
+/// its own. Best-effort: a failure (including an unresolvable helper) leaves the path a plain
+/// writable bind, logged, never fatal — so the construction never fails on the over-mount.
+fn over_mount_exclusive_via_helper(src: &std::path::Path) {
+    let helper = match kennel_lib_config::Deployment::load() {
+        Ok(d) => d.privhelper_mounts(),
+        Err(e) => {
+            eprintln!("kennel-privhelper: resolve kennel-privhelper-mounts: {e}");
+            return;
+        }
+    };
+    let ok = std::process::Command::new(&helper)
+        .arg("mount")
+        .arg(src)
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!(
+            "kennel-privhelper: exclusive bind not enforced for {}",
+            src.display()
+        );
+    }
 }
 
 /// The privileged construction the factory child runs as the kennel's uid 0, after its
@@ -780,8 +831,10 @@ fn verify_trusted_init(file: &std::fs::File, path: &std::path::Path) -> io::Resu
 /// own real uid/gid (so the workload's masked identity is a sane non-root id), then each
 /// granted supplementary gid. The operator line is omitted when the operator *is* root
 /// (the maps would otherwise overlap — the case when the factory runs under a root test).
-/// Writing requires the parent's `CAP_SETUID`/`CAP_SETGID`; `setgroups` is left enabled
-/// (not denied) because `kennel-bin-init` needs it for the workload's supplementary-group drop.
+/// Writing requires `CAP_SYS_ADMIN` over the new namespace (the kernel's map-write gate) plus
+/// `CAP_SETUID`/`CAP_SETGID`, and `CAP_SETFCAP` for the host-uid-0 line; `setgroups` is left
+/// enabled (not denied) because `kennel-bin-init` needs it for the workload's supplementary-group
+/// drop.
 fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Result<()> {
     let (uid_map, gid_map) = build_identity_maps(uid, gid, granted);
     std::fs::write(format!("/proc/{pid}/uid_map"), &uid_map)
@@ -797,8 +850,8 @@ fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Res
 /// operator's own id (the masked identity the workload runs as), plus each granted
 /// supplementary gid. NOT a `0 0 N` range: the kernel allows a multi-extent map mapping
 /// host 0 as long as it is written in a **single `write(2)`** (which `write_identity_maps`
-/// does) and the writer holds `CAP_SETFCAP` (Linux 5.12+) — so the kennel never maps the
-/// unrelated host system uids between 0 and the operator. The operator line is omitted when
+/// does) and the writer holds `CAP_SYS_ADMIN` over the namespace plus `CAP_SETFCAP` (Linux
+/// 5.12+) — so the kennel never maps the unrelated host system uids between 0 and the operator. The operator line is omitted when
 /// the operator *is* root (the lines would overlap — the root-test case).
 fn build_identity_maps(uid: u32, gid: u32, granted: &[u32]) -> (String, String) {
     use std::fmt::Write as _;

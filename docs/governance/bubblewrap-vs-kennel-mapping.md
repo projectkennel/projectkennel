@@ -133,17 +133,18 @@ worth surveying the whole space, because the choice has real security weight and
 | **Delegated subuid range + setuid id-map helpers** | **setuid-root helpers** (`newuidmap`/`newgidmap`) + `/etc/subuid` | a delegated id **range** (admin-configured; here `remco:100000:65536`) | nothing beyond staying inside the granted range | the id-map helpers are setuid-root attack surface (shadow-utils has an LPE CVE history); the range is static and coarse | rootless podman / runc / Docker-rootless |
 | **Privileged daemon** | a long-lived **root service** + its socket | whoever can reach the socket ≈ root | the daemon's own API/policy, if any | the orchestrator is *always* root and large; socket access is root access (the `docker` group ≈ root footgun) | dockerd, systemd-machined/`nspawn`, LXD |
 | **Large setuid-root sandbox binary** | the **setuid bit** on a big, feature-rich program | the binary does whatever its argv/logic dictates, as root until it drops | the binary's own code | the *entire* pre-drop codepath runs as root and is LPE surface — the documented Firejail CVE history is the cautionary tale for this shape | Firejail; bwrap's own setuid fallback mode |
-| **Minimized setuid helper, gated on a signed policy** | the **setuid bit on a small, single-purpose helper**, fronted by an **unprivileged** orchestrator | full root *in the helper*, but it builds only what a verified template floors | **a verified ed25519-signed policy** — construction is downstream of a signature check against the trust store | shares the setuid risk *class* (the pre-drop window) — the bet is minimization **and** the policy gate, not avoiding setuid | **Kennel** (`kennel-privhelper`) |
+| **Minimized file-capped helper, gated on a signed policy** | **file capabilities on a small, single-purpose helper**, fronted by an **unprivileged** orchestrator | near-root *in the helper* (a retained `cap_sys_admin`), but it builds only what a verified template floors | **a verified ed25519-signed policy** — construction is downstream of a signature check against the trust store | shares the privileged-helper risk *class* (the pre-drop window; a retained `cap_sys_admin` is near-root) — the bet is minimization **and** the policy gate, not escaping the class | **Kennel** (`kennel-privhelper`) |
 
-**Where Kennel sits, and what is and isn't being claimed.** Kennel picks the setuid-helper locus (bottom
+**Where Kennel sits, and what is and isn't being claimed.** Kennel picks the privileged-helper locus (bottom
 row), but splits it two ways no other row combines — the privilege is both *minimized* and *conditioned*:
 
-- **Minimized, and the orchestrator is unprivileged.** Verified on the box: the only setuid bit is on
-  `kennel-privhelper` (`-rwsr-xr-x root root`); **kenneld itself runs as the invoking user** (`USER remco`),
-  a plain `-rwxr-xr-x` binary with no setuid and no file-caps. The daemon that does scheduling, IPC, policy
-  resolution, and signature verification holds *no* standing privilege — it shells the one privileged step
-  out to a small, single-purpose helper. That is the inverse of the daemon-is-root row: with dockerd the
-  *orchestrator* is root, so its socket is root; with Kennel the orchestrator is you.
+- **Minimized, and the orchestrator is unprivileged.** Verified on the box: the privilege lives in file
+  capabilities on `kennel-privhelper` (`getcap` shows `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin=ep`,
+  no setuid bit; setuid-root only as a no-xattr fallback); **kenneld itself runs as the invoking user**
+  (`USER remco`), a plain `-rwxr-xr-x` binary with no setuid and no file-caps. The daemon that does
+  scheduling, IPC, policy resolution, and signature verification holds *no* standing privilege — it shells
+  the one privileged step out to a small, single-purpose helper. That is the inverse of the daemon-is-root
+  row: with dockerd the *orchestrator* is root, so its socket is root; with Kennel the orchestrator is you.
 - **Conditioned — the part no other row has.** Every approach above except the last builds *whatever it is
   told*: the kernel trusts every process, the AppArmor path trusts every argv, the daemon trusts every
   socket peer, the setuid binary trusts its command line. Kennel's privileged construction runs only
@@ -153,12 +154,13 @@ row), but splits it two ways no other row combines — the privilege is both *mi
 
 The honest caveat, so this does not overclaim: **none of this makes Kennel "more unprivileged."** Every row
 needs a one-time privileged install — the distro ships bwrap's AppArmor profile; Kennel's install sets the
-privhelper's setuid bit — and neither sandbox is conjured without that. And a setuid helper *is* a setuid
-helper: it carries the setuid risk class, and the argument holds only while that helper stays small and
-audited (the standing TCB discipline). The bet is deliberate and has precedent on both sides: a *small*
-setuid helper done well (Chrome's minimal `chrome-sandbox`) versus a *large* setuid sandbox done badly
-(Firejail's LPE history). Kennel commits to the small-helper-plus-signed-policy shape; keeping the helper
-small is load-bearing, not incidental.
+privhelper's file capabilities — and neither sandbox is conjured without that. And a privileged helper *is* a
+privileged helper: a retained `cap_sys_admin` is near-root, so file caps narrow the grant but do not escape
+the risk class, and the argument holds only while that helper stays small and audited (the standing TCB
+discipline). The bet is deliberate and has precedent on both sides: a *small* privileged helper done well
+(Chrome's minimal `chrome-sandbox`) versus a *large* setuid sandbox done badly (Firejail's LPE history).
+Kennel commits to the small-helper-plus-signed-policy shape; keeping the helper small is load-bearing, not
+incidental.
 
 ---
 

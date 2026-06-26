@@ -1,8 +1,8 @@
 {
   "crate_count": 26,
-  "total_sloc": 33822,
+  "total_sloc": 33344,
   "tcb_crate_count": 16,
-  "tcb_sloc": 21123,
+  "tcb_sloc": 20645,
   "crates": [
     {
       "name": "kenneld",
@@ -66,10 +66,10 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1601,
+      "sloc": 1761,
       "uses_unsafe": false,
       "in_tcb": true,
-      "bins": ["kennel-privhelper"],
+      "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
       "consumers": ["kenneld"],
       "first_party_deps": ["kennel-lib-bpf", "kennel-lib-config", "kennel-lib-spawn", "kennel-lib-syscall"],
       "external_deps": []
@@ -95,24 +95,24 @@
       "external_deps": []
     },
     {
-      "name": "kennel-lib-bpf",
-      "sloc": 1244,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["kenneld", "privhelper", "spawn"],
-      "first_party_deps": [],
-      "external_deps": ["libc", "object"]
-    },
-    {
       "name": "kennel-lib-syscall",
-      "sloc": 1064,
+      "sloc": 912,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
       "consumers": ["audit", "bin-init", "cli", "control", "kenneld", "privhelper", "spawn"],
       "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
       "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
+    },
+    {
+      "name": "kennel-lib-bpf",
+      "sloc": 781,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["kenneld", "privhelper", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["libc", "object"]
     },
     {
       "name": "kennel-lib-dbus",
@@ -156,7 +156,7 @@
     },
     {
       "name": "kennel-lib-config",
-      "sloc": 479,
+      "sloc": 491,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -166,7 +166,7 @@
     },
     {
       "name": "kennel-lib-os",
-      "sloc": 396,
+      "sloc": 361,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],

@@ -1,8 +1,9 @@
-//! Source-line counting: `#[cfg(test)]`-stripped, comment-and-blank-excluding (std-only).
+//! Source-line counting: test-cfg-stripped, comment-and-blank-excluding (std-only).
 //!
 //! Reproduces the method `03-crate-decomposition.md` used by hand — verified to match its prior
 //! counts exactly on crates that did not change. A line counts when, after dropping every
-//! `#[cfg(test)]` item's block, it is non-blank and not a `//` / `/* … */` / `*` comment line.
+//! test-only `#[cfg(...)]` item's block (`#[cfg(test)]` or `#[cfg(all(test, ...))]`), it is
+//! non-blank and not a `//` / `/* … */` / `*` comment line.
 
 use std::path::Path;
 
@@ -61,8 +62,8 @@ fn count_file(text: &str) -> usize {
     let mut i = 0;
     let mut total = 0usize;
     while let Some(line) = lines.get(i) {
-        // A `#[cfg(test)]` item: skip from here to the close of the block it guards.
-        if line.trim_start().starts_with("#[cfg(test)]") {
+        // A test-only `#[cfg(...)]` item: skip from here to the close of the block it guards.
+        if is_test_cfg(line) {
             i = skip_block(&lines, i);
             continue;
         }
@@ -77,8 +78,18 @@ fn count_file(text: &str) -> usize {
     total
 }
 
-/// Given `lines[start]` is a `#[cfg(test)]` attribute, return the index just past the guarded
-/// block's closing brace (tracking brace depth from the first `{`).
+/// Whether `line` is a **test-only** `#[cfg(...)]` attribute whose guarded block is excluded.
+///
+/// Matches bare `#[cfg(test)]` and `#[cfg(all(test, ...))]` (both require `test`, so the block
+/// compiles only under `cargo test`). `#[cfg(any(test, ...))]` and feature-only gates are real
+/// code and are kept. Whitespace is normalised so rustfmt's `all(test, feature = "e2e")` matches.
+fn is_test_cfg(line: &str) -> bool {
+    let compact: String = line.split_whitespace().collect();
+    compact.starts_with("#[cfg(test)]") || compact.starts_with("#[cfg(all(test,")
+}
+
+/// Given `lines[start]` is a test-only `#[cfg(...)]` attribute, return the index just past the
+/// guarded block's closing brace (tracking brace depth from the first `{`).
 fn skip_block(lines: &[&str], start: usize) -> usize {
     let mut depth: i32 = 0;
     let mut started = false;
@@ -145,6 +156,29 @@ mod tests {
         // Counted: `use std::io;`, `fn real() {`, `let x = 1; …`, `}` = 4. The doc comment, the
         // blanks, and the whole `#[cfg(test)]` module are excluded.
         assert_eq!(count_file(src), 4);
+    }
+
+    #[test]
+    fn excludes_all_test_cfg_but_keeps_real_cfg() {
+        // `#[cfg(all(test, feature = "e2e"))]` is test-only → its block is excluded; a feature-only
+        // or `any(test, ...)` gate is real code → kept. Whitespace in the attribute is normalised.
+        assert!(is_test_cfg("#[cfg(test)]"));
+        assert!(is_test_cfg("    #[cfg(all(test, feature = \"e2e\"))]"));
+        assert!(!is_test_cfg("#[cfg(feature = \"e2e\")]"));
+        assert!(!is_test_cfg("#[cfg(any(test, feature = \"e2e\"))]"));
+        let src = "\
+fn real() {}
+#[cfg(all(test, feature = \"e2e\"))]
+mod e2e {
+    #[test]
+    fn t() { assert!(true); }
+}
+#[cfg(feature = \"e2e\")]
+fn kept() {}
+";
+        // Counted: `fn real() {}`, `#[cfg(feature = \"e2e\")]`, `fn kept() {}` = 3. The whole
+        // `all(test, ...)` module is excluded; the feature-only item and its attribute are kept.
+        assert_eq!(count_file(src), 3);
     }
 
     #[test]

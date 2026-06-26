@@ -372,21 +372,32 @@ operator").
 
 Honestly scoped — **not** a one-line install change:
 
-- **Enumerate and minimise the host-side file-cap set.** The construct path already names its caps in
-  prose: `CAP_SETUID`/`CAP_SETGID` (write the id-maps), `CAP_SETFCAP` (the single-write `uid_map` quirk),
-  `CAP_SYS_PTRACE` (reach into the operator-owned child userns), the egress loader's
-  `CAP_BPF`/`CAP_NET_ADMIN`, and the `modprobe` path's `CAP_SYS_MODULE`. **The central question is whether
-  host `CAP_SYS_ADMIN` is avoidable** — mounts run *inside* the cloned userns, where the owner holds it
-  intrinsically, so the host *file* may not need it at all. If so the win is large (no near-root cap on
-  the binary); verify against the real construct path before claiming it.
-- **Rework the in-process privilege transitions from the `seteuid` idiom to `capset`.** `construct.rs`
-  raises/drops privilege via `seteuid(0)`/`setuid(op)` today (setuid gives all caps at euid 0); under
-  setcap it raises *specific* effective caps from the permitted set and lowers them explicitly. Same
-  fences, different mechanism.
+- **Enumerate and minimise the host-side file-cap set.** Measured against the real construct path, the
+  **common factory** carries `{cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin}` and nothing more. The
+  identity caps write the id-maps; `cap_setfcap` covers the host-uid-0 line. **`cap_sys_admin` is not
+  avoidable for the common factory:** the factory maps host uid 0 into the new userns (the `0 0 1` line that
+  gives the kennel a real uid 0 for its binderfs and root-owned view), and the kernel's `uid_map` write gate
+  requires `CAP_SYS_ADMIN` over the target namespace (checked against the opener's creds, strace-confirmed
+  EPERM without it). The *only* way to shed it is to write the maps as the userns **owner** (a dumpable
+  construction child + open-as-operator, which rides the owner-branch of the map-write check on just the
+  three identity caps — verified on the machine); that stance was weighed and **not** taken, since the
+  factory's euid-0 window is brief and the cap is retained for one contained operation. `CAP_SYS_PTRACE` is
+  *not* a factory file cap — the operator-owned child userns grants `kenneld` ptrace intrinsically. The win
+  is real but lateral: the **rare** host-context caps are shed off the factory into separately-gated
+  sub-helpers — `kennel-privhelper-net` `{cap_net_admin}` (host-lo bind mirror),
+  `kennel-privhelper-bpf` `{cap_bpf,cap_net_admin,cap_perfmon}` (host-mode egress; `cap_perfmon` is required
+  because cgroup-sockaddr programs read kernel context under `kernel.unprivileged_bpf_disabled`), and
+  `kennel-privhelper-mounts` `{cap_sys_admin}` (exclusive over-mount) — each invoked only by the factory.
+- **In-process privilege transitions: the `seteuid` idiom is kept (it is cap-compatible).** `construct.rs`
+  raises/drops privilege via `seteuid(0)`/`setuid(op)`. Under setcap this works unchanged: `CAP_SETUID`
+  authorises the euid-0 climb to open the root-owned `uid_map`, the file caps (`+ep`) stay effective at any
+  euid, and the final `setuid(op)` clears the effective set on the 0→nonzero transition (the same drop
+  setuid gave for free). No `capset` rework was needed — the factory just needed the right *file* caps.
 - **Solve the `modprobe` exec under setcap.** Setuid gives `modprobe` root naturally; setcap does not —
   caps do not cross `execve` to a non-fcap binary without **ambient** capabilities. Either set ambient
   `CAP_SYS_MODULE` before the exec, or drop the runtime `modprobe` dependency (boot-time `binderfs` load
   covers the common case). Decide deliberately — do not silently regress binder auto-load.
+  ***NEW FINDING:*** the ONLY thing that needs doing is to add the following to /etc/modprobe.d/kennel-binder.conf: "alias fs-binder binder_linux" in the install.sh - the next time the kernel is looking for the 'binder' fs module, modprobe will simply pick it up. Verified on Ubuntu 26.04 LTS, by simply doing "# mount -t binder binder /dev/binderfs"
 - **Install + portability.** `install.sh` swaps `chmod 4755` for `setcap <set> kennel-privhelper`, with
   **xattr-support detection** and a setuid fallback for filesystems that cannot carry file caps (the
   reason setuid is the universal default). Confirm the AppArmor `userns` grant still inherits across
@@ -397,15 +408,44 @@ Honestly scoped — **not** a one-line install change:
   Kennel under setuid, T3.1). Last cycle's cleanup made the corpus correctly say *setuid*; this makes
   file caps **real**, so the corpus moves with the code — and this time the file-caps claim is true.
 
-**Honest benefit, not overclaimed:** setcap removes the euid-0 window and shrinks the pre-drop blast
-radius to the named set — a real least-privilege gain. It does **not** escape the privileged-helper risk
-class (a retained `CAP_SYS_ADMIN` is near-root regardless; even without it, the helper is still the TCB's
-privileged locus). The bet stays "small, single-purpose, signed-policy-gated helper" — setcap sharpens it.
+**Honest benefit, not overclaimed:** the factory keeps a **brief** euid-0 window (only the `uid_map` write
+needs it) rather than running euid-0 throughout, and the **rare** caps (`net_admin`, `bpf`+`perfmon`, the
+mount `sys_admin`) move off it onto separately-gated sub-helpers — a real reduction of the factory's
+standing blast radius. It does **not** escape the privileged-helper risk class: the factory retains
+`CAP_SYS_ADMIN` (near-root) for the map write, so it stays the TCB's privileged locus. The bet stays
+"small, single-purpose, signed-policy-gated helper" — the split sharpens it by capability, not by escaping
+the class.
 
-**Exit:** the installed privhelper carries a minimised file-cap set (no setuid bit) on xattr-capable
-filesystems, with a setuid fallback where file caps are unsupported; construction — including binder load
-and the BPF egress path — passes e2e on the hardened-kernel + AppArmor path; the corpus privilege model
-reads setcap.
+**Exit:** the installed factory carries `{cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin}` (no setuid bit)
+on xattr-capable filesystems, with a setuid fallback where file caps are unsupported; the three sub-helpers
+carry their single-purpose cap sets; construction — including binder load and the BPF egress path — passes
+e2e on the hardened-kernel + AppArmor path; the corpus privilege model reads setcap.
+
+### W15 · Surface the privhelper's stderr through kenneld
+
+**[operability] S.**
+
+When the privhelper — the factory or a sub-helper — fails, its stderr carries the precise cause, but
+kenneld does not surface it. W14 made this concrete: a `uid_map` write `EPERM` (the factory missing
+`CAP_SYS_ADMIN`) wrote a clear line to the helper's fd 2, which is a socket kenneld holds; kenneld neither
+drains nor forwards it, so the operator saw only a hang and the generic `factory did not return the 4-byte
+init pid`. Recovering the one-line cause took `strace`. Every privhelper failure mode (a missing cap, a
+refused scope, an unowned cgroup, a bad init binary) has the same blind spot.
+
+Make kenneld **capture the helper's stderr and surface it**: drain the helper's stderr to a bounded buffer,
+and on a failure fold its last lines into the construction-failure log line and the audit event, so
+`kennel … failed to start [spawn workload]: …` carries the helper's own words, not just the transport
+symptom. This is observability, not a privilege change — the helper stays the same; kenneld stops swallowing
+its diagnostics.
+
+Related fail-fast (the other half of why W14's failure was undiagnosable): the construction child blocks on
+its **inherited** copy of the maps-ack pipe, so a parent-side failure presents as a ~90 s hang (SIGKILL at
+service stop) rather than a prompt error. Close the child's write end of that pipe right after the `clone`
+so a dead parent yields EOF and the child fails fast.
+
+**Exit:** a privhelper or sub-helper failure produces a specific operator-visible diagnostic in the kenneld
+journal carrying the helper's own stderr (no `strace` to read a refusal or cap error), and a parent-side
+construction failure fails fast instead of hanging to the service-stop timeout.
 
 ## Sequencing
 
@@ -424,6 +464,7 @@ W9  (kennel-compose)  ── M,  after W2 + W1, ship gate ───────�
 W10 (CLI split)       ── M,  after W9, ship gate ─────────────────►
 W11 (dynamic red-team)── S,  after W1, ship gate ─────────────────►
 W14 (privhelper setcap)── M, independent (security) ──────────────►
+W15 (privhelper stderr)── S, after W14 (diagnostic debt it exposed) ►
 ```
 
 W1 is the only deep dependency chain (A→B→C). W8 lands before W13 so the threat ID can be cited in the
@@ -458,6 +499,9 @@ the tag.
 - The installed privhelper carries a minimised file-cap set with no setuid bit (setuid fallback only where
   file caps are unsupported); construction passes e2e on the hardened-kernel + AppArmor path; the corpus
   privilege model reads setcap (W14).
+- A privhelper or sub-helper failure surfaces the helper's own stderr in the kenneld journal (no `strace` to
+  read a refusal or cap error), and a parent-side construction failure fails fast rather than hanging to the
+  service-stop timeout (W15).
 
 CHANGELOG records every stable-surface change — the two newly-brokered connector shapes, the
 `dbus-broker@v1` template, the OpenSSH key format, the `kennel inspect` verb, the split CLI binaries, the
