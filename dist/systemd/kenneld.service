@@ -3,7 +3,7 @@
 # Started on demand by kenneld.socket; persists for the session. Runs as the
 # user (no elevated privilege) inside user@<uid>.service so it can create and
 # join the per-kennel cgroups; privilege is borrowed transiently through the
-# setuid privhelper.
+# file-capped privhelper.
 [Unit]
 Description=Project Kennel orchestrator
 Requires=kenneld.socket

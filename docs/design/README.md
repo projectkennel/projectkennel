@@ -14,7 +14,7 @@ reach — Landlock, cgroup BPF, user/mount/PID/IPC namespaces, seccomp, `no_new_
 
 It is **built, not proposed**, and it runs **without privilege**: `kenneld` is an ordinary
 user process; the sandbox is assembled inside an identity-mapped user namespace (the
-bubblewrap mechanism), with a single small setuid-root helper for the few
+bubblewrap mechanism), with a single small file-capped helper for the few
 host-global operations a user namespace cannot reach.
 
 This directory is the **design corpus** — the *why* and the *what*, vendor- and

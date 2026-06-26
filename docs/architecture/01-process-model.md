@@ -32,7 +32,7 @@ Runs as the user.
 
 ### `kennel-privhelper` (the privileged component, and the kennel factory)
 
-Small binary plus the `kennel-lib-syscall` dependency. The installer installs it setuid root (mode `4755`, owner root); file capabilities `cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep` are a documented per-distribution alternative the installer does not itself apply. `cap_net_admin`/`cap_sys_admin` cover the loopback addresses, the egress BPF, and the kennel's mount/pivot construction; `cap_setgid`/`cap_setuid`/`cap_setfcap` cover the identity map (the precise `0 0 1` + operator lines are written in one `write(2)`, which is why `cap_setfcap` is needed) and the operator drop.
+Small binary plus the `kennel-lib-syscall` dependency. The installer installs it with file capabilities `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin=ep`, with setuid root (mode `4755`, owner root) only as the no-xattr fallback for filesystems that cannot carry file caps. `cap_setgid`/`cap_setuid`/`cap_setfcap` cover the identity map (the precise `0 0 1` + operator lines are written in one `write(2)`, which is why `cap_setfcap` is needed) and the operator drop; `cap_sys_admin` is the kernel's `uid_map`-write gate for mapping host uid 0 and covers the kennel's mount/pivot construction. The rare host-context operations are not on the factory: they are delegated to three single-purpose sub-helpers the factory execs only when a policy needs them — `kennel-privhelper-net` (`cap_net_admin`, the host-`lo` mirror loopback address), `kennel-privhelper-bpf` (`cap_bpf,cap_net_admin,cap_perfmon`, the host-mode egress BPF attach), and `kennel-privhelper-mounts` (`cap_sys_admin`, the exclusive-bind over-mount).
 
 The privhelper is the kennel **factory**: it does *all* privileged construction in a child it `clone`s, then hands off to a trusted root-owned `kennel-bin-init`. Operations (the `Op` enum in `kennel-privhelper::wire`):
 
@@ -114,7 +114,10 @@ These are dependencies, not source. Their versions are pinned in the build envir
 |---|---|---|---|
 | `kennel` (CLI) | user | inherited from shell | nothing special |
 | `kenneld` | user | none | started by systemd --user or equivalent |
-| `kennel-privhelper` | root (setuid) or user | `cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep` | the kennel **factory**: clones the namespaces, writes the identity map, builds + pivots the view, then `fexecve`s `kennel-bin-init`; installer uses setuid (mode `4755`), file caps a per-distribution alternative |
+| `kennel-privhelper` | user (file caps) or root (setuid fallback) | `cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin=ep` | the kennel **factory**: clones the namespaces, writes the identity map, builds + pivots the view, then `fexecve`s `kennel-bin-init`; installer uses file caps, setuid-root (mode `4755`) the no-xattr fallback |
+| `kennel-privhelper-net` | user (file caps) | `cap_net_admin=ep` | sub-helper the factory execs on demand: adds/deletes the host-`lo` mirror loopback address (netlink) |
+| `kennel-privhelper-bpf` | user (file caps) | `cap_bpf,cap_net_admin,cap_perfmon=ep` | sub-helper the factory execs on demand (`host` mode only): attaches the host-mode egress BPF to the kennel cgroup |
+| `kennel-privhelper-mounts` | user (file caps) | `cap_sys_admin=ep` | sub-helper the factory execs on demand: over-mounts the exclusive-bind sentinel |
 | `kennel-bin-init` | operator (as built; design models uid 0) | none ambient (userns-scoped `CAP_SETUID`/`CAP_SETGID` only) | PID 1; root-owned binary, trapped post-pivot; forks + supervises the facades and the workload |
 | `host-netproxy` | user | none | |
 | `kennel-sshd` (bastion) | user | none | per-user, managed by kenneld; stock OpenSSH `sshd` |
@@ -205,8 +208,8 @@ Project Kennel processes communicate over Unix domain sockets and BPF maps. No p
    +----------------------------------------------------------------------+
    | Privileged                                                           |
    |                                                                      |
-   |   kennel-privhelper  (root / cap_net_admin,cap_sys_admin,            |
-   |                       cap_setgid,cap_setuid,cap_setfcap)             |
+   |   kennel-privhelper  (file caps: cap_setuid,cap_setgid,             |
+   |                       cap_setfcap,cap_sys_admin)                     |
    |   addr/egress ops: live for one operation, then exit                 |
    |   construct-kennel: the factory — clones the kennel, builds and      |
    |     pivots the view, fexecve's kennel-bin-init, then stays its parent    |

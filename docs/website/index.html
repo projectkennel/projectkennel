@@ -1116,9 +1116,9 @@
                     <p>Project Kennel is <b>pre-release</b>: the reference runtime is built and runs the full
                         vertical unprivileged on stock Linux (kernel 6.17, Landlock ABI ≥ 6), but interfaces and
                         guarantees may still change. The install is offline — prebuilt binaries, no toolchain, no
-                        network — and adds one small setuid-root helper for the handful of host-global operations a
-                        user namespace cannot reach (the per-kennel loopback addresses, the egress BPF attach, the
-                        policy-granted <code>gid_map</code> write, and the one-time binder module load).</p>
+                        network — and adds one small file-capped helper for the handful of host-global operations a
+                        user namespace cannot reach (the identity-map write, plus the per-kennel loopback mirror and
+                        the egress BPF attach delegated to single-capability sub-helpers).</p>
                 </div>
 
                 <div class="grid rv" style="grid-template-columns:1fr 1fr">

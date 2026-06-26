@@ -3,12 +3,12 @@
 # Why this exists
 # ---------------
 # kenneld runs as an ordinary user. To build each workload's sandbox it execs the
-# setuid-root privhelper (kennel-privhelper), which establishes an identity-mapped
+# file-capped privhelper (kennel-privhelper), which establishes an identity-mapped
 # *user namespace* — the bubblewrap-equivalent mechanism that grants CAP_SYS_ADMIN
 # *inside that namespace* — and constructs the view within it (mount(2), pivot_root).
 # Crucially the privhelper clones the userns *as the operator*: it drops its effective
 # uid across the clone so the namespace is operator-owned (docs/architecture/01-process-model.md),
-# so to the kernel it is an *unprivileged* userns creation despite the setuid bit.
+# so to the kernel it is an *unprivileged* userns creation despite the helper's file caps.
 #
 # Ubuntu 23.10+/24.04 ship `kernel.apparmor_restrict_unprivileged_userns=1`: under it,
 # `clone/unshare(CLONE_NEWUSER)` SUCCEEDS but the creator holds NO capabilities in the
@@ -18,9 +18,9 @@
 # the capability for the kennel spawn *specifically*, without weakening the host-wide
 # restriction for every other binary.
 #
-# So construction needs BOTH the privhelper's setuid root (mode 4755; file capabilities
-# a per-distribution alternative, docs/architecture/07-paths.md) for the map-write and
-# mount capabilities, AND this AppArmor grant for the operator-owned userns creation
+# So construction needs BOTH the privhelper's file capabilities (cap_setuid,cap_setgid,
+# cap_setfcap,cap_sys_admin; setuid-root the no-xattr fallback, docs/architecture/07-paths.md)
+# for the map-write, AND this AppArmor grant for the operator-owned userns creation
 # under the restriction. Removing the profile breaks construction (the privhelper's
 # child cannot write its uid_map: `kennel-bin-init did not report ready`). On hosts that
 # do not restrict unprivileged user namespaces, the profile is harmless.
