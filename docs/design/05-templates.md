@@ -396,12 +396,15 @@ If two includes contribute conflicting entries for the same unique key (e.g., tw
 
 ### Trust store and enforcement
 
-Signing keys live in the trust store: `~/.config/kennel/keys/` for user-installed keys, `/etc/kennel/keys/` for system-installed (organisation) keys. Public keys only; private signing keys are never in these trees.
+Signing keys live in the trust store at three layers: `/usr/lib/kennel/keys/` (vendor — the package-shipped maintainer keys), `/etc/kennel/keys/` (host — administrator-installed organisation keys), and `~/.config/kennel/keys/` (user — the operator's own keys). At the vendor and host layers, only public keys (`<key-id>.pub`) are installed; private signing keys are held by the maintainer or administrator, never on the target host. At the user layer, private keys live alongside their public keys in the same directory (private: `<key-id>` with no extension; public: `<key-id>.pub` — the `ssh-keygen` convention; directory mode 0700).
 
-- The project's maintainer keys ship with the package and verify the official template set.
-- Organisations install their own keys and sign their own templates and fragments. Organisations can require, via system-wide configuration, that policies derive only from templates and includes signed by specific keys — an attacker who installs a malicious template signed by an untrusted key cannot have it loaded.
+Keys are Ed25519 in the **OpenSSH wire format** (W4): public keys are `ssh-ed25519 <base64-blob> <comment>`; private keys are `-----BEGIN OPENSSH PRIVATE KEY-----` PEM envelopes (unencrypted). `kennel keygen <key-id>` generates a key pair via `ssh-keygen -t ed25519`. The pre-W4 legacy format (raw base64 seed as `<key-id>.key`, raw base64 public key as `<key-id>.pub`) is still accepted for backward compatibility (auto-detected by content); `kennel keygen migrate` converts legacy pairs to OpenSSH format in place.
 
-Project Kennel refuses to load any template or include whose signature is invalid. It warns but does not refuse on *missing* signatures in development mode (local unsigned templates are part of the authoring workflow); production deployments set a settings flag, pushed to managed workstations, that turns missing-signature into a hard refusal. CI verifies that every committed template and fragment version carries a valid signature and that its lockfile entry matches.
+- The project's maintainer keys ship with the package (vendor layer) and verify the official template set.
+- Organisations install their own keys (host layer) and sign their own templates and fragments. Organisations can require, via system-wide configuration, that policies derive only from templates and includes signed by specific keys — an attacker who installs a malicious template signed by an untrusted key cannot have it loaded.
+- Users generate their own keys (user layer) to sign their own templates and policies. Users are restricted only from the **reserved names** declared at the host and vendor layers (§7.13.5, §4.10.2).
+
+Project Kennel refuses to load any template or include whose signature is invalid. It warns but does not refuse on *missing* signatures in development mode (local unsigned templates are part of the authoring workflow); production deployments set a settings flag, pushed to managed workstations, that turns missing-signature into a hard refusal. CI verifies that every committed template and fragment version carries a valid signature and that its lockfile entry matches. The full key-management model — the three-tier hierarchy, rotation, revocation, and trust-root honesty bounds — is in §4.10.
 
 ### The composable fragment catalogue
 

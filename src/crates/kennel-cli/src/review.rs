@@ -357,6 +357,8 @@ pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Derive the writable root directory from a glob-like `fs.write` entry, expanding
+/// `~` and `$HOME` relative to `home`.
 pub fn writable_root(entry: &str, home: &Path) -> Option<PathBuf> {
     let trimmed = entry
         .strip_suffix("/**")

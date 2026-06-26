@@ -25,6 +25,7 @@ use crate::{
 /// `<name>@<version>.toml` (the installed layout) and then `<name>/policy.toml`
 /// (the in-tree source layout), so the same resolver serves both.
 pub struct FsTemplateSource {
+    /// The template search directories (the template cascade).
     pub dirs: Vec<PathBuf>,
 }
 
@@ -250,6 +251,7 @@ impl TempSettled {
         Ok(Self { path })
     }
 
+    /// The path to the temporary settled file.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1511,5 +1513,86 @@ fn print_source_diff(old: Option<&[u8]>, new: &[u8]) {
         if !new_lines.contains(line) && !line.trim().is_empty() {
             println!("  - {line}");
         }
+    }
+}
+
+// ---- `kennel policy inspect` ---------------------------------------------------
+
+/// `kennel policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...`
+///
+/// Load a settled (or compilable source) policy and render its grants.
+/// Currently supports `--unix` (AF_UNIX socket grants, §7.6).
+pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_arg: Option<String> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut show_unix = false;
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("unix") => show_unix = true,
+            lexopt::Arg::Long("template-dir") => {
+                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
+            }
+            lexopt::Arg::Long("trust-dir") => {
+                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            }
+            lexopt::Arg::Value(v) if policy_arg.is_none() => {
+                policy_arg = Some(v.to_string_lossy().into_owned());
+            }
+            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "inspect")),
+        }
+    }
+    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "inspect"))?;
+    if !show_unix {
+        return Err("no grant filter specified — use --unix to inspect AF_UNIX grants".to_owned());
+    }
+
+    let (policy_file, _name) = resolve_policy(&policy_arg, true)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+    let policy = if is_source_policy(&bytes) {
+        let source = FsTemplateSource {
+            dirs: template_dirs,
+        };
+        let keys = load_trust_store(&trust_dirs)?;
+        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+        compiled.policy
+    } else {
+        let keys = load_trust_store(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, &keys)
+            .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
+    };
+
+    if show_unix {
+        print_unix_grants(&policy);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Render the AF_UNIX grants from a settled policy's `UnixRuntime` (§7.6).
+fn print_unix_grants(policy: &kennel_lib_policy::SettledPolicy) {
+    let unix = &policy.unix;
+    if unix.is_empty() {
+        println!("no AF_UNIX grants");
+        return;
+    }
+    println!("AF_UNIX grants ({} socket{}):\n",
+        unix.sockets.len(),
+        if unix.sockets.len() == 1 { "" } else { "s" },
+    );
+    for sock in &unix.sockets {
+        println!("  {}", sock.name);
+        println!("    real:  {}", sock.real);
+        println!("    shim:  {}", sock.shim);
+        if let Some(env) = &sock.env {
+            println!("    env:   {env}");
+        }
+        println!();
     }
 }

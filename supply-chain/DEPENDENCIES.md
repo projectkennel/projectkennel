@@ -175,3 +175,22 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** remco (2026-06-19). Provenance: byte-identical to `github.com/iliabylich/mini-sansio-dbus` @ `b1adcf603bd6705313decd65dece865894d74e3b` (tag v5.0.1), 77 source files + `Cargo.toml.orig`, via `tools/audit-source.sh` — **except one applied hardening hunk** (`src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch`); the upstream `.crate` sha256 matched the independent re-download and the crates.io index `cksum` *before* the patch. `#![forbid(unsafe_code)]` — no unsafe. Red-flag scan clean: no build.rs, no proc-macro, no FFI/asm; sans-IO, so no `std::process`/`net`/`fs`/`env` (the caller owns all I/O). The `incoming` decoder parses adversarial workload wire and carries a fuzz target (`fuzz/`). Young/low-adoption upstream, mitigated by the exact pin + CHECKSUMS + the fuzz target — which earned its keep here, finding a network-reachable `unreachable!()` in the header-field decoder (a panic on a bogus field-code byte, unmaskable under release `panic = "abort"`). The patch turns it into the `Err(MalformedHeaderField)` the caller already handles; it is reported upstream and dropped on the fixed release. Source review by the assistant, accepted by the maintainer.
 - **Transitive deps added:** none. The index lists `anyhow` and `rustix` but both are `dev`-dependencies (its examples/tests only), never built when the crate is consumed.
 - **Proc-macros / build.rs:** none (`build = false`).
+
+### termion
+
+- **Version:** =4.0.6 (exact pin).
+- **Justification:** Terminal control — raw mode, ANSI escape sequences, cursor positioning, terminal size detection, input event parsing. Used by `kennel-compose` (the standalone policy-authoring tool, W9) for interactive prompts: select-from-list, multi-select, confirm, styled output. The alternative is `dialoguer` (12 new crates including proc-macros and `rustix`); `termion` pulls exactly one new transitive (`numtoa`). This is a terminal-interaction library, not something we'd hand-roll for the same quality (§5.1) — the raw-mode/cooked-mode lifecycle, cross-terminal ANSI escape handling, and input event parsing are fiddly to get right.
+- **Licence:** MIT.
+- **Reviewer:** antigravity (2026-06-25). Provenance: `.crate` sha256 matches independent re-download (audit-helper.sh confirm); `.cargo_vcs_info.json` records commit `c784cec0a6f8d1b02692eb58d781acf172bb5959` at `gitlab.redox-os.org/redox-os/termion` (Redox OS GitLab). 2132 lines across 16 source files. Eight instances of `unsafe` — all thin `libc` FFI wrappers (`isatty`, `ioctl` for terminal size, `tcgetattr`/`tcsetattr`/`cfmakeraw`). No build.rs, no proc-macro. Source review by the assistant.
+- **Transitive deps added:** `numtoa` (new, below); `libc` already vendored.
+- **Shipped into:** `kennel-compose` only (standalone optional binary). **Not** linked into `kenneld`, `kennel-privhelper`, `kennel-cli`, or any daemon-TCB crate.
+- **Proc-macros / build.rs:** none.
+
+### numtoa
+
+- **Version:** =0.2.4 (exact pin).
+- **Justification:** Integer-to-string conversion without `std::fmt`, `#![no_std]`. Pulled **transitively by `termion`** (termion uses it for efficient integer rendering in ANSI escape sequences). Not used directly by any first-party crate. 558 lines in a single `lib.rs`. Recorded here because it is a new vendored crate in the shipped graph.
+- **Licence:** MIT OR Apache-2.0 (we take Apache-2.0).
+- **Reviewer:** antigravity (2026-06-25). Provenance: `.crate` sha256 matches independent re-download (audit-helper.sh confirm); `.cargo_vcs_info.json` records commit `4bc342658bab2949a65b514494634579a1be4a63` at `gitlab.com/mmstick/numtoa` (GitLab). Four instances of `unsafe` (`str::from_utf8_unchecked` on self-produced ASCII digit sequences — trivially sound). No build.rs, no proc-macro, no FFI. Zero dependencies.
+- **Transitive deps added:** none.
+- **Proc-macros / build.rs:** none.

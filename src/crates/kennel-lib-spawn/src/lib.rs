@@ -29,6 +29,7 @@ pub mod plan;
 pub mod wire;
 
 use std::io;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use kennel_lib_policy::{KeySet, PolicyError, SettledPolicy};
@@ -674,13 +675,50 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
                 format!("create_bind_target {}: {e}", dest.display()),
             )
         })?;
-        mount::bind(&b.source, &dest, true).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("bind {}->{}: {e}", b.source.display(), dest.display()),
+        // W3: for writable binds, resolve the source with RESOLVE_NO_SYMLINKS
+        // (openat2) so a source that symlink-escapes the granted tree is refused
+        // before the mount is applied — closing the writable-bind-source
+        // symlink-aliasing class (0.4.0 F1 residual). The returned O_PATH fd is
+        // bound via /proc/self/fd/N, which resolves to the real inode. The fd
+        // must stay alive until after mount::bind returns.
+        //
+        // Read-only binds are not guarded: a read-only symlink-aliased bind
+        // cannot be used to write the control socket or any other protected path.
+        if b.writable {
+            // AT_FDCWD (-100) — resolve relative to cwd. For absolute paths the
+            // kernel ignores it; all bind sources in the plan are absolute. We
+            // use the raw value to avoid pulling libc into this crate.
+            let fd = kennel_lib_syscall::fd::open_no_symlinks(
+                -100, // AT_FDCWD
+                &b.source,
             )
-        })?;
-        if !b.writable {
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!(
+                        "writable bind source {}: {e} (symlink in path? \
+                         RESOLVE_NO_SYMLINKS refuses symlink-aliased sources, W3)",
+                        b.source.display(),
+                    ),
+                )
+            })?;
+            let fd_path =
+                PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()));
+            mount::bind(&fd_path, &dest, true).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("bind {}->{}: {e}", b.source.display(), dest.display()),
+                )
+            })?;
+            // `fd` is dropped here — after mount::bind has consumed the
+            // /proc/self/fd/N path and the bind is in place.
+        } else {
+            mount::bind(&b.source, &dest, true).map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("bind {}->{}: {e}", b.source.display(), dest.display()),
+                )
+            })?;
             mount::remount_readonly(&dest).map_err(|e| {
                 io::Error::new(e.kind(), format!("remount_ro {}: {e}", dest.display()))
             })?;

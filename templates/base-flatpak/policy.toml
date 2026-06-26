@@ -1,0 +1,135 @@
+# ============================================================================
+# Template: base-flatpak  (v1)  — the flatpak baseline (curated bracket).
+# Inherits: nothing — this is a reference baseline, NOT a recommended start.
+#
+# ┌─────────────────────────────────────────────────────────────────────────┐
+# │ REFERENCE BASELINE — NOT A RECOMMENDED START.                         │
+# │ This template encodes flatpak's curated-runtime posture: only the     │
+# │ base subtrees of /usr are present (loader, core libs, terminfo,       │
+# │ zoneinfo, CAs). The host's sprawl (/usr/local, /usr/src, /usr/include)│
+# │ is absent. Use this to compare posture against base-confined/base-    │
+# │ bwrap, or as a reference for what the W2 floor achieves.              │
+# └─────────────────────────────────────────────────────────────────────────┘
+#
+# Posture:
+#   - Curated /usr base: /usr/bin, /usr/sbin, /usr/lib, /usr/lib64,
+#     /usr/libexec, /usr/share — same as base-confined (W2)
+#   - Permissive exec (flatpak does not exec-gate within the runtime)
+#   - Net mode none (flatpak portals handle network; not modelled here)
+#   - Flatpak seccomp filter (matched to flatpak's default)
+#   - Constructed /dev, private /tmp, PID namespace
+#   - Still runs under Kennel's non-optional invariants: Landlock, no_new_privs,
+#     setuid/setgid/setcap denial, binder gateway.
+#
+# See docs/design/04-trust-boundaries.md §4.2 and the W2 workstream.
+# ============================================================================
+
+template_name = "base-flatpak"
+template_version = "1"
+
+
+# --- Capabilities (framework invariants) ------------------------------------
+[cap]
+no_new_privs = true
+bounding_set = []
+
+
+# --- Execution (permissive — flatpak does not exec-gate) --------------------
+[exec]
+allow = ["**"]
+
+deny_setuid = true
+deny_setgid = true
+deny_setcap = true
+deny_writable = true
+
+path = ["/usr/bin", "/usr/sbin", "/bin"]
+
+
+# --- Filesystem (the curated base — matching W2) ---------------------------
+[fs]
+# The W2 curated base: only the subtrees a dynamically-linked workload needs.
+# Matches base-confined exactly — construction-by-absence (§4.2).
+read = [
+    "/usr/bin/**", "/usr/sbin/**",
+    "/usr/lib/**",
+    "/usr/lib64/**",
+    "/usr/libexec/**",
+    "/usr/share/**",
+    "/lib/**", "/lib64/**",
+    "/etc/ssl/**", "/etc/pki/**",
+    "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
+    "/etc/alternatives/**",
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
+    "/sys/devices/system/cpu/**",
+]
+write = []
+
+[fs.home]
+shadow = true
+
+[fs.tmp]
+private = true
+size = "512M"
+mode = "0700"
+
+[fs.proc]
+visibility = "self"
+hidepid = true
+
+[fs.dev]
+allow = [
+    "/dev/null", "/dev/zero", "/dev/random", "/dev/urandom",
+    "/dev/tty", "/dev/pts/**",
+]
+
+
+# --- Network (isolated — flatpak uses portals for network) -----------------
+[net]
+mode = "none"
+
+# Invariant denies — mandatory on every policy, defence-in-depth even in
+# mode = none (the runtime enforces these regardless of proxy presence).
+[[net.proxy.deny.invariant]]
+cidr = "169.254.169.254/32"
+reason = "cloud metadata IPv4 — never permitted from a kennel (mandatory invariant)"
+[[net.proxy.deny.invariant]]
+cidr = "fd00:ec2::254/128"
+reason = "AWS IPv6 metadata — never permitted"
+[[net.proxy.deny.invariant]]
+cidr = "fe80::/10"
+reason = "IPv6 link-local — no legitimate egress destination"
+
+
+# --- AF_UNIX sockets -------------------------------------------------------
+[unix]
+default = "deny"
+abstract = "deny"
+
+
+# --- Environment ------------------------------------------------------------
+[env]
+set = { TMPDIR = "/tmp", NO_PROXY = "" }
+
+
+# --- Seccomp (flatpak's default filter) -------------------------------------
+# Matched to flatpak's seccomp filter (the syscalls flatpak blocks in its
+# default profile). Kennel's filter is a superset; these are the common denies.
+[seccomp]
+profile = "default"
+deny = [
+    "userfaultfd", "perf_event_open", "bpf",
+    "process_vm_readv", "process_vm_writev",
+    "kexec_load", "kexec_file_load",
+    "mount", "umount", "umount2", "pivot_root",
+    "swapon", "swapoff", "reboot",
+    "init_module", "finit_module", "delete_module",
+    "personality",
+]
+
+
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "v+X/SRJnGZSMmcM1/lxZW9nCDN5RxEOoyZ2JUESBhH3F7BllbBQvpyc0mUne39CuF06CLmX5rEoAoveFJ5boCQ=="
