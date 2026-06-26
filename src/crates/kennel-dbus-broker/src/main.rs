@@ -185,3 +185,72 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_broker_lifecycle() {
+        let mut broker = Broker::new();
+
+        // 1. REGISTER_CONSUMER
+        let talk = vec!["org.freedesktop.DBus".to_owned()];
+        let reg_data = kennel_lib_binder::service::broker::encode_register(
+            42, // consumer_id
+            kennel_lib_binder::service::dbus::SESSION, // bus
+            &talk,
+            &[],
+            &[],
+            &[],
+            &[],
+        );
+        let incoming_reg = Incoming {
+            code: broker::REGISTER_CONSUMER,
+            data: reg_data,
+            fds: Vec::new(),
+            sender_pid: 100,
+            sender_euid: 1000,
+            buffer: 0,
+        };
+        let reply_reg = broker.handle(&incoming_reg);
+        assert_eq!(reply_reg, vec![status::OK]);
+
+        // 2. RELAY_FRAME (registered consumer)
+        let relay_data = kennel_lib_binder::service::broker::encode_relay(
+            42,
+            kennel_lib_binder::service::dbus::SESSION,
+            &[0x01, 0x02, 0x03],
+        );
+        let incoming_relay = Incoming {
+            code: broker::RELAY_FRAME,
+            data: relay_data.clone(),
+            fds: Vec::new(),
+            sender_pid: 100,
+            sender_euid: 1000,
+            buffer: 0,
+        };
+        let reply_relay = broker.handle(&incoming_relay);
+        assert_eq!(reply_relay, vec![status::OK]);
+
+        // 3. UNREGISTER_CONSUMER
+        let unreg_data = kennel_lib_binder::service::broker::encode_unregister(
+            42,
+            kennel_lib_binder::service::dbus::SESSION,
+        );
+        let incoming_unreg = Incoming {
+            code: broker::UNREGISTER_CONSUMER,
+            data: unreg_data,
+            fds: Vec::new(),
+            sender_pid: 100,
+            sender_euid: 1000,
+            buffer: 0,
+        };
+        let reply_unreg = broker.handle(&incoming_unreg);
+        assert_eq!(reply_unreg, vec![status::OK]);
+
+        // 4. RELAY_FRAME (unregistered consumer)
+        let reply_relay_post = broker.handle(&incoming_relay);
+        assert_eq!(reply_relay_post, vec![status::NOT_FOUND]);
+    }
+}

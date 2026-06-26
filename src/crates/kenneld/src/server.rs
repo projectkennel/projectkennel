@@ -1144,14 +1144,14 @@ where
 /// used anywhere, so a name with `/`, `..`, NUL, whitespace, or control bytes cannot
 /// traverse a path or inject a hostname. `List`/`AuthorizedKeys` carry no name.
 pub fn dispatch_request<P, L>(
-    shared: &Shared<P, L>,
+    shared: &Arc<Shared<P, L>>,
     request: Request,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
     constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
@@ -1264,7 +1264,7 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
 // block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_kennel<P, L>(
-    shared: &Shared<P, L>,
+    shared: &Arc<Shared<P, L>>,
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
@@ -1276,8 +1276,8 @@ pub fn run_kennel<P, L>(
     // for a plain `kennel run`, which provides nothing over the mesh.
     provider_tier: Option<crate::catalogue::Tier>,
 ) where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{}`", req.kennel));
@@ -1852,6 +1852,20 @@ pub fn run_kennel<P, L>(
             consumes: loaded.consumes,
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
+            dbus_transactor: {
+                let has_broker = {
+                    let cat = shared
+                        .catalogue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !cat.resolve("org.projectkennel.dbus-broker").is_empty()
+                };
+                if has_broker {
+                    Some(std::sync::Arc::clone(shared) as std::sync::Arc<dyn crate::dbus::MeshTransactor>)
+                } else {
+                    None
+                }
+            },
         });
     }
 
@@ -1904,22 +1918,31 @@ pub fn run_kennel<P, L>(
     // Push the consumer's D-Bus filter set to the dbus-broker (W1 Part C).
     // Best-effort: a missing broker or failed push is logged, not fatal — the consumer's
     // DBUS_* verbs will be denied by the broker until re-registered.
-    if let Some(ref rules) = dbus_session_rules {
-        if let Err(e) = shared.register_dbus_consumer(
-            ctx,
-            kennel_lib_binder::service::dbus::SESSION,
-            rules,
-        ) {
-            eprintln!("kenneld: dbus-broker session registration for ctx={ctx}: {e}");
+    let has_broker = {
+        let cat = shared
+            .catalogue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !cat.resolve("org.projectkennel.dbus-broker").is_empty()
+    };
+    if has_broker {
+        if let Some(ref rules) = dbus_session_rules {
+            if let Err(e) = shared.register_dbus_consumer(
+                ctx,
+                kennel_lib_binder::service::dbus::SESSION,
+                rules,
+            ) {
+                eprintln!("kenneld: dbus-broker session registration for ctx={ctx}: {e}");
+            }
         }
-    }
-    if let Some(ref rules) = dbus_system_rules {
-        if let Err(e) = shared.register_dbus_consumer(
-            ctx,
-            kennel_lib_binder::service::dbus::SYSTEM,
-            rules,
-        ) {
-            eprintln!("kenneld: dbus-broker system registration for ctx={ctx}: {e}");
+        if let Some(ref rules) = dbus_system_rules {
+            if let Err(e) = shared.register_dbus_consumer(
+                ctx,
+                kennel_lib_binder::service::dbus::SYSTEM,
+                rules,
+            ) {
+                eprintln!("kenneld: dbus-broker system registration for ctx={ctx}: {e}");
+            }
         }
     }
     // Hard-reaper race close (§7.12.7): a spawned sibling's construction is async to the SPAWN reply,
@@ -2366,6 +2389,31 @@ fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, Strin
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     Ok(command)
+}
+
+impl<P, L> crate::dbus::MeshTransactor for Shared<P, L>
+where
+    P: Privileged + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn transact_broker(&self, code: u32, data: &[u8]) -> io::Result<Vec<u8>> {
+        let broker_bus_key = mesh_bus_key(
+            crate::catalogue::Tier::Host,
+            "org.projectkennel.dbus-broker",
+            None,
+        );
+        let buses = self
+            .mesh_buses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(bus) = buses.get(&broker_bus_key) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "dbus-broker mesh bus not running",
+            ));
+        };
+        bus.transact_service("org.projectkennel.dbus-broker", code, data)
+    }
 }
 
 /// Derive the map key for a mesh bus from its `(tier, name, key)` triple.

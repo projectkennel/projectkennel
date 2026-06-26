@@ -1063,7 +1063,7 @@ fn dbus_handle(dbus: Option<&DbusRelay>, incoming: &Incoming, ctx: u16, writer: 
             );
             Reply::Data(reply)
         }
-        verb::DBUS_SEND => Reply::Data(relay.send(pid, &incoming.data)),
+        verb::DBUS_SEND => Reply::Data(relay.send(ctx, pid, &incoming.data)),
         verb::DBUS_RECV => Reply::Data(relay.recv(pid, &incoming.data)),
         // Unreachable: `handle` dispatches here only for the four DBUS_* codes.
         _ => Reply::Data(one(status::BAD_REQUEST)),

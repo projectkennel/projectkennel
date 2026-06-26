@@ -316,6 +316,8 @@ pub struct BinderPrep {
     /// through this when a `SVC_CONNECT` resolves to a not-yet-running one. `None` on a construction
     /// path with no activator (a test path) — a `Pending` consume then waits out the deadline.
     pub activator: Option<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// Brokered D-Bus transactor for the standing dbus-broker service kennel.
+    pub dbus_transactor: Option<std::sync::Arc<dyn crate::dbus::MeshTransactor>>,
 }
 
 /// Everything needed to bring one kennel up.
@@ -1202,11 +1204,18 @@ fn bring_up<P: Privileged + Sync>(
     // before releasing the binder pull, so their command sockets are bound before the workload's
     // first D-Bus message. With no delegate (no `[dbus]` grant or no binary) the relay is `None`
     // and the membrane denies every D-Bus verb (fail-closed).
-    let dbus_relay = match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
-        Ok(relay) => relay,
-        Err(e) => {
-            eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
-            None
+    let dbus_relay = if let Some(transactor) = binder.and_then(|b| b.dbus_transactor.as_ref()) {
+        Some(std::sync::Arc::new(crate::dbus::DbusRelay::new_brokered(
+            std::sync::Arc::clone(transactor),
+            kennel_lib_binder::ratelimit::RateLimiter::with_defaults(),
+        )))
+    } else {
+        match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
+            Ok(relay) => relay,
+            Err(e) => {
+                eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
+                None
+            }
         }
     };
 
