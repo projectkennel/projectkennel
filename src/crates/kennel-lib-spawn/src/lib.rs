@@ -869,6 +869,10 @@ pub fn attach_egress(
         let l = kennel_lib_bpf::load_program(elf, spec, kennel_lib_bpf::KENNEL_MAPS)
             .map_err(SpawnError::Syscall)?;
         populate_egress_maps(&l, plan)?;
+        // Seal the write-once meta map (§02-7-bpf-abi.md), consistent with the
+        // privhelper's production path.
+        kennel_lib_bpf::freeze_maps(&l.maps, &["kennel_meta_map"])
+            .map_err(SpawnError::Syscall)?;
         l.attach(cgroup, spec.attach_type)
             .map_err(SpawnError::Syscall)?;
         loaded.push(l);

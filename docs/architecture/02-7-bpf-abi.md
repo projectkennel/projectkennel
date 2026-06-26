@@ -97,7 +97,7 @@ Each kennel has its own map set, including its own `audit_ringbuf` (one per kenn
 
 A single-element array carrying per-kennel metadata. Read by every program at every invocation; updated by the loader at kennel start and not written again thereafter.
 
-> **Status: read-only sealing not yet built (roadmap).** The map is intended to be marked read-only via `BPF_F_RDONLY_PROG` once populated. As built, `kennel_meta_map` is created with `map_flags = 0` and is never frozen; the write-once property is upheld by the loader convention, not enforced by the kernel.
+> **As built:** `kennel_meta_map` is created with `BPF_F_RDONLY_PROG` (prevents BPF-program writes) and frozen via `BPF_MAP_FREEZE` after the loader populates it (prevents subsequent userspace writes). The write-once property is enforced by the kernel, not just by loader convention.
 
 ```c
 struct kennel_meta {           // 64 bytes (loader value_size); bpf/maps.h is authoritative

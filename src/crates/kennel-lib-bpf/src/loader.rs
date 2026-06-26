@@ -15,6 +15,8 @@ const MAP_TYPE_ARRAY: u32 = 2;
 const MAP_TYPE_LPM_TRIE: u32 = 11;
 const MAP_TYPE_RINGBUF: u32 = 27;
 const F_NO_PREALLOC: u32 = 1;
+/// `BPF_F_RDONLY_PROG` — prevent BPF programs from writing to the map.
+const F_RDONLY_PROG: u32 = 0x80;
 
 // Program type / attach types (enum bpf_prog_type / bpf_attach_type).
 const PROG_TYPE_CGROUP_SOCK: u32 = 9;
@@ -55,7 +57,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         key_size: 4,
         value_size: 64,
         max_entries: 1,
-        map_flags: 0,
+        map_flags: F_RDONLY_PROG,
     },
     MapSpec {
         name: "deny_v4",
@@ -401,6 +403,30 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
         maps.insert(spec.name.to_owned(), fd);
     }
     Ok(maps)
+}
+
+/// Freeze the named maps so that neither userspace nor BPF programs can update them
+/// after population. Maps created with `BPF_F_RDONLY_PROG` already prevent BPF-side
+/// writes; freezing additionally prevents userspace writes — the belt-and-braces
+/// sealing `02-7-bpf-abi.md` specifies for `kennel_meta_map`.
+///
+/// Only maps whose names appear in `names` are frozen; the caller decides which maps
+/// are write-once (the meta map) vs. legitimately updated at runtime (the ringbuf).
+///
+/// # Errors
+///
+/// Returns the OS error if a freeze is rejected (e.g. the map is already frozen or
+/// the caller lacks `CAP_BPF`).
+pub fn freeze_maps(
+    maps: &BTreeMap<String, OwnedFd>,
+    names: &[&str],
+) -> io::Result<()> {
+    for name in names {
+        if let Some(fd) = maps.get(*name) {
+            sys::map_freeze(fd.as_fd())?;
+        }
+    }
+    Ok(())
 }
 
 /// Insert into one of the kennel's shared maps (from `create_maps(KENNEL_MAPS)`), if present.
@@ -1096,6 +1122,41 @@ mod root_tests {
         assert!(
             other_denied,
             "a bind to :9090 (not in the allowlist) must be denied"
+        );
+    }
+    #[test]
+    fn meta_map_is_read_only_after_freeze() {
+        if skip_if_unprivileged("meta_map_is_read_only_after_freeze") {
+            return;
+        }
+        // Create the maps (kennel_meta_map now carries BPF_F_RDONLY_PROG).
+        let maps = create_maps(KENNEL_MAPS).expect("create_maps");
+        let meta_fd = maps.get("kennel_meta_map").expect("meta map present");
+
+        // Populate: a write before freeze must succeed.
+        let key = 0u32.to_ne_bytes();
+        let value = [0u8; 64];
+        // SAFETY: key (4 bytes) and value (64 bytes) match kennel_meta_map's geometry.
+        unsafe {
+            sys::map_update(meta_fd.as_fd(), &key, &value, sys::BPF_ANY)
+                .expect("pre-freeze write must succeed");
+        }
+
+        // Freeze the meta map.
+        freeze_maps(&maps, &["kennel_meta_map"]).expect("freeze");
+
+        // A userspace write after freeze must be rejected (EPERM).
+        // SAFETY: same geometry as above.
+        let result = unsafe { sys::map_update(meta_fd.as_fd(), &key, &value, sys::BPF_ANY) };
+        assert!(
+            result.is_err(),
+            "a write to a frozen map must be rejected"
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::EPERM),
+            "frozen map write should return EPERM, got {err}"
         );
     }
 }

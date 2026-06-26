@@ -15,6 +15,7 @@ const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_PROG_LOAD: libc::c_int = 5;
 const BPF_OBJ_PIN: libc::c_int = 6;
 const BPF_OBJ_GET: libc::c_int = 7;
+const BPF_MAP_FREEZE: libc::c_int = 27;
 const BPF_PROG_ATTACH: libc::c_int = 8;
 const BPF_PROG_DETACH: libc::c_int = 9;
 
@@ -351,3 +352,35 @@ pub fn obj_get(path: &CStr) -> io::Result<OwnedFd> {
     };
     owned_fd(ret)
 }
+
+/// Freeze a map (`BPF_MAP_FREEZE`): after this call, both userspace and BPF programs
+/// are prevented from updating the map. A map created with `BPF_F_RDONLY_PROG`
+/// already prevents BPF-side writes; freezing additionally prevents userspace writes.
+///
+/// # Errors
+///
+/// Returns the OS error if the fd is not a map, the map is already frozen, or the
+/// caller lacks the required capability.
+pub fn map_freeze(map: BorrowedFd<'_>) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let attr = MapElemAttr {
+        map_fd: u32::try_from(map.as_raw_fd())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fd out of range"))?,
+        ..MapElemAttr::default()
+    };
+    // SAFETY: `attr` is fully initialised (map_fd set, rest zeroed); the kernel reads
+    // only `map_fd` for BPF_MAP_FREEZE. See `bpf`.
+    let ret = unsafe {
+        bpf(
+            BPF_MAP_FREEZE,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<MapElemAttr>(),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+

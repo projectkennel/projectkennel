@@ -130,6 +130,12 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     if let Err(e) = populate_maps(&maps, payload) {
         return Response::internal(errno_of(&e));
     }
+    // Seal the write-once meta map (02-7-bpf-abi.md): BPF_F_RDONLY_PROG (set at creation)
+    // prevents BPF-program writes; BPF_MAP_FREEZE prevents userspace writes. Frozen after
+    // populate (which writes it once) and before the programs attach.
+    if let Err(e) = kennel_lib_bpf::freeze_maps(&maps, &["kennel_meta_map"]) {
+        return Response::internal(errno_of(&e));
+    }
 
     for spec in kennel_lib_bpf::KENNEL_PROGRAMS {
         let Some(elf) = kennel_lib_bpf::programs::object(spec.name) else {
