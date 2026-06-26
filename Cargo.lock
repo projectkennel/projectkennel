@@ -115,6 +115,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-dbus-broker"
+version = "0.4.0"
+dependencies = [
+ "kennel-lib-binder",
+ "kennel-lib-dbus",
+ "mini-sansio-dbus",
+ "nix",
+]
+
+[[package]]
 name = "kennel-facade"
 version = "0.4.0"
 dependencies = [

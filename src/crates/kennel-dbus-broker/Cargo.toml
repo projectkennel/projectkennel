@@ -1,0 +1,30 @@
+[package]
+name = "kennel-dbus-broker"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel dbus-broker@v1: the standing D-Bus mediation service kennel (§7.7, W1 Part C). Replaces the per-consumer host-dbus delegate with a single long-running service that receives per-consumer filter sets from kenneld via the binder-connector mesh and applies them to relayed D-Bus frames. Runs inside its own kennel, not on the host."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+autobins = false
+
+[[bin]]
+name = "dbus-broker"
+path = "src/main.rs"
+
+[dependencies]
+# The binder client library: Connection, ContextManager, flat_binder_object, service wire.
+kennel-lib-binder = { path = "../kennel-lib-binder" }
+# The D-Bus mediation engine: the delegate core (filter + serial demux), message
+# reconstruction, and the typed conduit frame.
+kennel-lib-dbus = { path = "../kennel-lib-dbus" }
+# The bus-side D-Bus client: the sans-IO connector (SASL handshake) and connection.
+mini-sansio-dbus = "=5.0.1"
+# poll(2) over the bus fds (single-threaded event loop).
+nix = { version = "=0.31.3", default-features = false, features = ["poll"] }
+
+[lints]
+workspace = true

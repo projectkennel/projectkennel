@@ -73,6 +73,10 @@ pub enum Reply {
     /// socketpair local end and the stderr pipe read end — `02-10` §7.12). The multi-fd
     /// generalisation of [`Self::DataAndFd`]; the kernel translates each fd into the caller's table.
     DataAndFds(Vec<u8>, Vec<OwnedFd>),
+    /// Reply with a single binder handle (a `BINDER_TYPE_HANDLE` object); the kernel
+    /// translates it from the replying endpoint's handle table into the caller's.
+    /// Used by the mesh bus to hand a provider's node to a consumer.
+    Handle(u32),
 }
 
 /// A context-manager endpoint owning node 0 of one binder instance.
@@ -164,6 +168,7 @@ impl ContextManager {
                 self.conn
                     .reply_with_data_and_fds(incoming, &data, &borrowed)
             }
+            Reply::Handle(handle) => self.conn.reply_with_handle(incoming, handle),
         }
     }
 

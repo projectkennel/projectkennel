@@ -62,12 +62,24 @@ const OUTBOUND_DEPTH: usize = 32;
 /// Constructed once (with a bounded sender to each enabled bus's delegate, see
 /// [`spawn_pipe_writer`]) and shared by the node-0 handlers; pipe reader threads feed its inbound
 /// queues via [`DbusRelay::deliver_inbound`].
+pub trait MeshTransactor: Send + Sync {
+    /// Transact a message with the standing dbus-broker on the mesh bus.
+    fn transact_broker(&self, code: u32, data: &[u8]) -> std::io::Result<Vec<u8>>;
+}
+
+/// The per-kennel D-Bus relay state.
+///
+/// Constructed once (with a bounded sender to each enabled bus's delegate, see
+/// [`spawn_pipe_writer`]) and shared by the node-0 handlers; pipe reader threads feed its inbound
+/// queues via [`DbusRelay::deliver_inbound`].
 pub struct DbusRelay {
     /// Monotonic base for the rate limiter's clock.
     start: Instant,
     /// The bounded outbound channel to each enabled bus's delegate. Immutable after construction
     /// (so no lock needed to relay); `try_send` is non-blocking.
     senders: HashMap<Bus, SyncSender<Vec<u8>>>,
+    /// Brokered mode transactor.
+    broker_transactor: Option<std::sync::Arc<dyn MeshTransactor>>,
     inner: Mutex<Inner>,
     inbound: Condvar,
 }
@@ -132,6 +144,26 @@ impl DbusRelay {
         Self {
             start: Instant::now(),
             senders,
+            broker_transactor: None,
+            inner: Mutex::new(Inner {
+                conns: HashMap::new(),
+                limiter,
+            }),
+            inbound: Condvar::new(),
+        }
+    }
+
+    /// Construct a new brokered D-Bus relay that forwards messages to the standing
+    /// dbus-broker via the given MeshTransactor.
+    #[must_use]
+    pub fn new_brokered(
+        transactor: std::sync::Arc<dyn MeshTransactor>,
+        limiter: RateLimiter,
+    ) -> Self {
+        Self {
+            start: Instant::now(),
+            senders: HashMap::new(),
+            broker_transactor: Some(transactor),
             inner: Mutex::new(Inner {
                 conns: HashMap::new(),
                 limiter,
@@ -151,7 +183,7 @@ impl DbusRelay {
         let Some(bus) = bus_from_byte(bus_byte) else {
             return vec![status::BAD_REQUEST];
         };
-        if !self.senders.contains_key(&bus) {
+        if self.broker_transactor.is_none() && !self.senders.contains_key(&bus) {
             return vec![status::DENIED]; // the bus is not enabled by policy
         }
         {
@@ -172,44 +204,76 @@ impl DbusRelay {
         }
         // Tell the delegate (no lock held — the write rides the bounded channel). Roll the
         // registration back if a stalled delegate sheds it, so no half-open connection lingers.
-        if self.try_relay(bus, &Record::Open { conn_id, bus }) {
+        if self.broker_transactor.is_some() {
             vec![status::OK]
         } else {
-            self.lock().conns.remove(&conn_id);
-            vec![status::AGAIN]
+            if self.try_relay(bus, &Record::Open { conn_id, bus }) {
+                vec![status::OK]
+            } else {
+                self.lock().conns.remove(&conn_id);
+                vec![status::AGAIN]
+            }
         }
     }
 
     /// Handle `DBUS_SEND` `[conn_id | frame]`: rate-limit, relay the frame, ack immediately. Only
     /// the connection's owner may send on it.
     #[must_use]
-    pub fn send(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
+    pub fn send(&self, ctx: u16, sender_pid: i32, data: &[u8]) -> Vec<u8> {
         let Some((conn_id, frame)) = wire::decode_send(data) else {
             return vec![status::BAD_REQUEST];
         };
-        let bus = {
+        let (bus, bus_byte) = {
             let mut inner = self.lock();
             if !inner.limiter.allow(self.now_ms()) {
                 return vec![status::AGAIN]; // rate cap (audit 4)
             }
             match inner.conns.get(&conn_id) {
-                Some(conn) if conn.owner_pid == sender_pid => conn.bus,
+                Some(conn) if conn.owner_pid == sender_pid => (
+                    conn.bus,
+                    match conn.bus {
+                        Bus::Session => kennel_lib_binder::service::dbus::SESSION,
+                        Bus::System => kennel_lib_binder::service::dbus::SYSTEM,
+                    },
+                ),
                 Some(_) => return vec![status::DENIED], // not the owner
                 None => return vec![status::BAD_REQUEST],
             }
         };
-        // Relay is non-blocking and lock-free; a stalled delegate sheds (audit 3) rather than
-        // blocking the binder thread or holding the relay lock.
-        if self.try_relay(
-            bus,
-            &Record::Frame {
-                conn_id,
-                frame: frame.to_vec(),
-            },
-        ) {
-            vec![status::OK]
+        if let Some(ref transactor) = self.broker_transactor {
+            let payload = kennel_lib_binder::service::broker::encode_relay(ctx, bus_byte, frame);
+            match transactor.transact_broker(
+                kennel_lib_binder::service::broker::RELAY_FRAME,
+                &payload,
+            ) {
+                Ok(reply) => {
+                    if reply.first().copied() == Some(status::OK) {
+                        if reply.len() > 1 {
+                            self.deliver_inbound(conn_id, reply[1..].to_vec());
+                        }
+                        vec![status::OK]
+                    } else if reply.first().copied() == Some(status::DENIED) {
+                        vec![status::DENIED]
+                    } else {
+                        vec![status::AGAIN]
+                    }
+                }
+                Err(_) => vec![status::AGAIN],
+            }
         } else {
-            vec![status::AGAIN]
+            // Relay is non-blocking and lock-free; a stalled delegate sheds (audit 3) rather than
+            // blocking the binder thread or holding the relay lock.
+            if self.try_relay(
+                bus,
+                &Record::Frame {
+                    conn_id,
+                    frame: frame.to_vec(),
+                },
+            ) {
+                vec![status::OK]
+            } else {
+                vec![status::AGAIN]
+            }
         }
     }
 
@@ -283,9 +347,11 @@ impl DbusRelay {
         // never tears down its mediation loop + bridge socket — a permanent host-side leak. So if
         // the relay does not land, leave the connection intact and return AGAIN: the facade retries
         // (exactly as `open()` does). Mark `closed` only after the Close is on its way.
-        if let Some(bus) = bus {
-            if !self.try_relay(bus, &Record::Close { conn_id }) {
-                return vec![status::AGAIN];
+        if self.broker_transactor.is_none() {
+            if let Some(bus) = bus {
+                if !self.try_relay(bus, &Record::Close { conn_id }) {
+                    return vec![status::AGAIN];
+                }
             }
         }
         {
@@ -421,7 +487,7 @@ mod tests {
             "re-opening another's live id is a hijack attempt"
         );
         assert_eq!(
-            relay.send(OTHER, &wire::encode_send(1, &[0xAA])),
+            relay.send(0, OTHER, &wire::encode_send(1, &[0xAA])),
             vec![status::DENIED]
         );
         assert_eq!(relay.recv(OTHER, &wire::encode_conn(1)), Vec::<u8>::new());
@@ -496,7 +562,7 @@ mod tests {
         let _ = read_record(&mut delegate); // the Open
         let frame = vec![0xDE, 0xAD];
         assert_eq!(
-            relay.send(FACADE_PID, &wire::encode_send(3, &frame)),
+            relay.send(0, FACADE_PID, &wire::encode_send(3, &frame)),
             vec![status::OK]
         );
         assert_eq!(
@@ -563,12 +629,12 @@ mod tests {
         );
         let _ = read_record(&mut delegate);
         assert_eq!(
-            relay.send(FACADE_PID, &wire::encode_send(1, &[0])),
+            relay.send(0, FACADE_PID, &wire::encode_send(1, &[0])),
             vec![status::OK]
         );
         // The next verb is over the cap — shed, no token spent on the delegate.
         assert_eq!(
-            relay.send(FACADE_PID, &wire::encode_send(1, &[0])),
+            relay.send(0, FACADE_PID, &wire::encode_send(1, &[0])),
             vec![status::AGAIN]
         );
     }
