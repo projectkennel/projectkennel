@@ -421,6 +421,32 @@ on xattr-capable filesystems, with a setuid fallback where file caps are unsuppo
 carry their single-purpose cap sets; construction — including binder load and the BPF egress path — passes
 e2e on the hardened-kernel + AppArmor path; the corpus privilege model reads setcap.
 
+### W15 · Surface the privhelper's stderr through kenneld
+
+**[operability] S.**
+
+When the privhelper — the factory or a sub-helper — fails, its stderr carries the precise cause, but
+kenneld does not surface it. W14 made this concrete: a `uid_map` write `EPERM` (the factory missing
+`CAP_SYS_ADMIN`) wrote a clear line to the helper's fd 2, which is a socket kenneld holds; kenneld neither
+drains nor forwards it, so the operator saw only a hang and the generic `factory did not return the 4-byte
+init pid`. Recovering the one-line cause took `strace`. Every privhelper failure mode (a missing cap, a
+refused scope, an unowned cgroup, a bad init binary) has the same blind spot.
+
+Make kenneld **capture the helper's stderr and surface it**: drain the helper's stderr to a bounded buffer,
+and on a failure fold its last lines into the construction-failure log line and the audit event, so
+`kennel … failed to start [spawn workload]: …` carries the helper's own words, not just the transport
+symptom. This is observability, not a privilege change — the helper stays the same; kenneld stops swallowing
+its diagnostics.
+
+Related fail-fast (the other half of why W14's failure was undiagnosable): the construction child blocks on
+its **inherited** copy of the maps-ack pipe, so a parent-side failure presents as a ~90 s hang (SIGKILL at
+service stop) rather than a prompt error. Close the child's write end of that pipe right after the `clone`
+so a dead parent yields EOF and the child fails fast.
+
+**Exit:** a privhelper or sub-helper failure produces a specific operator-visible diagnostic in the kenneld
+journal carrying the helper's own stderr (no `strace` to read a refusal or cap error), and a parent-side
+construction failure fails fast instead of hanging to the service-stop timeout.
+
 ## Sequencing
 
 ```
@@ -438,6 +464,7 @@ W9  (kennel-compose)  ── M,  after W2 + W1, ship gate ───────�
 W10 (CLI split)       ── M,  after W9, ship gate ─────────────────►
 W11 (dynamic red-team)── S,  after W1, ship gate ─────────────────►
 W14 (privhelper setcap)── M, independent (security) ──────────────►
+W15 (privhelper stderr)── S, after W14 (diagnostic debt it exposed) ►
 ```
 
 W1 is the only deep dependency chain (A→B→C). W8 lands before W13 so the threat ID can be cited in the
@@ -472,6 +499,9 @@ the tag.
 - The installed privhelper carries a minimised file-cap set with no setuid bit (setuid fallback only where
   file caps are unsupported); construction passes e2e on the hardened-kernel + AppArmor path; the corpus
   privilege model reads setcap (W14).
+- A privhelper or sub-helper failure surfaces the helper's own stderr in the kenneld journal (no `strace` to
+  read a refusal or cap error), and a parent-side construction failure fails fast rather than hanging to the
+  service-stop timeout (W15).
 
 CHANGELOG records every stable-surface change — the two newly-brokered connector shapes, the
 `dbus-broker@v1` template, the OpenSSH key format, the `kennel inspect` verb, the split CLI binaries, the
