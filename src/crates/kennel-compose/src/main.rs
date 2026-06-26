@@ -44,8 +44,6 @@ struct Args {
     output: Option<PathBuf>,
     /// Additional template search directories.
     template_dirs: Vec<PathBuf>,
-    /// Additional trust-store directories.
-    trust_dirs: Vec<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -116,19 +114,16 @@ fn run_compose(args: &Args) -> ExitCode {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    // Discover available templates and fragments from the live system. Both the
-    // explicit `--template-dir` roots and the `--trust-dir` trust-store roots are
-    // searched: a trust-store directory holds the trusted templates an operator
-    // composes against.
-    let mut search_dirs = args.template_dirs.clone();
-    search_dirs.extend(args.trust_dirs.iter().cloned());
+    // Discover available templates and fragments from the live system template
+    // cascade, plus any explicit `--template-dir` roots.
+    let search_dirs = args.template_dirs.clone();
     let available_templates = templates::discover_templates(&search_dirs);
     let available_fragments = templates::discover_fragments(&search_dirs);
 
     if available_templates.is_empty() && available_fragments.is_empty() {
         eprintln!("kennel-compose: no templates or fragments found in the search path");
         eprintln!("  searched: ~/.config/kennel/templates/, /etc/kennel/templates/, /usr/lib/kennel/templates/");
-        for d in args.template_dirs.iter().chain(&args.trust_dirs) {
+        for d in &args.template_dirs {
             eprintln!("  searched: {}", d.display());
         }
         eprintln!(
@@ -487,7 +482,6 @@ fn parse_args() -> Result<Args, String> {
     let mut compose = false;
     let mut output: Option<PathBuf> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
 
     let mut it = raw.iter();
@@ -500,9 +494,6 @@ fn parse_args() -> Result<Args, String> {
             }
             "--template-dir" => {
                 template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
-            }
-            "--trust-dir" => {
-                trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into());
             }
             "--help" | "-h" => {
                 print_usage();
@@ -538,7 +529,6 @@ fn parse_args() -> Result<Args, String> {
         no_prompts,
         output,
         template_dirs,
-        trust_dirs,
     })
 }
 
@@ -583,7 +573,6 @@ fn print_usage() {
     eprintln!("options:");
     eprintln!("  --output <path>        write to file (default: stdout)");
     eprintln!("  --template-dir <dir>   additional template search directory");
-    eprintln!("  --trust-dir <dir>      additional trust-store directory");
     eprintln!("  --no-prompts           all defaults, maximally restrictive");
     eprintln!("  -h, --help             print this help");
     eprintln!();
