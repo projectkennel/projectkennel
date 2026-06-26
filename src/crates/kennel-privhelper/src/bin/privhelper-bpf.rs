@@ -8,8 +8,13 @@
 //! mode where there is no net-ns boundary and the cgroup BPF is the primary egress
 //! gate) — so `CAP_BPF`, a verifier-bug LPE surface, never sits on the common factory.
 //!
+//! The pins land in the per-user bpffs at [`kennel_privhelper::bpf_pin_root`]. This helper
+//! does **not** mount that bpffs — the mount is the one egress step that needs `CAP_SYS_ADMIN`,
+//! which the factory holds and this sub-helper does not; the factory mounts it before delegating,
+//! and this helper pins into it (`CAP_BPF`). If it is absent, pinning is skipped (no audit drain).
+//!
 //! Invoked **only** by the main `kennel-privhelper`'s construct orchestration (never
-//! by `kenneld` directly). It carries its own `cap_bpf,cap_net_admin` file caps, so
+//! by `kenneld` directly). It carries its own `cap_bpf,cap_net_admin,cap_perfmon` file caps, so
 //! the orchestrator gains them across the `exec` without holding them.
 //!
 //! Gating (boundary 1, `04-trust-boundaries.md`): the caller must hold a
@@ -166,8 +171,10 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
         return;
     }
     let caller_uid = kennel_lib_syscall::unistd::real_uid();
-    let base = pin_root(caller_uid);
-    if ensure_bpffs(&base, caller_uid).is_err() {
+    let base = kennel_privhelper::bpf_pin_root(caller_uid);
+    // The bpffs is mounted by the factory (it holds `CAP_SYS_ADMIN`; this sub-helper does not).
+    // Without it there is nowhere to pin — degrade to "no audit drain".
+    if !kennel_lib_syscall::mount::is_bpffs(&base).unwrap_or(false) {
         return;
     }
     let dir = base.join(pin_id);
@@ -192,14 +199,6 @@ fn pin_kennel_maps(maps: &std::collections::BTreeMap<String, std::os::fd::OwnedF
     }
 }
 
-/// The bpffs mount root for a user's BPF pins: `/run/user/<uid>/kennel/bpf`.
-///
-/// uid-derived (matching `kenneld::bpf_audit::pin_dir_for`) so the privileged helper
-/// and the unprivileged daemon agree without passing a path over the wire.
-fn pin_root(uid: u32) -> std::path::PathBuf {
-    std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"))
-}
-
 /// Whether `id` is a safe single path component for a pin dir: the kennel-name grammar
 /// `[a-z0-9][a-z0-9-]{0,63}` (so never `..`, never containing `/`).
 fn valid_pin_id(id: &str) -> bool {
@@ -214,19 +213,6 @@ fn valid_pin_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-/// Ensure a bpffs is mounted at `base` (idempotent) and owned by the caller, owner-only
-/// `0700`. `base` lives inside the user's `0700` `/run/user/<uid>/`, so other users
-/// cannot reach it regardless; the chown lets the unprivileged owner reopen the pins.
-fn ensure_bpffs(base: &std::path::Path, caller_uid: u32) -> std::io::Result<()> {
-    std::fs::create_dir_all(base)?;
-    if !kennel_lib_syscall::mount::is_bpffs(base).unwrap_or(false) {
-        kennel_lib_syscall::mount::mount_bpffs(base)?;
-    }
-    let _ = std::os::unix::fs::chown(base, Some(caller_uid), None);
-    set_mode(base, 0o700)?;
-    Ok(())
 }
 
 /// Remove a per-kennel pin dir and its pinned-map files (unlinking a pin detaches that

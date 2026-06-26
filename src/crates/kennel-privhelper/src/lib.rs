@@ -37,6 +37,16 @@
 
 #![forbid(unsafe_code)]
 
+/// The bpffs mount root for a user's egress-BPF map pins: `/run/user/<uid>/kennel/bpf`.
+///
+/// Shared by the factory (which mounts the bpffs here, holding `cap_sys_admin`) and the
+/// `kennel-privhelper-bpf` sub-helper (which pins into it), and matching `kenneld`'s
+/// `bpf_audit::pin_dir_for`, so all three agree on the path without it crossing the wire.
+#[must_use]
+pub fn bpf_pin_root(uid: u32) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/run/user/{uid}/kennel/bpf"))
+}
+
 pub mod addr;
 pub mod alloc;
 pub mod client;

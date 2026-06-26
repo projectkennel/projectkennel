@@ -589,13 +589,18 @@ fn add_loopback_via_helper(addrs: &[LoopbackAddr], ctx: u16) -> io::Result<()> {
     Ok(())
 }
 
-/// Attach the per-kennel egress BPF by exec'ing the `{bpf,net_admin}` `kennel-privhelper-bpf`
-/// sub-helper — the common factory holds **no** `CAP_BPF` of its own. Reached only for
-/// `net.mode = host` (a non-empty egress payload); the cgroup path rides argv and the payload
-/// (the allow/deny ruleset) rides stdin. The sub-helper re-checks that the caller owns the
-/// target cgroup before the attach (the delegation boundary moves with the privilege).
+/// Attach the per-kennel egress BPF by exec'ing the `{bpf,net_admin,perfmon}`
+/// `kennel-privhelper-bpf` sub-helper — the common factory holds **no** `CAP_BPF` of its own.
+/// Reached only for `net.mode = host` (a non-empty egress payload); the cgroup path rides argv
+/// and the payload (the allow/deny ruleset) rides stdin. The sub-helper re-checks that the caller
+/// owns the target cgroup before the attach (the delegation boundary moves with the privilege).
 fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
+    // Mount the per-user bpffs the sub-helper pins the maps into. Only the *mount* needs
+    // `CAP_SYS_ADMIN` (which the factory holds and the bpf sub-helper does not), so the factory
+    // does it here — in the host mount namespace `kenneld` shares — before delegating; the
+    // sub-helper (`CAP_BPF`) then creates the per-kennel pin dir and pins into it.
+    ensure_bpf_pin_bpffs();
     let bpf_helper = kennel_lib_config::Deployment::load()
         .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-bpf: {e}")))?
         .privhelper_bpf();
@@ -617,6 +622,23 @@ fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io
         )));
     }
     Ok(())
+}
+
+/// Mount the per-user bpffs at [`crate::bpf_pin_root`] that the egress sub-helper pins into.
+///
+/// The bpffs *mount* is the one egress step that needs `CAP_SYS_ADMIN`; the factory holds it
+/// (the bpf sub-helper does not), and mounts here in the host mount namespace so `kenneld` can
+/// `BPF_OBJ_GET` the pinned `audit_ringbuf` to drain it. Idempotent — one bpffs per user serves
+/// all their kennels; the per-kennel pin dir and the pins are created operator-side by the
+/// sub-helper. Best-effort: a mount failure degrades to "no audit drain", never fatal.
+fn ensure_bpf_pin_bpffs() {
+    let base = crate::bpf_pin_root(real_uid());
+    if std::fs::create_dir_all(&base).is_err() {
+        return;
+    }
+    if !kennel_lib_syscall::mount::is_bpffs(&base).unwrap_or(false) {
+        let _ = kennel_lib_syscall::mount::mount_bpffs(&base);
+    }
 }
 
 /// Over-mount the exclusive-bind sentinel on `src` by exec'ing the `{sys_admin}`
