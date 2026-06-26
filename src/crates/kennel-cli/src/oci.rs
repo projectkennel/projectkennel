@@ -35,9 +35,10 @@ pub fn store_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".local/share/kennel/images"))
 }
 
-/// Validate a store-entry name: a single, safe path component. Rejects anything that could escape
-/// the store dir (`/`, `.`, `..`, empty, control/space) so `<name>` is always one directory under
-/// the store root.
+/// Validate a store-entry name: a single, safe path component.
+///
+/// Rejects anything that could escape the store dir (`/`, `.`, `..`, empty, control/space) so
+/// `<name>` is always one directory under the store root.
 ///
 /// # Errors
 ///
@@ -326,6 +327,7 @@ fn read_image_user(config_path: &Path) -> Option<String> {
 }
 
 /// Whether settled-policy bytes are the OCI substrate model: a non-empty `[rootfs].path`.
+///
 /// The grammar partition (§7.11) keys on this — `kennel run` refuses it, `kennel oci run`
 /// requires it. A parse failure is treated as not-OCI (the daemon rejects a bad policy anyway).
 #[must_use]
@@ -344,9 +346,11 @@ pub fn policy_image(settled_bytes: &[u8]) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// `kennel oci <build|run> …` — the OCI substrate verb group (§7.11). A noun group like
-/// `kennel policy`, kept distinct from `kennel run` so `[rootfs]` is valid under exactly one
-/// verb (the grammar partition) and the run path always does the digest provenance check.
+/// `kennel oci <build|run> …` — the OCI substrate verb group (§7.11).
+///
+/// A noun group like `kennel policy`, kept distinct from `kennel run` so `[rootfs]` is valid under
+/// exactly one verb (the grammar partition) and the run path always does the digest provenance
+/// check.
 ///
 /// # Errors
 ///
@@ -392,7 +396,9 @@ fn refuse_if_running(name: &str) -> Result<(), String> {
 }
 
 /// `kennel oci revert <name> [--list] [-- <path>…]` — restore the managed overlay upper toward the
-/// image lower (§7.11.4b). The image lower is the **pin** (content-addressed by its `digest`), the
+/// image lower (§7.11.4b).
+///
+/// The image lower is the **pin** (content-addressed by its `digest`), the
 /// upper's copy-ups and whiteouts are the **diff against the pin**, and removing an upper entry is
 /// **restore-from-pin** (the lower shows back through) — the OCI instantiation of the same pin /
 /// diff-against-pin / restore-from-pin mechanism as the trust-manifest store (§7.4, `02-9`):

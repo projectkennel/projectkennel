@@ -12,8 +12,9 @@ use std::process::ExitCode;
 use crate::policy::is_source_policy;
 use crate::resolve_policy;
 
-/// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust
-/// manifest after legitimate edits (T2.8). The confined workload cannot update the manifest
+/// `kennel review <policy> [--yes]` — the operator's sign-off on a workspace's trust manifest.
+///
+/// After legitimate edits (T2.8). The confined workload cannot update the manifest
 /// (it is masked), so changed/added execution triggers stay flagged until a human re-pins
 /// them here, host-side.
 ///
@@ -23,6 +24,12 @@ use crate::resolve_policy;
 /// (adopts the on-disk state, so the host IDE unlocks); `--revert` instead **restores** each
 /// trigger to its pinned baseline and removes planted ones (the §2.5 teardown disposition).
 /// `--yes` skips the per-root confirmation.
+///
+/// # Errors
+///
+/// Returns a message on an unknown flag or missing `<policy>` argument, if `HOME` is unset,
+/// if the policy cannot be resolved or read, if it is still a source policy (uncompiled) or
+/// fails to parse as a settled artefact, or if reviewing any writable root fails.
 pub fn review(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_arg: Option<&str> = None;
     let mut assume_yes = false;
@@ -233,10 +240,6 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
-/// Resolve a settled `fs.write` entry to its host directory root: expand a leading
-/// `~`/`$HOME` to the operator's real `home`, strip a trailing `/**` or `/*` glob. Returns
-/// `None` for an entry that does not name a home-relative or absolute path (nothing the
-/// host can place a manifest under).
 /// `kennel release <policy>` — release leaked exclusive over-mounts (§2.7 recovery).
 ///
 /// The teardown release is automatic, but a crashed kennel can leave an `fs.exclusive` path
@@ -244,6 +247,12 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
 /// exclusive host paths and invokes the privhelper to unmount each — **directly**, not through
 /// `kenneld`, so it works even when the daemon is down. Idempotent: a path that is not (or no
 /// longer) shadowed is skipped.
+///
+/// # Errors
+///
+/// Returns a message if no `<policy>` argument is given, if `HOME` is unset, if the policy
+/// cannot be resolved or read, if it is still a source policy or fails to parse as a settled
+/// artefact, if the deployment config cannot be loaded, or if spawning the privhelper fails.
 pub fn release(args: &[String]) -> Result<ExitCode, String> {
     let policy_arg = args
         .iter()
@@ -312,6 +321,12 @@ pub fn release(args: &[String]) -> Result<ExitCode, String> {
 /// Plain `fs.write` on a non-owned path is *fine* — the kernel still gates the workload's
 /// writes by the operator's uid — so only `exclusive` paths are checked, and the test is
 /// ownership, not write-access.
+///
+/// # Errors
+///
+/// Returns a message if any `fs.exclusive` path cannot be resolved to a host path, does not
+/// exist, or is not owned by the real uid. An unparseable artefact is not an error here (the
+/// caller reports it).
 pub fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
     let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
         return Ok(()); // an unparseable artefact is reported by the caller, not here
@@ -320,6 +335,11 @@ pub fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
 }
 
 /// The ownership test behind [`verify_exclusive_ownership`], over the resolved `exclusive` list.
+///
+/// # Errors
+///
+/// Returns a message if `HOME` is unset, or if any `fs.exclusive` path cannot be resolved to
+/// a host path, does not exist, or is not owned by the real uid.
 pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt as _;
     if exclusive.is_empty() {
@@ -357,6 +377,9 @@ pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Derive the writable root directory from a glob-like `fs.write` entry, expanding
+/// `~` and `$HOME` relative to `home`.
+#[must_use]
 pub fn writable_root(entry: &str, home: &Path) -> Option<PathBuf> {
     let trimmed = entry
         .strip_suffix("/**")

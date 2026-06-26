@@ -38,6 +38,7 @@ pub mod error;
 pub mod invariant;
 pub mod keys;
 pub mod libresolve;
+pub mod openssh;
 pub mod patch;
 pub mod settled;
 pub mod signature;

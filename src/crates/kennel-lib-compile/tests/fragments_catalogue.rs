@@ -68,6 +68,10 @@ const CATALOGUE: &[Expect] = &[
         fragment: "net-clients",
         grants: &["/usr/bin/curl", "/usr/bin/wget"],
     },
+    Expect {
+        fragment: "dev-headers",
+        grants: &["/usr/include/", "/usr/src/"],
+    },
 ];
 
 fn repo_root() -> PathBuf {

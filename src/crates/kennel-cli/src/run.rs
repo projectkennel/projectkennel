@@ -30,6 +30,11 @@ use crate::{
 /// not run `kennel compile` between edits. The in-memory build needs `--key` (kenneld
 /// verifies the settled signature against its trust store); the settled bytes are
 /// written to a short-lived temp file that is removed when the run returns.
+///
+/// # Errors
+///
+/// Returns a message if a flag is missing its value or is unknown, if no `<policy>`
+/// argument is given, if the policy cannot be resolved, or if [`launch`] fails.
 // allow(too_many_lines): one cohesive arg-parse → resolve → (maybe compile+sign) → start
 // sequence for the `run` subcommand; the lexopt CLI overhaul folds this into the shared
 // parser table.
@@ -99,6 +104,13 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 /// resolved the named store entry), which both permits `[rootfs]` and asserts the signed
 /// `[rootfs].image` equals that digest before boot. `display` is the operator-facing name of
 /// the policy for diagnostics (a path or a store `<name>`).
+///
+/// # Errors
+///
+/// Returns a message if the policy file cannot be read, if an in-memory compile/sign
+/// fails, if a non-OCI run is handed an `[rootfs]` policy or an OCI digest does not match
+/// the signed image, if the exclusive-ownership pre-flight fails, if the daemon cannot be
+/// reached or the request/response exchange fails, or if the daemon reports an error.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn launch(
     policy_file: PathBuf,
@@ -423,10 +435,17 @@ fn run_interactive(
     proxy_session(conn, ours, name, filter_escapes)
 }
 
-/// `kennel attach <name>`: reconnect a terminal to a still-running kennel's pty. The
-/// daemon's broker takes over from any current client (the prior terminal gets a clean
+/// `kennel attach <name>`: reconnect a terminal to a still-running kennel's pty.
+///
+/// The daemon's broker takes over from any current client (the prior terminal gets a clean
 /// "detached: another client attached"). Same raw-mode proxy and `Ctrl-\ d` detach as
 /// an interactive `run`.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are not a single `<name>`, if stdin is not a
+/// terminal, if raw mode or the socketpair cannot be set up, if the daemon cannot be
+/// reached or the request/response exchange fails, or if the daemon reports an error.
 pub fn attach(args: &[String]) -> Result<ExitCode, String> {
     use kennel_lib_syscall::pty;
     let [name] = args else {

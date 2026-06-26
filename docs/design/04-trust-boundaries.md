@@ -160,3 +160,81 @@ Each class needs specific mechanisms to construct or interpose its boundary safe
 | Environment view | Spawn wrapper | none |
 
 Below Landlock ABI 6 (kernel 6.12) the abstract-AF_UNIX and signal classes fall back to the seccomp/AppArmor path; on ABI 6 and above they are enforced natively and Project Kennel does not rely on AppArmor for the workload. The full feature matrix and the AppArmor `userns`-grant arrangement are in §8.
+
+## 4.10 Key management
+
+Every signed artefact in the system — source templates, included fragments, and settled policies — carries an Ed25519 signature that binds the content to a `key_id` in the trust store. This section covers the key format, the three-tier hierarchy, rotation, revocation, and the honesty bounds of the local trust root.
+
+### 4.10.1 Key format
+
+The signing key format is Ed25519, fixed — no algorithm negotiation, no fallback, no configuration knob.
+
+Keys are stored in the **OpenSSH wire format**: private keys are `-----BEGIN OPENSSH PRIVATE KEY-----` PEM envelopes (unencrypted, as produced by `ssh-keygen -t ed25519`); public keys are `ssh-ed25519 <base64-blob> <comment>`. No raw seeds, no PEM-wrapped PKCS#8, no SSH agent forwarding. Generation is via `ssh-keygen`, not a custom generator — operator familiarity, auditability, and interop with `ssh-keygen -l`, `authorized_keys`, and fleet-management tooling. `kennel keygen <key-id>` wraps `ssh-keygen` with the right flags; `kennel keygen migrate` converts legacy key pairs in place.
+
+**Legacy raw-base64 format.** A second format is also accepted (auto-detected by content): private keys as raw base64-encoded 32-byte Ed25519 seeds stored as `<key-id>.key`, public keys as raw base64 `<key-id>.pub`. Both the CLI and daemon read it; `kennel keygen migrate` converts a `<key-id>.key` + `<key-id>.pub` pair to the OpenSSH format (`<key-id>` with no extension + `<key-id>.pub` with the `ssh-ed25519` wire format) in place.
+
+**The `key_id`.** A `key_id` is simultaneously a filename and a signature-envelope identity. It is the file stem of the `.pub` file in the trust store and the file stem of the private key beside it. The signature envelope records which `key_id` signed the artefact; the verifier looks up that `key_id` in the trust store and checks the signature against the corresponding public key. Format: 1–64 characters of ASCII letters, digits, `.`, `-`, `_` — safe as a filename on every filesystem, unambiguous in TOML, and legible in `kennel policy show` output. The comment field in the OpenSSH public key carries the `key_id` as well, so `ssh-keygen -l` and `authorized_keys`-style listings show which key this is.
+
+### 4.10.2 The three-tier key hierarchy
+
+Keys are tiered by **filesystem layer** — the same layering that governs templates, policies, and configuration. A key at a given layer signs the artefacts that live at that layer.
+
+| Layer | Key store | Signs | Who can place keys here |
+|---|---|---|---|
+| **Vendor** | `/usr/lib/kennel/keys/` | Vendor-shipped templates + fragments | Package maintainer (root-installed via the package) |
+| **Host** | `/etc/kennel/keys/` | Host-level (fleet/organisation) templates, fragments, and policies under `/etc/kennel/` | System administrator (root) |
+| **User** | `~/.config/kennel/keys/` | User-level templates, fragments, and policies under `~/.config/kennel/` | The user |
+
+Each layer is a flat directory of `*.pub` files. There is no singular "the vendor key" or "the host key" — any number of keys may coexist in a layer, and every key in a layer is equally valid. An organisation may have several host-level signing keys (one per team, one per role, one per automation pipeline); a user may have several user-level keys. The trust store treats them all the same: if the `key_id` in the signature envelope matches any `.pub` file in any searched directory, the signature verifies.
+
+At the user layer, private keys live alongside their public keys in the same `~/.config/kennel/keys/` directory — the private key file has no extension (`<key-id>`), the public key is `<key-id>.pub`, matching the `ssh-keygen` convention. The directory is mode 0700. At the vendor and host layers, only public keys are installed (the private signing keys are held by the maintainer or administrator, never on the target host).
+
+The principle: a key at a given layer may sign any artefact at that layer — templates *and* policies alike. The distinction is not "template vs policy" but "which layer of the filesystem tree does the artefact live in":
+
+- A user writes their own template under `~/.config/kennel/templates/`, inheriting from (and narrowing within) a host-level or vendor-shipped parent. Any of their user-layer keys may sign it.
+- An organisation ships a fleet template to `/etc/kennel/templates/`. Any host-layer key signs it.
+- The project ships the reference templates in `/usr/lib/kennel/templates/`. A vendor-layer key signs them.
+
+**Users can write, sign, and use their own templates.** A user template under `~/.config/kennel/templates/` signed with the user's own key is entirely legal. Users are restricted only from the **reserved names** declared at the host and vendor layers (the `[[reserved]]` namespace prefixes — e.g. `org.projectkennel.*` is vendor-reserved, an organisation may reserve `com.acme.*` at the host level). Outside the reserved namespaces, a user key signs user-layer artefacts with no system-administrator involvement.
+
+**Ancestor-chain trust is system-only.** When the compiler resolves a template's *inheritance chain*, it verifies each ancestor's signature against the **system-only** trust store (`/etc/kennel/keys/` + `/usr/lib/kennel/keys/`) — never the user layer. This anchors the security baseline in system-administered keys: a user template that inherits from `base-confined@v1` can narrow within the ancestor's re-asserted invariants but cannot weaken them, and the ancestor it inherits from must be signed by a host or vendor key.
+
+**Settled-policy trust includes all layers.** When the daemon loads a settled policy at construction time, it verifies the signature against all three layers: vendor first, then host, then user. Earlier directories win on a duplicate `key_id` — a vendor or host key is unshadowable by a user key of the same name.
+
+The settled signature is also a pragmatic choice for speed: at construction time the daemon can verify the settled artefact's validity purely from its signature — one Ed25519 check on the canonical bytes — instead of re-resolving the entire template inheritance chain, re-verifying every ancestor's signature, and re-compiling the effective policy to confirm it matches. The compile step is the operator's responsibility (done once, offline); the daemon loads the result and trusts it by signature, so construction is fast and the daemon never needs the template tree at all.
+
+**Vendor-provenance keys** are the authority for the reserved `org.projectkennel.*` namespace (§7.13.5). A key loaded from `/usr/lib/kennel/keys/` is tagged as vendor-provenance in the trust store; the catalogue gate checks this tag. Host-declared `[[reserved]]` namespaces (§7.13.5a) bind a name prefix to a set of authorized `key_id`s, so an organisation can reserve its own namespace and restrict who may provide under it.
+
+### 4.10.3 Rotation
+
+**Additive-and-lazy.** A new key is placed in the trust store alongside the old one; both verify simultaneously. There is no expiry clock, no revocation list, no online ceremony. New artefacts are signed with the new key; old artefacts remain valid until recompiled. This is the `authorized_keys` model — add the new, remove the old when no artefact you care about still references it.
+
+The compiler records `key_id` in the `[signature]` envelope; `kennel policy show` and `kennel policy risks` display which key signed what, so the operator can audit which keys are still in use before removing an old one.
+
+The trust store is re-read on every daemon request (not frozen at boot), so a key created or removed after `kenneld` started is honoured without a restart.
+
+### 4.10.4 Revocation
+
+**Construction-time, no in-flight kill.** Removing a `.pub` file from the trust store revokes the key: the next `kennel run` (or daemon construction request) will refuse any artefact signed with that `key_id`. There is no mechanism to kill a running kennel whose settled policy was signed by a now-revoked key — the settled artefact was verified at construction, and the running kennel holds a trusted in-memory struct, not a live reference to the key.
+
+This is deliberate: a running kennel is already confined by the policy it was constructed with. Revoking the signing key does not change the confinement; it prevents future construction. To actually stop a kennel, use `kennel kill`.
+
+### 4.10.5 The local trust root
+
+**What the host trust root actually guarantees.** The trust boundary is the filesystem:
+
+| Layer | Protected by | Compromise means |
+|---|---|---|
+| `/usr/lib/kennel/keys/` | Package manager + root | Package supply chain or root compromise |
+| `/etc/kennel/keys/` | Root ownership | Root compromise |
+| `~/.config/kennel/keys/` | User ownership | Any process in the user's default context |
+
+The tiered integrity paths:
+
+- **Vendor keys → reference-template integrity.** A vendor key guarantees that the reference templates are the ones the project maintainer signed. Only a package update can change the vendor store.
+- **Host keys → fleet-artefact integrity.** A host key guarantees that the fleet artefacts were placed by the administrator. Only root can add a new trusted host-level signer.
+- **User keys → user-artefact integrity.** A user key guarantees that the user's own templates and settled policies were compiled by the user. Any process the user runs can sign — this is not a limitation; the threat model confines workloads, not the operator's own tools.
+
+**No cross-layer promotion.** A user key cannot sign an artefact that verifies as a system key. A user key in `~/.config/kennel/keys/` is never consulted when verifying a template ancestor (system-only trust). A user who needs fleet trust must have the administrator install the `.pub` file into `/etc/kennel/keys/`.
+
+The honesty bound: the signing key proves *who compiled*, not *what the policy does*. The policy's grants are readable prose; the key proves they were not tampered with between compilation and construction. The daemon verifies the signature and then trusts the in-memory struct — the key does not grant any authority; it attests provenance.

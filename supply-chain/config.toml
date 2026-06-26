@@ -8,6 +8,10 @@ version = "0.10"
 version = "2.8.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.numtoa]]
+version = "0.2.4"
+criteria = "safe-to-deploy"
+
 [[exemptions.proc-macro2]]
 version = "1.0.106"
 criteria = "safe-to-deploy"
@@ -26,4 +30,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.syn]]
 version = "2.0.117"
+criteria = "safe-to-deploy"
+
+[[exemptions.termion]]
+version = "4.0.6"
 criteria = "safe-to-deploy"

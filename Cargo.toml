@@ -60,6 +60,10 @@ members = [
     # The in-kennel ends of binder connectors (push workload traffic into binder, or pull it back):
     # one crate, four binaries (facade-afunix/socks5/client/ssh).
     "src/crates/kennel-facade",
+    # The standalone policy-authoring tool (W9). Optional separate install, not part of
+    # the runtime dispatch tree. Carries heavier deps (termion) that the runtime path does
+    # not link.
+    "src/crates/kennel-compose",
     # Build-time tooling (not shipped): the manpage + policy-schema + crate-inventory generators (std-only).
     "src/tools/gen-man",
     "src/tools/gen-schema",

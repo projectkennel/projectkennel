@@ -30,6 +30,10 @@
 //! - [`spawn`]'s one `CommandExt::pre_exec` call, which registers the
 //!   post-`fork`/pre-`execve` seal hook the spawn sequence installs confinement
 //!   in. Wrapping it here keeps `kennel-lib-spawn` `#![forbid(unsafe_code)]`.
+//! - [`fd::open_no_symlinks`]'s raw `openat2(2)` syscall. Neither `libc`
+//!   nor `nix` wraps `openat2`; the ABI is one syscall and a 24-byte
+//!   `#[repr(C)]` struct (`struct open_how`), following the same pattern as the
+//!   `clone3` wrapper in [`namespace`].
 //! - [`netlink`]'s three socket syscalls (`socket`/`sendto`/`recv`) for
 //!   interface-address management. The `rtnetlink` crate is a large async tree
 //!   (MIT-only) and `ioctl` cannot add a secondary/IPv6 address; the message is

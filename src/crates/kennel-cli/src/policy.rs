@@ -1,7 +1,8 @@
-//! The `kennel policy <verb>` command group — author, inspect, sign, diff, lint, and check
-//! policies — plus the compile machinery shared with `run`'s in-memory dev loop
-//! (`build_settled`, `FsTemplateSource`, `TempSettled`, `mint_ssh_keys`, `is_source_policy`).
-//! Split out of `main.rs`.
+//! The `kennel policy <verb>` command group.
+//!
+//! Author, inspect, sign, diff, lint, and check policies — plus the compile machinery
+//! shared with `run`'s in-memory dev loop (`build_settled`, `FsTemplateSource`,
+//! `TempSettled`, `mint_ssh_keys`, `is_source_policy`). Split out of `main.rs`.
 //!
 //! Path/name resolvers, the template/trust-dir cascade, and key loading stay in the crate root
 //! (shared across modules); `review::check_exclusive_ownership` gates `compile`.
@@ -21,10 +22,13 @@ use crate::{
 
 // ---- `kennel compile` ----------------------------------------------------------
 
-/// A filesystem-backed [`TemplateSource`]: searches each directory for a flat
-/// `<name>@<version>.toml` (the installed layout) and then `<name>/policy.toml`
-/// (the in-tree source layout), so the same resolver serves both.
+/// A filesystem-backed [`TemplateSource`].
+///
+/// Searches each directory for a flat `<name>@<version>.toml` (the installed layout)
+/// and then `<name>/policy.toml` (the in-tree source layout), so the same resolver
+/// serves both.
 pub struct FsTemplateSource {
+    /// The template search directories (the template cascade).
     pub dirs: Vec<PathBuf>,
 }
 
@@ -64,6 +68,12 @@ impl TemplateSource for FsTemplateSource {
 /// Resolves a source policy fully and writes a settled policy. Stateless: it never
 /// contacts the daemon. Exit codes follow `02-1-cli.md` (3 = validation/resolution,
 /// 6 = signature).
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, the policy cannot be resolved or
+/// read, the signing key cannot be loaded, an exclusive bind targets an unowned host
+/// path, the lockfile mismatches a prior pin, or writing the settled artefact fails.
 // allow: one cohesive arg-parse + compile + write/sign sequence for the CLI subcommand.
 #[allow(clippy::too_many_lines)]
 pub fn compile(args: &[String]) -> Result<ExitCode, String> {
@@ -216,10 +226,13 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
 }
 
 /// Whether `bytes` is a **source** policy (a template or a leaf) rather than a
-/// compiled settled artefact. A source policy parses as a `SourcePolicy` or
-/// `LeafPolicy`; a settled document carries fields (`settled_schema_version`,
-/// `[signature]`, …) those `deny_unknown_fields` schemas reject, so the two parses
-/// are mutually exclusive. Used by `kennel run` to decide whether to compile.
+/// compiled settled artefact.
+///
+/// A source policy parses as a `SourcePolicy` or `LeafPolicy`; a settled document
+/// carries fields (`settled_schema_version`, `[signature]`, …) those
+/// `deny_unknown_fields` schemas reject, so the two parses are mutually exclusive.
+/// Used by `kennel run` to decide whether to compile.
+#[must_use]
 pub fn is_source_policy(bytes: &[u8]) -> bool {
     kennel_lib_compile::parse_source(bytes).is_ok() || kennel_lib_compile::parse_leaf(bytes).is_ok()
 }
@@ -234,6 +247,10 @@ pub struct TempSettled {
 impl TempSettled {
     /// Write `bytes` to a unique, safe-owned path (under `$XDG_RUNTIME_DIR` when set,
     /// else the temp dir) keyed by kennel name and pid.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the file cannot be written to the chosen directory.
     pub fn write(name: &str, bytes: &[u8]) -> Result<Self, String> {
         let dir =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
@@ -243,6 +260,10 @@ impl TempSettled {
     /// Write `bytes` to a unique path **in `dir`**, keyed by kennel name and pid. Used when
     /// the settled artefact must sit beside a sibling the daemon resolves relative to it
     /// (the `ssh/` minted-key dir) — so `<settled>.parent()/ssh` finds the keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if the file cannot be written into `dir`.
     pub fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> Result<Self, String> {
         let path = dir.join(format!("kennel-run-{name}-{}.settled", std::process::id()));
         std::fs::write(&path, bytes)
@@ -250,6 +271,8 @@ impl TempSettled {
         Ok(Self { path })
     }
 
+    /// The path to the temporary settled file.
+    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -285,6 +308,11 @@ pub fn print_warnings(warnings: &[String]) {
 /// the artefact in the policy dir).
 /// Returns whether any key was minted (i.e. the policy has `[ssh]` grants) — the caller
 /// uses this to keep the settled artefact beside the `ssh/` dir the daemon resolves from.
+///
+/// # Errors
+///
+/// Returns a message if the `ssh_dir` cannot be created, `ssh-keygen` cannot be run or
+/// fails, or a generated public key cannot be read back.
 pub fn mint_ssh_keys(
     policy: &mut kennel_lib_policy::SettledPolicy,
     ssh_dir: &Path,
@@ -328,9 +356,17 @@ fn lock_path_for(output: &Path, name: &str) -> PathBuf {
         .join(format!("{name}.lock"))
 }
 
-/// Compile policy `bytes` (a template/direct policy parses as a `SourcePolicy`; a
-/// leaf in the delta form does not, so fall back to the leaf parser). On a
-/// double parse failure the source parse error is returned.
+/// Compile policy `bytes` into a settled artefact.
+///
+/// A template/direct policy parses as a `SourcePolicy`; a leaf in the delta form does
+/// not, so fall back to the leaf parser. On a double parse failure the source parse
+/// error is returned.
+///
+/// # Errors
+///
+/// Returns a `PolicyError` if `bytes` parses as neither a source nor a leaf policy
+/// (the source parse error is surfaced), or if resolving and compiling the parsed
+/// policy fails.
 pub fn build_settled(
     bytes: &[u8],
     source: &FsTemplateSource,
@@ -350,6 +386,12 @@ pub fn build_settled(
 /// Resolve and check a policy (chain, signatures, deltas, includes, invariants)
 /// without emitting a settled artefact. Exit 0 if valid; otherwise the same code
 /// `compile` would return.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no policy is given, the policy file
+/// cannot be read, or the trust store cannot be loaded. A policy that resolves but is
+/// invalid is reported via the exit code, not an error.
 pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_path: Option<&str> = None;
     let mut require_signed = false;
@@ -409,6 +451,12 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
 /// **expose** and **mitigate**, each with the granting site, its documented reason,
 /// and the catalogue residual. Source-driven (threat tags live only in the source +
 /// compile-time derivation, never the settled artefact). Read-only; no daemon.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no policy is given, the policy file
+/// cannot be read, the trust store cannot be loaded, the source cannot be resolved, or
+/// the threat catalogue cannot be loaded.
 pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_path: Option<&str> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
@@ -468,6 +516,12 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
 /// bump. Each grant change is annotated with the threats it exposes/mitigates plus
 /// a net threat-posture delta — the semantic counterpart of `policy upgrade`'s raw
 /// source line diff (`05-templates.md` §5.11).
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no policy is given, the trust store
+/// cannot be loaded, a policy cannot be resolved or read, the one-argument form has no
+/// `template_base` to diff against, or the threat catalogue cannot be loaded.
 pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut template_dirs: Vec<PathBuf> = Vec::new();
@@ -793,6 +847,10 @@ fn print_risks_json(name: &str, report: &kennel_lib_compile::risks::RiskReport) 
 /// Walks the `policies/` and `templates/` cascades (`~/.config/kennel`,
 /// `/etc/kennel`, `/usr/lib/kennel`) and prints each artefact's name, kind, and the
 /// directory it was found in. A read-only survey; touches no daemon.
+///
+/// # Errors
+///
+/// Returns a usage message if any arguments are given (the verb takes none).
 pub fn policy_list(args: &[String]) -> Result<ExitCode, String> {
     if !args.is_empty() {
         return Err(usage_of(POLICY_VERBS, "list"));
@@ -844,6 +902,7 @@ pub fn policy_list(args: &[String]) -> Result<ExitCode, String> {
 
 /// Classify a `policy.toml` as a `template` (has `template_name`) or `leaf` (has `name`),
 /// by a cheap parse. Unparseable or ambiguous files report `source`.
+#[must_use]
 pub fn policy_kind(path: &Path) -> &'static str {
     let Ok(bytes) = std::fs::read(path) else {
         return "source";
@@ -880,6 +939,12 @@ pub fn policy_kind(path: &Path) -> &'static str {
 /// egress proxy stands up), filesystem grants, the exec allowlist, the embedded
 /// workload, and the TTL. This is the tool to catch "the template says X but resolves
 /// to Y" — e.g. a `mode = open` policy that still carries a proxy listener.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no policy is given, the policy
+/// cannot be resolved or read, the trust store cannot be loaded, or the policy fails
+/// to compile (source form) or verify (settled form).
 pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_arg: Option<String> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
@@ -1060,6 +1125,12 @@ fn user_policies_dir() -> PathBuf {
 /// `policies/<name>/` first (copy-on-write) so edits never try to mutate the system copy;
 /// the user copy then shadows the system one in the cascade. `$EDITOR` (then `$VISUAL`,
 /// else `vi`) is launched on the resulting path.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, the name is not a valid policy name,
+/// the policy cannot be resolved, the copy-on-write into the user config fails, the
+/// editor cannot be launched, or the editor exits non-zero.
 pub fn policy_edit(args: &[String]) -> Result<ExitCode, String> {
     let [name] = args else {
         return Err(usage_of(POLICY_VERBS, "edit"));
@@ -1111,6 +1182,12 @@ fn is_under_system_dir(path: &Path) -> bool {
 /// Writes `~/.config/kennel/policies/<name>/policy.toml`: a minimal leaf that inherits
 /// `--from` (default `base-confined@v1`), with a commented `[workload]` stub to fill in.
 /// Refuses to overwrite an existing policy. Prints next steps (`policy show`/`compile`).
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no name is given, the name is not a
+/// valid policy name, `--from` is not a versioned reference, a policy of that name
+/// already exists, or the scaffold directory or file cannot be written.
 pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     let mut name: Option<String> = None;
     let mut from = "base-confined@v1".to_owned();
@@ -1172,6 +1249,11 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
 /// and runs `lint_settled` on the resolved policy, reporting any finding — settings that
 /// contradict the resolved net mode, or grants the mode makes vacuous. Exit 0 if all clean,
 /// 7 if any template lints with a finding (a CI-friendly distinct code).
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid or the trust store cannot be loaded.
+/// A template that fails to compile is reported and counted, not returned as an error.
 pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -1247,10 +1329,19 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
         Ok(ExitCode::from(7))
     }
 }
-/// Sign a source template/fragment with an ed25519 key, **appending** a
-/// `[signature]` block to the file so its comments are preserved (the signature
-/// covers the canonical re-serialisation, not the raw bytes). Prints the public key
-/// to install in the trust store as `<key_id>.pub`. Leaf policies may stay unsigned.
+/// Sign a source template/fragment with an ed25519 key.
+///
+/// **Appends** a `[signature]` block to the file so its comments are preserved (the
+/// signature covers the canonical re-serialisation, not the raw bytes). Prints the
+/// public key to install in the trust store as `<key_id>.pub`. Leaf policies may stay
+/// unsigned.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no template or `--key` is given, the
+/// file cannot be read, the key cannot be loaded, the file already carries a
+/// `[signature]`, the file is not a signable source template or fragment, signing
+/// fails, or the output cannot be written.
 pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     let mut path: Option<&str> = None;
     let mut key_path: Option<&str> = None;
@@ -1320,11 +1411,21 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// version, asks for consent, and on yes rewrites `template_base` and recompiles so
-/// `kennel.lock` re-pins. This is the sanctioned way to change a locked entry
-/// (`05-templates.md` §5.11): the lock is otherwise immutable, a mismatch being a
-/// hard error. The semantic threat-impact delta is `kennel diff`'s job (roadmap);
-/// this shows the honest source diff and never migrates without consent.
+/// `kennel policy upgrade <name>` — re-point a leaf to the newest template version.
+///
+/// Finds the newest available version, shows the source diff, asks for consent, and on
+/// yes rewrites `template_base` and recompiles so `kennel.lock` re-pins. This is the
+/// sanctioned way to change a locked entry (`05-templates.md` §5.11): the lock is
+/// otherwise immutable, a mismatch being a hard error. The semantic threat-impact delta
+/// is `kennel diff`'s job (roadmap); this shows the source diff and never migrates
+/// without consent.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no name is given, the policy cannot
+/// be resolved, read, or parsed, it has no `template_base`, the reference is malformed,
+/// the template is not found in the search path, the source is not UTF-8, the rewrite
+/// or write fails, or the subsequent recompile fails.
 pub fn upgrade(args: &[String]) -> Result<ExitCode, String> {
     let mut name: Option<&str> = None;
     let mut assume_yes = false;
@@ -1437,8 +1538,10 @@ pub fn upgrade(args: &[String]) -> Result<ExitCode, String> {
 }
 
 /// Scan the template search dirs for the newest available version of `name`.
+///
 /// Recognises the flat `name@vX.toml` layout and the nested `name/policy.toml`
 /// (whose `template_version` supplies the version). Returns the newest `vX`.
+#[must_use]
 pub fn newest_template_version(dirs: &[PathBuf], name: &str) -> Option<String> {
     let mut newest: Option<String> = None;
     let mut consider = |candidate: String| {
@@ -1480,9 +1583,14 @@ pub fn newest_template_version(dirs: &[PathBuf], name: &str) -> Option<String> {
     newest
 }
 
-/// Replace exactly the `template_base = "<old>"` value with `<new>`, preserving the
-/// rest of the file. Errors if the old reference is not found verbatim (so we never
-/// silently write a no-op or corrupt an unexpected layout).
+/// Replace exactly the `template_base = "<old>"` value with `<new>`.
+///
+/// Preserves the rest of the file. Errors if the old reference is not found verbatim
+/// (so we never silently write a no-op or corrupt an unexpected layout).
+///
+/// # Errors
+///
+/// Returns a message if `text` does not contain the verbatim `"<old>"` reference.
 pub fn rewrite_template_base(text: &str, old: &str, new: &str) -> Result<String, String> {
     let needle = format!("\"{old}\"");
     if !text.contains(&needle) {
@@ -1511,5 +1619,94 @@ fn print_source_diff(old: Option<&[u8]>, new: &[u8]) {
         if !new_lines.contains(line) && !line.trim().is_empty() {
             println!("  - {line}");
         }
+    }
+}
+
+// ---- `kennel policy inspect` ---------------------------------------------------
+
+/// `kennel policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...`
+///
+/// Load a settled (or compilable source) policy and render its grants.
+/// Currently supports `--unix` (`AF_UNIX` socket grants, §7.6).
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no policy is given, no grant filter
+/// (`--unix`) is selected, the policy cannot be resolved or read, the trust store
+/// cannot be loaded, or the policy fails to compile (source form) or verify (settled
+/// form).
+pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
+    let mut policy_arg: Option<String> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut show_unix = false;
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("unix") => show_unix = true,
+            lexopt::Arg::Long("template-dir") => {
+                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
+            }
+            lexopt::Arg::Long("trust-dir") => {
+                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            }
+            lexopt::Arg::Value(v) if policy_arg.is_none() => {
+                policy_arg = Some(v.to_string_lossy().into_owned());
+            }
+            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "inspect")),
+        }
+    }
+    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "inspect"))?;
+    if !show_unix {
+        return Err("no grant filter specified — use --unix to inspect AF_UNIX grants".to_owned());
+    }
+
+    let (policy_file, _name) = resolve_policy(&policy_arg, true)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+
+    add_default_template_dirs(&mut template_dirs);
+    add_system_trust_dirs(&mut trust_dirs);
+    let policy = if is_source_policy(&bytes) {
+        let source = FsTemplateSource {
+            dirs: template_dirs,
+        };
+        let keys = load_trust_store(&trust_dirs)?;
+        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+        compiled.policy
+    } else {
+        let keys = load_trust_store(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, &keys)
+            .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
+    };
+
+    if show_unix {
+        print_unix_grants(&policy);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Render the `AF_UNIX` grants from a settled policy's `UnixRuntime` (§7.6).
+fn print_unix_grants(policy: &kennel_lib_policy::SettledPolicy) {
+    let unix = &policy.unix;
+    if unix.is_empty() {
+        println!("no AF_UNIX grants");
+        return;
+    }
+    println!(
+        "AF_UNIX grants ({} socket{}):\n",
+        unix.sockets.len(),
+        if unix.sockets.len() == 1 { "" } else { "s" },
+    );
+    for sock in &unix.sockets {
+        println!("  {}", sock.name);
+        println!("    real:  {}", sock.real);
+        println!("    shim:  {}", sock.shim);
+        if let Some(env) = &sock.env {
+            println!("    env:   {env}");
+        }
+        println!();
     }
 }

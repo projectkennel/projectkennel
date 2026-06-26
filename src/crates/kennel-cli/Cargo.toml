@@ -11,9 +11,31 @@ repository.workspace = true
 
 # The host execution unit (W10): installed as `/usr/libexec/kennel/host`, reached through the
 # `kennel` shim. The cargo bin name is `kennel-host` so it does not collide with the shim's `kennel`.
+# TRANSITION: kennel-host is kept as a re-dispatcher during the 0.5.0 cycle; the real work now
+# lives in the four sub-binaries below.
+
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "kennel-host"
 path = "src/main.rs"
+
+[[bin]]
+name = "kennel-run"
+path = "src/bin/kennel_run.rs"
+
+[[bin]]
+name = "kennel-policy"
+path = "src/bin/kennel_policy.rs"
+
+[[bin]]
+name = "kennel-oci"
+path = "src/bin/kennel_oci.rs"
+
+[[bin]]
+name = "kennel-misc"
+path = "src/bin/kennel_misc.rs"
 
 [dependencies]
 # The control-socket wire protocol shared with the daemon (the only thing the CLI

@@ -171,6 +171,24 @@ Add a directory to the template search path (repeatable).
 \fB\-\-trust\-dir D\fR
 Trust store the new version's signature verifies against (forwarded to the recompile).
 .RE
+.TP
+\fBkennel policy inspect <policy> \-\-unix [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+inspect grants in a settled policy (\-\-unix: AF_UNIX sockets)
+.RS
+.TP
+\fB\-\-unix\fR
+Show AF_UNIX socket grants (§7.6).
+.RE
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
 .SH EXIT STATUS
 .TP
 \fB0\fR

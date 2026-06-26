@@ -222,6 +222,21 @@ pub struct KennelInfo {
     /// Whether a terminal is currently attached to this (interactive) kennel. False
     /// for a detached or non-interactive kennel.
     pub attached: bool,
+    /// The mesh capability names this kennel's `[[consumes]]` declares, with their
+    /// expected shapes and required/optional status — the consumer leg of the topology
+    /// (`kennel list`, §7.13.6). Empty for a kennel with no `[[consumes]]`.
+    pub consumed: Vec<ConsumedCapability>,
+}
+
+/// One consumed capability for the consumer-side topology (`kennel list`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumedCapability {
+    /// The capability name (the `[[consumes]]` name resolved against the catalogue).
+    pub name: String,
+    /// The expected connector shape (`af-unix` / `dbus-name` / `binder-connector`).
+    pub shape: String,
+    /// Whether the capability is required (`true`) or optional (`false`).
+    pub required: bool,
 }
 
 /// One catalogued provider→capability row, for [`Response::Mesh`] (`kennel mesh`, §7.13.7).
@@ -484,6 +499,12 @@ impl Response {
                     put_u32(&mut b, k.pid);
                     put_u8(&mut b, u8::from(k.running));
                     put_u8(&mut b, u8::from(k.attached));
+                    put_u32(&mut b, u32::try_from(k.consumed.len()).unwrap_or(u32::MAX));
+                    for c in &k.consumed {
+                        put_str(&mut b, &c.name);
+                        put_str(&mut b, &c.shape);
+                        put_u8(&mut b, u8::from(c.required));
+                    }
                 }
             }
             Self::Exited { code } => {
@@ -557,12 +578,30 @@ impl Response {
                 }
                 let mut kennels = Vec::with_capacity(n);
                 for _ in 0..n {
+                    let kennel = r.string()?;
+                    let ctx = r.u16()?;
+                    let pid = u32::try_from(r.u32_len()?).unwrap_or(u32::MAX);
+                    let running = r.u8()? != 0;
+                    let attached = r.u8()? != 0;
+                    let nc = r.u32_len()?;
+                    if nc > MAX_COUNT {
+                        return Err(WireError::TooLarge);
+                    }
+                    let mut consumed = Vec::with_capacity(nc);
+                    for _ in 0..nc {
+                        consumed.push(ConsumedCapability {
+                            name: r.string()?,
+                            shape: r.string()?,
+                            required: r.u8()? != 0,
+                        });
+                    }
                     kennels.push(KennelInfo {
-                        kennel: r.string()?,
-                        ctx: r.u16()?,
-                        pid: u32::try_from(r.u32_len()?).unwrap_or(u32::MAX),
-                        running: r.u8()? != 0,
-                        attached: r.u8()? != 0,
+                        kennel,
+                        ctx,
+                        pid,
+                        running,
+                        attached,
+                        consumed,
                     });
                 }
                 Ok(Self::Listing(kennels))
@@ -1118,6 +1157,18 @@ mod tests {
                 pid: 4242,
                 running: true,
                 attached: true,
+                consumed: vec![
+                    ConsumedCapability {
+                        name: "wayland-display".to_owned(),
+                        shape: "af-unix".to_owned(),
+                        required: true,
+                    },
+                    ConsumedCapability {
+                        name: "audio-playback".to_owned(),
+                        shape: "af-unix".to_owned(),
+                        required: false,
+                    },
+                ],
             },
             KennelInfo {
                 kennel: "build".to_owned(),
@@ -1125,6 +1176,7 @@ mod tests {
                 pid: 99,
                 running: false,
                 attached: false,
+                consumed: vec![],
             },
         ]));
     }

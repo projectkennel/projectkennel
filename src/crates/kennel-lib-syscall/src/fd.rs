@@ -1,9 +1,100 @@
-//! File-descriptor flag helpers.
+//! File-descriptor helpers: flag manipulation and `openat2` path resolution.
+//!
+//! The `openat2` wrapper (`open_no_symlinks`) is an `unsafe` site — the fourth in
+//! this crate — documented per §4 (SAFETY / INVARIANTS UPHELD / FAILURE MODE).
+//! It uses the raw `openat2(2)` syscall (Linux 5.6+, `__NR_openat2 = 437`) because
+//! neither `libc` nor `nix` wrap it. The pattern matches the existing `clone3`
+//! wrapper in `namespace.rs`: a `#[repr(C)]` kernel struct and a raw
+//! `libc::syscall`.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::path::Path;
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+
+// ─── openat2(2) — RESOLVE_NO_SYMLINKS ────────────────────────────────────────
+
+/// The kernel's `struct open_how` (v0, `OPEN_HOW_SIZE_VER0 = 24`).
+///
+/// All fields are `__u64`; the kernel reads exactly `size_of::<OpenHow>()` bytes
+/// and retains no pointer. Defined in `<linux/openat2.h>`.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// `RESOLVE_NO_SYMLINKS` (`<linux/openat2.h>`, kernel 5.6+).
+///
+/// If any path component (including the final one) is a symbolic link, the
+/// `openat2` call fails with `ELOOP`.
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+
+/// `__NR_openat2` — syscall 437 on x86-64 / aarch64 / riscv64.
+const SYS_OPENAT2: libc::c_long = 437;
+
+/// Open `path` relative to `dir_fd` with `RESOLVE_NO_SYMLINKS`, returning an
+/// `O_PATH` fd.
+///
+/// If any component of `path` is a symbolic link the call fails with `ELOOP`,
+/// closing the writable-bind-source symlink-aliasing class (0.4.0 F1
+/// residual). The returned fd is safe to use as `/proc/self/fd/N` — its target
+/// is the inode the path resolved to without following any symlink.
+///
+/// `dir_fd` follows the kernel's `int dfd` semantics: pass `libc::AT_FDCWD` to
+/// resolve relative to the current directory, or an open directory fd for
+/// anchored resolution. For absolute paths the kernel ignores it.
+///
+/// # Errors
+///
+/// - `ELOOP`: a path component is a symlink.
+/// - `ENOSYS`: kernel < 5.6 (does not support `openat2`).
+/// - Any other `openat2` error (`ENOENT`, `EACCES`, …).
+pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
+    let how = OpenHow {
+        flags: libc::O_PATH as u64, // fd-only, no read/write capability
+        mode: 0,
+        resolve: RESOLVE_NO_SYMLINKS,
+    };
+    // SAFETY: `openat2` with a valid `dir_fd` (or `AT_FDCWD`), a NUL-terminated
+    // `path`, and a correctly sized, stack-local `open_how` is a pure open-path
+    // call — no pointer is retained, no aliasing concern. `O_PATH` means no I/O
+    // capability is granted, only an fd for `/proc/self/fd/N` resolution. The
+    // returned descriptor is fresh and owned by us.
+    //
+    // INVARIANTS UPHELD: `how` is stack-local, correctly sized (24 bytes,
+    // `OPEN_HOW_SIZE_VER0`), zeroed in unused fields. `c_path` lives until
+    // the syscall returns. `SYS_OPENAT2` is the correct syscall number for
+    // all supported architectures (verified against `<asm/unistd.h>`).
+    //
+    // FAILURE MODE: -1 + errno → `Err`. The caller must not proceed with
+    // the bind mount — a symlink in the path is a potential escape.
+    let fd = unsafe {
+        libc::syscall(
+            SYS_OPENAT2,
+            dir_fd,
+            c_path.as_ptr(),
+            std::ptr::from_ref(&how),
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `openat2` returned a non-negative descriptor that we are the
+    // sole owner of; wrapping it transfers that ownership for RAII close.
+    let fd = RawFd::try_from(fd).map_err(|_| io::Error::other("openat2 fd out of range"))?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+// ─── FD flag helpers ─────────────────────────────────────────────────────────
 
 /// Set the close-on-exec flag (`FD_CLOEXEC`) on `fd`.
 ///
@@ -108,6 +199,67 @@ mod tests {
         assert!(
             !FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC),
             "dup_onto(fd, fd) clears close-on-exec so it survives fexecve"
+        );
+    }
+
+    // ─── open_no_symlinks (openat2 RESOLVE_NO_SYMLINKS) ──────────────────
+
+    #[test]
+    fn open_no_symlinks_succeeds_on_a_real_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("kennel-test-openat2-real");
+        std::fs::write(&path, b"ok").expect("create");
+        let fd = open_no_symlinks(libc::AT_FDCWD, &path);
+        let _ = std::fs::remove_file(&path);
+        let fd = fd.expect("open_no_symlinks on a real file should succeed");
+        // The fd is O_PATH — we can stat through /proc/self/fd/N.
+        let proc_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+        assert!(
+            std::fs::symlink_metadata(&proc_path).is_ok(),
+            "/proc/self/fd/N must be resolvable"
+        );
+    }
+
+    #[test]
+    fn open_no_symlinks_rejects_a_symlink_target() {
+        let dir = std::env::temp_dir();
+        let real = dir.join("kennel-test-openat2-target");
+        let link = dir.join("kennel-test-openat2-link");
+        std::fs::write(&real, b"ok").expect("create");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let result = open_no_symlinks(libc::AT_FDCWD, &link);
+        let _ = std::fs::remove_file(&real);
+        let _ = std::fs::remove_file(&link);
+        let err = result.expect_err("open_no_symlinks on a symlink target must fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ELOOP),
+            "expected ELOOP, got: {err}"
+        );
+    }
+
+    #[test]
+    fn open_no_symlinks_rejects_a_symlink_component() {
+        let dir = std::env::temp_dir();
+        let real_dir = dir.join("kennel-test-openat2-realdir");
+        let link_dir = dir.join("kennel-test-openat2-linkdir");
+        let _ = std::fs::remove_dir_all(&real_dir);
+        let _ = std::fs::remove_file(&link_dir);
+        std::fs::create_dir_all(&real_dir).expect("mkdir");
+        let target = real_dir.join("file");
+        std::fs::write(&target, b"ok").expect("create");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("symlink");
+        // Try to open link_dir/file — the link_dir component is a symlink.
+        let via_link = link_dir.join("file");
+        let result = open_no_symlinks(libc::AT_FDCWD, &via_link);
+        let _ = std::fs::remove_dir_all(&real_dir);
+        let _ = std::fs::remove_file(&link_dir);
+        let err = result.expect_err("open_no_symlinks with a symlink component must fail");
+        assert_eq!(
+            err.raw_os_error(),
+            Some(libc::ELOOP),
+            "expected ELOOP for symlink component, got: {err}"
         );
     }
 }
