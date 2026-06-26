@@ -733,9 +733,8 @@ pub mod mesh {
         // The name bytes are everything before the padding; find the padding start.
         let name_end = (0..obj_start)
             .rev()
-            .find(|&i| data[i] != 0)
-            .map(|i| i + 1)
-            .unwrap_or(0);
+            .find(|&i| data.get(i).copied() != Some(0))
+            .map_or(0, |i| i.saturating_add(1));
         if name_end == 0 || name_end > MESH_NAME_MAX_BYTES {
             return None;
         }
@@ -752,13 +751,13 @@ pub mod mesh {
 
         /// Build a mock `ADD_SERVICE` payload as `transact_node` would lay it out:
         /// `[name bytes | padding to 8-byte alignment | flat_binder_object]`.
-        /// The driver translates the BINDER_TYPE_BINDER to BINDER_TYPE_HANDLE for the
+        /// The driver translates the `BINDER_TYPE_BINDER` to `BINDER_TYPE_HANDLE` for the
         /// context manager, so we hand-build the translated version.
         fn mock_add_service_data(name: &str, handle: u32) -> Vec<u8> {
             let mut buf = name.as_bytes().to_vec();
             let obj_off = buf.len().next_multiple_of(8);
             buf.resize(obj_off, 0); // padding
-            // Build a BINDER_TYPE_HANDLE object (the translated form).
+                                    // Build a BINDER_TYPE_HANDLE object (the translated form).
             let mut obj = flat_binder_object_binder(0, 0, 0);
             // Overwrite the type tag to BINDER_TYPE_HANDLE (as the driver would).
             obj[..4].copy_from_slice(&BINDER_TYPE_HANDLE.to_ne_bytes());
@@ -802,14 +801,14 @@ pub mod mesh {
             let mut data = mock_add_service_data("test-svc", 1);
             // Corrupt the type tag of the trailing object.
             let obj_start = data.len() - FLAT_BINDER_OBJECT_SIZE;
-            data[obj_start] ^= 0xFF;
+            *data.get_mut(obj_start).expect("object byte in range") ^= 0xFF;
             assert!(decode_add_service(&data).is_none());
         }
     }
 }
 
 /// The `dbus-broker@v1` control-channel wire protocol: the verbs `kenneld` speaks on the
-/// broker's acquired node handle (the `binder-connector` from Part A, §7.13.4a).
+/// broker's acquired node handle (the `binder-connector`, §7.13.4a).
 ///
 /// `kenneld` pushes per-consumer D-Bus filter sets via `REGISTER_CONSUMER` at consumer
 /// construction, and clears them via `UNREGISTER_CONSUMER` at teardown. The broker enforces
@@ -858,12 +857,19 @@ pub mod broker {
     /// A decoded `REGISTER_CONSUMER` request.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct RegisterConsumer {
+        /// The kennel's context number (`ctx`) identifying the consumer.
         pub consumer_id: u16,
+        /// The target bus: session (`0`) or system (`1`).
         pub bus: u8,
+        /// Bus names the consumer may send method calls/signals to (talk).
         pub talk: Vec<String>,
+        /// Allowed method calls, as `interface=member` filters.
         pub call: Vec<String>,
+        /// Broadcast (signal) names the consumer may receive.
         pub broadcast: Vec<String>,
+        /// Bus names the consumer may own.
         pub own: Vec<String>,
+        /// Bus names explicitly denied for talk, overriding the talk set.
         pub deny_talk: Vec<String>,
     }
 
@@ -871,8 +877,10 @@ pub mod broker {
     #[must_use]
     pub fn decode_register(data: &[u8]) -> Option<RegisterConsumer> {
         let mut cur = data;
-        let id_bytes = take(&mut cur, 2)?;
-        let consumer_id = u16::from_be_bytes([id_bytes[0], id_bytes[1]]);
+        let &[id_hi, id_lo] = take(&mut cur, 2)? else {
+            return None;
+        };
+        let consumer_id = u16::from_be_bytes([id_hi, id_lo]);
         let &bus = take(&mut cur, 1)?.first()?;
         let talk = take_string_list(&mut cur)?;
         let call = take_string_list(&mut cur)?;
@@ -945,12 +953,16 @@ pub mod broker {
     }
 
     fn take_string_list(cur: &mut &[u8]) -> Option<Vec<String>> {
-        let n_bytes = take(cur, 2)?;
-        let n = u16::from_be_bytes([n_bytes[0], n_bytes[1]]);
+        let &[n_hi, n_lo] = take(cur, 2)? else {
+            return None;
+        };
+        let n = u16::from_be_bytes([n_hi, n_lo]);
         let mut list = Vec::with_capacity(usize::from(n));
         for _ in 0..n {
-            let len_bytes = take(cur, 2)?;
-            let len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]);
+            let &[len_hi, len_lo] = take(cur, 2)? else {
+                return None;
+            };
+            let len = u16::from_be_bytes([len_hi, len_lo]);
             let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
             list.push(s.to_owned());
         }
@@ -981,8 +993,7 @@ pub mod broker {
 
         #[test]
         fn register_rejects_trailing_garbage() {
-            let bytes = encode_register(1, 0, &[], &[], &[], &[], &[]);
-            let mut bad = bytes.clone();
+            let mut bad = encode_register(1, 0, &[], &[], &[], &[], &[]);
             bad.push(0xFF);
             assert!(decode_register(&bad).is_none());
         }

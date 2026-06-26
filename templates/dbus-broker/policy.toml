@@ -3,12 +3,13 @@
 # Inherits: base-confined@v1
 # Threat catalogue: THREATS.md v0.4
 #
-# The standing D-Bus mediation service kennel (§7.7, W1 Part C). Replaces the
-# per-consumer host-dbus delegate with a single long-running broker that
-# receives per-consumer filter sets from kenneld via the binder-connector mesh
-# and applies them to relayed D-Bus frames.
+# The standing D-Bus mediation service kennel (§7.7): the intended replacement for the
+# per-consumer host-dbus delegate — a single long-running broker that receives per-consumer
+# filter sets from kenneld via the binder-connector mesh and mediates relayed D-Bus frames.
 #
-# The broker is started when the first D-Bus consumer connects and stays
+# The frame relay is not yet implemented (the broker is a stub); D-Bus mediation currently
+# flows through the legacy host-dbus delegate. This template is the deployment shape for the
+# broker once the relay lands — started when the first D-Bus consumer connects and kept
 # running (restart = on-failure) until all consumers exit.
 #
 # Shape:
@@ -57,3 +58,9 @@ allow = ["dbus-broker", "/bin/sh"]
 
 # --- Network -----------------------------------------------------------------
 # Inherited from base-confined: constrained mode (no proxy allowlist = no egress).
+
+
+[signature]
+algorithm = "ed25519"
+key_id = "kennel-maint-2026"
+signature = "f6FcsfUt2+3NikgQTJZgdzn73Pb9xjPz6QVPa4iwIc3fQItut90buaQHK+cEb60a6Y5JcVqWIP6nOYFbpwGwCQ=="

@@ -1,12 +1,12 @@
 {
-  "crate_count": 27,
-  "total_sloc": 34596,
+  "crate_count": 28,
+  "total_sloc": 35529,
   "tcb_crate_count": 16,
-  "tcb_sloc": 20920,
+  "tcb_sloc": 21730,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7319,
+      "sloc": 7958,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -35,6 +35,16 @@
       "external_deps": ["lexopt", "serde", "serde_json"]
     },
     {
+      "name": "kennel-lib-binder",
+      "sloc": 2203,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["libc"]
+    },
+    {
       "name": "kennel-lib-policy",
       "sloc": 2085,
       "uses_unsafe": false,
@@ -43,16 +53,6 @@
       "consumers": ["cli", "compile", "compose", "kenneld", "spawn"],
       "first_party_deps": [],
       "external_deps": ["basic-toml", "ed25519-compact", "object", "serde"]
-    },
-    {
-      "name": "kennel-lib-binder",
-      "sloc": 2032,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["bin-init", "dbus", "facade", "kenneld", "spawn"],
-      "first_party_deps": [],
-      "external_deps": ["libc"]
     },
     {
       "name": "kennel-lib-spawn",
@@ -120,7 +120,7 @@
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
-      "consumers": ["facade", "host-dbus"],
+      "consumers": ["dbus-broker", "facade", "host-dbus"],
       "first_party_deps": ["kennel-lib-binder"],
       "external_deps": ["mini-sansio-dbus"]
     },
@@ -243,6 +243,16 @@
       "consumers": ["facade", "host-delegate", "syscall"],
       "first_party_deps": [],
       "external_deps": ["nix"]
+    },
+    {
+      "name": "kennel-dbus-broker",
+      "sloc": 123,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["dbus-broker"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus"],
+      "external_deps": ["mini-sansio-dbus", "nix"]
     },
     {
       "name": "kennel-lib-text",

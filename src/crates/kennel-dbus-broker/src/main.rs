@@ -1,8 +1,13 @@
-//! `dbus-broker@v1`: the standing D-Bus mediation service kennel (§7.7, W1 Part C).
+//! `dbus-broker@v1`: the standing D-Bus mediation service kennel (§7.7).
 //!
-//! Replaces the per-consumer `host-dbus` delegate with a single long-running service that
-//! receives per-consumer filter sets from `kenneld` via the `binder-connector` mesh (Part A)
-//! and applies them to relayed D-Bus frames. Runs inside its own kennel, not on the host.
+//! A single long-running service — the intended replacement for the per-consumer `host-dbus`
+//! delegate — that receives per-consumer filter sets from `kenneld` over the `binder-connector`
+//! mesh and mediates relayed D-Bus frames. Runs inside its own kennel, not on the host.
+//!
+//! **Status: the frame relay is not yet implemented.** The control channel (consumer
+//! registration) and the mesh wiring are in place, but `handle_relay` is a stub — frames are
+//! not parsed, filtered, or forwarded to the real bus. D-Bus mediation currently flows through
+//! `kenneld`'s legacy `host-dbus` delegate; the broker is dormant unless a deployment selects it.
 //!
 //! **Control channel** (the `binder-connector` verb set):
 //!
@@ -10,8 +15,8 @@
 //!   kennel is constructed. The broker stores the filter set keyed by `(ctx, bus)`.
 //! - `UNREGISTER_CONSUMER(ctx, bus)` — `kenneld` pushes at consumer teardown. The broker
 //!   drops the entry.
-//! - `RELAY_FRAME(ctx, bus, frame)` — `kenneld` relays a D-Bus frame from a consumer. The
-//!   broker applies the stored filter, and if approved, sends it on the real bus.
+//! - `RELAY_FRAME(ctx, bus, frame)` — intended to apply the stored filter and forward approved
+//!   frames to the real bus (currently stubbed; see Status above).
 //!
 //! **Architecture:**
 //!
@@ -19,7 +24,7 @@
 //! workload → facade-dbus → binder(node 0) → kenneld → RELAY_FRAME → dbus-broker → real bus
 //!                                                        ↑
 //!                                       kenneld pushes DbusBusRuntime
-//!                                       via REGISTER_CONSUMER (Part A)
+//!                                       via REGISTER_CONSUMER
 //! ```
 
 #![forbid(unsafe_code)]
@@ -96,10 +101,8 @@ impl Broker {
                 system: Some(rules),
             }
         };
-        self.consumers.insert(
-            (reg.consumer_id, reg.bus),
-            ConsumerEntry { filter },
-        );
+        self.consumers
+            .insert((reg.consumer_id, reg.bus), ConsumerEntry { filter });
         eprintln!(
             "dbus-broker: registered consumer ctx={} bus={}",
             reg.consumer_id, reg.bus,
@@ -119,17 +122,17 @@ impl Broker {
         }
     }
 
-    fn handle_relay(&mut self, incoming: &Incoming) -> Vec<u8> {
+    fn handle_relay(&self, incoming: &Incoming) -> Vec<u8> {
         let Some((consumer_id, bus, frame)) = broker::decode_relay(&incoming.data) else {
             return vec![status::BAD_REQUEST];
         };
         let Some(consumer) = self.consumers.get(&(consumer_id, bus)) else {
             return vec![status::NOT_FOUND];
         };
-        // Apply the consumer's filter to the frame.
-        // TODO(W1-C): parse the frame into a typed Call, run it through consumer.filter.decide(),
-        // and if approved, reconstruct and send it on the real D-Bus bus. Return the bus's reply
-        // (or error) back. For now, the enforcement boundary is wired but relay is stubbed.
+        // Frame relay is not yet implemented: the consumer filter is registered and the wire
+        // path is in place, but the frame is not parsed, run through `consumer.filter.decide()`,
+        // or forwarded to the real D-Bus bus. D-Bus mediation flows through kenneld's legacy
+        // host-dbus delegate until this is built; the broker is dormant unless selected.
         let _ = &consumer.filter;
         let _ = frame;
         vec![status::OK]
@@ -197,7 +200,7 @@ mod tests {
         // 1. REGISTER_CONSUMER
         let talk = vec!["org.freedesktop.DBus".to_owned()];
         let reg_data = kennel_lib_binder::service::broker::encode_register(
-            42, // consumer_id
+            42,                                        // consumer_id
             kennel_lib_binder::service::dbus::SESSION, // bus
             &talk,
             &[],
@@ -224,7 +227,7 @@ mod tests {
         );
         let incoming_relay = Incoming {
             code: broker::RELAY_FRAME,
-            data: relay_data.clone(),
+            data: relay_data,
             fds: Vec::new(),
             sender_pid: 100,
             sender_euid: 1000,

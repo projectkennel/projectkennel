@@ -64,6 +64,11 @@ const OUTBOUND_DEPTH: usize = 32;
 /// queues via [`DbusRelay::deliver_inbound`].
 pub trait MeshTransactor: Send + Sync {
     /// Transact a message with the standing dbus-broker on the mesh bus.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the mesh-bus transaction fails (the broker is not
+    /// registered, the bus is unreachable, or the transport errors).
     fn transact_broker(&self, code: u32, data: &[u8]) -> std::io::Result<Vec<u8>>;
 }
 
@@ -154,7 +159,7 @@ impl DbusRelay {
     }
 
     /// Construct a new brokered D-Bus relay that forwards messages to the standing
-    /// dbus-broker via the given MeshTransactor.
+    /// dbus-broker via the given [`MeshTransactor`].
     #[must_use]
     pub fn new_brokered(
         transactor: std::sync::Arc<dyn MeshTransactor>,
@@ -204,15 +209,11 @@ impl DbusRelay {
         }
         // Tell the delegate (no lock held — the write rides the bounded channel). Roll the
         // registration back if a stalled delegate sheds it, so no half-open connection lingers.
-        if self.broker_transactor.is_some() {
+        if self.broker_transactor.is_some() || self.try_relay(bus, &Record::Open { conn_id, bus }) {
             vec![status::OK]
         } else {
-            if self.try_relay(bus, &Record::Open { conn_id, bus }) {
-                vec![status::OK]
-            } else {
-                self.lock().conns.remove(&conn_id);
-                vec![status::AGAIN]
-            }
+            self.lock().conns.remove(&conn_id);
+            vec![status::AGAIN]
         }
     }
 
@@ -240,41 +241,46 @@ impl DbusRelay {
                 None => return vec![status::BAD_REQUEST],
             }
         };
-        if let Some(ref transactor) = self.broker_transactor {
-            let payload = kennel_lib_binder::service::broker::encode_relay(ctx, bus_byte, frame);
-            match transactor.transact_broker(
-                kennel_lib_binder::service::broker::RELAY_FRAME,
-                &payload,
-            ) {
-                Ok(reply) => {
-                    if reply.first().copied() == Some(status::OK) {
-                        if reply.len() > 1 {
-                            self.deliver_inbound(conn_id, reply[1..].to_vec());
-                        }
-                        vec![status::OK]
-                    } else if reply.first().copied() == Some(status::DENIED) {
-                        vec![status::DENIED]
-                    } else {
-                        vec![status::AGAIN]
-                    }
+        self.broker_transactor.as_ref().map_or_else(
+            || {
+                // Relay is non-blocking and lock-free; a stalled delegate sheds (audit 3) rather
+                // than blocking the binder thread or holding the relay lock.
+                if self.try_relay(
+                    bus,
+                    &Record::Frame {
+                        conn_id,
+                        frame: frame.to_vec(),
+                    },
+                ) {
+                    vec![status::OK]
+                } else {
+                    vec![status::AGAIN]
                 }
-                Err(_) => vec![status::AGAIN],
-            }
-        } else {
-            // Relay is non-blocking and lock-free; a stalled delegate sheds (audit 3) rather than
-            // blocking the binder thread or holding the relay lock.
-            if self.try_relay(
-                bus,
-                &Record::Frame {
-                    conn_id,
-                    frame: frame.to_vec(),
-                },
-            ) {
-                vec![status::OK]
-            } else {
-                vec![status::AGAIN]
-            }
-        }
+            },
+            |transactor| {
+                let payload =
+                    kennel_lib_binder::service::broker::encode_relay(ctx, bus_byte, frame);
+                transactor
+                    .transact_broker(kennel_lib_binder::service::broker::RELAY_FRAME, &payload)
+                    .map_or_else(
+                        |_| vec![status::AGAIN],
+                        |reply| {
+                            if reply.first().copied() == Some(status::OK) {
+                                if let Some(inbound) = reply.get(1..) {
+                                    if !inbound.is_empty() {
+                                        self.deliver_inbound(conn_id, inbound.to_vec());
+                                    }
+                                }
+                                vec![status::OK]
+                            } else if reply.first().copied() == Some(status::DENIED) {
+                                vec![status::DENIED]
+                            } else {
+                                vec![status::AGAIN]
+                            }
+                        },
+                    )
+            },
+        )
     }
 
     /// Handle `DBUS_RECV` `[conn_id]`: block until an inbound frame is queued (or the connection

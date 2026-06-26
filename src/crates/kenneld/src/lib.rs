@@ -1204,20 +1204,21 @@ fn bring_up<P: Privileged + Sync>(
     // before releasing the binder pull, so their command sockets are bound before the workload's
     // first D-Bus message. With no delegate (no `[dbus]` grant or no binary) the relay is `None`
     // and the membrane denies every D-Bus verb (fail-closed).
-    let dbus_relay = if let Some(transactor) = binder.and_then(|b| b.dbus_transactor.as_ref()) {
-        Some(std::sync::Arc::new(crate::dbus::DbusRelay::new_brokered(
-            std::sync::Arc::clone(transactor),
-            kennel_lib_binder::ratelimit::RateLimiter::with_defaults(),
-        )))
-    } else {
-        match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
+    let dbus_relay = binder.and_then(|b| b.dbus_transactor.as_ref()).map_or_else(
+        || match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
             Ok(relay) => relay,
             Err(e) => {
                 eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
                 None
             }
-        }
-    };
+        },
+        |transactor| {
+            Some(std::sync::Arc::new(crate::dbus::DbusRelay::new_brokered(
+                std::sync::Arc::clone(transactor),
+                kennel_lib_binder::ratelimit::RateLimiter::with_defaults(),
+            )))
+        },
+    );
 
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
     // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so

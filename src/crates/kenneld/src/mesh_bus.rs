@@ -75,7 +75,7 @@ impl MeshBus {
         tier: Tier,
         name: &str,
         key: Option<&str>,
-        writer: Arc<Writer>,
+        writer: &Arc<Writer>,
     ) -> io::Result<Self> {
         let mount_dir = super::mesh::host_rp_dir(tier, name, key);
         let device_path = mount_dir.join(kennel_lib_binder::binderfs::BINDER_DEVICE);
@@ -96,26 +96,23 @@ impl MeshBus {
         let client = Connection::open(client_fd, MESH_MAP_SIZE)?;
 
         // The shared handle map: providers register → handle stored; consumers resolve → handle delivered.
-        let handles: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
+        let handle_map: Arc<Mutex<HashMap<String, u32>>> = Arc::new(Mutex::new(HashMap::new()));
 
-        let handles_for_handler = Arc::clone(&handles);
-        let writer_for_handler = Arc::clone(&writer);
+        let handles_for_handler = Arc::clone(&handle_map);
+        let writer_for_handler = Arc::clone(writer);
 
         let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
-            mesh_handle(
-                &handles_for_handler,
-                incoming,
-                conn,
-                &writer_for_handler,
-            )
+            mesh_handle(&handles_for_handler, incoming, conn, &writer_for_handler)
         });
 
-        let handles_for_death = Arc::clone(&handles);
-        let writer_for_death = Arc::clone(&writer);
+        let handles_for_death = Arc::clone(&handle_map);
+        let writer_for_death = Arc::clone(writer);
 
         let death: DeathHandler = Arc::new(move |cookie: u64, _conn: &Connection| {
             // A provider's node died. The cookie is the handle we stored.
-            let handle = cookie as u32;
+            let Ok(handle) = u32::try_from(cookie) else {
+                return; // not a handle we ever stored
+            };
             let mut map = handles_for_death
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -146,30 +143,34 @@ impl MeshBus {
             stop,
             waker,
             loopers,
-            handles,
+            handles: handle_map,
             client,
             refcount: 0,
         })
     }
 
     /// The host path of the binder device — bind-mount this into a kennel's view.
+    #[must_use]
     pub fn device_path(&self) -> &Path {
         &self.device_path
     }
 
     /// The host directory the binderfs is mounted at.
+    #[must_use]
     pub fn mount_dir(&self) -> &Path {
         &self.mount_dir
     }
 
     /// Increment the participant count (a kennel bind-mounted the device).
-    pub fn add_participant(&mut self) {
+    pub const fn add_participant(&mut self) {
         self.refcount = self.refcount.saturating_add(1);
     }
 
     /// Decrement the participant count (a kennel's bind-mount was unmounted by the reaper).
+    ///
     /// Returns `true` if the refcount reached zero (the bus should be unmounted).
-    pub fn remove_participant(&mut self) -> bool {
+    #[must_use]
+    pub const fn remove_participant(&mut self) -> bool {
         self.refcount = self.refcount.saturating_sub(1);
         self.refcount == 0
     }
@@ -219,8 +220,7 @@ impl MeshBus {
     ///
     /// Called when the last participant disconnects or at `kenneld` shutdown.
     pub fn teardown(&self) {
-        self.stop
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
         self.waker.wake();
         // Join the looper threads.
         if let Ok(mut threads) = self.loopers.lock() {
@@ -358,8 +358,21 @@ fn mesh_svc_connect(
         .get(name)
         .copied();
 
-    match handle {
-        Some(h) => {
+    handle.map_or_else(
+        || {
+            writer.emit(
+                &Event::new(
+                    "mesh.svc-connect",
+                    Resource::Binder,
+                    Outcome::Deny,
+                    Source::Kenneld,
+                )
+                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+                .field("service", Value::untrusted(name)),
+            );
+            Reply::Data(vec![status::NOT_FOUND])
+        },
+        |h| {
             writer.emit(
                 &Event::new(
                     "mesh.svc-connect",
@@ -372,19 +385,6 @@ fn mesh_svc_connect(
                 .field("handle", Value::Uint(u64::from(h))),
             );
             Reply::Handle(h)
-        }
-        None => {
-            writer.emit(
-                &Event::new(
-                    "mesh.svc-connect",
-                    Resource::Binder,
-                    Outcome::Deny,
-                    Source::Kenneld,
-                )
-                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-                .field("service", Value::untrusted(name)),
-            );
-            Reply::Data(vec![status::NOT_FOUND])
-        }
-    }
+        },
+    )
 }

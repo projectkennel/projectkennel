@@ -761,7 +761,9 @@ fn svc_connect_handoff(
                 .field("shape", Value::untrusted("dbus-name".to_owned()))
                 .field("ctx", Value::Uint(u64::from(ctx))),
             );
-            return Reply::Data(kennel_lib_binder::service::svc_connect::encode_reply(status::OK));
+            return Reply::Data(kennel_lib_binder::service::svc_connect::encode_reply(
+                status::OK,
+            ));
         }
         Shape::BinderConnector => {
             // The binder-connector handoff is mediated on the mesh bus, not the per-kennel

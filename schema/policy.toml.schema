@@ -1043,7 +1043,7 @@
           ]
         },
         "abstract": {
-          "description": "Abstract-namespace socket disposition. 'deny' (default): abstract sockets denied by the always-on Landlock scope. 'allow': accepted only when the kennel owns its CLONE_NEWNET (net.mode != host); the combination abstract=allow + net.mode=host is a hard compile error (T1.13).",
+          "description": "Abstract-namespace socket disposition.",
           "type": "string",
           "enum": [
             "deny",

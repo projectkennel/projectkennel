@@ -631,22 +631,19 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     &format!("mesh-bus/{name}"),
                     String::new(),
                 ));
-                let mb = crate::mesh_bus::MeshBus::create(tier, name, key, w)?;
+                let mb = crate::mesh_bus::MeshBus::create(tier, name, key, &w)?;
                 e.insert(mb)
             }
         };
         bus.add_participant();
-        Ok(bus.device_path().to_path_buf())
+        let device_path = bus.device_path().to_path_buf();
+        drop(buses);
+        Ok(device_path)
     }
 
     /// Release a participant from a mesh bus. If the refcount reaches zero, the bus
     /// is torn down (serve loop stopped, binderfs unmounted).
-    fn release_mesh_bus(
-        &self,
-        tier: crate::catalogue::Tier,
-        name: &str,
-        key: Option<&str>,
-    ) {
+    fn release_mesh_bus(&self, tier: crate::catalogue::Tier, name: &str, key: Option<&str>) {
         let bus_key = mesh_bus_key(tier, name, key);
         let mut buses = self
             .mesh_buses
@@ -660,8 +657,8 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Push a consumer's D-Bus filter set to the `dbus-broker@v1` via the mesh bus (§7.7,
-    /// W1 Part C). Returns `Ok(())` on success, or `Err` if the broker is not yet registered
+    /// Push a consumer's D-Bus filter set to the `dbus-broker@v1` via the mesh bus (§7.7).
+    /// Returns `Ok(())` on success, or `Err` if the broker is not yet registered
     /// or the mesh bus transaction fails. Best-effort: a failed push logs and falls through
     /// (the consumer's D-Bus verbs will be denied by the broker until re-registered).
     fn register_dbus_consumer(
@@ -699,16 +696,14 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             kennel_lib_binder::service::broker::REGISTER_CONSUMER,
             &data,
         )?;
+        drop(buses);
         if reply.first().copied() == Some(kennel_lib_binder::service::status::OK) {
             Ok(())
         } else {
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
-                    "dbus-broker REGISTER_CONSUMER for ctx={ctx} bus={bus_byte} returned {:?}",
-                    reply.first()
-                ),
-            ))
+            Err(io::Error::other(format!(
+                "dbus-broker REGISTER_CONSUMER for ctx={ctx} bus={bus_byte} returned {:?}",
+                reply.first()
+            )))
         }
     }
 
@@ -733,6 +728,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             kennel_lib_binder::service::broker::UNREGISTER_CONSUMER,
             &data,
         );
+        drop(buses);
     }
 
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.10.2): a synthetic
@@ -1890,7 +1886,8 @@ pub fn run_kennel<P, L>(
                     !cat.resolve("org.projectkennel.dbus-broker").is_empty()
                 };
                 if has_broker {
-                    Some(std::sync::Arc::clone(shared) as std::sync::Arc<dyn crate::dbus::MeshTransactor>)
+                    Some(std::sync::Arc::clone(shared)
+                        as std::sync::Arc<dyn crate::dbus::MeshTransactor>)
                 } else {
                     None
                 }
@@ -1944,7 +1941,7 @@ pub fn run_kennel<P, L>(
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
 
-    // Push the consumer's D-Bus filter set to the dbus-broker (W1 Part C).
+    // Push the consumer's D-Bus filter set to the dbus-broker.
     // Best-effort: a missing broker or failed push is logged, not fatal — the consumer's
     // DBUS_* verbs will be denied by the broker until re-registered.
     let has_broker = {
@@ -1956,20 +1953,16 @@ pub fn run_kennel<P, L>(
     };
     if has_broker {
         if let Some(ref rules) = dbus_session_rules {
-            if let Err(e) = shared.register_dbus_consumer(
-                ctx,
-                kennel_lib_binder::service::dbus::SESSION,
-                rules,
-            ) {
+            if let Err(e) =
+                shared.register_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SESSION, rules)
+            {
                 eprintln!("kenneld: dbus-broker session registration for ctx={ctx}: {e}");
             }
         }
         if let Some(ref rules) = dbus_system_rules {
-            if let Err(e) = shared.register_dbus_consumer(
-                ctx,
-                kennel_lib_binder::service::dbus::SYSTEM,
-                rules,
-            ) {
+            if let Err(e) =
+                shared.register_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SYSTEM, rules)
+            {
                 eprintln!("kenneld: dbus-broker system registration for ctx={ctx}: {e}");
             }
         }
@@ -2108,7 +2101,7 @@ pub fn run_kennel<P, L>(
     // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
     // nothing, including every spawned kennel itself, which is depth-1).
     shared.reap_children(ctx);
-    // Best-effort: unregister this consumer's D-Bus filter sets from the broker (W1 Part C).
+    // Best-effort: unregister this consumer's D-Bus filter sets from the broker.
     // A missing broker or already-gone entry is harmless (the broker returns NOT_FOUND).
     shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SESSION);
     shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SYSTEM);
@@ -2403,7 +2396,7 @@ where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
 {
-    fn new(shared: &'a Shared<P, L>) -> Self {
+    const fn new(shared: &'a Shared<P, L>) -> Self {
         Self {
             shared,
             buses: Vec::new(),
@@ -2415,7 +2408,7 @@ where
     }
 }
 
-impl<'a, P, L> Drop for MeshBusGuard<'a, P, L>
+impl<P, L> Drop for MeshBusGuard<'_, P, L>
 where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
@@ -2479,16 +2472,18 @@ where
                 "dbus-broker mesh bus not running",
             ));
         };
-        bus.transact_service("org.projectkennel.dbus-broker", code, data)
+        let reply = bus.transact_service("org.projectkennel.dbus-broker", code, data);
+        drop(buses);
+        reply
     }
 }
 
 /// Derive the map key for a mesh bus from its `(tier, name, key)` triple.
 fn mesh_bus_key(tier: crate::catalogue::Tier, name: &str, key: Option<&str>) -> String {
-    match key {
-        Some(k) => format!("{}/{name}.{k}", tier.as_str()),
-        None => format!("{}/{name}", tier.as_str()),
-    }
+    key.map_or_else(
+        || format!("{}/{name}", tier.as_str()),
+        |k| format!("{}/{name}.{k}", tier.as_str()),
+    )
 }
 
 #[cfg(test)]

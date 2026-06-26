@@ -2,7 +2,7 @@
 name = "kennel-dbus-broker"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel dbus-broker@v1: the standing D-Bus mediation service kennel (§7.7, W1 Part C). Replaces the per-consumer host-dbus delegate with a single long-running service that receives per-consumer filter sets from kenneld via the binder-connector mesh and applies them to relayed D-Bus frames. Runs inside its own kennel, not on the host."
+description = "Project Kennel dbus-broker@v1: the standing D-Bus mediation service kennel (§7.7). The intended replacement for the per-consumer host-dbus delegate — a single long-running service that receives per-consumer filter sets from kenneld via the binder-connector mesh and mediates relayed D-Bus frames. Runs inside its own kennel, not on the host. The frame relay itself is not yet implemented (mediation currently flows through the legacy host-dbus delegate)."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
