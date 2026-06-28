@@ -1,3 +1,4 @@
 # Append-only: one "<SETTLED_SCHEMA_VERSION> <sha256 of the schema shape>" line per version.
 # Maintained by src/tools/tests/schema-version-pin.sh — never edit a past version's line.
 1 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
+2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
