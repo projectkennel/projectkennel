@@ -57,3 +57,8 @@ nproc = "64"     # processes / threads
 cpu = "30"       # CPU-seconds
 
 # No [[mutable]] manifest: pyhello-tool opens nothing.
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGNc4YV/XcHutXLKNapzC/WqUOh1wocK/f\n0NWgh7DTZ0LBjGnjxMIvlpec6FnwksW8+dVGPZCpqV0CoBoUwJdQk=\n-----END SSH SIGNATURE-----\n"

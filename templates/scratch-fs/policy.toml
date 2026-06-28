@@ -59,7 +59,8 @@ cpu = "30"
 field = "fs.write"
 oneof = ["~/scratch/work-a", "~/scratch/work-b"]
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "NNh/1lZjitJtEJsLCECkevJeeb7zsmwLeYQuSETCEOba7DrIO+fJUX/wH4Jk0IXmvYlJlZWyqP6HbH0bhmiyDw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBVK5Nzt7agIt978wjc5ZX3gK5B9iQH4o6\nM1KVutUap2fUH3JxXh8FPt3okXgvCNvRH4Up7NKVmPwsotXA+xowo=\n-----END SSH SIGNATURE-----\n"

@@ -41,7 +41,8 @@ reason = "the Debian Almquist shell (`/bin/sh` on Debian/Ubuntu)"
 path = "/usr/bin/env"
 reason = "the `#!/usr/bin/env <interp>` shebang interpreter (the kernel's execve target for env-shebang scripts)"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "AlnhuVsdSXvjPcYNLAnC4AIAsVjsdfGgf4m1Z1cNUL7U8JQmPUgKtgU1RlCu798GvzoMe/ToR2bzQzKIa6jYAA=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQJfmCYM/3T4NNPc7BFeqWW/9kTS6SJpT/W\neeDQHqn9G+qHRXYFA+MQUFa5rh74UjbLFfC5HWT9xR1w715cQyPws=\n-----END SSH SIGNATURE-----\n"

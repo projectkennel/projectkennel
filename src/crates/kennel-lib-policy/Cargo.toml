@@ -13,6 +13,10 @@ repository.workspace = true
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
 ed25519-compact = { version = "=2.3.0", default-features = false, features = ["std"] }
+# Bare SHA-512 for the SSHSIG signature preimage (the verifier hashes the canonical
+# bytes before the Ed25519 check). default-features = false → no `sha384`/`traits`,
+# zero transitive deps. We call only `Hash::hash` (unkeyed); the HMAC path is unused.
+hmac-sha512 = { version = "=1.1.12", default-features = false }
 # ELF inspection for the compile-time shared-library closure (DT_NEEDED + PT_INTERP);
 # read-only, the inspected binary is never executed. Same pin as kennel-lib-bpf.
 object = { version = "=0.36.7", default-features = false, features = ["read_core", "elf", "std"] }

@@ -43,6 +43,7 @@ pub mod patch;
 pub mod settled;
 pub mod signature;
 pub mod spawn;
+pub mod sshsig;
 pub mod variant;
 
 pub use audit::parse_audit_defaults;
@@ -63,7 +64,14 @@ pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use spawn::spawn_eligible;
 
 /// The newest `settled_schema_version` this build accepts.
-pub const SETTLED_SCHEMA_VERSION: u32 = 1;
+///
+/// Bumped to 2 with the SSHSIG signature format: a v1 artefact carries the old
+/// bare-Ed25519 signature this build no longer reads.
+pub const SETTLED_SCHEMA_VERSION: u32 = 2;
+
+/// The oldest `settled_schema_version` this build still verifies. A v1 settled policy
+/// predates the SSHSIG signature format and must be recompiled to be re-signed.
+pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 2;
 
 /// Verify a settled-policy document and return its body.
 ///
@@ -140,12 +148,7 @@ pub fn verify_pinned(
 /// The shared tail of [`verify_settled`] / [`verify_pinned`]: schema-version gate, signature
 /// verification over the canonical body, and framework-invariant re-assertion.
 fn verify_doc(doc: SignedSettledPolicy, keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
-    if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
-        return Err(PolicyError::UnsupportedSchemaVersion {
-            found: doc.policy.settled_schema_version,
-            max: SETTLED_SCHEMA_VERSION,
-        });
-    }
+    check_schema_version(doc.policy.settled_schema_version)?;
     let canonical = canonical::canonical_bytes(&doc.policy)?;
     verify_signature(&canonical, &doc.signature, keys)?;
     validate(&doc.policy).map_err(PolicyError::InvariantViolations)?;
@@ -179,13 +182,32 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
 pub fn parse_signed_settled_unverified(bytes: &[u8]) -> Result<SignedSettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
         basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
-    if doc.policy.settled_schema_version > SETTLED_SCHEMA_VERSION {
+    check_schema_version(doc.policy.settled_schema_version)?;
+    Ok(doc)
+}
+
+/// The settled-schema-version gate: reject a version newer than this build understands
+/// ([`PolicyError::UnsupportedSchemaVersion`]) or older than it still reads
+/// ([`PolicyError::ObsoleteSchemaVersion`] — a pre-SSHSIG artefact, fix is recompile).
+///
+/// # Errors
+///
+/// One of the two schema-version errors above when `version` is out of the accepted
+/// `[MIN_SETTLED_SCHEMA_VERSION, SETTLED_SCHEMA_VERSION]` range.
+const fn check_schema_version(version: u32) -> Result<(), PolicyError> {
+    if version > SETTLED_SCHEMA_VERSION {
         return Err(PolicyError::UnsupportedSchemaVersion {
-            found: doc.policy.settled_schema_version,
+            found: version,
             max: SETTLED_SCHEMA_VERSION,
         });
     }
-    Ok(doc)
+    if version < MIN_SETTLED_SCHEMA_VERSION {
+        return Err(PolicyError::ObsoleteSchemaVersion {
+            found: version,
+            min: MIN_SETTLED_SCHEMA_VERSION,
+        });
+    }
+    Ok(())
 }
 
 /// Resolve and fill the settled policy's dynamic-loader `EXECUTE` grant set.
@@ -214,11 +236,10 @@ pub fn sign_settled(
     key: &SigningKey,
 ) -> Result<SignedSettledPolicy, PolicyError> {
     let canonical = canonical::canonical_bytes(policy)?;
-    let sig = key.sign(&canonical);
     let envelope = SignatureEnvelope {
-        algorithm: "ed25519".to_owned(),
+        algorithm: signature::SSHSIG_ALGORITHM.to_owned(),
         key_id: key.key_id().to_owned(),
-        signature: b64::encode(&sig),
+        signature: sshsig::sign_ed25519(key, &canonical),
         signed_fields: Vec::new(),
     };
     Ok(SignedSettledPolicy {
@@ -543,11 +564,13 @@ mod tests {
         let key = signing_key();
         let doc = sign_settled(&sample_policy(), &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
-        // A different keypair registered under the same key_id.
+        // A different keypair registered under the same key_id. The SSHSIG embeds the
+        // signer's public key, so the mismatch with the trust-store key is caught before
+        // the cryptographic check — the store is the authority.
         let imposter = SigningKey::from_seed("kennel-maint-2026-01", &[9u8; 32]).expect("seed");
         let err = verify_settled(&bytes, &keyset_for(&imposter)).expect_err("must reject");
         assert!(
-            matches!(err, PolicyError::Signature(SignatureError::Verification)),
+            matches!(err, PolicyError::Signature(SignatureError::KeyMismatch)),
             "got {err:?}"
         );
     }

@@ -109,7 +109,8 @@ ttl = "8h"
 ttl_action = "warn"
 
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "6H3Q9rIXaox333WOK410Wljai7OYu05W3p8a+SBTZj3D5XDAROqmjRwHuh9V3UjdCONssG8M3M+7YZcB04AuCw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQO6raHWdOxeS9wD47NkiRPLh5cE+cCs0ji\nm6D+gXH89xiTIslarm7+zNx+rMH0bSlbPqlY8wYvln6ya2cn1UwAc=\n-----END SSH SIGNATURE-----\n"

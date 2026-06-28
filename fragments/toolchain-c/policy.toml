@@ -54,7 +54,8 @@ reason = "GNU make"
 path = "/usr/lib/gcc/**"
 reason = "gcc's per-version backend binaries (cc1, cc1plus, collect2), re-exec'd by the driver"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "y229ATbRqLwrKl1UoslLjilJVf8ewdKLXO7PFmxOdraCLZQRYLLDl4OAXfy4fHKyp7hOCNImNHufM//BzS6lCA=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFRcPWMBL4C8tEZ9q0JkqQOfjiC3yCWF3s\naQt25BHm3u9Hn3quX+P/oc39tW5bCvBtedDMOmOvN0ZMp40WS8gAw=\n-----END SSH SIGNATURE-----\n"

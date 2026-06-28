@@ -54,7 +54,8 @@ reason = "create a temporary file/dir"
 path = "/usr/bin/install"
 reason = "copy and set permissions"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "hkAC96VVHe2E0Vicn+nv1vz/mz+kgXD/1SDxDhOyPpLWlx7t/y9cEGSSBSaDt5QysdI5D82io3XYVk61fnywDA=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOadW7aWYSM6RQgQayBAXKlTE+0DtvFnbT\njcODhW/mXDR9YESoCJUgDxyzNxbxQF2yWNFHVqvkXWpdLfMa963Q8=\n-----END SSH SIGNATURE-----\n"

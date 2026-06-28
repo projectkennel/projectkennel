@@ -34,7 +34,8 @@ reason = "git's per-subcommand helper binaries, re-exec'd by `git`"
 path = "/etc/gitconfig"
 reason = "system-wide git configuration (read-only)"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "MIAplxujHU5wPobwir4m3QCiEjE8DdwPPRMrjym9UzTWldPCc4ycQ5Vu8sW51nXCTLIxRfm2HQlnwC39lxHsBA=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI8O6zN7xuP0dyDGiu6ssakkGXfBUCJ8hC\n7aN1kz0VDrc8DYCgjjatk+m4yCO51L0MMNk7HHMMBDT0N2GmSWtgw=\n-----END SSH SIGNATURE-----\n"

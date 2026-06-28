@@ -940,7 +940,7 @@ mod tests {
     #[allow(clippy::too_many_lines)] // one cohesive SettledPolicy test fixture literal
     fn policy_with_placeholders() -> SettledPolicy {
         SettledPolicy {
-            settled_schema_version: 1,
+            settled_schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
             name: "ai-coding".to_owned(),
             deferred_substitutions: vec!["<ctx>".to_owned(), "<home>".to_owned()],
             framework_invariants_asserted: Vec::new(),
@@ -1029,7 +1029,7 @@ mod tests {
             manifest: Vec::new(),
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),
-                schema_version: 1,
+                schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
                 threat_catalogue_version: "0.1".to_owned(),
                 resolved_artifacts: Vec::new(),
             },

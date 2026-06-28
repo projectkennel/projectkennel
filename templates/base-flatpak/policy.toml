@@ -130,7 +130,8 @@ deny = [
 
 
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "v+X/SRJnGZSMmcM1/lxZW9nCDN5RxEOoyZ2JUESBhH3F7BllbBQvpyc0mUne39CuF06CLmX5rEoAoveFJ5boCQ=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIXAXtwjcGIuhTXpSko9VoS4UbAJEktG9o\nJMeNqm/Dnc/m2a0CprncrUoM5pgew8f7Xu3PDlIehe9lyd5o3jZwQ=\n-----END SSH SIGNATURE-----\n"

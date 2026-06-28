@@ -1520,7 +1520,7 @@ pub struct SignedSettledPolicy {
 #[allow(clippy::too_many_lines)] // one cohesive struct-literal fixture; splitting it obscures it.
 pub fn sample_settled() -> SettledPolicy {
     SettledPolicy {
-        settled_schema_version: 1,
+        settled_schema_version: crate::SETTLED_SCHEMA_VERSION,
         name: "ai-coding".to_owned(),
         deferred_substitutions: vec!["<ctx>".to_owned(), "<uid>".to_owned()],
         framework_invariants_asserted: vec!["cap.no_new_privs".to_owned()],
@@ -1598,7 +1598,7 @@ pub fn sample_settled() -> SettledPolicy {
         manifest: Vec::new(),
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
-            schema_version: 1,
+            schema_version: crate::SETTLED_SCHEMA_VERSION,
             threat_catalogue_version: "0.1".to_owned(),
             resolved_artifacts: vec![ResolvedArtifact {
                 name: "base-confined".to_owned(),

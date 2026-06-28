@@ -74,7 +74,8 @@ ports = [443]
 reason = "GitHub Container Registry"
 threats.exposed = ["T1.2", "T1.9"]
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "CgGm9hh1gfUqXO0cn1fsXWoa0MjHi0gE5OkT7HlpxyOElKgEJyc46ftQIvCfmb4eWX/jELsEEpQKSJfAXpn6Dw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBOyASW/stIZ3R4JDM9uZLL4SniDPwjhQ6\nCsKY+Z+r1CBmfjM2SYNBN9ow2GmsmJv/g/Pn8Y/oRnfakHD+E0Iwo=\n-----END SSH SIGNATURE-----\n"

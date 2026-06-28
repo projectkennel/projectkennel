@@ -49,7 +49,8 @@ reason = "zip extractor"
 path = "/usr/bin/zstd"
 reason = "zstandard (de)compress"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "xihDojilAkczbgw3Ln1CPbxCENFwZiQsLMAyOHuXO7iT+/peZzX2rxdRe8Rel3m1KXgTWxD1TVgkcZfZ8s85Dw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMlOtOZnLSjazrcfkuyxbCi5EwoTzcteUM\niz5awSudgAbiZGAtwrkUWJ/J40wz/B8vXSs7aAX0E9AwOEBUGOZwM=\n-----END SSH SIGNATURE-----\n"
