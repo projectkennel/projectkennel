@@ -125,7 +125,8 @@ reason = "Google Container Registry — image pull"
 # spawn; $HOME is the writable tmpfs skopeo/umoci use for their cache). No image
 # Env is involved here — this confines the *fetch*, not a booted image.
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "IjOivQLqM0bY9hmmjLEpcdt23Xgsynb577nIJhFX/50o+vx4icdOJNoBo3Z/E2v6iFuwgvQ3H/O6C1RYBDs9Cg=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCAEWE7h0O65D66ghos8p5w137qxsrMumi\nRiLXWGlxk0SGrFv3Becck6dRh5NFMMt41I7FEmxuhrcM1L675y4Q4=\n-----END SSH SIGNATURE-----\n"

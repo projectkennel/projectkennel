@@ -54,6 +54,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
 
 [[package]]
+name = "hmac-sha512"
+version = "1.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "019ece39bbefc17f13f677a690328cb978dbf6790e141a3c24e66372cb38588b"
+
+[[package]]
 name = "kennel-facade"
 version = "0.4.0"
 dependencies = [
@@ -157,6 +163,7 @@ version = "0.4.0"
 dependencies = [
  "basic-toml",
  "ed25519-compact",
+ "hmac-sha512",
  "object",
  "serde",
 ]

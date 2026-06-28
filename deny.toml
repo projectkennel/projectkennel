@@ -28,9 +28,11 @@ all-features = true
 # "(MIT OR Apache-2.0) AND Unicode-3.0", so Unicode-3.0 must be allowed outright.
 # seccompiler ("Apache-2.0 OR BSD-3-Clause") and memchr ("Unlicense OR MIT")
 # resolve via Apache-2.0/MIT, so neither BSD-3-Clause nor Unlicense is needed.
+# hmac-sha512 (the SSHSIG SHA-512) is ISC — permissive, no advertising clause.
 # The workspace's own crates are Apache-2.0.
 allow = [
     "Apache-2.0",
+    "ISC",
     "MIT",
     "Unicode-3.0",
 ]

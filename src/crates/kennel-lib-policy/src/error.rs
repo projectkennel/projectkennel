@@ -19,6 +19,15 @@ pub enum PolicyError {
         /// The newest version this build accepts.
         max: u32,
     },
+    /// The settled-policy schema version predates a breaking format change this build
+    /// no longer reads (e.g. the pre-SSHSIG signature format). The artefact must be
+    /// recompiled; it cannot be verified in place.
+    ObsoleteSchemaVersion {
+        /// The version found in the document.
+        found: u32,
+        /// The oldest version this build still reads.
+        min: u32,
+    },
     /// One or more framework invariants were violated.
     InvariantViolations(Vec<InvariantViolation>),
     /// A source policy failed schema validation (identity, reference grammar, or
@@ -55,6 +64,13 @@ impl core::fmt::Display for PolicyError {
                 write!(
                     f,
                     "settled_schema_version {found} is newer than supported maximum {max}"
+                )
+            }
+            Self::ObsoleteSchemaVersion { found, min } => {
+                write!(
+                    f,
+                    "settled_schema_version {found} predates the current signature format \
+                     (minimum {min}); recompile the policy to re-sign it"
                 )
             }
             Self::InvariantViolations(vs) => {

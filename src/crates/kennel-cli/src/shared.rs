@@ -20,7 +20,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: RUN,
         summary: RUN_SUMMARY,
-        usage: "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+        usage: "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
     },
     CommandSpec {
         name: "attach",
@@ -104,7 +104,7 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
     CommandSpec {
         name: "compile",
         summary: "compile a source policy into a signed settled artefact",
-        usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+        usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
     },
     CommandSpec {
         name: "validate",
@@ -114,7 +114,7 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
     CommandSpec {
         name: "sign",
         summary: "sign a source template/fragment with a key",
-        usage: "policy sign <template> --key <key> [--output <path>]",
+        usage: "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
     },
     CommandSpec {
         name: "lint",
@@ -478,6 +478,171 @@ pub fn default_signing_key() -> Result<PathBuf, String> {
     }
 }
 
+// ─── Signing: SSHSIG via ssh-keygen, key_id resolved by public key ───────────
+//
+// The operator-facing signing path shells out to `ssh-keygen -Y sign`, so a key in a
+// file, an ssh-agent, or a hardware token are all transparent — we write no agent
+// client. The public half lives in the trust store (where trust is conferred, §15.2);
+// the private half may live anywhere, since its location confers no authority. The
+// in-process SSHSIG signer (`kennel_lib_policy::sshsig`) is used only by tests and the
+// library's own `sign_settled`.
+
+/// Find the trust-store `key_id` whose public key matches `pubkey`, searching `dirs`
+/// in order (first directory, then alphabetical within it; first match wins).
+///
+/// This is the inverse of the trust store: it maps a signing key back to the name
+/// under which its public half is trusted, so the `key_id` stamped at signing time
+/// comes from where the `*.pub` is *placed*, not from the private key's filename.
+#[must_use]
+pub fn resolve_key_id(dirs: &[PathBuf], pubkey: &[u8; 32]) -> Option<String> {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.extension().and_then(|e| e.to_str()) != Some("pub") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let bytes = if kennel_lib_policy::openssh::is_openssh_public(&contents) {
+                kennel_lib_policy::openssh::parse_public_key(&contents)
+                    .ok()
+                    .map(|(b, _)| b)
+            } else {
+                kennel_lib_policy::b64::decode(contents.trim().as_bytes())
+                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+            };
+            if bytes.as_ref() == Some(pubkey) {
+                return Some(stem.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Sign `canonical` with `ssh-keygen -Y sign`, returning the trust-store `key_id` and
+/// the armored SSHSIG to stamp into the `[signature]` envelope.
+///
+/// `key` is the `--key` value: a path to a private key file, or to a public key whose
+/// private half is held by an ssh-agent or a hardware token — `ssh-keygen` handles all
+/// three. The stamped `key_id` is `key_id_override` (`--key-id`) if given, else the
+/// trust-store `*.pub` whose public key matches the signer's (the SSHSIG embeds the
+/// public key, so the match is read straight back out of the armor). `trust_dirs` is
+/// the set to resolve against — all layers for `run`/`compile`, system-only for
+/// templates.
+///
+/// # Errors
+///
+/// Returns a message if `ssh-keygen` is missing or fails, the produced signature
+/// cannot be parsed, the signer is a hardware key (not yet supported for signing
+/// here), or no `key_id` can be determined without a trust-store match or override.
+pub fn sshsig_sign(
+    canonical: &[u8],
+    key: &str,
+    key_id_override: Option<&str>,
+    trust_dirs: &[PathBuf],
+) -> Result<(String, String), String> {
+    let dir = std::env::temp_dir().join(format!("kennel-sign-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating sign scratch dir: {e}"))?;
+    let guard = ScratchDir(dir);
+    let msg = guard.0.join("canonical");
+    std::fs::write(&msg, canonical).map_err(|e| format!("staging canonical bytes: {e}"))?;
+
+    let status = std::process::Command::new("ssh-keygen")
+        .args([
+            "-Y",
+            "sign",
+            "-q",
+            "-n",
+            kennel_lib_policy::sshsig::NAMESPACE,
+            "-f",
+        ])
+        .arg(key)
+        .arg(&msg)
+        .status()
+        .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
+    if !status.success() {
+        return Err(format!("ssh-keygen -Y sign failed for key `{key}`"));
+    }
+    let sig_path = guard.0.join("canonical.sig");
+    let armor =
+        std::fs::read_to_string(&sig_path).map_err(|e| format!("reading the signature: {e}"))?;
+
+    // The SSHSIG embeds the public key; read it back to resolve the trust-store name.
+    let parsed = kennel_lib_policy::sshsig::SshSig::parse_armored(&armor)
+        .map_err(|e| format!("parsing the signature ssh-keygen produced: {e}"))?;
+    if parsed.key_kind != kennel_lib_policy::sshsig::KeyKind::Ed25519 {
+        return Err(
+            "hardware (sk-) signing keys are not yet supported for signing; use an Ed25519 key"
+                .to_owned(),
+        );
+    }
+    let matched = resolve_key_id(trust_dirs, &parsed.pubkey);
+    let key_id = match (key_id_override, matched) {
+        (Some(id), found) => {
+            if let Some(found) = found {
+                if found != id {
+                    eprintln!(
+                        "warning: --key-id `{id}`, but this key is trusted as `{found}` in the trust store"
+                    );
+                }
+            }
+            id.to_owned()
+        }
+        (None, Some(found)) => found,
+        (None, None) => {
+            return Err(format!(
+                "the signing key's public half is not in any trust dir, so its key_id cannot be \
+                 resolved; install its `.pub` in a trust dir or pass --key-id <id> (key: `{key}`)"
+            ));
+        }
+    };
+    Ok((key_id, armor))
+}
+
+/// A scratch directory removed when dropped.
+struct ScratchDir(PathBuf);
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Assemble a signed settled document from an SSHSIG armor and the resolved `key_id`.
+#[must_use]
+pub fn settled_with_sshsig(
+    policy: &kennel_lib_policy::SettledPolicy,
+    key_id: String,
+    armor: String,
+) -> kennel_lib_policy::SignedSettledPolicy {
+    kennel_lib_policy::SignedSettledPolicy {
+        signature: kennel_lib_policy::SignatureEnvelope {
+            algorithm: kennel_lib_policy::signature::SSHSIG_ALGORITHM.to_owned(),
+            key_id,
+            signature: armor,
+            signed_fields: Vec::new(),
+        },
+        policy: policy.clone(),
+    }
+}
+
+/// The trust dirs a `run`/`compile` signature's `key_id` is resolved against — all
+/// layers, including the user's own keys (a user may sign a leaf with their own key).
+#[must_use]
+pub fn signing_trust_dirs() -> Vec<PathBuf> {
+    kennel_lib_config::User::load()
+        .unwrap_or_default()
+        .key_dirs()
+}
+
 /// The default user key directory.
 pub fn default_key_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CONFIG_HOME")
@@ -499,6 +664,7 @@ pub const fn policy_error_code(err: &kennel_lib_policy::PolicyError) -> u8 {
         E::Parse(_)
         | E::Canonical(_)
         | E::UnsupportedSchemaVersion { .. }
+        | E::ObsoleteSchemaVersion { .. }
         | E::InvariantViolations(_)
         | E::SourceValidation(_)
         | E::Resolution(_)
@@ -542,4 +708,86 @@ pub fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
     f.write_all(b"\n")?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod signer_tests {
+    use super::*;
+
+    /// A scratch trust dir under the system temp dir, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("kennel-w5-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create scratch dir");
+            Self(dir)
+        }
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).expect("write scratch file");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The OpenSSH `ssh-ed25519 <blob> <comment>` public-key line for `pubkey`.
+    fn openssh_pub_line(pubkey: &[u8; 32], comment: &str) -> String {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&11u32.to_be_bytes());
+        blob.extend_from_slice(b"ssh-ed25519");
+        blob.extend_from_slice(&32u32.to_be_bytes());
+        blob.extend_from_slice(pubkey);
+        format!(
+            "ssh-ed25519 {} {comment}",
+            kennel_lib_policy::b64::encode(&blob)
+        )
+    }
+
+    fn signing_key(seed: u8) -> kennel_lib_policy::SigningKey {
+        kennel_lib_policy::SigningKey::from_seed("seed", &[seed; 32]).expect("32-byte seed")
+    }
+
+    #[test]
+    fn resolve_key_id_matches_openssh_and_legacy() {
+        let scratch = Scratch::new("resolve");
+        let key = signing_key(1);
+        let pubkey = key.public_key_bytes();
+        // OpenSSH-format public key, trusted under the stem `maintainer`.
+        scratch.write("maintainer.pub", &openssh_pub_line(&pubkey, "person@host"));
+        // Legacy raw-base64 public key for a *different* key, trusted as `legacy`.
+        let other = signing_key(2).public_key_bytes();
+        scratch.write("legacy.pub", &kennel_lib_policy::b64::encode(&other));
+
+        let dirs = [scratch.0.clone()];
+        assert_eq!(
+            resolve_key_id(&dirs, &pubkey).as_deref(),
+            Some("maintainer")
+        );
+        assert_eq!(resolve_key_id(&dirs, &other).as_deref(), Some("legacy"));
+        // A key with no `.pub` present resolves to nothing.
+        assert_eq!(
+            resolve_key_id(&dirs, &signing_key(3).public_key_bytes()),
+            None
+        );
+    }
+
+    #[test]
+    fn key_id_comes_from_trust_store_not_filename() {
+        let scratch = Scratch::new("decouple");
+        let pubkey = signing_key(7).public_key_bytes();
+        // The public half is trusted as `release-key`, wherever the private half lives.
+        scratch.write("release-key.pub", &openssh_pub_line(&pubkey, "rel@host"));
+        // The stamped key_id is read back from the signer's public key (which a real
+        // SSHSIG embeds) against the trust store, not from any filename.
+        assert_eq!(
+            resolve_key_id(std::slice::from_ref(&scratch.0), &pubkey).as_deref(),
+            Some("release-key")
+        );
+    }
 }

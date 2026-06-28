@@ -23,7 +23,8 @@ reason = "transfer a URL"
 path = "/usr/bin/wget"
 reason = "retrieve files over HTTP(S)/FTP"
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "+k16WzcYqb0NpC4xhvSxjY1E9tB1RLU/QlO/1iKAEHPopVwTpq4J5QCt3/nGazbdxRDa9GKx/ngLPBkfn0M6BQ=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQObkhPgbWnROuMMTkWbkdbfAIhJvP19BPG\nF9DBIM9z7osKltr8rStpe1q5Yn8Eixu7OwDhgW7TF3cKxNcXaK+Qk=\n-----END SSH SIGNATURE-----\n"

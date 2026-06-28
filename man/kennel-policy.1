@@ -36,7 +36,7 @@ scaffold a new leaf policy
 Scaffold the leaf from this template (default base\-confined).
 .RE
 .TP
-\fBkennel policy compile <policy> [\-\-output P] [\-\-key K | \-\-unsigned] [\-\-require\-signed] [\-\-no\-lock] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+\fBkennel policy compile <policy> [\-\-output P] [\-\-key K | \-\-unsigned] [\-\-key\-id ID] [\-\-require\-signed] [\-\-no\-lock] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
 compile a source policy into a signed settled artefact
 .RS
 .TP
@@ -92,7 +92,7 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
 .TP
-\fBkennel policy sign <template> \-\-key <key> [\-\-output <path>]\fR
+\fBkennel policy sign <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
 sign a source template/fragment with a key
 .RS
 .TP

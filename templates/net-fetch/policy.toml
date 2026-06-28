@@ -67,7 +67,8 @@ match = [
     "github.com:443", "*.githubusercontent.com:443", "ghcr.io:443",
 ]
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "agz0etYmgjpofXGza63LbQo8Q3WSvt2/hGirW/CYcepUNONX0q+go/C+wiDhtvrbhWg8jftHj3JcHDByqKBRBQ=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQATyyhFO4vz7wuUvAeZhkZVIxLibisf/S5\neNwtUuxsjr2GM+60WZU8y8CAAps31RjCWvm2t3AD/MIQ1nVfqnyQs=\n-----END SSH SIGNATURE-----\n"

@@ -65,7 +65,8 @@ pub use source::{
     NetProxyDeny, NetSection, SourcePolicy,
 };
 pub use source_sig::{
-    sign_leaf, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
+    canonical_leaf, canonical_source, sign_leaf, sign_source, verify_self, verify_source, Signable,
+    SignatureMode, Trust,
 };
 pub use translate::{translate, Translated};
 pub use version::{is_newer as version_is_newer, parse_reference};

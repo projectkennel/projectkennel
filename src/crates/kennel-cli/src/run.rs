@@ -19,7 +19,7 @@ use crate::policy::{
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, connect, default_signing_key, exit_code,
-    load_signing_key, load_trust_store, resolve_policy, send,
+    load_trust_store, resolve_policy, send, settled_with_sshsig, signing_trust_dirs, sshsig_sign,
 };
 
 /// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`
@@ -56,6 +56,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_arg: Option<&str> = None;
     let mut name_arg: Option<&str> = None;
     let mut key_path: Option<&str> = None;
+    let mut key_id: Option<&str> = None;
     let mut force = false;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -63,6 +64,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
             "--force" => force = true,
             "--template-dir" => {
                 template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
@@ -89,6 +91,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
         command,
         force,
         key_path,
+        key_id,
         template_dirs,
         trust_dirs,
         None,
@@ -118,6 +121,7 @@ pub fn launch(
     command: &[String],
     force: bool,
     key_path: Option<&str>,
+    key_id: Option<&str>,
     template_dirs: Vec<PathBuf>,
     trust_dirs: Vec<PathBuf>,
     oci_digest: Option<&str>,
@@ -142,13 +146,9 @@ pub fn launch(
     let _temp;
     let effective_policy: PathBuf = if is_source_policy(&bytes) {
         // A source leaf is compiled-and-signed in memory (the §9.10 dev loop). That
-        // needs a *signing* (private) key; with `--key` omitted we default to the
-        // sole key in the user key dir. A pre-compiled settled artefact takes the
-        // `else` branch and needs no key at all (the daemon verifies its signature).
-        let key_path: PathBuf = match key_path {
-            Some(p) => PathBuf::from(p),
-            None => default_signing_key()?,
-        };
+        // needs a *signing* (private) key — a `~/.ssh` file, an agent, or the sole key
+        // in the user key dir when `--key` is omitted. A pre-compiled settled artefact
+        // takes the `else` branch and needs no key at all (the daemon verifies it).
         add_default_template_dirs(&mut template_dirs);
         add_system_trust_dirs(&mut trust_dirs);
         let source = FsTemplateSource {
@@ -170,9 +170,14 @@ pub fn launch(
             .unwrap_or_else(|| Path::new("."))
             .join("ssh");
         let minted = mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
-        let key = load_signing_key(&key_path)?;
-        let doc = kennel_lib_policy::sign_settled(&compiled.policy, &key)
-            .map_err(|e| format!("signing: {e}"))?;
+        let key = match key_path {
+            Some(p) => p.to_owned(),
+            None => default_signing_key()?.to_string_lossy().into_owned(),
+        };
+        let canonical = kennel_lib_policy::canonical::canonical_bytes(&compiled.policy)
+            .map_err(|e| format!("canonical form: {e}"))?;
+        let (resolved_id, armor) = sshsig_sign(&canonical, &key, key_id, &signing_trust_dirs())?;
+        let doc = settled_with_sshsig(&compiled.policy, resolved_id, armor);
         let out = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
         // When SSH keys were minted, the daemon resolves them at `<settled>.parent()/ssh`,
         // so the temp settled MUST sit beside that `ssh/` dir (the source policy's dir).

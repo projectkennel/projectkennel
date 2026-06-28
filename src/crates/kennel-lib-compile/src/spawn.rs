@@ -87,7 +87,7 @@ pub fn resolve_grant(
         // context demands it (the daemon re-verifies this exact commitment at SPAWN —
         // [`kennel_lib_policy::verify_pinned`]).
         let doc = kennel_lib_policy::parse_signed_settled_unverified(&bytes)?;
-        if doc.signature.algorithm == "ed25519" {
+        if doc.signature.algorithm == kennel_lib_policy::signature::SSHSIG_ALGORITHM {
             if let Some(keys) = trust.keys() {
                 kennel_lib_policy::verify_settled(&bytes, keys)?;
             }

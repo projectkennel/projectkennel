@@ -64,7 +64,8 @@ ttl = "2h"
 ttl_action = "exit"
 
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "ArR/lJSeEU0koZMnv1oWOnqWnAwQqGvOH+buZPglPEoeSDhRtOTMox7yu/e9sEG93C3FW7c7YrwuPqyYH7RjDw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI2RxiYD7XDoj1IjtWgCZeNJGtg2t6lEdF\nbg9kEUQtxdhDObx+5ZavYcOjYMgjNJf4CN3NLuWZDZzC5e99EbnAc=\n-----END SSH SIGNATURE-----\n"

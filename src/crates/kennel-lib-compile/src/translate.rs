@@ -2790,14 +2790,14 @@ mod tests {
         // output must clear that bar.
         let t = translate_template(AI_CODING_STRICT);
         let policy = SettledPolicy {
-            settled_schema_version: 1,
+            settled_schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
             name: "myproj".to_owned(),
             deferred_substitutions: t.deferred_substitutions,
             framework_invariants_asserted: Vec::new(),
             effective_policy: t.effective_policy,
             provenance: Provenance {
                 compiler_version: "0.0.0".to_owned(),
-                schema_version: 1,
+                schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
                 threat_catalogue_version: "0.1".to_owned(),
                 resolved_artifacts: Vec::<ResolvedArtifact>::new(),
             },

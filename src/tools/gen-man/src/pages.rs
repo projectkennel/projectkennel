@@ -85,7 +85,7 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "run",
         "run a workload confined by a policy or template, in the foreground",
-        "run <policy> [<name>] [--key K] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+        "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
     ),
     (
         "attach",
@@ -161,7 +161,7 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
     (
         "compile",
         "compile a source policy into a signed settled artefact",
-        "policy compile <policy> [--output P] [--key K | --unsigned] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+        "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
     ),
     (
         "validate",
@@ -171,7 +171,7 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
     (
         "sign",
         "sign a source template/fragment with a key",
-        "policy sign <template> --key <key> [--output <path>]",
+        "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
     ),
     (
         "lint",
