@@ -20,10 +20,10 @@ the code whose compromise would break confinement.
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
 | `kenneld` | 7958 | — | **yes** | *(2 bins)* | basic-toml, serde |
-| `kennel-lib-compile` | 5242 | — | — | cli, compose | basic-toml, serde |
-| `kennel-cli` | 4307 | — | — | *(binary)* | lexopt, serde, serde_json |
+| `kennel-lib-compile` | 5241 | — | — | cli, compose | basic-toml, serde |
+| `kennel-cli` | 4433 | — | — | *(binary)* | lexopt, serde, serde_json |
+| `kennel-lib-policy` | 2346 | — | **yes** | cli, compile, compose, kenneld, spawn | basic-toml, ed25519-compact, hmac-sha512, object, serde |
 | `kennel-lib-binder` | 2203 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn | libc |
-| `kennel-lib-policy` | 2085 | — | **yes** | cli, compile, compose, kenneld, spawn | basic-toml, ed25519-compact, object, serde |
 | `kennel-lib-spawn` | 1980 | — | **yes** | bin-init, kenneld, privhelper | — |
 | `kennel-privhelper` | 1764 | — | **yes** | kenneld | — |
 | `kennel-lib-audit` | 1287 | — | **yes** | cli, kenneld | — |
@@ -66,7 +66,7 @@ the code whose compromise would break confinement.
 - `kennel-privhelper` → bpf, config, spawn, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, privhelper
 
-**Totals.** 28 crates, **35529 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **21730 SLOC**; the remaining 12 crates (13799 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 28 crates, **35915 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **21991 SLOC**; the remaining 12 crates (13924 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 

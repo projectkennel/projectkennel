@@ -56,3 +56,8 @@ nproc = "16"     # processes / threads
 cpu = "10"       # CPU-seconds
 
 # No [[mutable]] manifest: true-tool opens nothing.
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQASw3jscmHZORnhsDJHkDcS/ctbbfROgY5\nC9g3Z9FfvgUH2b4+hqYM9QvYVoPh3KsAeSuhq7Y/Qb9LlwAwC85Qk=\n-----END SSH SIGNATURE-----\n"

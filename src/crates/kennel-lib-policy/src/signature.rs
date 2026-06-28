@@ -1,13 +1,17 @@
 //! The signature envelope and its verification.
 //!
-//! A signature is a plain Ed25519 signature over the canonical-form bytes of the
-//! artefact (`docs/architecture/02-2-config-schema.md` §Signatures). The algorithm is
-//! fixed at `ed25519`; anything else is a categorical error.
+//! A signature is an SSHSIG (OpenSSH detached signature, [`crate::sshsig`]) over the
+//! canonical-form bytes of the artefact, produced by `ssh-keygen -Y sign` and verified
+//! in-process for Ed25519 keys. The algorithm field is fixed at `sshsig`; anything else
+//! is a categorical error.
 
-use ed25519_compact::Signature;
 use serde::{Deserialize, Serialize};
 
 use crate::keys::KeySet;
+
+/// The `algorithm` value a kennel signature carries: an SSHSIG (OpenSSH detached
+/// signature) over the canonical bytes. The underlying primitive is Ed25519.
+pub const SSHSIG_ALGORITHM: &str = "sshsig";
 
 /// Why a signature could not be verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +26,18 @@ pub enum SignatureError {
     MalformedSignature,
     /// The signature did not verify against the canonical bytes and key.
     Verification,
+    /// The SSHSIG armor or binary structure could not be parsed.
+    MalformedSshsig(String),
+    /// The SSHSIG `namespace` is not the kennel-policy domain (domain-separation
+    /// guard — a signature minted for another protocol must not verify here).
+    NamespaceMismatch(String),
+    /// The key embedded in the SSHSIG is not the one the trust store holds under
+    /// the envelope's `key_id` (the store is the authority; the embedded key is a
+    /// claim that must agree).
+    KeyMismatch,
+    /// The signer is a hardware (`sk-`) key: its signature is non-deterministic and
+    /// must be verified out-of-process via `ssh-keygen -Y verify`, off the hot path.
+    HardwareKeyRequiresExternalVerify,
 }
 
 impl core::fmt::Display for SignatureError {
@@ -34,6 +50,18 @@ impl core::fmt::Display for SignatureError {
             Self::MalformedKey => write!(f, "malformed Ed25519 key material"),
             Self::MalformedSignature => write!(f, "malformed signature (bad Base64 or length)"),
             Self::Verification => write!(f, "signature did not verify"),
+            Self::MalformedSshsig(m) => write!(f, "malformed SSHSIG: {m}"),
+            Self::NamespaceMismatch(n) => {
+                write!(f, "SSHSIG namespace `{n}` is not the kennel-policy domain")
+            }
+            Self::KeyMismatch => write!(
+                f,
+                "SSHSIG-embedded key does not match the trust-store key for this key_id"
+            ),
+            Self::HardwareKeyRequiresExternalVerify => write!(
+                f,
+                "hardware (sk-) signer requires out-of-process verification via ssh-keygen"
+            ),
         }
     }
 }
@@ -44,11 +72,13 @@ impl std::error::Error for SignatureError {}
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureEnvelope {
-    /// Signature algorithm. Must be `"ed25519"`.
+    /// Signature algorithm. Must be `"sshsig"` ([`SSHSIG_ALGORITHM`]).
     pub algorithm: String,
-    /// Identifies the signing key in the trust store.
+    /// Identifies the signing key in the trust store. The SSHSIG also embeds the
+    /// public key; the two must agree, and the store is the authority.
     pub key_id: String,
-    /// Base64-encoded 64-byte Ed25519 signature over the canonical bytes.
+    /// The armored SSHSIG (`-----BEGIN SSH SIGNATURE-----` …) over the canonical
+    /// bytes, stored verbatim — the content commitment lifted into the lockfile.
     pub signature: String,
     /// The top-level fields the signature covers (every field except
     /// `[signature]`). Recorded for source artefacts; for the settled policy the
@@ -68,18 +98,16 @@ pub fn verify_signature(
     envelope: &SignatureEnvelope,
     keys: &KeySet,
 ) -> Result<(), SignatureError> {
-    if envelope.algorithm != "ed25519" {
+    if envelope.algorithm != SSHSIG_ALGORITHM {
         return Err(SignatureError::UnsupportedAlgorithm(
             envelope.algorithm.clone(),
         ));
     }
+    // The trust store is the authority: resolve the `key_id` to the key we trust, then
+    // require the SSHSIG-embedded key to match it (checked inside `SshSig::verify`).
     let key = keys
         .get(&envelope.key_id)
         .ok_or_else(|| SignatureError::UnknownKey(envelope.key_id.clone()))?;
-    let sig_bytes = crate::b64::decode(envelope.signature.as_bytes())
-        .ok_or(SignatureError::MalformedSignature)?;
-    let signature =
-        Signature::from_slice(&sig_bytes).map_err(|_| SignatureError::MalformedSignature)?;
-    key.verify(canonical, &signature)
-        .map_err(|_| SignatureError::Verification)
+    let sig = crate::sshsig::SshSig::parse_armored(&envelope.signature)?;
+    sig.verify(canonical, key)
 }

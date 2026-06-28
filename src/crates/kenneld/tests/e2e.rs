@@ -95,7 +95,7 @@ fn own_cgroup_base() -> Option<PathBuf> {
 #[allow(clippy::too_many_lines)] // a flat settled-policy fixture; cohesive, not decomposable.
 fn minimal_policy(home: &Path) -> SettledPolicy {
     SettledPolicy {
-        settled_schema_version: 1,
+        settled_schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
         name: "e2e".to_owned(),
         deferred_substitutions: Vec::new(),
         framework_invariants_asserted: Vec::new(),
@@ -175,7 +175,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         manifest: Vec::new(),
         provenance: Provenance {
             compiler_version: "0.0.0".to_owned(),
-            schema_version: 1,
+            schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
             threat_catalogue_version: "0.1".to_owned(),
             resolved_artifacts: Vec::new(),
         },

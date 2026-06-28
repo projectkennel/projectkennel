@@ -25,7 +25,8 @@ path = "/usr/src/**"
 reason = "kernel headers and source trees (absent from the curated base)"
 
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "VCUWmcIkepCSkarJ7rNTGNHqDQuaaJoujAln76/hgOHwKJRnmLr0OdRa2xgFR2ZHDJw0ywjn5wdbEvCiKNXvCQ=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOAFkp5RuOSz8XatPbpaNaNbF8dCvj8mUS\nnlUDwXXZ77opZfiYC6yrF5ZFAgvc2xRKZR2MZ4znCJRCSLJaEGcg0=\n-----END SSH SIGNATURE-----\n"

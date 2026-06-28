@@ -57,3 +57,8 @@ nproc = "16"     # processes / threads
 cpu = "10"       # CPU-seconds
 
 # No [[mutable]] manifest: echo-tool opens nothing — the most fenced target.
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEfDv2PB/VhUyUU0HU88viz9ayN0xuOd5N\nF1Mpd4LYzIbyA5LS9vrdk/q9j/sPSrx5BFC6/0jXEbxQ1cW+5rZAE=\n-----END SSH SIGNATURE-----\n"

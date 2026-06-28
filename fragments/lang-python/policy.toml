@@ -48,7 +48,8 @@ ports = [443]
 reason = "PyPI package downloads"
 threats.exposed = ["T1.2", "T1.9"]
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "vrzoyrglhXKwZoVnz8mHi9zpa7N1Hy9xpkJH4zpoWtT7d5cJXDX+fv7NmAAbBy/szsx6zmZKqk6gmiezBQ6XBA=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFLBP6/fji2DxGrwdrWbtSMdthFESAtIkU\nRM8YxvsMBwdg628it8K2tBTZykAB7MJtVBdWUZUrV8Hd3aIQeepgs=\n-----END SSH SIGNATURE-----\n"

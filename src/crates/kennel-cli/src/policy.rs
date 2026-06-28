@@ -16,8 +16,8 @@ use kennel_lib_compile::TemplateSource;
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, default_settled_path, default_signing_key,
-    is_valid_policy_name, lexopt_unexpected, lexopt_value, load_signing_key, load_trust_store,
-    policy_error_code, resolve_policy, usage_of, POLICY_VERBS,
+    is_valid_policy_name, lexopt_unexpected, lexopt_value, load_trust_store, policy_error_code,
+    resolve_policy, settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, POLICY_VERBS,
 };
 
 // ---- `kennel compile` ----------------------------------------------------------
@@ -80,6 +80,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     let mut policy_path: Option<&str> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut key_path: Option<&str> = None;
+    let mut key_id: Option<&str> = None;
     let mut unsigned = false;
     let mut require_signed = false;
     let mut no_lock = false;
@@ -93,6 +94,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
                 output_path = Some(it.next().ok_or("--output needs a value")?.into());
             }
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
             "--unsigned" => unsigned = true,
             "--require-signed" => require_signed = true,
             "--no-lock" => no_lock = true,
@@ -121,17 +123,9 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     if key_path.is_some() && unsigned {
         return Err("--key and --unsigned are mutually exclusive".to_owned());
     }
-    // Sign with the given `--key`, else the sole key in the user key dir; `--unsigned`
-    // opts out entirely (a development build). `default_signing_key` errors helpfully
-    // if there is no key or several to choose from.
-    let signing_key: Option<PathBuf> = if unsigned {
-        None
-    } else {
-        Some(match key_path {
-            Some(p) => PathBuf::from(p),
-            None => default_signing_key()?,
-        })
-    };
+    if key_id.is_some() && unsigned {
+        return Err("--key-id and --unsigned are mutually exclusive".to_owned());
+    }
     add_default_template_dirs(&mut template_dirs);
 
     let bytes = std::fs::read(&policy_path)
@@ -207,11 +201,22 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
             .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
     }
 
-    let doc = if let Some(key_path) = &signing_key {
-        let key = load_signing_key(key_path)?;
-        kennel_lib_policy::sign_settled(policy, &key).map_err(|e| format!("signing: {e}"))?
-    } else {
+    // Sign via `ssh-keygen -Y sign` with `--key` (else the sole key in the user key
+    // dir); `--unsigned` opts out entirely (a development build). The stamped `key_id`
+    // comes from where the matching `*.pub` is placed in the trust store, not from the
+    // signing key's filename — so the key may live in `~/.ssh`, an agent, or a token,
+    // away from the public keys.
+    let doc = if unsigned {
         kennel_lib_compile::seal_unsigned(policy)
+    } else {
+        let key = match key_path {
+            Some(p) => p.to_owned(),
+            None => default_signing_key()?.to_string_lossy().into_owned(),
+        };
+        let canonical =
+            kennel_lib_policy::canonical::canonical_bytes(policy).map_err(|e| e.to_string())?;
+        let (key_id, armor) = sshsig_sign(&canonical, &key, key_id, &signing_trust_dirs())?;
+        settled_with_sshsig(policy, key_id, armor)
     };
     let out_bytes = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
@@ -1345,37 +1350,37 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
 pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     let mut path: Option<&str> = None;
     let mut key_path: Option<&str> = None;
+    let mut key_id: Option<&str> = None;
     let mut output: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
             "--output" => output = Some(it.next().ok_or("--output needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             value if path.is_none() => path = Some(value),
             _ => return Err("only one <template> may be given".to_owned()),
         }
     }
-    let path = path.ok_or("usage: kennel sign <template> --key <key> [--output <path>]")?;
+    let path =
+        path.ok_or("usage: kennel sign <template> --key <key> [--key-id <id>] [--output <path>]")?;
     let key_path = key_path.ok_or("sign needs --key <path>")?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    let key = load_signing_key(Path::new(key_path))?;
     // A base/template is SourcePolicy syntax (`[fs] read = [...]`); a composable
     // fragment is leaf-delta syntax (`[[fs.read.add]]`) and signs through the leaf
     // path. Try the source form first; fall back to the leaf form so `policy sign`
-    // covers both templates and fragments (05-templates §5.10).
-    let env = match kennel_lib_compile::parse_source(&bytes) {
+    // covers both templates and fragments (05-templates §5.10). Either way we need the
+    // canonical bytes the signature covers, which the signer then signs.
+    let payload = match kennel_lib_compile::parse_source(&bytes) {
         Ok(policy) => {
             if policy.signature.is_some() {
                 return Err(format!(
                     "{path} already carries a [signature]; remove it before re-signing"
                 ));
             }
-            kennel_lib_compile::sign_source(&policy, &key)
-                .map_err(|e| format!("signing: {e}"))?
-                .signature
-                .ok_or("internal: signature not produced")?
+            kennel_lib_compile::canonical_source(&policy).map_err(|e| format!("signing: {e}"))?
         }
         Err(source_err) => {
             let leaf = kennel_lib_compile::parse_leaf(&bytes).map_err(|_| {
@@ -1386,28 +1391,30 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
                     "{path} already carries a [signature]; remove it before re-signing"
                 ));
             }
-            kennel_lib_compile::sign_leaf(&leaf, &key)
-                .map_err(|e| format!("signing: {e}"))?
-                .signature
-                .ok_or("internal: signature not produced")?
+            kennel_lib_compile::canonical_leaf(&leaf).map_err(|e| format!("signing: {e}"))?
         }
     };
-    // Append the signature as a new top-level table, preserving the original text.
+
+    // Templates are the security baseline: only a system/vendor key may sign one, so
+    // the `key_id` resolves against the system trust dirs — never the user's keys. The
+    // private key itself may live in `~/.ssh`, an agent, or a token (ssh-keygen).
+    let mut trust_dirs = Vec::new();
+    add_system_trust_dirs(&mut trust_dirs);
+    let (key_id, armor) = sshsig_sign(&payload, key_path, key_id, &trust_dirs)?;
+
+    // Append the signature as a new top-level table, preserving the original text. The
+    // multi-line SSHSIG armor is stored as a single-line basic string with escaped
+    // newlines (what the serde serialiser would emit for the settled artefact too).
+    let escaped = armor.replace('\\', "\\\\").replace('\n', "\\n");
     let block = format!(
-        "\n[signature]\nalgorithm = \"{}\"\nkey_id = \"{}\"\nsignature = \"{}\"\n",
-        env.algorithm, env.key_id, env.signature
+        "\n[signature]\nalgorithm = \"sshsig\"\nkey_id = \"{key_id}\"\nsignature = \"{escaped}\"\n"
     );
     let mut out_bytes = bytes;
     out_bytes.extend_from_slice(block.as_bytes());
     let out = output.unwrap_or_else(|| PathBuf::from(path));
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
-    eprintln!("signed {} with key `{}`", out.display(), key.key_id());
-    eprintln!(
-        "install this public key in the trust store as `{}.pub`:\n{}",
-        key.key_id(),
-        kennel_lib_policy::b64::encode(&key.public_key_bytes())
-    );
+    eprintln!("signed {} with key `{key_id}`", out.display());
     Ok(ExitCode::SUCCESS)
 }
 

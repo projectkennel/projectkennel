@@ -563,7 +563,10 @@ mod tests {
     #[test]
     fn compiles_a_template_into_a_settled_policy() {
         let p = compile_ai();
-        assert_eq!(p.settled_schema_version, 1);
+        assert_eq!(
+            p.settled_schema_version,
+            kennel_lib_policy::SETTLED_SCHEMA_VERSION
+        );
         assert_eq!(p.name, "ai-coding-strict");
         assert_eq!(p.provenance.compiler_version, "test-0.0.0");
         assert!(p

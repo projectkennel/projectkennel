@@ -190,12 +190,11 @@ pub fn canonical_leaf(leaf: &LeafPolicy) -> Result<Vec<u8>, PolicyError> {
 ///
 /// Returns [`PolicyError::Canonical`] if the canonical form cannot be produced.
 pub fn sign_leaf(leaf: &LeafPolicy, key: &SigningKey) -> Result<LeafPolicy, PolicyError> {
-    let sig = key.sign(&canonical_leaf(leaf)?);
     let mut signed = leaf.clone();
     signed.signature = Some(SignatureEnvelope {
-        algorithm: "ed25519".to_owned(),
+        algorithm: kennel_lib_policy::signature::SSHSIG_ALGORITHM.to_owned(),
         key_id: key.key_id().to_owned(),
-        signature: kennel_lib_policy::b64::encode(&sig),
+        signature: kennel_lib_policy::sshsig::sign_ed25519(key, &canonical_leaf(leaf)?),
         signed_fields: Vec::new(),
     });
     Ok(signed)
@@ -226,12 +225,11 @@ pub fn canonical_source(policy: &SourcePolicy) -> Result<Vec<u8>, PolicyError> {
 /// Returns [`PolicyError::Canonical`] if the canonical form cannot be produced.
 pub fn sign_source(policy: &SourcePolicy, key: &SigningKey) -> Result<SourcePolicy, PolicyError> {
     let canonical = canonical_source(policy)?;
-    let sig = key.sign(&canonical);
     let mut signed = policy.clone();
     signed.signature = Some(SignatureEnvelope {
-        algorithm: "ed25519".to_owned(),
+        algorithm: kennel_lib_policy::signature::SSHSIG_ALGORITHM.to_owned(),
         key_id: key.key_id().to_owned(),
-        signature: kennel_lib_policy::b64::encode(&sig),
+        signature: kennel_lib_policy::sshsig::sign_ed25519(key, &canonical),
         signed_fields: Vec::new(),
     });
     Ok(signed)

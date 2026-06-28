@@ -1,8 +1,8 @@
 {
   "crate_count": 28,
-  "total_sloc": 35529,
+  "total_sloc": 35915,
   "tcb_crate_count": 16,
-  "tcb_sloc": 21730,
+  "tcb_sloc": 21991,
   "crates": [
     {
       "name": "kenneld",
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5242,
+      "sloc": 5241,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -26,13 +26,23 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 4307,
+      "sloc": 4433,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
       "consumers": [],
       "first_party_deps": ["kennel-lib-audit", "kennel-lib-cli", "kennel-lib-compile", "kennel-lib-config", "kennel-lib-control", "kennel-lib-manifest", "kennel-lib-policy", "kennel-lib-syscall", "kennel-lib-term", "kennel-lib-text"],
       "external_deps": ["lexopt", "serde", "serde_json"]
+    },
+    {
+      "name": "kennel-lib-policy",
+      "sloc": 2346,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "compile", "compose", "kenneld", "spawn"],
+      "first_party_deps": [],
+      "external_deps": ["basic-toml", "ed25519-compact", "hmac-sha512", "object", "serde"]
     },
     {
       "name": "kennel-lib-binder",
@@ -43,16 +53,6 @@
       "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn"],
       "first_party_deps": [],
       "external_deps": ["libc"]
-    },
-    {
-      "name": "kennel-lib-policy",
-      "sloc": 2085,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["cli", "compile", "compose", "kenneld", "spawn"],
-      "first_party_deps": [],
-      "external_deps": ["basic-toml", "ed25519-compact", "object", "serde"]
     },
     {
       "name": "kennel-lib-spawn",

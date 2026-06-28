@@ -96,7 +96,8 @@ nproc = "512"
 ttl_action = "warn"
 
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "xi5Iun8dYX01LOozCIlYpR3WaUX0jjauahrUBXO5ws2gwJwyHY1vSnXU6LdkO6JoTgFIAWhc+YbsByXw0kfwBw=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQC6sBdNpv8zA6C0fSIwv6434ObDRcnQJdN\nFKNFvtSIlWtWaNt0eiPdbSBWkj4ExD/KDMHacozYi0gkc4yNNCZwU=\n-----END SSH SIGNATURE-----\n"

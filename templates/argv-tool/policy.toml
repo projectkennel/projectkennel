@@ -68,3 +68,8 @@ cpu = "10"       # CPU-seconds
 field = "workload.argv"
 freeform = true
 reason = "the caller chooses the command to run within the [exec].allow floor; the cage contains it"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQLyDfuvVn+SNeywwRFXqX4g1l/rpTgssvf\nsp8+A0DQlThmETO+YqchYIOCS6nj6WrokjiIxlP6p3xA019QqSvQQ=\n-----END SSH SIGNATURE-----\n"

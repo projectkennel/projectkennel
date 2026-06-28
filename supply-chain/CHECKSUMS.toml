@@ -369,6 +369,17 @@ verified-against = [
 ]
 notes = "Direct dep of kennel-lib-policy (Ed25519 verify on the spawn path; sign+verify in the compiler). default-features = false, features = [\"std\"] — zero transitive deps (getrandom/ct-codecs/ed25519 all optional, not enabled; x25519.rs/pem.rs not compiled). Field arithmetic is fiat-crypto formally-verified code; single unsafe is volatile secret-wipe; verify rejects non-canonical S and weak keys."
 
+[crate."hmac-sha512"]
+version = "=1.1.12"
+crate-sha256 = "019ece39bbefc17f13f677a690328cb978dbf6790e141a3c24e66372cb38588b"
+audited-by = "remco"
+audited-on = "2026-06-28"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical)",
+    "github.com/jedisct1/rust-hmac-sha512 @ 597b57dccc5ef4ec21f6ea107fd4fa3d75c99759 (tag 1.1.12) — 5 source files byte-identical via tools/audit-source.sh",
+]
+notes = "Direct dep of kennel-lib-policy: bare SHA-512 for the SSHSIG signature preimage (the verifier hashes the canonical bytes before the Ed25519 check). default-features = false — the `sha384`/`traits` features and their optional `digest*` deps are NOT enabled, so zero transitive deps. Same author as ed25519-compact (jedisct1). The SHA-512 core (src/lib.rs) is self-contained; we call only `Hash::hash` (unkeyed) — SSHSIG hashes are unkeyed, the HMAC path is never invoked."
+
 [crate."arbitrary"]
 version = "=1.4.1"
 crate-sha256 = "dde20b3d026af13f561bdd0f15edf01fc734f0dafcedbaf42bba506a9517f223"

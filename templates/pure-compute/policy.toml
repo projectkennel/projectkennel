@@ -53,7 +53,8 @@ cpu = "30"       # CPU-seconds
 
 # No [[mutable]] manifest: pure-compute opens nothing — the most fenced target.
 
+
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "RVLyZP4tedAfrBb//NTqEJupTazSiIv7tq8UcC7y/1G2cGDS25JZBufJkXtqonKKcLtoB8t1qN2m7Lt6X+wzDg=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDiSD0fR2CtsWTqnuBC46istNqtVEaT7sE\nSqyk+ehBXzUeQjcYRbH322sZPEXUESlGB4gFH25kOLt7tNkn8mdQQ=\n-----END SSH SIGNATURE-----\n"

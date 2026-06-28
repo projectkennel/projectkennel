@@ -11,7 +11,7 @@ This ledger pairs with:
 
 ## Status
 
-Seven direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`, `lexopt`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
+Eight direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`, `hmac-sha512`, `lexopt`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
 
 ## System libraries (linked, not vendored)
 
@@ -110,6 +110,15 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Licence:** MIT.
 - **Reviewer:** remco (2026-05-31). Provenance verified independent of crates.io via `tools/audit-source.sh`: 15 source files byte-identical to `github.com/jedisct1/rust-ed25519-compact` at tag 2.3.0. Source read for backdoors: no FFI/asm/process/net/fs/env; the single `unsafe` is the volatile secret-wipe; verification rejects non-canonical `S` (malleability) and weak/identity keys.
 - **Transitive deps added:** none. `getrandom`, `ct-codecs`, and `ed25519` are optional dependencies, gated behind the `random`/`pem`/`traits` features, none of which we enable. `x25519.rs` and `pem.rs` are not compiled.
+- **Proc-macros / build.rs:** none.
+
+### hmac-sha512
+
+- **Version:** =1.1.12 (exact pin), `default-features = false`.
+- **Justification:** Bare SHA-512 for `kennel-lib-policy`'s SSHSIG verifier. The signature format is OpenSSH's SSHSIG (`ssh-keygen -Y sign`); an SSHSIG signs a domain-separated preimage over `SHA-512(canonical-bytes)`, so the verifier must hash the canonical form before the Ed25519 check. "Don't roll your own crypto" (§4) — a vetted SHA-512 rather than a hand-rolled one. SHA-512 already exists inside `ed25519-compact` (Ed25519 uses it internally) but is not part of its public API, so a dedicated crate is taken. Chosen for being self-contained and dependency-free, and from the same author as our Ed25519 crate (jedisct1). We call only the unkeyed `Hash::hash`; the crate's HMAC and SHA-384 paths are not used.
+- **Licence:** ISC.
+- **Reviewer:** remco (2026-06-28). Provenance verified independent of crates.io via `tools/audit-source.sh`: 5 source files byte-identical to `github.com/jedisct1/rust-hmac-sha512` at tag 1.1.12 (commit `597b57dccc5ef4ec21f6ea107fd4fa3d75c99759`). Source read: a self-contained SHA-512/HMAC implementation; no FFI/asm/process/net/fs/env; we invoke only the unkeyed `Hash::hash`.
+- **Transitive deps added:** none. The `digest09`/`digest010`/`digest011` dependencies are optional, gated behind the `traits` feature (and `default = ["sha384"]` pulls no crates); with `default-features = false` none are enabled.
 - **Proc-macros / build.rs:** none.
 
 ### lexopt
