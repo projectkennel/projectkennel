@@ -104,7 +104,6 @@ mod tests {
     use super::*;
     use crate::catalogue::{Catalogue, EnabledProvider, Enablement, Tier};
     use kennel_lib_policy::settled::ProvideRuntime;
-    use std::collections::BTreeSet;
 
     fn consume(name: &str, shape: Shape, key: Option<&str>) -> ConsumeRuntime {
         ConsumeRuntime {
@@ -145,7 +144,7 @@ mod tests {
     }
 
     fn catalogue(providers: &[EnabledProvider]) -> Catalogue {
-        Catalogue::project(providers, &BTreeSet::new(), &[], |_, _| {})
+        Catalogue::project(providers)
     }
 
     fn ready(mut cat: Catalogue, who: &str) -> Catalogue {

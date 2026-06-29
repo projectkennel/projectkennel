@@ -188,6 +188,7 @@ version = "0.5.0"
 dependencies = [
  "basic-toml",
  "gen-schema",
+ "kennel-lib-config",
  "kennel-lib-control",
  "kennel-lib-policy",
  "serde",

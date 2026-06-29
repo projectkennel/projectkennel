@@ -1,12 +1,12 @@
 {
   "crate_count": 28,
-  "total_sloc": 36634,
+  "total_sloc": 36710,
   "tcb_crate_count": 16,
-  "tcb_sloc": 22522,
+  "tcb_sloc": 22433,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 8058,
+      "sloc": 7969,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -16,17 +16,17 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5241,
+      "sloc": 5343,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
       "consumers": ["cli", "compose"],
-      "first_party_deps": ["kennel-lib-control", "kennel-lib-policy"],
+      "first_party_deps": ["kennel-lib-config", "kennel-lib-control", "kennel-lib-policy"],
       "external_deps": ["basic-toml", "serde"]
     },
     {
       "name": "kennel-cli",
-      "sloc": 4433,
+      "sloc": 4496,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -170,7 +170,7 @@
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
-      "consumers": ["bin-init", "cli", "compose", "kenneld", "privhelper"],
+      "consumers": ["bin-init", "cli", "compile", "compose", "kenneld", "privhelper"],
       "first_party_deps": [],
       "external_deps": ["basic-toml", "serde"]
     },

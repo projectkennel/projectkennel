@@ -17,6 +17,10 @@ kennel-lib-policy = { path = "../kennel-lib-policy" }
 # The control-socket path recogniser (W10): the compiler refuses any grant whose target is the
 # kenneld control socket — the CLI→daemon trust boundary — at install (the loud primary guard).
 kennel-lib-control = { path = "../kennel-lib-control" }
+# The host-declared reserved-namespace table (`system.toml` `[[reserved]]`): the compiler is the
+# tier-aware authorizer for reserved capability names (§7.13.5), so it reads the same table the
+# operator declares. Config types only — no enforcement code, kept out of the daemon's TCB.
+kennel-lib-config = { path = "../kennel-lib-config" }
 # Source and settled policies are TOML (no JSON); serde derives the schema types.
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"

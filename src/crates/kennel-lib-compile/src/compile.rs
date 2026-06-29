@@ -115,7 +115,7 @@ pub fn compile(
     warnings.extend(crate::binder::validate(&effective)?);
     warnings.extend(crate::mesh::validate(
         &effective,
-        reserved_namespace_permitted(provides_origin, trust),
+        &reserved_authority(provides_origin, trust),
     )?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;
@@ -135,19 +135,33 @@ pub fn compile(
     )
 }
 
-/// Whether the resolved policy may carry a reserved `org.projectkennel.*` `[[provides]]` name
-/// (§7.13.5). The reserved namespace is maintainer-trust material, claimable only through a
-/// maintainer-signed template — the same trust mechanism spawn targets use (§7.12). This is the
-/// compile-time fail-fast over the signature provenance [`resolve_verified`] records: permissive
-/// without a trust store (development authoring) and for an entry-authored provide (the
-/// template-authoring path, whose authority is the maintainer signature on the settled output,
-/// checked authoritatively at the catalogue, §7.13.4); a reserved name inherited from an
-/// *unverified* ancestor while a store is configured is refused, since an unsigned ancestor must
-/// not inject a reserved capability into the chain.
-const fn reserved_namespace_permitted(origin: ProvidesOrigin, trust: &Trust<'_>) -> bool {
-    trust.keys().is_none()
-        || matches!(origin, ProvidesOrigin::Absent | ProvidesOrigin::Entry)
-        || matches!(origin, ProvidesOrigin::Ancestor { verified: true })
+/// The tier-aware reserved-namespace authority for this resolved policy (§7.13.5).
+///
+/// The reserved namespace is tier-trust material: `org.projectkennel.*` is claimable only through a
+/// vendor-tier (maintainer) template, a host `[[reserved]]` name only through a host-tier one — and
+/// **any** key at the required tier is equivalent. This is the *sole* authorizer: there is no runtime
+/// re-check (the daemon trusts the settled signature it verifies). The declaring tier is the verified
+/// tier of the ancestor template that supplied the provides (ancestor-origin), or the output `--key`'s
+/// tier when the leaf authored them itself (entry-origin); `None` (unverified / no signer) claims
+/// nothing reserved. With no trust store (development authoring) the gate does not enforce.
+fn reserved_authority<'a>(
+    origin: ProvidesOrigin,
+    trust: &Trust<'a>,
+) -> crate::mesh::ReservedAuthority<'a> {
+    // An *entry-origin* reserved provide's authority is the output signer's tier — unknown when no
+    // output signer is set (inspection: `kennel policy validate`/`risks`, or an unsigned dev build).
+    // There we do not enforce: the tier check is the act of compiling *with* a key to produce the
+    // signed artefact. An ancestor-origin provide is always checkable (its tier comes from resolution).
+    let entry_unsigned = matches!(origin, ProvidesOrigin::Entry) && trust.signing_tier().is_none();
+    crate::mesh::ReservedAuthority {
+        enforce: trust.keys().is_some() && !entry_unsigned,
+        declaring_tier: match origin {
+            ProvidesOrigin::Ancestor { tier } => tier,
+            ProvidesOrigin::Entry => trust.signing_tier(),
+            ProvidesOrigin::Absent => None,
+        },
+        reserved: trust.reserved(),
+    }
 }
 
 /// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
@@ -206,7 +220,7 @@ pub fn compile_leaf(
     warnings.extend(crate::binder::validate(&effective)?);
     warnings.extend(crate::mesh::validate(
         &effective,
-        reserved_namespace_permitted(provides_origin, trust),
+        &reserved_authority(provides_origin, trust),
     )?);
     crate::dev::validate(&effective)?;
     crate::identity::validate(&effective)?;

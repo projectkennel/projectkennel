@@ -19,6 +19,38 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-30 — reserved-namespace authority is compile-only and tier-based
+
+- **Target:** the service-catalogue chapter, design §7.13.4 / §7.13.5 (the reserved-namespace gate)
+  and §7.13.5a (host `[[reserved]]`). In the frozen trees: docs/design/07-13-service-catalog.md.
+- **Change (as-built to capture in the rewrite):** the reserved-namespace authority is resolved
+  **entirely at compile**, **tier-based**, and sealed into the settled policy's signature. There is
+  **no runtime gate**. Drop the §7.13.4/§7.13.5 framing of a "runtime backstop / authoritative
+  catalogue gate" where "a reserved provide's settled *signature* must be a maintainer key", and the
+  per-entry `ReservedNamespace.keys` allowlist for host names. The as-built rule:
+  - A reserved name has a *required tier*: `org.projectkennel.*` → **vendor** (the key dir
+    `/usr/lib/kennel/keys`); a host `[[reserved]]` prefix (`system.toml`) → **host** (`/etc/kennel/keys`).
+    Tiers order `User < Host < Vendor`; the gate checks the **declaring tier ≥ required**.
+  - **The authority is the tier, not the identity — any key at a tier is equivalent.** The declaring
+    tier is the verified tier of the ancestor *template* that supplied the `[[provides]]`
+    (ancestor-origin), or the output `--key`'s tier when the leaf authored them itself (entry-origin).
+    So a **host-signed** settled may provide `org.projectkennel.wayland` legitimately when it derives a
+    **vendor-signed** template that declares it — which is what lets the installer host-compile the
+    reference providers (no maintainer private key on the target host).
+  - The daemon does **not** re-derive this. It loads only a settled policy whose signature verifies
+    against the trust store (`verify_settled_signed`); that trusted signature is the whole boundary.
+    The old runtime signer-tier check was **security theatre** against the trust root: a holder of any
+    trusted key can re-sign a forged settled, and its only reach is that operator's own per-user daemon.
+  - Mechanism: `kennel-lib-compile::mesh::ReservedAuthority` (the sole authorizer) + a tier-aware
+    `source_sig::Trust` (`Tier`, `tier_of`); `resolve::ProvidesOrigin::Ancestor { tier }`. Removed:
+    `kenneld::catalogue::{provide_authorized, first_unauthorized_provide}` and the daemon's
+    `vendor_key_ids` / host-`reserved` plumbing.
+- **Why:** the runtime gate forced reserved providers to be maintainer-signed *settled* artefacts —
+  un-shippable across arches (settled pins arch loaders) and un-buildable on a target host (no
+  maintainer key), while adding no real security. Moving the (already-existing) compile fail-fast to be
+  the tier-aware sole authority unblocks host-compiled reference providers with zero shortcut.
+- **Source:** branch fix/reserved-namespace-tier-gate.
+
 ## 2026-06-29 — D-Bus brokering is opt-in per consumer; host-dbus retained
 
 - **Target:** the D-Bus mediation chapter (design §7.7) and the mesh chapter (§7.13.2,

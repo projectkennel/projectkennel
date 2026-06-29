@@ -26,8 +26,11 @@
 //! usable while authoring. A *present* signature is always checked when a trust
 //! store is supplied, in either mode.
 
+use std::collections::BTreeSet;
+
 use crate::leaf::LeafPolicy;
 use crate::source::SourcePolicy;
+use kennel_lib_config::ReservedNamespace;
 use kennel_lib_policy::keys::{KeySet, SigningKey};
 use kennel_lib_policy::signature::{verify_signature, SignatureEnvelope, SignatureError};
 use kennel_lib_policy::PolicyError;
@@ -76,12 +79,44 @@ pub enum SignatureMode {
     AllowUnsigned,
 }
 
+/// The trust **tier** a verified signing key belongs to (§7.13.5).
+///
+/// The equivalence class the reserved-namespace gate keys on: a key's tier is *which trust dir loaded
+/// it* (`Vendor` = `/usr/lib/kennel/keys`, `Host` = `/etc/kennel/keys`, `User` = `~/.config/kennel/keys`),
+/// not its identity — **any** key at a tier is equivalent. Ordered `User < Host < Vendor`, so a higher
+/// tier may claim a lower tier's reserved names (a vendor key may provide a host-reserved name); the
+/// `>=` is what the gate checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// A user-tier key (`~/.config/kennel/keys`) — may claim only *unreserved* names.
+    User,
+    /// A host/admin-tier key (`/etc/kennel/keys`) — may claim host `[[reserved]]` names.
+    Host,
+    /// A vendor/maintainer-tier key (`/usr/lib/kennel/keys`) — may claim the built-in
+    /// `org.projectkennel.*` namespace.
+    Vendor,
+}
+
 /// The trust context resolution verifies ancestors against.
 /// (No `Debug`: [`KeySet`] holds opaque key material and does not implement it.)
 #[derive(Clone, Copy)]
 pub struct Trust<'a> {
     keys: Option<&'a KeySet>,
     mode: SignatureMode,
+    /// The vendor-tier key-ids (loaded from the vendor dir). A verified key in this set is
+    /// [`Tier::Vendor`]. `None` ⇒ no key is vendor-tier (development / untiered store).
+    vendor_keys: Option<&'a BTreeSet<String>>,
+    /// The host-tier key-ids (loaded from the system dir). A verified key in this set is
+    /// [`Tier::Host`]. A key in neither set is [`Tier::User`].
+    host_keys: Option<&'a BTreeSet<String>>,
+    /// The key-id that will sign the settled output (the `--key`), if known. It confers the tier for
+    /// an *entry-origin* reserved provide (one the leaf authors itself, §7.13.5), since the entry is
+    /// not signature-checked during resolution. `None` ⇒ no output signer known (entry-origin reserved
+    /// names are then refused under enforcement).
+    signing_key: Option<&'a str>,
+    /// The host-declared reserved namespaces (`system.toml` `[[reserved]]`): a name under one is
+    /// gated at [`Tier::Host`]. Empty ⇒ only the built-in `org.projectkennel.*` namespace is reserved.
+    reserved: &'a [ReservedNamespace],
 }
 
 impl<'a> Trust<'a> {
@@ -91,6 +126,10 @@ impl<'a> Trust<'a> {
         Self {
             keys: Some(keys),
             mode: SignatureMode::Require,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
         }
     }
 
@@ -100,6 +139,10 @@ impl<'a> Trust<'a> {
         Self {
             keys,
             mode: SignatureMode::AllowUnsigned,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
         }
     }
 
@@ -109,6 +152,66 @@ impl<'a> Trust<'a> {
         Self {
             keys: None,
             mode: SignatureMode::AllowUnsigned,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
+        }
+    }
+
+    /// Tag the trust store with its tier membership: `vendor` are the vendor-dir key-ids,
+    /// `host` the system-dir key-ids. A verified key in neither is [`Tier::User`]. Without
+    /// this, every verified key resolves to [`Tier::User`] (so reserved names are refused under
+    /// enforcement) — the CLI supplies it from the trust-dir cascade.
+    #[must_use]
+    pub const fn with_tiers(
+        mut self,
+        vendor: &'a BTreeSet<String>,
+        host: &'a BTreeSet<String>,
+    ) -> Self {
+        self.vendor_keys = Some(vendor);
+        self.host_keys = Some(host);
+        self
+    }
+
+    /// Record the key-id that will sign the settled output (the `--key`) — the tier authority for an
+    /// entry-origin reserved provide.
+    #[must_use]
+    pub const fn with_signing_key(mut self, key_id: Option<&'a str>) -> Self {
+        self.signing_key = key_id;
+        self
+    }
+
+    /// The tier the settled output's signing key sits at, if an output signer is known — the
+    /// authority for an entry-origin reserved provide. `None` ⇒ no signer known.
+    #[must_use]
+    pub fn signing_tier(&self) -> Option<Tier> {
+        self.signing_key.map(|k| self.tier_of(k))
+    }
+
+    /// Record the host-declared reserved namespaces (`system.toml` `[[reserved]]`).
+    #[must_use]
+    pub const fn with_reserved(mut self, reserved: &'a [ReservedNamespace]) -> Self {
+        self.reserved = reserved;
+        self
+    }
+
+    /// The host-declared reserved namespaces this context gates against.
+    #[must_use]
+    pub const fn reserved(&self) -> &'a [ReservedNamespace] {
+        self.reserved
+    }
+
+    /// The [`Tier`] of a verified signing key — vendor, host, or (the default) user. Any key at a
+    /// tier is equivalent; this never compares identities, only set membership by loading dir.
+    #[must_use]
+    pub fn tier_of(&self, key_id: &str) -> Tier {
+        if self.vendor_keys.is_some_and(|s| s.contains(key_id)) {
+            Tier::Vendor
+        } else if self.host_keys.is_some_and(|s| s.contains(key_id)) {
+            Tier::Host
+        } else {
+            Tier::User
         }
     }
 

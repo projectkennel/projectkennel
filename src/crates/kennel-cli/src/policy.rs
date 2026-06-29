@@ -16,8 +16,8 @@ use kennel_lib_compile::TemplateSource;
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, default_settled_path, default_signing_key,
-    is_valid_policy_name, lexopt_unexpected, lexopt_value, load_trust_store, policy_error_code,
-    resolve_policy, settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, POLICY_VERBS,
+    is_valid_policy_name, lexopt_unexpected, lexopt_value, policy_error_code, resolve_policy,
+    settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, TrustContext, POLICY_VERBS,
 };
 
 // ---- `kennel compile` ----------------------------------------------------------
@@ -144,11 +144,11 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     // otherwise unsigned templates resolve (development), still verifying any present
     // signature against whatever keys are loaded.
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_compile::Trust::require(&keys)
+        tc.require()
     } else {
-        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
+        tc.allow_unsigned()
     };
 
     let mut compiled = match build_settled(&bytes, &source, &trust, version) {
@@ -425,11 +425,11 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_compile::Trust::require(&keys)
+        tc.require()
     } else {
-        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
+        tc.allow_unsigned()
     };
 
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
@@ -491,8 +491,8 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
-    let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+    let tc = TrustContext::load(&trust_dirs)?;
+    let trust = tc.allow_unsigned();
 
     // The risk engine reads the resolved *source* (threats survive only there).
     // `effective_source` folds either form — a template/source document or a
@@ -551,19 +551,19 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
     )?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
 
     // The primary's *declared* identity (its own `name`/`template_base`, before the
     // fold loses them) drives the label and the one-arg baseline.
     let (primary_name, primary_base) = declared_meta(primary)?;
-    let primary_eff = resolve_effective(primary, &template_dirs, &keys)?;
+    let primary_eff = resolve_effective(primary, &template_dirs, &tc)?;
     let primary_label = primary_name.unwrap_or_else(|| primary.to_owned());
 
     // One arg: baseline → policy (what the leaf adds over its template). Two args:
     // <primary> → <other> (primary is the "before", other the "after").
     let (old_eff, old_label, new_eff, new_label) = if let Some(other) = positionals.get(1) {
         let (other_name, _) = declared_meta(other)?;
-        let other_eff = resolve_effective(other, &template_dirs, &keys)?;
+        let other_eff = resolve_effective(other, &template_dirs, &tc)?;
         let other_label = other_name.unwrap_or_else(|| (*other).to_owned());
         (primary_eff, primary_label, other_eff, other_label)
     } else {
@@ -573,7 +573,7 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
                  pass a second policy to compare two"
             )
         })?;
-        let baseline = resolve_template_baseline(&reference, &template_dirs, &keys)?;
+        let baseline = resolve_template_baseline(&reference, &template_dirs, &tc)?;
         (
             baseline,
             format!("{reference} (baseline)"),
@@ -615,14 +615,14 @@ fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), String> 
 fn resolve_effective(
     arg: &str,
     template_dirs: &[PathBuf],
-    keys: &kennel_lib_policy::KeySet,
+    tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
     let (path, _) = resolve_policy(arg, false)?;
     let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
         .map_err(|e| format!("resolving {}: {e}", path.display()))
 }
@@ -632,7 +632,7 @@ fn resolve_effective(
 fn resolve_template_baseline(
     reference: &str,
     template_dirs: &[PathBuf],
-    keys: &kennel_lib_policy::KeySet,
+    tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
     let (name, version) = kennel_lib_compile::parse_reference(reference)
         .map_err(|e| format!("`template_base`: {e}"))?;
@@ -642,7 +642,7 @@ fn resolve_template_baseline(
     let bytes = source.fetch(&name, &version).ok_or_else(|| {
         format!("cannot read `{reference}` to diff against (pass --template-dir)")
     })?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
         .map_err(|e| format!("resolving `{reference}`: {e}"))
 }
@@ -980,8 +980,8 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
-        let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let tc = TrustContext::load(&trust_dirs)?;
+        let trust = tc.allow_unsigned();
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
@@ -990,8 +990,8 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
         ));
         compiled.policy
     } else {
-        let keys = load_trust_store(&trust_dirs)?;
-        kennel_lib_policy::verify_settled(&bytes, &keys)
+        let tc = TrustContext::load(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, tc.keys())
             .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
     };
     print_effective_policy(&policy);
@@ -1276,8 +1276,8 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
     }
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+    let tc = TrustContext::load(&trust_dirs)?;
+    let trust = tc.allow_unsigned();
     let source = FsTemplateSource {
         dirs: template_dirs.clone(),
     };
@@ -1678,14 +1678,14 @@ pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
-        let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let tc = TrustContext::load(&trust_dirs)?;
+        let trust = tc.allow_unsigned();
         let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         compiled.policy
     } else {
-        let keys = load_trust_store(&trust_dirs)?;
-        kennel_lib_policy::verify_settled(&bytes, &keys)
+        let tc = TrustContext::load(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, tc.keys())
             .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
     };
 

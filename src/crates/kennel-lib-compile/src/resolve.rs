@@ -50,7 +50,7 @@ use crate::source::{
     NetSection, RootfsSection, SeccompSection, ServiceSection, SourcePolicy, SpawnSection,
     SshSection, TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
-use crate::source_sig::Trust;
+use crate::source_sig::{Tier, Trust};
 use kennel_lib_policy::audit::{
     AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection,
 };
@@ -117,14 +117,16 @@ pub enum ProvidesOrigin {
     /// No `[[provides]]` in the resolved policy.
     Absent,
     /// The entry (the most-derived artefact) authored them — the template-authoring path. Its
-    /// reserved-name authority is conferred by the maintainer signing the settled output, checked
-    /// at the catalogue (§7.13.4), not at this resolution.
+    /// reserved-name authority is conferred by the **tier** of the key that signs the settled output
+    /// (the `--key`), checked at compile (§7.13.5), since the entry itself is not signature-checked here.
     Entry,
-    /// An ancestor template supplied them; `verified` is whether that ancestor's signature checked
-    /// against the resolution trust store (i.e. it is a maintainer-signed template).
+    /// An ancestor template supplied them. `tier` is the [`Tier`] the supplying template's signature
+    /// verified at (which trust dir loaded the key), or `None` if it did not verify. The
+    /// reserved-namespace gate keys on this: `org.projectkennel.*` is permitted only when `tier` is
+    /// [`Tier::Vendor`] — any vendor key qualifies, identity never enters it (§7.13.5).
     Ancestor {
-        /// Whether the supplying ancestor's signature verified against the trust store.
-        verified: bool,
+        /// The trust tier the supplying ancestor's signature verified at, or `None` if unverified.
+        tier: Option<Tier>,
     },
 }
 
@@ -210,7 +212,10 @@ pub fn resolve_verified(
         // `i` indexes the parent that supplies the provides; `links[i]` is its verification record
         // (built in the same leaf-first order). `.get` keeps clippy's no-indexing rule satisfied.
         ProvidesOrigin::Ancestor {
-            verified: links.get(i).is_some_and(|l| l.signing_key_id.is_some()),
+            tier: links
+                .get(i)
+                .and_then(|l| l.signing_key_id.as_deref())
+                .map(|kid| trust.tier_of(kid)),
         }
     } else {
         ProvidesOrigin::Absent
@@ -1100,20 +1105,22 @@ mod tests {
         let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
-        assert_eq!(
-            r.provides_origin,
-            ProvidesOrigin::Ancestor { verified: false }
-        );
+        assert_eq!(r.provides_origin, ProvidesOrigin::Ancestor { tier: None });
     }
 
     #[test]
     fn provides_origin_is_verified_ancestor_when_the_supplier_is_signed_under_require() {
+        use std::collections::BTreeSet;
+
         use crate::source_sig::sign_source;
         use kennel_lib_policy::keys::{KeySet, SigningKey};
-        let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
+        let key = SigningKey::from_seed("a-vendor-key", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
         ks.insert(key.key_id(), &key.public_key_bytes())
             .expect("insert");
+        // Tag the key as vendor-tier (loaded from the vendor dir): any such key is equivalent.
+        let vendor: BTreeSet<String> = std::iter::once(key.key_id().to_owned()).collect();
+        let host = BTreeSet::new();
         let parent = parse(
             format!(
                 "template_name = \"p\"\n{}",
@@ -1127,10 +1134,17 @@ mod tests {
             .into_bytes();
         let src = MapSource::new().with("p", "v1", &signed);
         let child = parse(b"name = \"c\"\ntemplate_base = \"p@v1\"\n").expect("parse child");
-        let r = resolve_verified(&child, &src, &Trust::require(&ks)).expect("resolve");
+        let r = resolve_verified(
+            &child,
+            &src,
+            &Trust::require(&ks).with_tiers(&vendor, &host),
+        )
+        .expect("resolve");
         assert_eq!(
             r.provides_origin,
-            ProvidesOrigin::Ancestor { verified: true }
+            ProvidesOrigin::Ancestor {
+                tier: Some(Tier::Vendor)
+            }
         );
     }
 

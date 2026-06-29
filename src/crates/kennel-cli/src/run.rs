@@ -19,7 +19,7 @@ use crate::policy::{
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, connect, default_signing_key, exit_code,
-    load_trust_store, resolve_policy, send, settled_with_sshsig, signing_trust_dirs, sshsig_sign,
+    resolve_policy, send, settled_with_sshsig, signing_trust_dirs, sshsig_sign, TrustContext,
 };
 
 /// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`
@@ -154,8 +154,8 @@ pub fn launch(
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
-        let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let tc = TrustContext::load(&trust_dirs)?;
+        let trust = tc.allow_unsigned();
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);

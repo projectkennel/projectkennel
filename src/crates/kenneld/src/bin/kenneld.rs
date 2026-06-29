@@ -56,12 +56,11 @@ fn run() -> Result<(), String> {
         rest_dirs.iter().map(std::path::PathBuf::as_path).collect();
     // The loader re-reads these dirs on every request, so a key created, changed, or
     // removed after the daemon started (e.g. by `kennel keygen`) is honoured without a
-    // restart — the trust store lives on disk, not frozen in memory at boot. The host-declared
-    // `[[reserved]]` namespaces (§7.13.5a) ride along for the runtime reserved-provide gate.
+    // restart — the trust store lives on disk, not frozen in memory at boot. The reserved-namespace
+    // authority is resolved tier-aware at compile (§7.13.5), so the daemon carries no reserved table.
     let loader = policy::TrustStoreLoader::from_trust_dirs(
         Some(kennel_lib_config::vendor_key_dir()),
         &rest_refs,
-        deployment.reserved().to_vec(),
         kennel_lib_config::enablement_dirs(),
     );
 
