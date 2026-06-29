@@ -841,12 +841,12 @@ pub mod mesh {
 /// The `dbus-broker@v1` control-channel wire protocol: the verb `kenneld` speaks on the
 /// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
 ///
-/// There is one verb, [`ACCEPT_SESSION`]: kenneld, having identified a consumer on its
+/// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its
 /// per-kennel bus, tells the broker to accept one D-Bus session and apply the given filter set.
 /// The broker mints a per-session node and enforces the filter on every frame it mediates for
 /// that session. kenneld decides; the broker applies and never relays through kenneld.
 ///
-/// **Wire layout (all big-endian):** see [`encode_accept`]. The `bus` byte selects session (0)
+/// **Wire layout (all big-endian):** see [`broker::encode_accept`]. The `bus` byte selects session (0)
 /// or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
 pub mod broker {
     /// Tell the provider to accept a D-Bus session kenneld has authorized, applying the
