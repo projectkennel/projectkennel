@@ -80,13 +80,18 @@ first real consumer of them.
   place of a mediation pair instantiated per consuming kennel, and it makes D-Bus the second real consumer
   that proves Parts A/B on a frozen schema. This is **not** a TCB reduction (mediation is already
   confined) — it is a consolidation onto the mesh, and the roadmap states it as such.
-  The exact retirement boundary (what stays the consumer's in-view facade endpoint vs what moves into the
-  service kennel, and how `host-dbus` is decommissioned) is settled in design §7.7 / §7.13 during the
-  build, not pinned here. Parts A and B land before Part C is built.
+  **As built, the host-dbus delegate is kept (decision, 2026-06-29).** Brokering is **opt-in per
+  consumer**, not a wholesale replacement: a kennel that declares `[[consumes]] org.projectkennel.dbus`
+  (a `dbus-name` capability) is routed over the broker; `[dbus.session]` alone keeps the legacy
+  per-consumer `host-dbus` operator delegate. The two coexist (the two-declaration contract in
+  `dbus-brokered/consumer.toml`). Retiring `host-dbus` wholesale is **deferred past 0.5.0** — it stays the
+  fallback for the non-consuming case until the broker has demonstrably subsumed it. Parts A and B land
+  before Part C is built.
 
 **Exit:** `binder-connector` and `dbus-name` are no longer broker-refused; the `dbus-broker@v1` service
-kennel template is signed and ships; a policy-suite case exercises a `dbus-name` consume end-to-end; the
-per-kennel `host-dbus` operator delegate is retired in favour of the brokered service kennel.
+kennel template is signed and ships; a policy-suite case exercises a `dbus-name` consume end-to-end;
+brokered routing is gated on the consumer declaring a `dbus-name` consume, with `[dbus.session]` alone
+retaining the host-dbus delegate (wholesale host-dbus retirement deferred past 0.5.0).
 
 ### W2 · Filesystem view floor: narrow `/usr` to the flatpak base stance
 
@@ -465,8 +470,9 @@ W14 is independent of the mesh and slots against capacity. The ship gates — W9
 0.5.0 ships when:
 
 - `binder-connector` and `dbus-name` are implemented and no longer broker-refused; the `dbus-broker@v1`
-  service kennel ships with a policy-suite e2e; the per-kennel `host-dbus` operator delegate is retired in
-  favour of the brokered service kennel (W1).
+  service kennel ships with a policy-suite e2e; brokered D-Bus routing is gated on a `dbus-name` consume,
+  with `[dbus.session]` alone retaining the per-kennel `host-dbus` delegate — wholesale host-dbus
+  retirement is deferred past 0.5.0 (W1).
 - The base templates grant a measured minimal `/usr` floor (and a considered `/var`); the threat entry is
   written; the policy suite passes on the tightened floor (W2).
 - Writable-bind sources are resolved with `RESOLVE_NO_SYMLINKS` in the privhelper (W3).

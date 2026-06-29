@@ -19,6 +19,23 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-29 — D-Bus brokering is opt-in per consumer; host-dbus retained
+
+- **Target:** the D-Bus mediation chapter (design §7.7) and the mesh chapter (§7.13.2,
+  `dbus-name` shape). In the frozen trees: docs/design/07-7-dbus.md, docs/design/07-13-mesh.md.
+- **Change (as-built to capture in the rewrite):** brokered D-Bus is **opt-in per consumer**, not
+  a wholesale replacement of the `host-dbus` delegate. A kennel is routed over the standing
+  `dbus-broker@v1` only when it declares **both** `[dbus.session]` **and** a `[[consumes]]` of a
+  `dbus-name` capability (`org.projectkennel.dbus`); `[dbus.session]` alone keeps the legacy
+  per-consumer `host-dbus` operator delegate. The two coexist (the two-declaration contract
+  documented in `dbus-brokered/consumer.toml`). Drop any "host-dbus is retired / decommissioned"
+  framing — that retirement is **deferred past 0.5.0** (decision 2026-06-29: keep the host facade
+  for now). kenneld gates this on `loaded.consumes` carrying a `Shape::DbusName` entry.
+- **Why:** the broker consolidates mediation onto the mesh; it does not yet subsume the
+  non-consuming `[dbus.session]` case, which `host-dbus` still serves.
+- **Source:** #136 (`brokered_dbus` gated on a dbus-name consume) + the 2026-06-29 decision;
+  ROADMAP-0.5.0 W1 exit reconciled.
+
 ## 2026-06-28 — Signature format → SSHSIG (OpenSSH detached signatures)
 
 - **Target:** book ch16.3 (Audits — the commitment); the settled-policy chapter (the
