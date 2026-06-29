@@ -155,7 +155,12 @@ pub trait Privileged {
         _pty_fd: Option<std::os::fd::RawFd>,
         _workload_fd: Option<std::os::fd::RawFd>,
         _stdio_fds: Option<[std::os::fd::RawFd; 3]>,
-    ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
+    ) -> io::Result<(
+        Child,
+        i32,
+        std::os::fd::OwnedFd,
+        kennel_privhelper::client::HelperStderr,
+    )> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "factory construction not supported by this Privileged impl",
@@ -213,7 +218,12 @@ impl Privileged for HelperClient {
         pty_fd: Option<std::os::fd::RawFd>,
         workload_fd: Option<std::os::fd::RawFd>,
         stdio_fds: Option<[std::os::fd::RawFd; 3]>,
-    ) -> io::Result<(Child, i32, std::os::fd::OwnedFd)> {
+    ) -> io::Result<(
+        Child,
+        i32,
+        std::os::fd::OwnedFd,
+        kennel_privhelper::client::HelperStderr,
+    )> {
         kennel_privhelper::client::construct_kennel(
             &self.helper,
             construction_half,
@@ -1184,7 +1194,7 @@ fn bring_up<P: Privileged + Sync>(
     // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
     // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
     let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
-    let (mut child, init_pid, sync, supervision_bytes) = construct_via_factory(
+    let (mut child, init_pid, sync, supervision_bytes, helper_stderr) = construct_via_factory(
         privileged,
         plan,
         command,
@@ -1203,8 +1213,18 @@ fn bring_up<P: Privileged + Sync>(
     // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
     // binderfs reachable via /proc/<init>/root. This is what lets node 0 be claimed deterministically
     // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
-    // binder-less; the workload (which it gates) will not start, so surface it.
-    kennel_lib_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
+    // binder-less; the workload (which it gates) will not start, so surface it. The construction child
+    // shares the factory's captured stderr (W15): on a boot-sync failure its own cause — e.g.
+    // `construction child: build_kennel: <reason>` — is folded in, not just the transport symptom.
+    if let Err(e) = kennel_lib_syscall::boot::await_init_ready(sync_fd) {
+        let cause = helper_stderr.recent();
+        let msg = if cause.is_empty() {
+            format!("boot-sync: {e}")
+        } else {
+            format!("boot-sync: {e}: {cause}")
+        };
+        return Err(Error::Io(io::Error::new(e.kind(), msg)));
+    }
     tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
 
     // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place. The
@@ -1382,7 +1402,16 @@ fn construct_via_factory<P: Privileged + Sync>(
     egress_bytes: &[u8],
     log_level: u8,
     state: &mut Provision,
-) -> Result<(Child, i32, std::os::fd::OwnedFd, Vec<u8>), Error> {
+) -> Result<
+    (
+        Child,
+        i32,
+        std::os::fd::OwnedFd,
+        Vec<u8>,
+        kennel_privhelper::client::HelperStderr,
+    ),
+    Error,
+> {
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
@@ -1400,7 +1429,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     // boot-sync socket: the caller waits on it for kennel-bin-init's "ready", claims binder node 0,
     // then signals "go" (deterministic startup, `07-2` §7.2.1a). The factory exits the moment it
     // reports the pid, so the caller reaps the `Child` after the sync.
-    let (child, init_pid, sync) = privileged.construct_kennel(
+    let (child, init_pid, sync, helper_stderr) = privileged.construct_kennel(
         &half_bytes,
         Some(egress_bytes),
         plan.interactive_return_fd,
@@ -1409,7 +1438,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     )?;
     state.factory = true;
 
-    Ok((child, init_pid, sync, supervision_bytes))
+    Ok((child, init_pid, sync, supervision_bytes, helper_stderr))
 }
 
 /// Build the construction-half (the privhelper factory's input) from the plan, the kennel's
