@@ -1776,12 +1776,23 @@ pub fn run_kennel<P, L>(
         }
     }
 
-    // Brokered D-Bus consumer (§7.7): a kennel with a `[dbus]` grant reaches the standing
-    // dbus-broker over the connector mesh bus, so its `facade-dbus` opens the mesh device directly
-    // (the per-kennel `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view —
-    // the dbus-name consume is served by the facade, not the binder-connector consumer loop above,
-    // so nothing else mounts it. Only when the broker is actually enabled; otherwise D-Bus takes
-    // the legacy host-dbus route and needs no mesh device.
+    // Brokered D-Bus is opt-in per the consumer's policy: a kennel routes its D-Bus over the
+    // standing broker only when it BOTH enables `[dbus]` AND declares a `[[consumes]]` of a
+    // `dbus-name` capability (the service-mesh trigger). `[dbus]` alone keeps the legacy
+    // per-consumer host-dbus delegate — so enabling the broker for one kennel does not silently
+    // strip another's delegate. (dbus-brokered's consumer.toml documents this two-declaration
+    // contract.)
+    let consumes_dbus_name = loaded
+        .consumes
+        .iter()
+        .any(|c| c.shape == kennel_lib_policy::settled::Shape::DbusName);
+
+    // Brokered D-Bus consumer (§7.7): such a kennel reaches the standing dbus-broker over the
+    // connector mesh bus, so its `facade-dbus` opens the mesh device directly (the per-kennel
+    // `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view — the dbus-name
+    // consume is served by the facade, not the binder-connector consumer loop above, so nothing
+    // else mounts it. Only when this kennel actually consumes the broker; otherwise D-Bus takes the
+    // legacy host-dbus route and needs no mesh device.
     {
         let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
         // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
@@ -1800,7 +1811,7 @@ pub fn run_kennel<P, L>(
                 .next()
                 .map(|c| c.tier)
         };
-        if let (true, Some(tier)) = (dbus_enabled, broker_tier) {
+        if let (true, true, Some(tier)) = (dbus_enabled, consumes_dbus_name, broker_tier) {
             match shared.ensure_mesh_bus(tier, "org.projectkennel.dbus-broker", None) {
                 Ok(clone_fd) => {
                     mesh_bus_guard.push(tier, "org.projectkennel.dbus-broker".to_owned(), None);
@@ -1921,7 +1932,11 @@ pub fn run_kennel<P, L>(
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
             brokered_dbus: {
-                let has_broker = {
+                // Brokered only when this kennel actually consumes the broker (a `dbus-name`
+                // `[[consumes]]`) AND the broker is enabled in the catalogue. `[dbus]` alone is the
+                // legacy host-dbus delegate; gating on the consume keeps enabling the broker for one
+                // kennel from stripping another's delegate (the dbus-session-allowed regression).
+                let brokered = consumes_dbus_name && {
                     let cat = shared
                         .catalogue
                         .lock()
@@ -1931,10 +1946,10 @@ pub fn run_kennel<P, L>(
                 // Brokered: record this kennel's filter under its ctx so the D-Bus mesh bus's
                 // node-0 handler can resolve a future connect (sender_pid → cgroup → ctx → here)
                 // and mint the session. The per-kennel relay then only *locates* the mesh bus.
-                if has_broker {
+                if brokered {
                     shared.register_dbus_filter(ctx, loaded.dbus.clone());
                 }
-                has_broker
+                brokered
             },
         });
     }
