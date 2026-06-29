@@ -284,12 +284,19 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         });
     // Captured before the child closure moves `half`: the cgroup to birth the child into.
     let cgroup_path = half.cgroup_join.then(|| half.cgroup.clone());
+    // The child's inherited copy of the maps-ack pipe **write** end (`clone` copies the fd table).
+    // The child closes it first thing so its `recv_ack` below sees EOF — not a forever block — if the
+    // parent dies before `send_ack` (a `uid_map`-write `EPERM` is the motivating case): fail fast
+    // rather than hang to the service-stop SIGKILL. A `RawFd` is `Copy`, so this does not move the
+    // parent's `ready_w` `OwnedFd` into the closure (the parent still `send_ack`s on it below).
+    let child_ready_w = ready_w.as_raw_fd();
     let child = move || {
         // Each early return trips clone_pid1's `_exit(127)` backstop. Name the failing step on
         // stderr first (inherited from the factory, so it reaches kenneld's journal): a silent
         // 127 at this boundary is undebuggable, and the construction child has no other channel.
-        // Wait until the parent has written our identity maps (so the kennel's uid 0 is
-        // mappable); abort closed otherwise.
+        // Drop the inherited write end so a dead parent yields EOF (fail-fast), then wait until the
+        // parent has written our identity maps (so the kennel's uid 0 is mappable); abort closed otherwise.
+        let _ = kennel_lib_syscall::fd::close_inherited(child_ready_w);
         tracer.step("construct: child cloned, awaiting maps-ready ack from parent");
         if recv_ack(ready_r.as_fd()).ok().flatten() != Some(ACK_PROCEED) {
             eprintln!("kennel-privhelper: construction child: maps-ready ack not received");

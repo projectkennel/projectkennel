@@ -146,6 +146,28 @@ pub fn dup_onto(src: BorrowedFd<'_>, dst: RawFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Close descriptor number `fd` (`close(2)`).
+///
+/// For the privhelper construction child to drop its **inherited** copy of a handshake pipe's
+/// write end right after `clone`: `clone` copies the fd table, so without this the child also
+/// holds the parent's `ready_w`, and its `recv_ack` read on the matching read end can never see
+/// EOF. A parent that dies before `send_ack` (e.g. a `uid_map`-write `EPERM`) would then hang the
+/// child to the service-stop SIGKILL instead of failing fast. The child does not own the matching
+/// `OwnedFd` (the parent does), so this operates in descriptor numbers with no Rust-ownership concern.
+///
+/// # Errors
+/// The OS error if `close(2)` fails (e.g. `fd` is not open).
+pub fn close_inherited(fd: RawFd) -> io::Result<()> {
+    // SAFETY: a plain close of a raw descriptor the caller knows is open in this process (the
+    // post-clone child's inherited copy). We operate in descriptor numbers, not `OwnedFd`, so
+    // there is no double-close of a Rust-owned handle in this process.
+    let rc = unsafe { libc::close(fd) };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Duplicate `src` to the lowest free descriptor `>= base`, close-on-exec (`F_DUPFD_CLOEXEC`),
 /// returned as an [`OwnedFd`].
 ///

@@ -412,7 +412,12 @@ impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
         pty_fd: Option<std::os::fd::RawFd>,
         workload_fd: Option<std::os::fd::RawFd>,
         stdio_fds: Option<[std::os::fd::RawFd; 3]>,
-    ) -> io::Result<(std::process::Child, i32, std::os::fd::OwnedFd)> {
+    ) -> io::Result<(
+        std::process::Child,
+        i32,
+        std::os::fd::OwnedFd,
+        kennel_privhelper::client::HelperStderr,
+    )> {
         self.inner
             .construct_kennel(construction_half, egress, pty_fd, workload_fd, stdio_fds)
     }
