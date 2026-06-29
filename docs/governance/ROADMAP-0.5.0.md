@@ -316,6 +316,15 @@ findings that require fixes before 0.5.0 ships — budget accordingly. Runs afte
 **Exit:** a dynamic red-team pass covers the connector-broker race and the GUI confidentiality legs against
 the 0.5.0 surface; findings are recorded in `audits/`; any confirmed finding is fixed before the tag.
 
+**Done (2026-06-29):** [`audits/2026-06-29-dynamic-redteam-w11.md`](audits/2026-06-29-dynamic-redteam-w11.md).
+Both residuals driven by a live probe harness against the running daemon — **no confirmed finding**. The
+broker's TOCTOU windows are availability-only (consumer authorisation is sealed at spawn; resolution is
+name-keyed with strict key-equality), confirmed under 8-concurrent + reload-during-connect + cold
+concurrent activation with no panic/deadlock/mis-route. The GUI broker's per-connection runtime dir is the
+provider kennel's **private tmpfs** (never host-visible; each consumer relayed only into its own
+compositor). The one degradation reproduced is the already-remedied, cgroup-bounded 0.4.0 F3. Ship gate
+cleared; nothing blocks the tag.
+
 ### W12 · Stale-comment sweep
 
 **[housekeeping] XS.**
