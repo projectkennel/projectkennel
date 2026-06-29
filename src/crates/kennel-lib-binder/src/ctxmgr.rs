@@ -73,6 +73,16 @@ pub enum Reply {
     /// socketpair local end and the stderr pipe read end — `02-10` §7.12). The multi-fd
     /// generalisation of [`Self::DataAndFd`]; the kernel translates each fd into the caller's table.
     DataAndFds(Vec<u8>, Vec<OwnedFd>),
+    /// Reply with a single binder handle (a `BINDER_TYPE_HANDLE` object); the kernel
+    /// translates it from the replying endpoint's handle table into the caller's.
+    /// Used by the mesh bus to hand a provider's **persistent** node to a consumer — the
+    /// node-0 endpoint keeps its own ref (it serves every consumer from it).
+    Handle(u32),
+    /// Like [`Self::Handle`], but **release the endpoint's own ref** after forwarding — for a
+    /// freshly-`transact_handle`'d node the endpoint pins only to relay (the brokered D-Bus
+    /// session node, minted per consumer): hold it across the reply so it does not dangle, then
+    /// drop it so the node's owner can reclaim it once the consumer is done (§7.7).
+    HandleOnce(u32),
 }
 
 /// A context-manager endpoint owning node 0 of one binder instance.
@@ -163,6 +173,16 @@ impl ContextManager {
                 let borrowed: Vec<BorrowedFd<'_>> = fds.iter().map(AsFd::as_fd).collect();
                 self.conn
                     .reply_with_data_and_fds(incoming, &data, &borrowed)
+            }
+            Reply::Handle(handle) => self.conn.reply_with_handle(incoming, handle),
+            Reply::HandleOnce(handle) => {
+                // Forward the handle, then drop OUR ref (taken by `transact_handle`): the driver has
+                // already created the caller's ref while delivering this reply, so the node stays
+                // alive for the caller while we stop pinning it — letting its owner reclaim it once
+                // the caller is done (the brokered D-Bus session node, §7.7).
+                let r = self.conn.reply_with_handle(incoming, handle);
+                let _ = self.conn.release_handle(handle);
+                r
             }
         }
     }

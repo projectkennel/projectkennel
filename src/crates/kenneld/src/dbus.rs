@@ -66,8 +66,13 @@ pub struct DbusRelay {
     /// Monotonic base for the rate limiter's clock.
     start: Instant,
     /// The bounded outbound channel to each enabled bus's delegate. Immutable after construction
-    /// (so no lock needed to relay); `try_send` is non-blocking.
+    /// (so no lock needed to relay); `try_send` is non-blocking. Empty in brokered mode.
     senders: HashMap<Bus, SyncSender<Vec<u8>>>,
+    /// Whether this kennel's D-Bus is brokered over the connector mesh bus (vs. a legacy host-dbus
+    /// delegate). When brokered, this relay only *locates* the mesh bus on the per-kennel
+    /// `SVC_CONNECT`; the session itself (identity → filter → `ACCEPT_SESSION`) is the mesh
+    /// handler's job (§7.7), so this relay carries no transactor and no filter.
+    brokered: bool,
     inner: Mutex<Inner>,
     inbound: Condvar,
 }
@@ -132,12 +137,36 @@ impl DbusRelay {
         Self {
             start: Instant::now(),
             senders,
+            brokered: false,
             inner: Mutex::new(Inner {
                 conns: HashMap::new(),
                 limiter,
             }),
             inbound: Condvar::new(),
         }
+    }
+
+    /// Construct a brokered D-Bus relay: this kennel's D-Bus rides the connector mesh bus, so the
+    /// relay drives no host-dbus delegate. Its only job is to *locate* the mesh bus on the
+    /// per-kennel `SVC_CONNECT`; the mesh handler resolves identity and mints the session (§7.7).
+    #[must_use]
+    pub fn new_brokered(limiter: RateLimiter) -> Self {
+        Self {
+            start: Instant::now(),
+            senders: HashMap::new(),
+            brokered: true,
+            inner: Mutex::new(Inner {
+                conns: HashMap::new(),
+                limiter,
+            }),
+            inbound: Condvar::new(),
+        }
+    }
+
+    /// Whether this relay brokers (vs. drives a legacy host-dbus delegate).
+    #[must_use]
+    pub const fn is_brokered(&self) -> bool {
+        self.brokered
     }
 
     /// Handle `DBUS_OPEN` `[conn_id | bus]`: register the connection owned by `sender_pid` and tell
@@ -151,7 +180,7 @@ impl DbusRelay {
         let Some(bus) = bus_from_byte(bus_byte) else {
             return vec![status::BAD_REQUEST];
         };
-        if !self.senders.contains_key(&bus) {
+        if !self.brokered && !self.senders.contains_key(&bus) {
             return vec![status::DENIED]; // the bus is not enabled by policy
         }
         {
@@ -172,7 +201,7 @@ impl DbusRelay {
         }
         // Tell the delegate (no lock held — the write rides the bounded channel). Roll the
         // registration back if a stalled delegate sheds it, so no half-open connection lingers.
-        if self.try_relay(bus, &Record::Open { conn_id, bus }) {
+        if self.brokered || self.try_relay(bus, &Record::Open { conn_id, bus }) {
             vec![status::OK]
         } else {
             self.lock().conns.remove(&conn_id);
@@ -180,8 +209,11 @@ impl DbusRelay {
         }
     }
 
-    /// Handle `DBUS_SEND` `[conn_id | frame]`: rate-limit, relay the frame, ack immediately. Only
-    /// the connection's owner may send on it.
+    /// Handle `DBUS_SEND` `[conn_id | frame]`: rate-limit, relay the frame to the legacy
+    /// host-dbus delegate, ack immediately. Only the connection's owner may send on it.
+    ///
+    /// This is the **legacy** path. A brokered consumer never reaches here — it transacts its
+    /// per-session node on the mesh bus directly (§7.7), so kenneld is out of the byte path.
     #[must_use]
     pub fn send(&self, sender_pid: i32, data: &[u8]) -> Vec<u8> {
         let Some((conn_id, frame)) = wire::decode_send(data) else {
@@ -283,9 +315,11 @@ impl DbusRelay {
         // never tears down its mediation loop + bridge socket — a permanent host-side leak. So if
         // the relay does not land, leave the connection intact and return AGAIN: the facade retries
         // (exactly as `open()` does). Mark `closed` only after the Close is on its way.
-        if let Some(bus) = bus {
-            if !self.try_relay(bus, &Record::Close { conn_id }) {
-                return vec![status::AGAIN];
+        if !self.brokered {
+            if let Some(bus) = bus {
+                if !self.try_relay(bus, &Record::Close { conn_id }) {
+                    return vec![status::AGAIN];
+                }
             }
         }
         {

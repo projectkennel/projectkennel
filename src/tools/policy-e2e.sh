@@ -63,7 +63,9 @@ SUBKENNEL_NS="kennel-dev"
 SUBKENNEL_LINE="${UID_NUM}:${SUBKENNEL_TAG}:0000000002:${SUBKENNEL_NS}"
 SUITE_KEY_ID="kennel-suite"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-SUITE_KEY="$KEY_DIR/$SUITE_KEY_ID.key"
+# Post-SSHSIG (#134): `kennel keygen <id>` writes the OpenSSH private key as `<id>` (no `.key`
+# suffix) plus `<id>.pub`; `--key` takes that private-key path. (Was `<id>.key` pre-migration.)
+SUITE_KEY="$KEY_DIR/$SUITE_KEY_ID"
 ECHO_SOCK_DIR="/run/kennel-e2e"
 ECHO_SOCK="$ECHO_SOCK_DIR/echo.sock"
 HOME_FIXTURE="$HOME/kennel-e2e"
@@ -106,6 +108,7 @@ if [ "$DO_INSTALL" = 1 ]; then
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" \
         -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim \
+        -p kennel-dbus-broker \
         || { echo "static in-kernel build failed" >&2; exit 1; }
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress \
         || { echo "privhelper build failed" >&2; exit 1; }

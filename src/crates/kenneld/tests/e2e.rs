@@ -336,11 +336,11 @@ fn no_ipc_kennel_runs_through_the_factory() {
         oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
-    let shared = Shared::new(
+    let shared = std::sync::Arc::new(Shared::new(
         identity,
         HelperClient::new(privhelper_path()),
         TrustStoreLoader::from_keys(keys),
-    );
+    ));
 
     let req = StartRequest {
         policy: policy_file,
@@ -484,11 +484,11 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
-    let shared = Shared::new(
+    let shared = std::sync::Arc::new(Shared::new(
         identity,
         HelperClient::new(privhelper_path()),
         TrustStoreLoader::from_keys(keys),
-    );
+    ));
 
     // The workload runs in the remapped project ($HOME/kennel-e2e/manifest → the persona
     // home). It asserts: the manifest path EXISTS but is EMPTY (the empty over-mount) and
@@ -635,11 +635,11 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
-    let shared = Shared::new(
+    let shared = std::sync::Arc::new(Shared::new(
         identity,
         HelperClient::new(privhelper_path()),
         TrustStoreLoader::from_keys(keys),
-    );
+    ));
 
     let req = StartRequest {
         policy: policy_file,
@@ -800,11 +800,11 @@ fn run_ttl_kennel(
         oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
-    let shared = Shared::new(
+    let shared = std::sync::Arc::new(Shared::new(
         identity,
         HelperClient::new(privhelper_path()),
         TrustStoreLoader::from_keys(keys),
-    );
+    ));
 
     let req = StartRequest {
         policy: policy_file,
@@ -927,7 +927,8 @@ fn ttl_renew_without_an_operator_falls_back_to_resume() {
 /// `Shared` orchestration handle, and the temp dirs to clean up. `None` ⇒ a precondition
 /// is missing (printed); the caller returns (a skip, never a false pass).
 struct InteractiveHarness {
-    shared: kenneld::server::Shared<HelperClient, kenneld::policy::TrustStoreLoader>,
+    shared:
+        std::sync::Arc<kenneld::server::Shared<HelperClient, kenneld::policy::TrustStoreLoader>>,
     policy_file: PathBuf,
     cleanup: Vec<PathBuf>,
 }
@@ -1002,11 +1003,11 @@ fn interactive_harness(tag: &str) -> Option<InteractiveHarness> {
         oci_entry_bin: Some(sibling_binary("kennel-bin-oci-entry")),
         tracer: kennel_lib_config::Tracer::new("kenneld", kennel_lib_config::LogLevel::Info),
     };
-    let shared = Shared::new(
+    let shared = std::sync::Arc::new(Shared::new(
         identity,
         HelperClient::new(privhelper_path()),
         TrustStoreLoader::from_keys(keys),
-    );
+    ));
     Some(InteractiveHarness {
         shared,
         policy_file,
@@ -1151,7 +1152,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
     // broker (and the kennel) live across the detach/reattach below.
     let (client1, client1_peer) = UnixStream::pair().expect("client1 socketpair");
     let (mut control1, mut server1) = UnixStream::pair().expect("control1 socketpair");
-    let shared = std::sync::Arc::new(h.shared);
+    let shared = h.shared;
     let run_shared = std::sync::Arc::clone(&shared);
     let run_thread = std::thread::spawn(move || {
         run_kennel(

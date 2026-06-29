@@ -12,7 +12,7 @@
 //! signed-policy crypto: [`Privileged`] (the privhelper) and [`PolicyLoader`]
 //! (policy file → [`Plan`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
@@ -293,6 +293,18 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// the exit. The supervisor takes the mark to treat the kill as a reap (→ declared-but-pending,
     /// re-activatable) rather than a crash (→ restart/failed). Cleared as it is taken.
     idle_reaped: Mutex<std::collections::BTreeSet<String>>,
+    /// The live `binder-connector` mesh buses (§7.13.4a): one per capability, keyed by the
+    /// `(tier, name, key)` triple. Created lazily on first consumes/provides match (D4);
+    /// ref-counted for teardown. The `MeshBus` serves node 0 on its own looper thread.
+    mesh_buses: Mutex<HashMap<String, crate::mesh_bus::MeshBus>>,
+    /// Each brokered consumer's settled `[dbus]` filter, keyed by its kennel `ctx` — the policy
+    /// already carried on the ctx kenneld built at spawn (§7.7). The D-Bus mesh bus's node-0
+    /// handler reads this when a consumer connects: it resolves the caller's `sender_pid` → cgroup
+    /// → ctx, looks up the ctx's filter here, and pushes it to the broker as `ACCEPT_SESSION`.
+    /// Inserted when a brokered kennel is prepared, removed when its ctx is released — so it lives
+    /// exactly as long as the kennel does. It is *not* a session/credential store: identity is the
+    /// kernel's per-transaction attestation, this is only the policy to apply once identified.
+    dbus_filters: std::sync::Arc<Mutex<HashMap<u16, kennel_lib_policy::DbusRuntime>>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -316,6 +328,8 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
             activator: std::sync::OnceLock::new(),
             idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
+            mesh_buses: Mutex::new(HashMap::new()),
+            dbus_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -598,6 +612,82 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(|_| format!("unix:path=/run/user/{}/bus", self.identity.uid))
     }
 
+    /// Get or create a binder-connector mesh bus for the given capability, returning a **detached,
+    /// movable clone** of its binderfs (an `open_tree(CLONE)` fd from the holder) for one new
+    /// participant. The bus is created lazily on first use (D4) and ref-counted for teardown.
+    ///
+    /// The caller hands the fd to the kennel (via the mesh rendezvous), where `kennel-bin-init`
+    /// `move_mount`s it into the view — the device never enters the view as a host-path bind, so it
+    /// is immune to the kennel's PID namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if creating the mesh bus or cloning its mount fails.
+    fn ensure_mesh_bus(
+        &self,
+        tier: crate::catalogue::Tier,
+        name: &str,
+        key: Option<&str>,
+    ) -> io::Result<std::os::fd::OwnedFd> {
+        let bus_key = mesh_bus_key(tier, name, key);
+        let mut buses = self
+            .mesh_buses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bus = match buses.entry(bus_key) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                // The mesh bus mediates every cross-kennel D-Bus session — its verdicts are
+                // security-relevant, so they go to a real journal-backed writer (not a noop drain),
+                // keyed to the bus identity (it has no per-kennel audit state dir).
+                let w =
+                    std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
+                // The D-Bus connector bus alone gets the identity resolver: its node-0 handler
+                // mints a filtered session per consumer. Every other connector bus resolves a
+                // consumer straight to its provider's handle (no resolver).
+                let dbus_resolver =
+                    (name == "org.projectkennel.dbus-broker").then(|| self.dbus_resolver());
+                // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
+                // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
+                // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
+                // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
+                // owned by kenneld's own uid); the socket lets kenneld request movable clones.
+                let mount_dir = crate::mesh::host_rp_dir(tier, name, key);
+                let (holder_pid, holder_sock) = crate::mesh_holder::spawn(&mount_dir)?;
+                let mb = crate::mesh_bus::MeshBus::create(
+                    tier,
+                    name,
+                    key,
+                    &w,
+                    dbus_resolver,
+                    holder_pid,
+                    holder_sock,
+                )?;
+                e.insert(mb)
+            }
+        };
+        bus.add_participant();
+        let clone = bus.clone_mount_fd()?;
+        drop(buses);
+        Ok(clone)
+    }
+
+    /// Release a participant from a mesh bus. If the refcount reaches zero, the bus
+    /// is torn down (serve loop stopped, binderfs unmounted).
+    fn release_mesh_bus(&self, tier: crate::catalogue::Tier, name: &str, key: Option<&str>) {
+        let bus_key = mesh_bus_key(tier, name, key);
+        let mut buses = self
+            .mesh_buses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let std::collections::hash_map::Entry::Occupied(mut e) = buses.entry(bus_key) {
+            if e.get_mut().remove_participant() {
+                // Last participant — tear down the bus.
+                e.remove();
+            }
+        }
+    }
+
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.10.2): a synthetic
     /// key never outlives the kennel it was minted for. Best-effort.
     fn deregister_ssh(&self, kennel: &str) {
@@ -728,12 +818,58 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Deregister `name` and return its context to the pool.
     fn release(&self, name: &str, ctx: u16) {
+        // Drop this kennel's D-Bus filter (if brokered) — its ctx is being freed, so the mesh
+        // resolver must no longer resolve a future caller in a reused cgroup to a stale policy.
+        self.dbus_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ctx);
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.kennels.remove(name);
         reg.ctx.release(ctx);
+    }
+
+    /// Record a brokered consumer's settled `[dbus]` filter under its `ctx`, for the D-Bus mesh
+    /// bus's node-0 handler to resolve callers against (see [`Shared::dbus_filters`]). Removed when
+    /// the ctx is released ([`Shared::release`]).
+    fn register_dbus_filter(&self, ctx: u16, dbus: kennel_lib_policy::DbusRuntime) {
+        self.dbus_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ctx, dbus);
+    }
+
+    /// Build the D-Bus mesh resolver (see [`crate::mesh_bus::DbusResolver`]): map a connecting
+    /// consumer's `(sender_pid, capability name)` to the encoded `ACCEPT_SESSION` filter, resolving
+    /// `sender_pid` → cgroup → ctx → its `[dbus]` policy *fresh* each call. Nothing is remembered;
+    /// the only standing state is the ctx→policy map, keyed on a kernel-managed cgroup lifetime.
+    fn dbus_resolver(&self) -> crate::mesh_bus::DbusResolver {
+        let filters = std::sync::Arc::clone(&self.dbus_filters);
+        std::sync::Arc::new(move |sender_pid: i32, name: &str| {
+            let bus = kennel_lib_binder::service::dbus::capability_bus(name)?;
+            let ctx = crate::cgroup::pid_to_ctx(sender_pid)?;
+            let map = filters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runtime = map.get(&ctx)?;
+            let rules = match bus {
+                kennel_lib_binder::service::dbus::SYSTEM => runtime.system.as_ref(),
+                _ => runtime.session.as_ref(),
+            }?;
+            let payload = kennel_lib_binder::service::broker::encode_accept(
+                bus,
+                &rules.talk,
+                &rules.call,
+                &rules.broadcast,
+                &rules.own,
+                &rules.deny_talk,
+            );
+            drop(map);
+            Some(payload)
+        })
     }
 
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
@@ -1025,14 +1161,14 @@ where
 /// used anywhere, so a name with `/`, `..`, NUL, whitespace, or control bytes cannot
 /// traverse a path or inject a hostname. `List`/`AuthorizedKeys` carry no name.
 pub fn dispatch_request<P, L>(
-    shared: &Shared<P, L>,
+    shared: &Arc<Shared<P, L>>,
     request: Request,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
     constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
 ) where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     let response = match request {
         Request::Start(req) => match validate_kennel_name(&req.kennel) {
@@ -1145,7 +1281,7 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
 // block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_kennel<P, L>(
-    shared: &Shared<P, L>,
+    shared: &Arc<Shared<P, L>>,
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
@@ -1157,11 +1293,12 @@ pub fn run_kennel<P, L>(
     // for a plain `kennel run`, which provides nothing over the mesh.
     provider_tier: Option<crate::catalogue::Tier>,
 ) where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{}`", req.kennel));
+    let mut mesh_bus_guard = MeshBusGuard::new(shared);
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
         Err(resp) => {
@@ -1520,6 +1657,11 @@ pub fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
+    // Binder-connector mesh mounts to place in the view via the rendezvous (§7.13.4a): each is a
+    // detached binderfs clone fd + its in-view target directory. `kennel-bin-init` `move_mount`s them
+    // before forking the workload (and Landlock-grants the device). Collected across the provider and
+    // consumer passes below, then handed to `bring_up` on the `Spec`.
+    let mut mesh_mounts: Vec<(std::os::fd::OwnedFd, std::path::PathBuf)> = Vec::new();
     // Provider rendezvous points (§7.13.4b): for each af-unix `[[provides]]`, bind the host
     // rendezvous directory `<runtime>/mesh/<tier>/<name>[.key]/` at the in-view `dirname(endpoint)`,
     // so the socket the provider binds at its policy `endpoint` is the inode the broker connects
@@ -1564,6 +1706,117 @@ pub fn run_kennel<P, L>(
                     exclusive: false,
                 });
             }
+            // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability
+            // and request a movable clone of its binderfs to place at the provider's `endpoint`. The
+            // clone rides the mesh rendezvous; `kennel-bin-init` `move_mount`s it into the view, where
+            // the provider opens `<endpoint>` (= `<mount-dir>/binder`), `ADD_SERVICE`s, and serves.
+            for p in &loaded.provides {
+                if p.shape != kennel_lib_policy::settled::Shape::BinderConnector {
+                    continue;
+                }
+                let Some(target_dir) = std::path::Path::new(&p.endpoint).parent() else {
+                    continue;
+                };
+                let key = p.key.as_deref();
+                match shared.ensure_mesh_bus(tier, &p.name, key) {
+                    Ok(clone_fd) => {
+                        mesh_bus_guard.push(tier, p.name.clone(), p.key.clone());
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "kenneld: provider `{}`: mesh bus for `{}`: {e}",
+                            req.kennel, p.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Consumer mesh-bus bind-mounts (§7.13.4a): for each binder-connector `[[consumes]]` with an
+    // `at`, resolve the provider's tier from the catalogue, ensure the mesh bus, and bind-mount
+    // its binder device at the consumer's `at` path. The consumer opens this device, transacts
+    // `SVC_CONNECT` on the mesh bus to get the provider's handle, then transacts directly.
+    //
+    // Two-phase: collect (tier, name, key, at) under the catalogue lock, then drop it before
+    // taking the mesh_buses lock (ensure_mesh_bus), preventing lock-order inversion.
+    {
+        let mesh_consumer_binds: Vec<(crate::catalogue::Tier, String, Option<String>, String)> = {
+            let cat = shared
+                .catalogue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loaded
+                .consumes
+                .iter()
+                .filter(|c| c.shape == kennel_lib_policy::settled::Shape::BinderConnector)
+                .filter_map(|c| {
+                    let at = c.at.as_ref()?;
+                    let candidate = cat.resolve(&c.name).into_iter().next()?;
+                    Some((candidate.tier, c.name.clone(), c.key.clone(), at.clone()))
+                })
+                .collect()
+        }; // catalogue lock dropped
+        for (tier, name, key, at) in &mesh_consumer_binds {
+            let Some(target_dir) = std::path::Path::new(at).parent() else {
+                continue;
+            };
+            match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(*tier, name.clone(), key.clone());
+                    mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "kenneld: consumer `{}`: mesh bus for `{name}`: {e}",
+                        req.kennel
+                    );
+                }
+            }
+        }
+    }
+
+    // Brokered D-Bus consumer (§7.7): a kennel with a `[dbus]` grant reaches the standing
+    // dbus-broker over the connector mesh bus, so its `facade-dbus` opens the mesh device directly
+    // (the per-kennel `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view —
+    // the dbus-name consume is served by the facade, not the binder-connector consumer loop above,
+    // so nothing else mounts it. Only when the broker is actually enabled; otherwise D-Bus takes
+    // the legacy host-dbus route and needs no mesh device.
+    {
+        let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
+        // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
+        // registers its control node on the mesh bus keyed by its *policy-derived* tier (the
+        // supervisor activates it with the catalogue candidate's tier); a user-enabled broker is
+        // `User`, not `Host`. Keying this consumer's mesh bus by the same resolved tier is what puts
+        // both on one binderfs instance — mismatch them and the broker's control node is on a
+        // different bus, so `ACCEPT_SESSION` fails closed with no provider found.
+        let broker_tier = {
+            let cat = shared
+                .catalogue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cat.resolve("org.projectkennel.dbus-broker")
+                .into_iter()
+                .next()
+                .map(|c| c.tier)
+        };
+        if let (true, Some(tier)) = (dbus_enabled, broker_tier) {
+            match shared.ensure_mesh_bus(tier, "org.projectkennel.dbus-broker", None) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(tier, "org.projectkennel.dbus-broker".to_owned(), None);
+                    // The device lands at `MESH_DBUS_DEVICE` (`/dev/binderfs-mesh/binder`); its
+                    // mount dir is the parent. `facade-dbus` opens that path (the `SVC_CONNECT(dbus)`
+                    // reply names it).
+                    if let Some(target_dir) =
+                        std::path::Path::new(crate::binder::MESH_DBUS_DEVICE).parent()
+                    {
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("kenneld: consumer `{}`: dbus mesh bus: {e}", req.kennel);
+                }
+            }
         }
     }
 
@@ -1589,6 +1842,7 @@ pub fn run_kennel<P, L>(
         dbus,
         binder: None,
         oci: oci_prep,
+        mesh_mounts,
         tracer: tr,
     };
 
@@ -1666,6 +1920,22 @@ pub fn run_kennel<P, L>(
             consumes: loaded.consumes,
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
+            brokered_dbus: {
+                let has_broker = {
+                    let cat = shared
+                        .catalogue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    !cat.resolve("org.projectkennel.dbus-broker").is_empty()
+                };
+                // Brokered: record this kennel's filter under its ctx so the D-Bus mesh bus's
+                // node-0 handler can resolve a future connect (sender_pid → cgroup → ctx → here)
+                // and mint the session. The per-kennel relay then only *locates* the mesh bus.
+                if has_broker {
+                    shared.register_dbus_filter(ctx, loaded.dbus.clone());
+                }
+                has_broker
+            },
         });
     }
 
@@ -1714,6 +1984,10 @@ pub fn run_kennel<P, L>(
     let pid = kennel.id();
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
+
+    // D-Bus sessions are brokered lazily: the consumer's filter rides the brokered DbusRelay
+    // (resolved at construction), and a session node is minted per SVC_CONNECT(dbus-name) via
+    // ACCEPT_SESSION — no standing per-consumer registration at the broker.
     // Hard-reaper race close (§7.12.7): a spawned sibling's construction is async to the SPAWN reply,
     // so the requester can die — and its `reap_children` run — while this build is still in flight,
     // before the cgroup exists for the reaper to `cgroup.kill`. The requester's `SpawnRuntime::Drop`
@@ -1848,6 +2122,8 @@ pub fn run_kennel<P, L>(
     // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
     // nothing, including every spawned kennel itself, which is depth-1).
     shared.reap_children(ctx);
+    // D-Bus sessions need no explicit teardown: when this consumer's kennel exits, its
+    // session-node handles are released and the broker reclaims each on Br::Release.
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
@@ -2125,6 +2401,44 @@ fn verify_workload_digest(
     }
 }
 
+struct MeshBusGuard<'a, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    shared: &'a Shared<P, L>,
+    buses: Vec<(crate::catalogue::Tier, String, Option<String>)>,
+}
+
+impl<'a, P, L> MeshBusGuard<'a, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    const fn new(shared: &'a Shared<P, L>) -> Self {
+        Self {
+            shared,
+            buses: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, tier: crate::catalogue::Tier, name: String, key: Option<String>) {
+        self.buses.push((tier, name, key));
+    }
+}
+
+impl<P, L> Drop for MeshBusGuard<'_, P, L>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    fn drop(&mut self) {
+        for (tier, name, key) in &self.buses {
+            self.shared.release_mesh_bus(*tier, name, key.as_deref());
+        }
+    }
+}
+
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
 /// all three are present (otherwise the workload inherits the daemon's stdio).
 fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, String> {
@@ -2154,6 +2468,14 @@ fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, Strin
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     Ok(command)
+}
+
+/// Derive the map key for a mesh bus from its `(tier, name, key)` triple.
+fn mesh_bus_key(tier: crate::catalogue::Tier, name: &str, key: Option<&str>) -> String {
+    key.map_or_else(
+        || format!("{}/{name}", tier.as_str()),
+        |k| format!("{}/{name}.{k}", tier.as_str()),
+    )
 }
 
 #[cfg(test)]
@@ -2607,9 +2929,16 @@ mod tests {
         assert_eq!(summary, [("a", true), ("b", false)]);
     }
 
-    // The full per-kennel path (handle_connection / run_kennel driving a real spawn) is now
-    // exercised by the self-hosting e2e (`tests/e2e.rs`, run via the unprivileged runner)
-    // against the real privhelper + factory — which a `Privileged` double cannot represent
-    // (it was a double that hid the broken-on-the-daemon-path factory). The registry/control
-    // logic above stays as fast pure unit tests.
+    #[test]
+    fn mesh_bus_key_includes_tier_name_and_optional_key() {
+        use crate::catalogue::Tier;
+        assert_eq!(
+            super::mesh_bus_key(Tier::User, "org.x.wl", None),
+            "user/org.x.wl"
+        );
+        assert_eq!(
+            super::mesh_bus_key(Tier::Host, "org.x.wl", Some("K1")),
+            "host/org.x.wl.K1"
+        );
+    }
 }

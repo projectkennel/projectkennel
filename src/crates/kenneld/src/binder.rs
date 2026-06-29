@@ -51,6 +51,10 @@ const CONSUME_WAIT_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 const CONSUME_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 /// A service name is bounded (binderfs's own `BINDERFS_MAX_NAME`); reject longer.
 const MAX_NAME: usize = 255;
+/// The in-view device path of the D-Bus connector mesh bus (the template's binder-connector
+/// endpoint, bind-mounted into the consumer's view). The per-kennel `SVC_CONNECT(dbus-name)`
+/// hands this back so the facade opens the mesh bus and connects to the broker there (§7.7).
+pub(crate) const MESH_DBUS_DEVICE: &str = "/dev/binderfs-mesh/binder";
 
 // The node-0 verb codes and reply status bytes are the shared wire convention
 // (`kennel_lib_binder::service`), used by both kenneld here and the in-kennel clients.
@@ -314,7 +318,7 @@ fn handle(
     // catalogue and broker a connector. A facade-class verb (no registry lock): the request-don't-author
     // gate is the kennel's signed [[consumes]], and the resolve is against the daemon catalogue.
     if incoming.code == verb::SVC_CONNECT {
-        return svc_connect(consumes, catalogue, activator, incoming, ctx, writer);
+        return svc_connect(consumes, catalogue, activator, incoming, ctx, writer, dbus);
     }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
@@ -328,7 +332,7 @@ fn handle(
         if let Some(name) = kennel_lib_binder::service::svc_connect::decode_request(&incoming.data)
         {
             if consumes.iter().any(|c| c.name == name) {
-                return svc_connect(consumes, catalogue, activator, incoming, ctx, writer);
+                return svc_connect(consumes, catalogue, activator, incoming, ctx, writer, dbus);
             }
         }
         return af_unix_connect(unix, incoming, ctx, writer);
@@ -618,6 +622,7 @@ fn svc_connect(
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
+    dbus: Option<&DbusRelay>,
 ) -> Reply {
     use crate::broker::Decision;
     use kennel_lib_binder::service::svc_connect as wire;
@@ -647,12 +652,14 @@ fn svc_connect(
         Decision::NoGrant => (Outcome::Deny, status::DENIED),
         Decision::NoProvider => (Outcome::Deny, status::NOT_FOUND),
         // A `Ready` provider is running: broker the connector now.
-        Decision::Ready(sel) => return svc_connect_handoff(writer, incoming, ctx, name, &sel),
+        Decision::Ready(sel) => {
+            return svc_connect_handoff(writer, incoming, ctx, name, &sel, dbus)
+        }
         // A `Pending` provider is enabled but cold: socket-activate it and consume-with-wait until it
         // is declared-and-ready (broker the connector) or the deadline fires (§7.13.4a).
         Decision::Pending(sel) => {
             return svc_connect_activate_wait(
-                consumes, catalogue, activator, incoming, ctx, name, writer, &sel,
+                consumes, catalogue, activator, incoming, ctx, name, writer, &sel, dbus,
             );
         }
         // A `NotServing` (declared-but-failed) provider cannot hand a connector — no fallback (§7.13.4).
@@ -679,6 +686,7 @@ fn svc_connect_activate_wait(
     name: &str,
     writer: &Writer,
     sel: &crate::broker::Selected,
+    dbus: Option<&DbusRelay>,
 ) -> Reply {
     use crate::broker::Decision;
     let unavailable = || {
@@ -713,7 +721,7 @@ fn svc_connect_activate_wait(
         match decision {
             // Construction sealed: the provider is ready — broker the connector.
             Decision::Ready(ready) => {
-                return svc_connect_handoff(writer, incoming, ctx, name, &ready)
+                return svc_connect_handoff(writer, incoming, ctx, name, &ready, dbus)
             }
             // Crash-loop-exhausted / vanished / grant lost: stop waiting, report unavailable.
             Decision::NoGrant | Decision::NoProvider | Decision::NotServing => {
@@ -739,18 +747,53 @@ fn svc_connect_handoff(
     ctx: u16,
     name: &str,
     sel: &crate::broker::Selected,
+    dbus: Option<&DbusRelay>,
 ) -> Reply {
     use kennel_lib_policy::settled::Shape;
 
-    if sel.shape != Shape::AfUnix {
-        return emit_svc_connect(
-            writer,
-            incoming,
-            ctx,
-            name,
-            Outcome::Error,
-            status::UNAVAILABLE,
-        );
+    match sel.shape {
+        Shape::AfUnix => {} // handled below
+        Shape::DbusName => {
+            // The dbus-name handoff (§7.7) is a pure *locator*: on the per-kennel bus kenneld only
+            // tells the facade where the dbus mesh bus is, and the facade connects THERE. It makes
+            // no session and resolves no identity here — the mesh bus's node-0 handler does that,
+            // resolving the connecting facade afresh (sender_pid → cgroup → ctx → filter) and
+            // minting the session. Brokered → `[OK][mesh-path]`; no broker → `[OK]` and the facade
+            // takes the legacy host-dbus route via DBUS_* on this bus (unchanged behaviour).
+            let reply = if dbus.is_some_and(DbusRelay::is_brokered) {
+                let mut r = vec![status::OK];
+                r.extend_from_slice(MESH_DBUS_DEVICE.as_bytes());
+                r
+            } else {
+                vec![status::OK]
+            };
+            writer.emit(
+                &Event::new(
+                    "binder.svc-connect",
+                    Resource::Binder,
+                    Outcome::Allow,
+                    Source::Kenneld,
+                )
+                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+                .field("name", Value::untrusted(name.to_owned()))
+                .field("provider", Value::untrusted(sel.provider.clone()))
+                .field("shape", Value::untrusted("dbus-name".to_owned()))
+                .field("ctx", Value::Uint(u64::from(ctx))),
+            );
+            return Reply::Data(reply);
+        }
+        Shape::BinderConnector => {
+            // The binder-connector handoff is mediated on the mesh bus, not the per-kennel
+            // bus. A SVC_CONNECT here is a programming error by the facade — deny.
+            return emit_svc_connect(
+                writer,
+                incoming,
+                ctx,
+                name,
+                Outcome::Error,
+                status::UNAVAILABLE,
+            );
+        }
     }
     // The host rendezvous socket: kenneld's derived directory + the provider's policy endpoint leaf,
     // the same inode bound into the provider's view (§7.13.4b). A plain connect, the §4.3 fd-broker.

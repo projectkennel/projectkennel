@@ -266,13 +266,18 @@ fn is_exec_wildcard(entry: &str) -> bool {
     matches!(entry.trim(), "**" | "/**")
 }
 
-/// The Landlock access a granted device node receives: read and write the file,
-/// and `ioctl(2)` on it (`IOCTL_DEV`, ABI 5; [`Ruleset::allow_path`] masks the
-/// bit away on older kernels). Not `EXECUTE`/`READ_DIR` — a device node is
-/// neither a program nor a directory.
+/// The Landlock access a granted device node receives.
+///
+/// Read and write the file, and `ioctl(2)` on it (`IOCTL_DEV`, ABI 5; [`Ruleset::allow_path`] masks
+/// the bit away on older kernels). Not `EXECUTE`/`READ_DIR` — a device node is neither a program nor
+/// a directory.
 ///
 /// [`Ruleset::allow_path`]: kennel_lib_syscall::landlock::Ruleset::allow_path
-fn dev_access() -> AccessFs {
+///
+/// Public so `kennel-bin-init` grants a move-mounted mesh binder device the identical access when it
+/// places it post-pivot (§7.13.4a), matching the per-kennel binder device's rights.
+#[must_use]
+pub fn dev_access() -> AccessFs {
     AccessFs::READ_FILE | AccessFs::WRITE_FILE | AccessFs::IOCTL_DEV
 }
 

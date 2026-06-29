@@ -265,6 +265,37 @@ pub mod dbus {
     /// The system bus selector byte.
     pub const SYSTEM: u8 = 1;
 
+    /// The mesh capability name a D-Bus consumer's `SVC_CONNECT` carries for the **session** bus.
+    ///
+    /// Distinct names per bus are how the consumer tells the mesh handler which filter to apply
+    /// (the shared `svc_connect` codec carries only a name). Matches the `[[consumes]]` capability
+    /// and the facade's request.
+    pub const CAPABILITY_SESSION: &str = "org.projectkennel.dbus";
+
+    /// The mesh capability name a D-Bus consumer's `SVC_CONNECT` carries for the **system** bus.
+    pub const CAPABILITY_SYSTEM: &str = "org.projectkennel.dbus-system";
+
+    /// Map a mesh capability `name` to the D-Bus bus byte it selects, or `None` if it is not a
+    /// D-Bus capability. The mesh resolver uses this to pick the consumer's per-bus filter.
+    #[must_use]
+    pub fn capability_bus(name: &str) -> Option<u8> {
+        match name {
+            CAPABILITY_SESSION => Some(SESSION),
+            CAPABILITY_SYSTEM => Some(SYSTEM),
+            _ => None,
+        }
+    }
+
+    /// The capability name for `bus` (the inverse of [`capability_bus`]).
+    #[must_use]
+    pub const fn capability_for_bus(bus: u8) -> &'static str {
+        if bus == SYSTEM {
+            CAPABILITY_SYSTEM
+        } else {
+            CAPABILITY_SESSION
+        }
+    }
+
     /// Encode a [`super::verb::DBUS_OPEN`] request: `[conn_id: u32 be | bus: u8]`.
     #[must_use]
     pub fn encode_open(conn_id: u32, bus: u8) -> Vec<u8> {
@@ -682,6 +713,272 @@ pub mod svc_connect {
         #[test]
         fn reply_rejects_an_empty_buffer() {
             assert!(decode_reply(&[]).is_none());
+        }
+    }
+}
+
+/// The mesh bus wire protocol: the `ADD_SERVICE` and `SVC_CONNECT` verbs spoken on a **mesh
+/// binderfs instance** (the binder analogue of the `af-unix` rendezvous directory, §7.13.4a).
+///
+/// The mesh bus reuses the per-kennel [`verb::ADD_SERVICE`] and [`verb::SVC_CONNECT`] codes but
+/// with a different data layout: on the mesh, `ADD_SERVICE` carries a binder node alongside the
+/// name (sent via [`crate::client::Connection::transact_node`]; the node arrives as a translated
+/// `BINDER_TYPE_HANDLE` for the context manager), and `SVC_CONNECT`'s `OK` reply carries the
+/// provider's handle as a `BINDER_TYPE_HANDLE` object (via [`crate::ctxmgr::Reply::Handle`]).
+///
+/// The name is the `endpoint` from the provider's `[[provides]]` (the public capability
+/// identifier, e.g. `org.projectkennel.dbus-broker`).
+pub mod mesh {
+    /// The hard upper bound on a mesh service name, same as [`super::svc_connect::SVC_NAME_MAX_BYTES`].
+    pub const MESH_NAME_MAX_BYTES: usize = 255;
+
+    /// Encode a mesh `ADD_SERVICE` request data prefix: the bare service name.
+    ///
+    /// The caller sends this via [`crate::client::Connection::transact_node`], which appends the
+    /// binder node object after the name bytes; the handler extracts both with
+    /// [`decode_add_service`].
+    #[must_use]
+    pub fn encode_add_service(name: &str) -> Vec<u8> {
+        name.as_bytes().to_vec()
+    }
+
+    /// Decode a mesh `ADD_SERVICE` request: extract the service name and the trailing binder
+    /// handle (the provider's node, translated by the driver from `BINDER_TYPE_BINDER` to
+    /// `BINDER_TYPE_HANDLE`).
+    ///
+    /// The data layout is `[name: UTF-8 | padding | flat_binder_object(24)]`. The name is
+    /// everything before the last `FLAT_BINDER_OBJECT_SIZE` bytes (minus alignment padding).
+    /// `None` for a short, empty, oversized, or non-UTF-8 name, or a missing/invalid handle
+    /// object (all untrusted, all fail closed).
+    #[must_use]
+    pub fn decode_add_service(data: &[u8]) -> Option<(&str, u32)> {
+        use crate::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+
+        // The object sits at the end; everything before it (minus padding) is the name.
+        let obj_start = data.len().checked_sub(FLAT_BINDER_OBJECT_SIZE)?;
+        let handle = flat_binder_object_handle_value(data.get(obj_start..)?)?;
+
+        // The name ends where alignment padding begins (round up to 8-byte boundary).
+        // Walk backwards from obj_start to find the last non-zero byte before the object,
+        // or use the fact that transact_node pads the name to 8-byte alignment.
+        // The name bytes are everything before the padding; find the padding start.
+        let name_end = (0..obj_start)
+            .rev()
+            .find(|&i| data.get(i).copied() != Some(0))
+            .map_or(0, |i| i.saturating_add(1));
+        if name_end == 0 || name_end > MESH_NAME_MAX_BYTES {
+            return None;
+        }
+        let name = core::str::from_utf8(data.get(..name_end)?).ok()?;
+        Some((name, handle))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::proto::{
+            flat_binder_object_binder, BINDER_TYPE_HANDLE, FLAT_BINDER_OBJECT_SIZE,
+        };
+
+        /// Build a mock `ADD_SERVICE` payload as `transact_node` would lay it out:
+        /// `[name bytes | padding to 8-byte alignment | flat_binder_object]`.
+        /// The driver translates the `BINDER_TYPE_BINDER` to `BINDER_TYPE_HANDLE` for the
+        /// context manager, so we hand-build the translated version.
+        fn mock_add_service_data(name: &str, handle: u32) -> Vec<u8> {
+            let mut buf = name.as_bytes().to_vec();
+            let obj_off = buf.len().next_multiple_of(8);
+            buf.resize(obj_off, 0); // padding
+                                    // Build a BINDER_TYPE_HANDLE object (the translated form).
+            let mut obj = flat_binder_object_binder(0, 0, 0);
+            // Overwrite the type tag to BINDER_TYPE_HANDLE (as the driver would).
+            obj[..4].copy_from_slice(&BINDER_TYPE_HANDLE.to_ne_bytes());
+            // Set the handle in the union low (offset 8 within the object).
+            obj[8..12].copy_from_slice(&handle.to_ne_bytes());
+            buf.extend_from_slice(&obj);
+            buf
+        }
+
+        #[test]
+        fn add_service_round_trips() {
+            let data = mock_add_service_data("org.projectkennel.dbus-broker", 42);
+            let (name, handle) = decode_add_service(&data).expect("decode");
+            assert_eq!(name, "org.projectkennel.dbus-broker");
+            assert_eq!(handle, 42);
+        }
+
+        #[test]
+        fn add_service_short_name() {
+            let data = mock_add_service_data("x", 7);
+            let (name, handle) = decode_add_service(&data).expect("decode");
+            assert_eq!(name, "x");
+            assert_eq!(handle, 7);
+        }
+
+        #[test]
+        fn add_service_rejects_too_short() {
+            // Shorter than a flat_binder_object — no room for name + object.
+            assert!(decode_add_service(&[0u8; FLAT_BINDER_OBJECT_SIZE - 1]).is_none());
+        }
+
+        #[test]
+        fn add_service_rejects_no_name() {
+            // Just a binder object, no name bytes at all.
+            let obj = [0u8; FLAT_BINDER_OBJECT_SIZE];
+            assert!(decode_add_service(&obj).is_none());
+        }
+
+        #[test]
+        fn add_service_rejects_bad_handle_type() {
+            let mut data = mock_add_service_data("test-svc", 1);
+            // Corrupt the type tag of the trailing object.
+            let obj_start = data.len() - FLAT_BINDER_OBJECT_SIZE;
+            *data.get_mut(obj_start).expect("object byte in range") ^= 0xFF;
+            assert!(decode_add_service(&data).is_none());
+        }
+    }
+}
+
+/// The `dbus-broker@v1` control-channel wire protocol: the verb `kenneld` speaks on the
+/// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
+///
+/// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its
+/// per-kennel bus, tells the broker to accept one D-Bus session and apply the given filter set.
+/// The broker mints a per-session node and enforces the filter on every frame it mediates for
+/// that session. kenneld decides; the broker applies and never relays through kenneld.
+///
+/// **Wire layout (all big-endian):** see [`broker::encode_accept`]. The `bus` byte selects session (0)
+/// or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
+pub mod broker {
+    /// Tell the provider to accept a D-Bus session kenneld has authorized, applying the
+    /// given filter. kenneld→provider, on the connector mesh bus's control node.
+    ///
+    /// The provider mints a fresh session node, stores the filter against that node's
+    /// cookie, and replies with the node (a `BINDER_TYPE_BINDER` object). kenneld forwards
+    /// that node to the consumer, which transacts it directly; the provider keys the session
+    /// by the kernel-attested **target node**, never by anything the consumer says, and
+    /// reclaims it on the node's `Br::Release` (the consumer's last ref dropping). The
+    /// provider decides nothing — it applies kenneld's filter to the session it was handed.
+    pub const ACCEPT_SESSION: u32 = 1;
+
+    /// Encode an `ACCEPT_SESSION` request:
+    /// `[bus: u8 | talk | call | broadcast | own | deny_talk]`.
+    #[must_use]
+    pub fn encode_accept(
+        bus: u8,
+        talk: &[String],
+        call: &[String],
+        broadcast: &[String],
+        own: &[String],
+        deny_talk: &[String],
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.push(bus);
+        put_string_list(&mut out, talk);
+        put_string_list(&mut out, call);
+        put_string_list(&mut out, broadcast);
+        put_string_list(&mut out, own);
+        put_string_list(&mut out, deny_talk);
+        out
+    }
+
+    /// A decoded `ACCEPT_SESSION` request.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AcceptSession {
+        /// The target bus: session (`0`) or system (`1`).
+        pub bus: u8,
+        /// Bus names the consumer may send method calls/signals to (talk).
+        pub talk: Vec<String>,
+        /// Allowed method calls, as `interface=member` filters.
+        pub call: Vec<String>,
+        /// Broadcast (signal) names the consumer may receive.
+        pub broadcast: Vec<String>,
+        /// Bus names the consumer may own.
+        pub own: Vec<String>,
+        /// Bus names explicitly denied for talk, overriding the talk set.
+        pub deny_talk: Vec<String>,
+    }
+
+    /// Decode an `ACCEPT_SESSION` request. `None` for malformed input.
+    #[must_use]
+    pub fn decode_accept(data: &[u8]) -> Option<AcceptSession> {
+        let mut cur = data;
+        let &bus = take(&mut cur, 1)?.first()?;
+        let talk = take_string_list(&mut cur)?;
+        let call = take_string_list(&mut cur)?;
+        let broadcast = take_string_list(&mut cur)?;
+        let own = take_string_list(&mut cur)?;
+        let deny_talk = take_string_list(&mut cur)?;
+        if !cur.is_empty() {
+            return None; // trailing garbage
+        }
+        Some(AcceptSession {
+            bus,
+            talk,
+            call,
+            broadcast,
+            own,
+            deny_talk,
+        })
+    }
+
+    fn put_string_list(out: &mut Vec<u8>, list: &[String]) {
+        let n = u16::try_from(list.len()).unwrap_or(u16::MAX);
+        out.extend_from_slice(&n.to_be_bytes());
+        for s in list.iter().take(usize::from(n)) {
+            let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
+        }
+    }
+
+    fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = cur.split_at_checked(n)?;
+        *cur = tail;
+        Some(head)
+    }
+
+    fn take_string_list(cur: &mut &[u8]) -> Option<Vec<String>> {
+        let &[n_hi, n_lo] = take(cur, 2)? else {
+            return None;
+        };
+        let n = u16::from_be_bytes([n_hi, n_lo]);
+        let mut list = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            let &[len_hi, len_lo] = take(cur, 2)? else {
+                return None;
+            };
+            let len = u16::from_be_bytes([len_hi, len_lo]);
+            let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
+            list.push(s.to_owned());
+        }
+        Some(list)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn accept_round_trips() {
+            let talk = vec!["org.freedesktop.portal.Desktop".to_owned()];
+            let call = vec!["org.freedesktop.portal.FileChooser=OpenFile".to_owned()];
+            let deny_talk = vec!["org.freedesktop.secrets".to_owned()];
+            let bytes = encode_accept(1, &talk, &call, &[], &[], &deny_talk);
+            let got = decode_accept(&bytes).expect("decode");
+            assert_eq!(got.bus, 1);
+            assert_eq!(got.talk, talk);
+            assert_eq!(got.call, call);
+            assert!(got.broadcast.is_empty());
+            assert!(got.own.is_empty());
+            assert_eq!(got.deny_talk, deny_talk);
+        }
+
+        #[test]
+        fn accept_rejects_malformed() {
+            let mut bad = encode_accept(0, &[], &[], &[], &[], &[]);
+            bad.push(0xFF);
+            assert!(decode_accept(&bad).is_none()); // trailing garbage
+            assert!(decode_accept(&[]).is_none()); // short (no bus byte)
         }
     }
 }

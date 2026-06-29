@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod mesh_rendezvous;
 pub mod plan;
 pub mod wire;
 

@@ -74,7 +74,7 @@ fn load_dir_into(
                 continue;
             }
         };
-        if let Err(e) = keys.insert_b64(key_id, contents.trim()) {
+        if let Err(e) = keys.insert_pub_line(key_id, contents.trim()) {
             eprintln!(
                 "kenneld: warning: ignoring malformed trust key {}: {e:?}",
                 path.display()

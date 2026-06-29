@@ -36,6 +36,8 @@ pub mod etc;
 pub mod inbound;
 pub mod inet;
 pub mod mesh;
+pub mod mesh_bus;
+pub mod mesh_holder;
 pub mod policy;
 pub mod prompt;
 pub mod proxy;
@@ -315,6 +317,11 @@ pub struct BinderPrep {
     /// through this when a `SVC_CONNECT` resolves to a not-yet-running one. `None` on a construction
     /// path with no activator (a test path) — a `Pending` consume then waits out the deadline.
     pub activator: Option<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// Whether this kennel's D-Bus is brokered over the connector mesh bus (the standing
+    /// `dbus-broker` service kennel is enabled). When set, the per-kennel relay only locates the
+    /// mesh bus; the session is minted by the mesh handler (§7.7). When clear, a legacy host-dbus
+    /// delegate is spawned instead.
+    pub brokered_dbus: bool,
 }
 
 /// Everything needed to bring one kennel up.
@@ -365,6 +372,12 @@ pub struct Spec {
     /// The prepared OCI substrate launch (§7.11): the launcher + image `config.json` to bind
     /// in when the image's own entrypoint is run. Empty ([`OciPrep::default`]) otherwise.
     pub oci: OciPrep,
+    /// Connector mesh mounts to place in the view (§7.13.4a): detached binderfs clone fds (from the
+    /// holders, via [`mesh_bus::MeshBus::clone_mount_fd`]) paired with their in-view target
+    /// directories. `bring_up` hands them to `kennel-bin-init` over the mesh rendezvous after
+    /// boot-sync; the init `move_mount`s each before forking the workload. Empty for a kennel that
+    /// neither provides nor consumes a binder-connector.
+    pub mesh_mounts: Vec<(std::os::fd::OwnedFd, PathBuf)>,
     /// Spawn-path diagnostic tracer (the `log_level` knob): `bring_up` traces each
     /// step (egress, view, factory construct, boot-sync, proxy, binder node 0) through
     /// it. No-op at the default `info`.
@@ -658,6 +671,7 @@ pub fn start<P: Privileged + Sync>(
         dbus,
         binder,
         oci,
+        mesh_mounts,
         tracer,
     } = spec;
     let mut state = Provision::default();
@@ -678,6 +692,7 @@ pub fn start<P: Privileged + Sync>(
         &dbus,
         binder.as_ref(),
         &oci,
+        &mesh_mounts,
         tracer,
         command,
         &mut state,
@@ -737,6 +752,7 @@ fn bring_up<P: Privileged + Sync>(
     dbus: &DbusPrep,
     binder: Option<&BinderPrep>,
     oci: &OciPrep,
+    mesh_mounts: &[(std::os::fd::OwnedFd, PathBuf)],
     tracer: kennel_lib_config::Tracer,
     command: &mut Command,
     state: &mut Provision,
@@ -1150,6 +1166,25 @@ fn bring_up<P: Privileged + Sync>(
     kennel_lib_syscall::boot::await_init_ready(sync_fd).map_err(Error::Io)?;
     tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
 
+    // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place. The
+    // init bound its datagram socket before READY, so it is reachable now via /proc/<init>/root; the
+    // init `move_mount`s each fd into its target before forking the workload. Privhelper-free and
+    // boot-sync-free — the datagram buffers, so this need not block on the init's receive. Always
+    // sent (a count-0 datagram for a kennel with no mesh participation), so the init's receive is
+    // unconditional and never hangs.
+    {
+        let sock_path = std::path::PathBuf::from(format!("/proc/{init_pid}/root"))
+            .join(kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK.trim_start_matches('/'));
+        let (data, fds) = kennel_lib_spawn::mesh_rendezvous::encode(mesh_mounts);
+        kennel_lib_syscall::scm::send_to_with_fds(&sock_path, &data, &fds).map_err(Error::Io)?;
+        if !mesh_mounts.is_empty() {
+            tracer.step(&format!(
+                "bring-up: mesh rendezvous — sent {} mount fd(s) to kennel-bin-init",
+                mesh_mounts.len()
+            ));
+        }
+    }
+
     // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
     // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
     if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
@@ -1201,11 +1236,20 @@ fn bring_up<P: Privileged + Sync>(
     // before releasing the binder pull, so their command sockets are bound before the workload's
     // first D-Bus message. With no delegate (no `[dbus]` grant or no binary) the relay is `None`
     // and the membrane denies every D-Bus verb (fail-closed).
-    let dbus_relay = match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
-        Ok(relay) => relay,
-        Err(e) => {
-            eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
-            None
+    let dbus_relay = if binder.is_some_and(|b| b.brokered_dbus) {
+        // Brokered: the relay only locates the mesh bus on the per-kennel SVC_CONNECT. The mesh
+        // handler resolves the consumer (sender_pid → cgroup → ctx → its registered filter) and
+        // mints the session via ACCEPT_SESSION; the data plane is then consumer↔broker direct.
+        Some(std::sync::Arc::new(crate::dbus::DbusRelay::new_brokered(
+            kennel_lib_binder::ratelimit::RateLimiter::with_defaults(),
+        )))
+    } else {
+        match spawn_dbus_delegates(dbus, ctx, &tracer, state) {
+            Ok(relay) => relay,
+            Err(e) => {
+                eprintln!("kenneld: warning: D-Bus mediation delegate not started: {e}");
+                None
+            }
         }
     };
 

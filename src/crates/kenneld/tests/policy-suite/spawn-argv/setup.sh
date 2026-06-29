@@ -13,7 +13,7 @@ set -euo pipefail
 CASE_DIR="$1"
 KENNEL="/usr/bin/kennel"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
-SUITE_KEY="$CFG/keys/kennel-suite.key"
+SUITE_KEY="$CFG/keys/kennel-suite"
 SRC="/usr/lib/kennel/templates/argv-tool/policy.toml"   # the installed reference-template source
 OUT="$CFG/templates/argv-tool/argv-tool.settled.toml"   # the standard user template path
 

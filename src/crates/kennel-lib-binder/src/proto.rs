@@ -191,6 +191,28 @@ pub fn flat_binder_object_handle_value(bytes: &[u8]) -> Option<u32> {
     Some(handle)
 }
 
+/// Encode a `flat_binder_object` of type [`BINDER_TYPE_HANDLE`] carrying `handle`.
+///
+/// Placed in a reply's data buffer (with an offsets entry pointing at it) so the
+/// kernel translates the handle from the sender's handle table to the receiver's.
+/// This is the handle-reply counterpart to [`flat_binder_object_fd`].
+#[must_use]
+pub fn flat_binder_object_handle(handle: u32) -> [u8; FLAT_BINDER_OBJECT_SIZE] {
+    // hdr.type @0, flags @4, union (handle in low 4 of 8) @8, cookie (8) @16.
+    let seq = BINDER_TYPE_HANDLE
+        .to_ne_bytes()
+        .into_iter()
+        .chain(0u32.to_ne_bytes()) // flags
+        .chain(handle.to_ne_bytes()) // union low (handle)
+        .chain(0u32.to_ne_bytes()) // union high
+        .chain(0u64.to_ne_bytes()); // cookie
+    let mut out = [0u8; FLAT_BINDER_OBJECT_SIZE];
+    for (slot, byte) in out.iter_mut().zip(seq) {
+        *slot = byte;
+    }
+    out
+}
+
 /// Append a `{handle, cookie}` death-notification `BC_*`.
 ///
 /// `BC_REQUEST_DEATH_NOTIFICATION` / `BC_CLEAR_DEATH_NOTIFICATION`. The payload is
@@ -677,5 +699,17 @@ mod tests {
         );
         assert_eq!(out.get(4..8), Some(&0xABu32.to_ne_bytes()[..]));
         assert_eq!(out.get(8..16), Some(&0xCDEFu64.to_ne_bytes()[..]));
+    }
+
+    #[test]
+    fn flat_binder_object_handle_round_trips() {
+        let obj = flat_binder_object_handle(0x1234);
+        assert_eq!(obj.len(), FLAT_BINDER_OBJECT_SIZE);
+        // Decodes correctly via the existing decoder.
+        assert_eq!(flat_binder_object_handle_value(&obj), Some(0x1234));
+        // Type tag is BINDER_TYPE_HANDLE.
+        assert_eq!(obj.get(0..4), Some(&BINDER_TYPE_HANDLE.to_ne_bytes()[..]));
+        // Handle is at union low (offset 8).
+        assert_eq!(obj.get(8..12), Some(&0x1234u32.to_ne_bytes()[..]));
     }
 }

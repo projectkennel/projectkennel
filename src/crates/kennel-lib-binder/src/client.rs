@@ -40,6 +40,12 @@ pub struct Incoming {
     pub sender_pid: i32,
     /// The sending process euid (kernel-attested).
     pub sender_euid: u32,
+    /// The cookie of the **local node this transaction targeted** — the value the node's
+    /// owner set at registration. A service that owns more than one node uses it to tell
+    /// which was addressed (e.g. the dbus-broker gates control verbs on its kenneld-only
+    /// control node vs. its consumer-facing data node). The kernel attests the target; it
+    /// does not attest the *sender's* node, so this is the recipient's own discriminator.
+    pub node_cookie: u64,
     /// The kernel buffer holding the data, to release with `BC_FREE_BUFFER` after
     /// the reply is sent.
     pub buffer: u64,
@@ -57,6 +63,11 @@ pub struct RecvBatch {
     /// caller drops its handle to each (release + `BC_DEAD_BINDER_DONE`) — the inbound
     /// mirror's death-notify lifecycle (`07-5` §7.5.7, guard 1).
     pub dead: Vec<u64>,
+    /// Cookies of **local nodes we own** whose last external reference was dropped this
+    /// cycle (`BR_RELEASE`). The dbus-broker uses this to reclaim a per-session node when
+    /// the consumer's kennel exits and its handle is released — session teardown with no
+    /// explicit verb.
+    pub released: Vec<u64>,
 }
 
 /// One open binder endpoint.
@@ -575,6 +586,124 @@ impl Connection {
         self.write_only(&write)
     }
 
+    /// Reply to a received transaction with a single binder handle (a
+    /// `BINDER_TYPE_HANDLE` object), then free its inbound buffer. The kernel
+    /// translates `handle` from this endpoint's handle table into the original
+    /// caller's. Used by the mesh bus to hand a provider's node to a consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn reply_with_handle(&self, incoming: &Incoming, handle: u32) -> io::Result<()> {
+        let object = proto::flat_binder_object_handle(handle);
+        let offsets: [u64; 1] = [0]; // the single object sits at offset 0 in `object`
+        let td = TransactionData {
+            flags: 0, // no TF_ACCEPT_FDS — this is a handle, not an fd
+            data_size: len_u64(object.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: object.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, true, &td);
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        self.write_only(&write)
+    }
+
+    /// Reply to a received transaction with a freshly-minted **local node** `(ptr, cookie)`
+    /// we own (a `BINDER_TYPE_BINDER` object); the kernel translates it into a handle in the
+    /// caller's table. The dbus-broker uses this to hand kenneld a per-session node in its
+    /// `ACCEPT_SESSION` reply; kenneld forwards that handle to the consumer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if the `BINDER_WRITE_READ` fails.
+    pub fn reply_with_node(
+        &self,
+        incoming: &Incoming,
+        node_ptr: u64,
+        node_cookie: u64,
+        node_flags: u32,
+    ) -> io::Result<()> {
+        let object = proto::flat_binder_object_binder(node_ptr, node_cookie, node_flags);
+        let offsets: [u64; 1] = [0]; // the single object sits at offset 0 in `object`
+        let td = TransactionData {
+            flags: 0, // a node, not an fd
+            data_size: len_u64(object.len())?,
+            offsets_size: len_u64(std::mem::size_of_val(&offsets))?,
+            buffer: object.as_ptr() as u64,
+            offsets: offsets.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, true, &td);
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        self.write_only(&write)
+    }
+
+    /// Send a synchronous transaction expecting a single `BINDER_TYPE_HANDLE` in the reply,
+    /// returning the translated handle. kenneld uses this to receive the per-session node the
+    /// dbus-broker mints in its `ACCEPT_SESSION` reply, to then forward to the consumer.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::transact`], plus [`io::ErrorKind::InvalidData`] if the reply carried no
+    /// handle object.
+    pub fn transact_handle(&self, handle: u32, code: u32, data: &[u8]) -> io::Result<u32> {
+        let td = TransactionData {
+            target: u64::from(handle),
+            code,
+            data_size: len_u64(data.len())?,
+            buffer: data.as_ptr() as u64,
+            ..TransactionData::default()
+        };
+        let mut write = Vec::new();
+        proto::write_transaction(&mut write, false, &td);
+        let mut to_send: &[u8] = &write;
+        loop {
+            let brs = self.cycle(to_send)?;
+            to_send = &[];
+            self.ack_refcounts(&brs)?;
+            for br in brs {
+                match br {
+                    Br::Reply(reply) => return self.take_handle(reply),
+                    Br::Failed => {
+                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
+                        return Err(io::Error::other(format!(
+                            "binder handle transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                        )));
+                    }
+                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
+                    Br::Error(code) => {
+                        return Err(io::Error::other(format!("binder driver error {code}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Extract the translated handle from a `BINDER_TYPE_HANDLE` reply, then free the buffer.
+    fn take_handle(&self, reply: TransactionData) -> io::Result<u32> {
+        let guard = BufferGuard::new(self, reply.buffer);
+        let bytes = self
+            .map
+            .read_at(reply.buffer, proto::FLAT_BINDER_OBJECT_SIZE)
+            .ok_or_else(|| io::Error::other("reply handle-object out of range"))?;
+        let handle = proto::flat_binder_object_handle_value(bytes).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "reply carried no handle object")
+        })?;
+        // The transaction's strong ref on this handle is dropped when the reply buffer is freed
+        // (binder lifecycle), so take our OWN ref BEFORE the free — otherwise the returned handle is
+        // already dangling: the node's refcount falls to zero, its owner gets `BR_RELEASE`, and the
+        // first transaction on the handle fails `BR_FAILED_REPLY`. Mirrors `mesh_add_service`'s
+        // acquire-before-free. The caller owns this ref and releases it with [`Self::release_handle`].
+        self.acquire_handle(handle)?;
+        guard.free()?;
+        Ok(handle)
+    }
+
     /// Extract the fd from a `BINDER_TYPE_FD` reply, then free the reply buffer.
     fn take_fd(&self, reply: TransactionData) -> io::Result<OwnedFd> {
         let guard = BufferGuard::new(self, reply.buffer);
@@ -762,6 +891,7 @@ impl Connection {
         let mut transactions = Vec::new();
         let mut spawn_looper = false;
         let mut dead = Vec::new();
+        let mut released = Vec::new();
         for br in brs {
             match br {
                 Br::Transaction(td) => {
@@ -778,11 +908,15 @@ impl Connection {
                         fds,
                         sender_pid: td.sender_pid,
                         sender_euid: td.sender_euid,
+                        node_cookie: td.cookie,
                         buffer: td.buffer,
                     });
                 }
                 Br::SpawnLooper => spawn_looper = true,
                 Br::DeadBinder(cookie) => dead.push(cookie),
+                // The last external ref to a node we own was dropped — its cookie lets the
+                // owner reclaim per-node state (the dbus-broker's session teardown).
+                Br::Release { cookie, .. } => released.push(cookie),
                 _ => {}
             }
         }
@@ -790,6 +924,7 @@ impl Connection {
             transactions,
             spawn_looper,
             dead,
+            released,
         })
     }
 
