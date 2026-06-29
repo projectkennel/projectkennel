@@ -1038,6 +1038,13 @@ mod root_tests {
                 sys::BPF_ANY,
             )
             .expect("populate bind_subnet");
+        // Seed the bind-ACL allow set the wildcard rewrites into (the kennel loopback). In
+        // production `stamp_proxy` seeds this; the `bind_allow_v4` ACL is default-deny, so without
+        // it `kennel_bind_decide_v4` refuses EVERY bind and the floor logic below is never reached.
+        let (bak, bav) = allow_v4_entry([127, 0, 0, 1], 0, u16::MAX);
+        loaded
+            .update_map("bind_allow_v4", &bak, &bav, sys::BPF_ANY)
+            .expect("seed bind_allow_v4 loopback");
 
         // Floor at 1024: a wildcard bind below it is denied; one at/above it is allowed
         // (rewritten to the loopback). The denied/allowed pair is the adversarial proof
@@ -1106,6 +1113,13 @@ mod root_tests {
                 sys::BPF_ANY,
             )
             .expect("populate bind_subnet with allowlist");
+        // Seed the bind-ACL allow set the wildcard rewrites into (as `stamp_proxy` does in
+        // production); `bind_allow_v4` is default-deny, so this isolates the port allowlist from
+        // the address ACL — without it every bind is refused regardless of port.
+        let (bak, bav) = allow_v4_entry([127, 0, 0, 1], 0, u16::MAX);
+        loaded
+            .update_map("bind_allow_v4", &bak, &bav, sys::BPF_ANY)
+            .expect("seed bind_allow_v4 loopback");
 
         let cg = Path::new("/sys/fs/cgroup/kennel-lib-bpf-test-bindallow");
         let (mut allowed_denied, mut other_denied) = (true, false);

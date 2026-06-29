@@ -84,6 +84,9 @@ fn main() -> ExitCode {
         }
     };
 
+    // Each fallible step in `attach_egress_programs` reports its own cause to stderr (the
+    // factory captures and surfaces it): the exit code alone cannot distinguish ENOSYS
+    // (program not embedded) from EPERM/EINVAL (a kernel refusal).
     let resp = attach_egress_programs(std::path::Path::new(cgroup), &payload);
     ExitCode::from(match resp.status {
         Status::Ok => 0,
@@ -110,11 +113,17 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
 
     let dir = match std::fs::File::open(path) {
         Ok(f) => f,
-        Err(e) => return Response::internal(errno_of(&e)),
+        Err(e) => {
+            eprintln!("kennel-privhelper-bpf: open cgroup {}: {e}", path.display());
+            return Response::internal(errno_of(&e));
+        }
     };
     let owner = match dir.metadata() {
         Ok(m) => m.uid(),
-        Err(e) => return Response::internal(errno_of(&e)),
+        Err(e) => {
+            eprintln!("kennel-privhelper-bpf: stat cgroup {}: {e}", path.display());
+            return Response::internal(errno_of(&e));
+        }
     };
     if owner != kennel_lib_syscall::unistd::real_uid() {
         return Response::refused(REFUSAL_CGROUP_NOT_OWNED);
@@ -125,30 +134,43 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     // (so there is one `audit_ringbuf` to drain and one coherent set to pin).
     let maps = match kennel_lib_bpf::create_maps(kennel_lib_bpf::KENNEL_MAPS) {
         Ok(m) => m,
-        Err(e) => return Response::internal(errno_of(&e)),
+        Err(e) => {
+            eprintln!("kennel-privhelper-bpf: create_maps: {e}");
+            return Response::internal(errno_of(&e));
+        }
     };
     if let Err(e) = populate_maps(&maps, payload) {
+        eprintln!("kennel-privhelper-bpf: populate_maps: {e}");
         return Response::internal(errno_of(&e));
     }
     // Seal the write-once meta map (02-7-bpf-abi.md): BPF_F_RDONLY_PROG (set at creation)
     // prevents BPF-program writes; BPF_MAP_FREEZE prevents userspace writes. Frozen after
     // populate (which writes it once) and before the programs attach.
     if let Err(e) = kennel_lib_bpf::freeze_maps(&maps, &["kennel_meta_map"]) {
+        eprintln!("kennel-privhelper-bpf: freeze_maps: {e}");
         return Response::internal(errno_of(&e));
     }
 
     for spec in kennel_lib_bpf::KENNEL_PROGRAMS {
         let Some(elf) = kennel_lib_bpf::programs::object(spec.name) else {
             // The binary was built without this program embedded — treat as unsupported.
+            eprintln!(
+                "kennel-privhelper-bpf: program `{}` not embedded",
+                spec.name
+            );
             return Response::internal(ENOSYS);
         };
         let prog = match kennel_lib_bpf::load_program_against(elf, spec, &maps) {
             Ok(p) => p,
-            Err(e) => return Response::internal(errno_of(&e)),
+            Err(e) => {
+                eprintln!("kennel-privhelper-bpf: load `{}`: {e}", spec.name);
+                return Response::internal(errno_of(&e));
+            }
         };
         if let Err(e) =
             kennel_lib_bpf::sys::prog_attach_cgroup(cgroup_fd, prog.as_fd(), spec.attach_type)
         {
+            eprintln!("kennel-privhelper-bpf: attach `{}`: {e}", spec.name);
             return Response::internal(errno_of(&e));
         }
         // `prog` drops here: its fd closes, but the cgroup keeps the attachment. The

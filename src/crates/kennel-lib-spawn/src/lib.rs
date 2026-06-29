@@ -811,9 +811,15 @@ fn materialize_dir_masks(
             continue;
         }
         // Create the mountpoint dir if the host has no store there yet — masking the path
-        // also denies the workload *creating* a host `.trust-manifest.d`.
+        // also denies the workload *creating* a host `.trust-manifest.d`. A read-only parent
+        // (an OCI image's closure-locked `/usr`, §7.11.4c) already denies that creation, so the
+        // path cannot appear and there is nothing to mask — skip it rather than fault EROFS.
         if dest.symlink_metadata().is_err() {
-            std::fs::create_dir_all(&dest)?;
+            match std::fs::create_dir_all(&dest) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::ReadOnlyFilesystem => continue,
+                Err(e) => return Err(e),
+            }
         }
         mount::bind(&mask_src, &dest, false).map_err(|e| {
             io::Error::new(e.kind(), format!("store mask bind {}: {e}", dest.display()))

@@ -15,9 +15,12 @@ const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_PROG_LOAD: libc::c_int = 5;
 const BPF_OBJ_PIN: libc::c_int = 6;
 const BPF_OBJ_GET: libc::c_int = 7;
-const BPF_MAP_FREEZE: libc::c_int = 27;
 const BPF_PROG_ATTACH: libc::c_int = 8;
 const BPF_PROG_DETACH: libc::c_int = 9;
+// BPF_MAP_FREEZE is enumerator 22 (after BPF_MAP_LOOKUP_AND_DELETE_ELEM=21). Value 27
+// is BPF_MAP_DELETE_BATCH — sending that with a map-element attr deletes nothing and the
+// kernel rejects the malformed batch with EINVAL, so the meta map was never sealed.
+const BPF_MAP_FREEZE: libc::c_int = 22;
 
 /// `map_update` flag: create or overwrite the element (`BPF_ANY`).
 pub const BPF_ANY: u64 = 0;
@@ -55,13 +58,19 @@ struct ProgLoadAttr {
     expected_attach_type: u32,
 }
 
-// The anonymous BPF_MAP_*_ELEM struct. `__aligned_u64` forces 8-byte alignment,
-// which repr(C) reproduces by padding after `map_fd` — so `size_of` is 32, the
-// size the kernel reads.
+// The anonymous BPF_MAP_*_ELEM struct. `__aligned_u64` forces 8-byte alignment of
+// `key`, so the kernel layout has 4 bytes of padding after `map_fd` (size 32).
+//
+// That pad is made an EXPLICIT zeroed field, not an implicit hole: Rust does not
+// initialise struct padding, and the whole 32 bytes are copied verbatim into the
+// kernel's `bpf_attr`. `BPF_MAP_FREEZE` (`CHECK_ATTR`) requires every byte after
+// `map_fd` to be zero — uninitialised pad bytes make it fail `EINVAL`. (Element
+// updates don't zero-check those offsets, so the hole was latent there.)
 #[repr(C)]
 #[derive(Default)]
 struct MapElemAttr {
     map_fd: u32,
+    _pad: u32,
     key: u64,
     value: u64,
     flags: u64,
@@ -169,6 +178,7 @@ pub unsafe fn map_update(
         key: key.as_ptr() as u64,
         value: value.as_ptr() as u64,
         flags,
+        ..MapElemAttr::default()
     };
     // SAFETY: `attr` is fully initialised; `key`/`value` outlive the call and are
     // valid for reads of the map's key_size/value_size bytes (the caller passes
