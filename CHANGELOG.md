@@ -6,6 +6,127 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-29
+
+**Owed work and quality of life.** 0.5.0 pays the debt the two large prior releases accrued. It
+**completes the connector-shape story**: the two mesh transports the schema typed but the broker
+refused — `dbus-name` and `binder-connector` — are now brokered, and D-Bus mediation moves *onto*
+the mesh as a standing, lazily-activated **`dbus-broker@v1`** service kennel (the daemon still
+parses no protocol body). It **narrows the default view** from the whole host `/usr` to a curated
+flatpak-style base, **brings keys into line with the tools operators already use** (OpenSSH wire
+format, `ssh-keygen` signing), **moves the one privileged helper off `setuid-root` to file
+capabilities**, and eases adoption with a standalone policy-authoring tool. Both ship gates cleared:
+the `kennel-compose` authoring tool, and a **dynamic red-team** of the broker-resolution race and
+the GUI confidentiality legs ([audit](docs/governance/audits/2026-06-29-dynamic-redteam-w11.md)) —
+no finding. Verified on Linux 7.0 against the installed stack.
+
+### Policy schema changes
+
+- **`[unix].abstract = "allow"`** — an ABI-gated escape hatch for workloads that need an
+  abstract-namespace peer. Denied by default (the always-on Landlock `ABSTRACT_UNIX_SOCKET` scope,
+  ABI ≥ 6); the opt-in restores it where the kernel supports it. **`abstract = "allow"` with
+  `net.mode = "host"` is a hard compile error** (a typed diagnostic citing the new threat ID): an
+  abstract socket is scoped to the network namespace, so a host-mode kennel sharing the host netns
+  would have a direct hole into the host abstract namespace below every other gate. The settled
+  schema version is unchanged (`SETTLED_SCHEMA_VERSION = 2`): this is a value gate, not a new field.
+
+### Keys & signing
+
+- **OpenSSH wire format.** Signing keys are `-----BEGIN OPENSSH PRIVATE KEY-----` and trust-store
+  public keys are `ssh-ed25519 <blob> [comment]`, so **`ssh-keygen -t ed25519`** generates a key
+  that works with `kennel policy compile --key` and in the trust store with no conversion. `kennel
+  keygen` produces the same. The three-tier key hierarchy and rotation/revocation are unchanged.
+- **SSHSIG signatures.** Settled policies are signed as detached **SSHSIG** blobs via `ssh-keygen
+  -Y sign` (so a key in a file, an `ssh-agent`, or a hardware token are all transparent);
+  verification is in-process against the trust-store key (never execs `ssh-keygen`). A key-management
+  chapter is added to the corpus.
+
+### CLI changes
+
+- **`kennel-compose`** — a standalone, optional policy-authoring tool (separate install, no runtime
+  dependency). *Binary-probe mode* reads an ELF's interpreter + linked-library closure to seed the
+  `fs`/`exec.allow` floor and asks a structured set of capability questions; *interactive mode*
+  walks the available templates and signed fragments. It emits a policy the operator owns and
+  reviews; `--no-prompts` produces a maximally-restrictive CI skeleton. It is **not** an LLM and not
+  a compiler.
+- **`kennel inspect <name> --unix`** — surfaces a kennel's resolved `AF_UNIX` grants (§7.6.5).
+- **`kennel list`** now shows the **consumer** leg of the mesh topology (who-consumes-what:
+  capability, shape, required/optional, resolution state) beside who-provides-what.
+- The proposed keyword CLI split (`kennel-run`/`-policy`/`-oci`) was **prototyped, measured, and
+  declined** — it tripled deployed size for no functional gain; the host CLI stays one `kennel-host`
+  unit behind the context-detecting shim (the `kennel-cli` library extraction was kept).
+
+### IPC protocol changes
+
+- **`binder-connector` and `dbus-name` are brokered.** Both shapes were schema-typed but
+  broker-refused (`UNAVAILABLE`) in 0.4.0; `SVC_CONNECT` now resolves and hands them off. The
+  `binder-connector` channel delivers per-consumer authorisation decisions to a service workload at
+  runtime; the `dbus-name` shape authorises which destination a consumer's existing in-view D-Bus
+  facade endpoint may carry calls to (no new socket, no new path).
+- **Brokered D-Bus is opt-in per consumer.** A kennel routes over the standing `dbus-broker@v1`
+  only when it declares **both** `[dbus.session]` **and** a `[[consumes]]` of a `dbus-name`
+  capability; `[dbus.session]` alone keeps the legacy per-consumer `host-dbus` operator delegate.
+  The two coexist — wholesale `host-dbus` retirement is deferred past 0.5.0.
+
+### Runtime & enforcement
+
+- **View floor narrowed to the flatpak base stance.** The default view no longer binds the whole
+  host `/usr`; it binds a curated base (the loader + core lib closure, CA certs, terminfo,
+  locale/`gconv`, the base toolchain) so the host's sprawl is **absent**, not merely read-denied
+  (construction-by-absence, closing the `readdir`-still-enumerates gap). `/var` is handled the
+  flatpak way (synthesised bits, never a host bind). Two reference templates ship beside
+  `base-confined`: **`base-bwrap`** (the unnarrowed bracket) and **`base-flatpak`** (the narrowed
+  floor) — loudly marked reference baselines, not recommended starts.
+- **`RESOLVE_NO_SYMLINKS` on writable-bind sources.** A writable bind source is resolved with
+  `openat2(RESOLVE_NO_SYMLINKS)` past the shallowest writable ancestor and bound via
+  `/proc/self/fd/N`, refusing a source that symlink-escapes the granted tree — closing the
+  0.4.0 F1 writable-bind-source aliasing residual.
+- **`kennel_meta` BPF map sealed read-only.** Created with `BPF_F_RDONLY_PROG` and frozen, so a
+  workload cannot corrupt the meta map even if it reached the BPF subsystem.
+
+### Privilege model
+
+- **Privhelper: `setuid-root` → file capabilities.** The one privileged component no longer runs
+  the whole pre-drop codepath as euid 0 with the full root set. The common factory carries exactly
+  `{cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin}` (no setuid bit) — a brief euid-0 window only
+  for the `uid_map` write — and the **rare** host-context caps are shed onto separately-gated
+  sub-helpers: `kennel-privhelper-net` `{cap_net_admin}`, `kennel-privhelper-bpf`
+  `{cap_bpf,cap_net_admin,cap_perfmon}`, `kennel-privhelper-mounts` `{cap_sys_admin}`. `install.sh`
+  `setcap`s on xattr-capable filesystems with a `setuid` fallback where file caps are unsupported.
+  The corpus privilege model moves with the code.
+
+### Threat catalogue
+
+- **Abstract-socket namespace escape via host net mode** — a new entry (catalogue **v0.5**): a
+  `net.mode = "host"` workload with `abstract = "allow"` would share the host abstract-socket
+  namespace below the proxy/Landlock/BPF gates. Distinct from the host-network *egress* entry; the
+  structural mitigation (own net-ns is the boundary) and the W8 compile-time refusal cite it.
+- The **2026-06-29 dynamic red-team** (the 0.5.0 ship gate) is recorded: the connector-broker
+  resolution race and the GUI confidentiality legs were driven live against the running daemon —
+  no confirmed finding.
+
+### Observability
+
+- **Privhelper failure cause surfaced.** A factory or sub-helper construction failure now folds the
+  helper's own stderr (a missing cap, a refused scope, a BPF-attach errno) into the
+  operator-visible diagnostic and the journal, instead of the bare transport symptom — no `strace`
+  needed. A parent-side failure between the clone and the maps-ack now fails fast instead of hanging
+  to the service-stop timeout.
+
+### Fixed
+
+- **Host-mode BPF egress was entirely broken.** `BPF_MAP_FREEZE` was defined as command `27`
+  (`BPF_MAP_DELETE_BATCH`); the real value is `22`. Sealing the egress meta map failed `EINVAL`, so
+  the whole host-mode egress construction aborted. Corrected, plus a uninitialised-padding fix in
+  the map-element attr.
+- **Brokered-D-Bus routing regression.** `brokered_dbus` was set whenever the broker merely existed
+  in the catalogue, stripping the `host-dbus` delegate from every `[dbus.session]` consumer; now
+  gated on a `dbus-name` consume.
+- **OCI substrate `SIGBUS`.** A base template's host `/usr/lib` read-binds were materialised over
+  the image overlay, so the image's `ld.so` loaded the host glibc instead of the image's; the
+  mismatch faulted. For an OCI view the image-owned FHS roots are no longer host-bound, the
+  facades dir is bound directly, and the host-control-surface mask skips a read-only-parent path.
+
 ## [0.4.0] — 2026-06-25
 
 **The service mesh.** Confined kennels now offer capabilities to one another and consume them
