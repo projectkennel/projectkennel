@@ -99,13 +99,27 @@ fn run() -> io::Result<u8> {
     if let Err(e) = kennel_lib_syscall::process::set_ptracer_any() {
         eprintln!("kennel-bin-init: PR_SET_PTRACER_ANY (Yama relaxation) failed, continuing: {e}");
     }
+    // Mesh rendezvous (§7.13.4a): bind the datagram socket BEFORE READY, so it exists when kenneld
+    // sends the detached connector-binderfs clones (it does so right after our READY, reaching us via
+    // /proc/<init>/root). We receive + `move_mount` them below, before forking the workload. Bound
+    // unconditionally; a kennel with no mesh participation just receives a count-0 datagram.
+    let rendezvous = kennel_lib_syscall::scm::bind_dgram(Path::new(
+        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
+    ))?;
+    // We are the kennel's userns-0 (host root via `0 0 1`), so the socket is root-owned; make it
+    // writable so the operator-uid kenneld can send to it. Safe: it is removed before the workload
+    // forks, so no kennel process ever races it.
+    std::fs::set_permissions(
+        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
+        std::os::unix::fs::PermissionsExt::from_mode(0o666),
+    )?;
     // Boot-sync (07-2 §7.2.1a): announce we have execed and block until kenneld has claimed binder
     // node 0, so the pull below is a single first-try transaction (no retry). The factory placed
     // our end of the sync socket at `BOOT_SYNC_FD` before our `fexecve`.
     kennel_lib_syscall::boot::init_await_bus(kennel_lib_syscall::boot::BOOT_SYNC_FD)?;
     let conn = open_bus()?;
     let bytes = pull_plan(&conn)?;
-    let sup = decode_supervision(&bytes)
+    let mut sup = decode_supervision(&bytes)
         .map_err(|e| io::Error::other(format!("supervision-half decode failed: {e:?}")))?;
     // The spawn-path tracer (the `log_level` knob): kennel-bin-init runs post-`pivot_root` with an
     // empty argv/envp and cannot read system.toml, so kenneld threaded the level into the
@@ -123,6 +137,10 @@ fn run() -> io::Result<u8> {
         sup.argv,
         sup.aux.len()
     ));
+    // Place the connector mesh mounts kenneld handed us (§7.13.4a): `move_mount` each detached
+    // binderfs clone into its in-view target and grant the workload Landlock access to the device,
+    // before we fork the workload (which opens it by path). A count-0 datagram is the no-mesh case.
+    place_mesh_mounts(&rendezvous, &mut sup, &tr)?;
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
@@ -134,6 +152,38 @@ fn run() -> io::Result<u8> {
         facade_pids.len()
     ));
     supervise(&conn, workload_pid, &sup, &envp, &facade_pids)
+}
+
+/// Receive the mesh rendezvous datagram and `move_mount` each detached binderfs clone into the view.
+///
+/// kenneld sent (after our READY) one datagram naming each clone's in-view target directory, with the
+/// detached mount fds as `SCM_RIGHTS`. For each, we create the target dir, `move_mount` the binderfs
+/// onto it (we hold `CAP_SYS_ADMIN` in the kennel userns, so a sibling-userns clone attaches fine),
+/// and append the device dir + node to the workload's Landlock grants — so the workload, sealed when
+/// it is forked, may open `<target>/binder`. A count-0 datagram (a kennel with no mesh) is a no-op.
+fn place_mesh_mounts(
+    rendezvous: &std::os::fd::OwnedFd,
+    sup: &mut Supervision,
+    tr: &kennel_lib_config::Tracer,
+) -> io::Result<()> {
+    use kennel_lib_syscall::landlock::AccessFs;
+    use std::os::fd::AsFd as _;
+    let mut buf = [0u8; 4096];
+    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(rendezvous.as_fd(), &mut buf)?;
+    // The socket has served its purpose; clear it so the workload's /dev carries no stray node.
+    let _ = std::fs::remove_file(kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK);
+    for (mount, target) in
+        kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)
+    {
+        std::fs::create_dir_all(&target)?;
+        kennel_lib_syscall::namespace::move_mount_fd(mount.as_fd(), &target)?;
+        let device = target.join("binder");
+        tr.step(&format!("placed mesh binderfs at {}", target.display()));
+        sup.landlock_fs.push((target, AccessFs::READ_DIR));
+        sup.landlock_fs
+            .push((device, kennel_lib_spawn::plan::dev_access()));
+    }
+    Ok(())
 }
 
 /// Refuse to run anywhere but a kennel's user namespace.

@@ -65,9 +65,10 @@ done
 # and the host execution unit (`kennel-host` → `host`, dynamic).
 HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-privhelper kennel-privhelper-net kennel-privhelper-bpf kennel-privhelper-mounts"
 HOST_STAT_BINS="kennel-bin-init"
-# In-cage (→ facades/): the conduit facades, the OCI launcher, and the spawn execution unit
-# (`kennel-spawn` → `spawn`) — all static, all reached by path inside a constructed view.
-FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry"
+# In-cage (→ facades/): the conduit facades, the OCI launcher, the spawn execution unit
+# (`kennel-spawn` → `spawn`), and the standing D-Bus broker (`dbus-broker`, the §7.7 mediation
+# service kennel's workload) — all static, all reached by path inside a constructed view.
+FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry dbus-broker"
 
 # The in-kennel SPAWN test drivers — `kennel-facade` builds them, but they are the TEST SUITE, not
 # part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and

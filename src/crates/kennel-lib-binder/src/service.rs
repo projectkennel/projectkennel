@@ -265,6 +265,37 @@ pub mod dbus {
     /// The system bus selector byte.
     pub const SYSTEM: u8 = 1;
 
+    /// The mesh capability name a D-Bus consumer's `SVC_CONNECT` carries for the **session** bus.
+    ///
+    /// Distinct names per bus are how the consumer tells the mesh handler which filter to apply
+    /// (the shared `svc_connect` codec carries only a name). Matches the `[[consumes]]` capability
+    /// and the facade's request.
+    pub const CAPABILITY_SESSION: &str = "org.projectkennel.dbus";
+
+    /// The mesh capability name a D-Bus consumer's `SVC_CONNECT` carries for the **system** bus.
+    pub const CAPABILITY_SYSTEM: &str = "org.projectkennel.dbus-system";
+
+    /// Map a mesh capability `name` to the D-Bus bus byte it selects, or `None` if it is not a
+    /// D-Bus capability. The mesh resolver uses this to pick the consumer's per-bus filter.
+    #[must_use]
+    pub fn capability_bus(name: &str) -> Option<u8> {
+        match name {
+            CAPABILITY_SESSION => Some(SESSION),
+            CAPABILITY_SYSTEM => Some(SYSTEM),
+            _ => None,
+        }
+    }
+
+    /// The capability name for `bus` (the inverse of [`capability_bus`]).
+    #[must_use]
+    pub const fn capability_for_bus(bus: u8) -> &'static str {
+        if bus == SYSTEM {
+            CAPABILITY_SYSTEM
+        } else {
+            CAPABILITY_SESSION
+        }
+    }
+
     /// Encode a [`super::verb::DBUS_OPEN`] request: `[conn_id: u32 be | bus: u8]`.
     #[must_use]
     pub fn encode_open(conn_id: u32, bus: u8) -> Vec<u8> {
@@ -807,35 +838,32 @@ pub mod mesh {
     }
 }
 
-/// The `dbus-broker@v1` control-channel wire protocol: the verbs `kenneld` speaks on the
-/// broker's acquired node handle (the `binder-connector`, §7.13.4a).
+/// The `dbus-broker@v1` control-channel wire protocol: the verb `kenneld` speaks on the
+/// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
 ///
-/// `kenneld` pushes per-consumer D-Bus filter sets via `REGISTER_CONSUMER` at consumer
-/// construction, and clears them via `UNREGISTER_CONSUMER` at teardown. The broker enforces
-/// the filter set on every relayed D-Bus frame.
+/// There is one verb, [`ACCEPT_SESSION`]: kenneld, having identified a consumer on its
+/// per-kennel bus, tells the broker to accept one D-Bus session and apply the given filter set.
+/// The broker mints a per-session node and enforces the filter on every frame it mediates for
+/// that session. kenneld decides; the broker applies and never relays through kenneld.
 ///
-/// **Wire layout (all big-endian):**
-///
-/// `REGISTER_CONSUMER`: `[consumer_id: u16 | bus: u8 | n_talk: u16 | talk₁_len: u16 | talk₁ |
-///   ... | n_call: u16 | call₁_len: u16 | call₁ | ... | n_broadcast: u16 | ... | n_own: u16 |
-///   ... | n_deny_talk: u16 | ...]`
-///
-/// `UNREGISTER_CONSUMER`: `[consumer_id: u16 | bus: u8]`
-///
-/// The `consumer_id` is the kennel's context number (`ctx: u16`). The `bus` byte selects
-/// session (0) or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
+/// **Wire layout (all big-endian):** see [`encode_accept`]. The `bus` byte selects session (0)
+/// or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
 pub mod broker {
-    /// Register a consumer's D-Bus filter set with the broker.
-    pub const REGISTER_CONSUMER: u32 = 1;
-    /// Unregister a consumer (drop its filter set).
-    pub const UNREGISTER_CONSUMER: u32 = 2;
-    /// Relay a D-Bus frame for a registered consumer.
-    pub const RELAY_FRAME: u32 = 3;
+    /// Tell the provider to accept a D-Bus session kenneld has authorized, applying the
+    /// given filter. kenneld→provider, on the connector mesh bus's control node.
+    ///
+    /// The provider mints a fresh session node, stores the filter against that node's
+    /// cookie, and replies with the node (a `BINDER_TYPE_BINDER` object). kenneld forwards
+    /// that node to the consumer, which transacts it directly; the provider keys the session
+    /// by the kernel-attested **target node**, never by anything the consumer says, and
+    /// reclaims it on the node's `Br::Release` (the consumer's last ref dropping). The
+    /// provider decides nothing — it applies kenneld's filter to the session it was handed.
+    pub const ACCEPT_SESSION: u32 = 1;
 
-    /// Encode a `REGISTER_CONSUMER` request.
+    /// Encode an `ACCEPT_SESSION` request:
+    /// `[bus: u8 | talk | call | broadcast | own | deny_talk]`.
     #[must_use]
-    pub fn encode_register(
-        consumer_id: u16,
+    pub fn encode_accept(
         bus: u8,
         talk: &[String],
         call: &[String],
@@ -844,7 +872,6 @@ pub mod broker {
         deny_talk: &[String],
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(&consumer_id.to_be_bytes());
         out.push(bus);
         put_string_list(&mut out, talk);
         put_string_list(&mut out, call);
@@ -854,11 +881,9 @@ pub mod broker {
         out
     }
 
-    /// A decoded `REGISTER_CONSUMER` request.
+    /// A decoded `ACCEPT_SESSION` request.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct RegisterConsumer {
-        /// The kennel's context number (`ctx`) identifying the consumer.
-        pub consumer_id: u16,
+    pub struct AcceptSession {
         /// The target bus: session (`0`) or system (`1`).
         pub bus: u8,
         /// Bus names the consumer may send method calls/signals to (talk).
@@ -873,14 +898,10 @@ pub mod broker {
         pub deny_talk: Vec<String>,
     }
 
-    /// Decode a `REGISTER_CONSUMER` request. `None` for malformed input.
+    /// Decode an `ACCEPT_SESSION` request. `None` for malformed input.
     #[must_use]
-    pub fn decode_register(data: &[u8]) -> Option<RegisterConsumer> {
+    pub fn decode_accept(data: &[u8]) -> Option<AcceptSession> {
         let mut cur = data;
-        let &[id_hi, id_lo] = take(&mut cur, 2)? else {
-            return None;
-        };
-        let consumer_id = u16::from_be_bytes([id_hi, id_lo]);
         let &bus = take(&mut cur, 1)?.first()?;
         let talk = take_string_list(&mut cur)?;
         let call = take_string_list(&mut cur)?;
@@ -890,8 +911,7 @@ pub mod broker {
         if !cur.is_empty() {
             return None; // trailing garbage
         }
-        Some(RegisterConsumer {
-            consumer_id,
+        Some(AcceptSession {
             bus,
             talk,
             call,
@@ -899,41 +919,6 @@ pub mod broker {
             own,
             deny_talk,
         })
-    }
-
-    /// Encode an `UNREGISTER_CONSUMER` request: `[consumer_id: u16 | bus: u8]`.
-    #[must_use]
-    pub fn encode_unregister(consumer_id: u16, bus: u8) -> Vec<u8> {
-        let mut out = Vec::with_capacity(3);
-        out.extend_from_slice(&consumer_id.to_be_bytes());
-        out.push(bus);
-        out
-    }
-
-    /// Decode an `UNREGISTER_CONSUMER` request into `(consumer_id, bus)`.
-    #[must_use]
-    pub fn decode_unregister(data: &[u8]) -> Option<(u16, u8)> {
-        let [a, b, bus] = data else { return None };
-        Some((u16::from_be_bytes([*a, *b]), *bus))
-    }
-
-    /// Encode a `RELAY_FRAME` request: `[consumer_id: u16 | bus: u8 | frame bytes]`.
-    #[must_use]
-    pub fn encode_relay(consumer_id: u16, bus: u8, frame: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(frame.len().saturating_add(3));
-        out.extend_from_slice(&consumer_id.to_be_bytes());
-        out.push(bus);
-        out.extend_from_slice(frame);
-        out
-    }
-
-    /// Decode a `RELAY_FRAME` request into `(consumer_id, bus, frame)`.
-    #[must_use]
-    pub fn decode_relay(data: &[u8]) -> Option<(u16, u8, &[u8])> {
-        let [a, b, bus, frame @ ..] = data else {
-            return None;
-        };
-        Some((u16::from_be_bytes([*a, *b]), *bus, frame))
     }
 
     fn put_string_list(out: &mut Vec<u8>, list: &[String]) {
@@ -974,16 +959,13 @@ pub mod broker {
         use super::*;
 
         #[test]
-        fn register_round_trips() {
+        fn accept_round_trips() {
             let talk = vec!["org.freedesktop.portal.Desktop".to_owned()];
             let call = vec!["org.freedesktop.portal.FileChooser=OpenFile".to_owned()];
-            let broadcast = vec![];
-            let own = vec![];
             let deny_talk = vec!["org.freedesktop.secrets".to_owned()];
-            let bytes = encode_register(42, 0, &talk, &call, &broadcast, &own, &deny_talk);
-            let got = decode_register(&bytes).expect("decode");
-            assert_eq!(got.consumer_id, 42);
-            assert_eq!(got.bus, 0);
+            let bytes = encode_accept(1, &talk, &call, &[], &[], &deny_talk);
+            let got = decode_accept(&bytes).expect("decode");
+            assert_eq!(got.bus, 1);
             assert_eq!(got.talk, talk);
             assert_eq!(got.call, call);
             assert!(got.broadcast.is_empty());
@@ -992,39 +974,11 @@ pub mod broker {
         }
 
         #[test]
-        fn register_rejects_trailing_garbage() {
-            let mut bad = encode_register(1, 0, &[], &[], &[], &[], &[]);
+        fn accept_rejects_malformed() {
+            let mut bad = encode_accept(0, &[], &[], &[], &[], &[]);
             bad.push(0xFF);
-            assert!(decode_register(&bad).is_none());
-        }
-
-        #[test]
-        fn register_rejects_short() {
-            assert!(decode_register(&[]).is_none());
-            assert!(decode_register(&[0, 1]).is_none()); // missing bus + lists
-        }
-
-        #[test]
-        fn unregister_round_trips() {
-            assert_eq!(decode_unregister(&encode_unregister(7, 1)), Some((7, 1)));
-            assert!(decode_unregister(&[0, 1]).is_none()); // too short
-            assert!(decode_unregister(&[0, 1, 0, 0]).is_none()); // too long
-        }
-
-        #[test]
-        fn relay_round_trips() {
-            let frame = b"hello D-Bus";
-            let bytes = encode_relay(99, 0, frame);
-            let (id, bus, got_frame) = decode_relay(&bytes).expect("decode");
-            assert_eq!(id, 99);
-            assert_eq!(bus, 0);
-            assert_eq!(got_frame, frame);
-        }
-
-        #[test]
-        fn relay_rejects_short() {
-            assert!(decode_relay(&[]).is_none());
-            assert!(decode_relay(&[0, 1]).is_none()); // missing bus
+            assert!(decode_accept(&bad).is_none()); // trailing garbage
+            assert!(decode_accept(&[]).is_none()); // short (no bus byte)
         }
     }
 }

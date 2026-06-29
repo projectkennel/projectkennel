@@ -2,7 +2,7 @@
 name = "kennel-dbus-broker"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel dbus-broker@v1: the standing D-Bus mediation service kennel (§7.7). The intended replacement for the per-consumer host-dbus delegate — a single long-running service that receives per-consumer filter sets from kenneld via the binder-connector mesh and mediates relayed D-Bus frames. Runs inside its own kennel, not on the host. The frame relay itself is not yet implemented (mediation currently flows through the legacy host-dbus delegate)."
+description = "Project Kennel dbus-broker@v1: the standing D-Bus mediation service kennel (§7.7). The replacement for the per-consumer host-dbus delegate — a long-running service on the connector mesh bus. kenneld pushes one ACCEPT_SESSION per consumer to the broker's control node; the broker mints a per-session node and mediates the consumer's D-Bus frames against the real bus via the reused host-dbus mediation engine. Runs inside its own kennel, not on the host."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,13 +18,13 @@ path = "src/main.rs"
 [dependencies]
 # The binder client library: Connection, ContextManager, flat_binder_object, service wire.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
-# The D-Bus mediation engine: the delegate core (filter + serial demux), message
-# reconstruction, and the typed conduit frame.
+# The D-Bus filter types (BusRules/Filter) carried in ACCEPT_SESSION and the conduit
+# frame length helper (`frame_len`) the inbound reader uses.
 kennel-lib-dbus = { path = "../kennel-lib-dbus" }
-# The bus-side D-Bus client: the sans-IO connector (SASL handshake) and connection.
-mini-sansio-dbus = "=5.0.1"
-# poll(2) over the bus fds (single-threaded event loop).
-nix = { version = "=0.31.3", default-features = false, features = ["poll"] }
+# The per-connection mediation loop (`mediate`), reused once per session: it drives the
+# real bus (SASL + sans-IO) against the delegate. The broker bridges each session's frames
+# to it over a socketpair, so the bus-side I/O deps live in host-dbus, not here.
+kennel-host-dbus = { path = "../kennel-host-dbus" }
 
 [lints]
 workspace = true

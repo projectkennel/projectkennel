@@ -69,6 +69,37 @@ pub fn build_writer(
     writer(ctx, levels_from(runtime), &cfg)
 }
 
+/// A daemon-level audit writer that emits to kenneld's journal (the `stdout` sink, captured by
+/// systemd) regardless of per-kennel state.
+///
+/// For daemon-owned services that have **no per-kennel audit dir but security-relevant decisions to
+/// record** — the connector mesh bus (§7.13.4a) mediates every cross-kennel D-Bus session, so its
+/// `SVC_CONNECT` / `ACCEPT_SESSION` / provider-death verdicts MUST be durable, never dropped. A
+/// noop drain on that path is the wrong default: the most-trusted mediation in the system would run
+/// blind. Levels follow the operator's audit defaults; the sink is forced to `stdout` so the events
+/// land in the journal even when no file/journald sink is configured.
+#[must_use]
+pub fn daemon_writer(name: &str) -> Writer {
+    let runtime = load_audit_defaults();
+    let ctx = WriterContext {
+        kennel: name.to_owned(),
+        kennel_uuid: String::new(),
+        host: kennel_lib_audit::hostname(),
+    };
+    let cfg = SinkConfig {
+        kinds: vec![SinkKind::Stdout],
+        dir: PathBuf::new(),
+        rotate_at_bytes: runtime.file.rotate_at_bytes,
+        compress_after_seconds: runtime.file.compress_after_seconds,
+        retain_count: runtime
+            .file
+            .retain_count
+            .and_then(|n| usize::try_from(n).ok()),
+        syslog_facility: runtime.syslog_facility.clone(),
+    };
+    writer(ctx, levels_from(&runtime), &cfg)
+}
+
 /// A writer with **no sinks** — discards every event.
 ///
 /// Used when a kennel has no audit state directory configured: every kennel now runs the

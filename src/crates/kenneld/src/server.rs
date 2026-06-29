@@ -297,6 +297,14 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// `(tier, name, key)` triple. Created lazily on first consumes/provides match (D4);
     /// ref-counted for teardown. The `MeshBus` serves node 0 on its own looper thread.
     mesh_buses: Mutex<HashMap<String, crate::mesh_bus::MeshBus>>,
+    /// Each brokered consumer's settled `[dbus]` filter, keyed by its kennel `ctx` — the policy
+    /// already carried on the ctx kenneld built at spawn (§7.7). The D-Bus mesh bus's node-0
+    /// handler reads this when a consumer connects: it resolves the caller's `sender_pid` → cgroup
+    /// → ctx, looks up the ctx's filter here, and pushes it to the broker as `ACCEPT_SESSION`.
+    /// Inserted when a brokered kennel is prepared, removed when its ctx is released — so it lives
+    /// exactly as long as the kennel does. It is *not* a session/credential store: identity is the
+    /// kernel's per-transaction attestation, this is only the policy to apply once identified.
+    dbus_filters: std::sync::Arc<Mutex<HashMap<u16, kennel_lib_policy::DbusRuntime>>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -321,6 +329,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             activator: std::sync::OnceLock::new(),
             idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
             mesh_buses: Mutex::new(HashMap::new()),
+            dbus_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -603,20 +612,23 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(|_| format!("unix:path=/run/user/{}/bus", self.identity.uid))
     }
 
-    /// Get or create a binder-connector mesh bus for the given capability, returning the
-    /// host path of the binder device. The mesh bus is created lazily on first use (D4)
-    /// and ref-counted for teardown.
+    /// Get or create a binder-connector mesh bus for the given capability, returning a **detached,
+    /// movable clone** of its binderfs (an `open_tree(CLONE)` fd from the holder) for one new
+    /// participant. The bus is created lazily on first use (D4) and ref-counted for teardown.
+    ///
+    /// The caller hands the fd to the kennel (via the mesh rendezvous), where `kennel-bin-init`
+    /// `move_mount`s it into the view — the device never enters the view as a host-path bind, so it
+    /// is immune to the kennel's PID namespace.
     ///
     /// # Errors
     ///
-    /// Returns the OS error if creating the mesh bus fails (binderfs mount, device
-    /// allocation, or context-manager claim).
+    /// Returns the OS error if creating the mesh bus or cloning its mount fails.
     fn ensure_mesh_bus(
         &self,
         tier: crate::catalogue::Tier,
         name: &str,
         key: Option<&str>,
-    ) -> io::Result<std::path::PathBuf> {
+    ) -> io::Result<std::os::fd::OwnedFd> {
         let bus_key = mesh_bus_key(tier, name, key);
         let mut buses = self
             .mesh_buses
@@ -625,20 +637,39 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         let bus = match buses.entry(bus_key) {
             std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
             std::collections::hash_map::Entry::Vacant(e) => {
-                // The mesh bus is a daemon-level service; use a noop writer keyed to
-                // the bus identity (no per-kennel audit state dir).
-                let w = std::sync::Arc::new(crate::audit::noop_writer(
-                    &format!("mesh-bus/{name}"),
-                    String::new(),
-                ));
-                let mb = crate::mesh_bus::MeshBus::create(tier, name, key, &w)?;
+                // The mesh bus mediates every cross-kennel D-Bus session — its verdicts are
+                // security-relevant, so they go to a real journal-backed writer (not a noop drain),
+                // keyed to the bus identity (it has no per-kennel audit state dir).
+                let w =
+                    std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
+                // The D-Bus connector bus alone gets the identity resolver: its node-0 handler
+                // mints a filtered session per consumer. Every other connector bus resolves a
+                // consumer straight to its provider's handle (no resolver).
+                let dbus_resolver =
+                    (name == "org.projectkennel.dbus-broker").then(|| self.dbus_resolver());
+                // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
+                // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
+                // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
+                // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
+                // owned by kenneld's own uid); the socket lets kenneld request movable clones.
+                let mount_dir = crate::mesh::host_rp_dir(tier, name, key);
+                let (holder_pid, holder_sock) = crate::mesh_holder::spawn(&mount_dir)?;
+                let mb = crate::mesh_bus::MeshBus::create(
+                    tier,
+                    name,
+                    key,
+                    &w,
+                    dbus_resolver,
+                    holder_pid,
+                    holder_sock,
+                )?;
                 e.insert(mb)
             }
         };
         bus.add_participant();
-        let device_path = bus.device_path().to_path_buf();
+        let clone = bus.clone_mount_fd()?;
         drop(buses);
-        Ok(device_path)
+        Ok(clone)
     }
 
     /// Release a participant from a mesh bus. If the refcount reaches zero, the bus
@@ -655,80 +686,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 e.remove();
             }
         }
-    }
-
-    /// Push a consumer's D-Bus filter set to the `dbus-broker@v1` via the mesh bus (§7.7).
-    /// Returns `Ok(())` on success, or `Err` if the broker is not yet registered
-    /// or the mesh bus transaction fails. Best-effort: a failed push logs and falls through
-    /// (the consumer's D-Bus verbs will be denied by the broker until re-registered).
-    fn register_dbus_consumer(
-        &self,
-        ctx: u16,
-        bus_byte: u8,
-        rules: &kennel_lib_policy::DbusBusRuntime,
-    ) -> io::Result<()> {
-        let broker_bus_key = mesh_bus_key(
-            crate::catalogue::Tier::Host,
-            "org.projectkennel.dbus-broker",
-            None,
-        );
-        let buses = self
-            .mesh_buses
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(bus) = buses.get(&broker_bus_key) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "dbus-broker mesh bus not running",
-            ));
-        };
-        let data = kennel_lib_binder::service::broker::encode_register(
-            ctx,
-            bus_byte,
-            &rules.talk,
-            &rules.call,
-            &rules.broadcast,
-            &rules.own,
-            &rules.deny_talk,
-        );
-        let reply = bus.transact_service(
-            "org.projectkennel.dbus-broker",
-            kennel_lib_binder::service::broker::REGISTER_CONSUMER,
-            &data,
-        )?;
-        drop(buses);
-        if reply.first().copied() == Some(kennel_lib_binder::service::status::OK) {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!(
-                "dbus-broker REGISTER_CONSUMER for ctx={ctx} bus={bus_byte} returned {:?}",
-                reply.first()
-            )))
-        }
-    }
-
-    /// Remove a consumer's D-Bus filter set from the `dbus-broker@v1` (teardown counterpart
-    /// of [`register_dbus_consumer`](Self::register_dbus_consumer)). Best-effort.
-    fn unregister_dbus_consumer(&self, ctx: u16, bus_byte: u8) {
-        let broker_bus_key = mesh_bus_key(
-            crate::catalogue::Tier::Host,
-            "org.projectkennel.dbus-broker",
-            None,
-        );
-        let buses = self
-            .mesh_buses
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(bus) = buses.get(&broker_bus_key) else {
-            return;
-        };
-        let data = kennel_lib_binder::service::broker::encode_unregister(ctx, bus_byte);
-        let _ = bus.transact_service(
-            "org.projectkennel.dbus-broker",
-            kennel_lib_binder::service::broker::UNREGISTER_CONSUMER,
-            &data,
-        );
-        drop(buses);
     }
 
     /// Drop a kennel's SSH edges from the bastion on teardown (§7.10.2): a synthetic
@@ -861,12 +818,58 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Deregister `name` and return its context to the pool.
     fn release(&self, name: &str, ctx: u16) {
+        // Drop this kennel's D-Bus filter (if brokered) — its ctx is being freed, so the mesh
+        // resolver must no longer resolve a future caller in a reused cgroup to a stale policy.
+        self.dbus_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&ctx);
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.kennels.remove(name);
         reg.ctx.release(ctx);
+    }
+
+    /// Record a brokered consumer's settled `[dbus]` filter under its `ctx`, for the D-Bus mesh
+    /// bus's node-0 handler to resolve callers against (see [`Shared::dbus_filters`]). Removed when
+    /// the ctx is released ([`Shared::release`]).
+    fn register_dbus_filter(&self, ctx: u16, dbus: kennel_lib_policy::DbusRuntime) {
+        self.dbus_filters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(ctx, dbus);
+    }
+
+    /// Build the D-Bus mesh resolver (see [`crate::mesh_bus::DbusResolver`]): map a connecting
+    /// consumer's `(sender_pid, capability name)` to the encoded `ACCEPT_SESSION` filter, resolving
+    /// `sender_pid` → cgroup → ctx → its `[dbus]` policy *fresh* each call. Nothing is remembered;
+    /// the only standing state is the ctx→policy map, keyed on a kernel-managed cgroup lifetime.
+    fn dbus_resolver(&self) -> crate::mesh_bus::DbusResolver {
+        let filters = std::sync::Arc::clone(&self.dbus_filters);
+        std::sync::Arc::new(move |sender_pid: i32, name: &str| {
+            let bus = kennel_lib_binder::service::dbus::capability_bus(name)?;
+            let ctx = crate::cgroup::pid_to_ctx(sender_pid)?;
+            let map = filters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let runtime = map.get(&ctx)?;
+            let rules = match bus {
+                kennel_lib_binder::service::dbus::SYSTEM => runtime.system.as_ref(),
+                _ => runtime.session.as_ref(),
+            }?;
+            let payload = kennel_lib_binder::service::broker::encode_accept(
+                bus,
+                &rules.talk,
+                &rules.call,
+                &rules.broadcast,
+                &rules.own,
+                &rules.deny_talk,
+            );
+            drop(map);
+            Some(payload)
+        })
     }
 
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
@@ -1654,6 +1657,11 @@ pub fn run_kennel<P, L>(
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
     });
+    // Binder-connector mesh mounts to place in the view via the rendezvous (§7.13.4a): each is a
+    // detached binderfs clone fd + its in-view target directory. `kennel-bin-init` `move_mount`s them
+    // before forking the workload (and Landlock-grants the device). Collected across the provider and
+    // consumer passes below, then handed to `bring_up` on the `Spec`.
+    let mut mesh_mounts: Vec<(std::os::fd::OwnedFd, std::path::PathBuf)> = Vec::new();
     // Provider rendezvous points (§7.13.4b): for each af-unix `[[provides]]`, bind the host
     // rendezvous directory `<runtime>/mesh/<tier>/<name>[.key]/` at the in-view `dirname(endpoint)`,
     // so the socket the provider binds at its policy `endpoint` is the inode the broker connects
@@ -1699,22 +1707,21 @@ pub fn run_kennel<P, L>(
                 });
             }
             // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability
-            // and bind-mount its binder device at the provider's `endpoint`. The provider opens
-            // this device, registers its service node via `ADD_SERVICE`, and serves.
+            // and request a movable clone of its binderfs to place at the provider's `endpoint`. The
+            // clone rides the mesh rendezvous; `kennel-bin-init` `move_mount`s it into the view, where
+            // the provider opens `<endpoint>` (= `<mount-dir>/binder`), `ADD_SERVICE`s, and serves.
             for p in &loaded.provides {
                 if p.shape != kennel_lib_policy::settled::Shape::BinderConnector {
                     continue;
                 }
+                let Some(target_dir) = std::path::Path::new(&p.endpoint).parent() else {
+                    continue;
+                };
                 let key = p.key.as_deref();
                 match shared.ensure_mesh_bus(tier, &p.name, key) {
-                    Ok(device_path) => {
+                    Ok(clone_fd) => {
                         mesh_bus_guard.push(tier, p.name.clone(), p.key.clone());
-                        view.binds.push(kennel_lib_spawn::plan::BindMount {
-                            source: device_path,
-                            target: std::path::PathBuf::from(&p.endpoint),
-                            writable: true,
-                            exclusive: false,
-                        });
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
                     }
                     Err(e) => {
                         eprintln!(
@@ -1750,24 +1757,64 @@ pub fn run_kennel<P, L>(
                 })
                 .collect()
         }; // catalogue lock dropped
-        if let Some(view) = loaded.plan.view.as_mut() {
-            for (tier, name, key, at) in &mesh_consumer_binds {
-                match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
-                    Ok(device_path) => {
-                        mesh_bus_guard.push(*tier, name.clone(), key.clone());
-                        view.binds.push(kennel_lib_spawn::plan::BindMount {
-                            source: device_path,
-                            target: std::path::PathBuf::from(at),
-                            writable: true,
-                            exclusive: false,
-                        });
+        for (tier, name, key, at) in &mesh_consumer_binds {
+            let Some(target_dir) = std::path::Path::new(at).parent() else {
+                continue;
+            };
+            match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(*tier, name.clone(), key.clone());
+                    mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "kenneld: consumer `{}`: mesh bus for `{name}`: {e}",
+                        req.kennel
+                    );
+                }
+            }
+        }
+    }
+
+    // Brokered D-Bus consumer (§7.7): a kennel with a `[dbus]` grant reaches the standing
+    // dbus-broker over the connector mesh bus, so its `facade-dbus` opens the mesh device directly
+    // (the per-kennel `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view —
+    // the dbus-name consume is served by the facade, not the binder-connector consumer loop above,
+    // so nothing else mounts it. Only when the broker is actually enabled; otherwise D-Bus takes
+    // the legacy host-dbus route and needs no mesh device.
+    {
+        let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
+        // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
+        // registers its control node on the mesh bus keyed by its *policy-derived* tier (the
+        // supervisor activates it with the catalogue candidate's tier); a user-enabled broker is
+        // `User`, not `Host`. Keying this consumer's mesh bus by the same resolved tier is what puts
+        // both on one binderfs instance — mismatch them and the broker's control node is on a
+        // different bus, so `ACCEPT_SESSION` fails closed with no provider found.
+        let broker_tier = {
+            let cat = shared
+                .catalogue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cat.resolve("org.projectkennel.dbus-broker")
+                .into_iter()
+                .next()
+                .map(|c| c.tier)
+        };
+        if let (true, Some(tier)) = (dbus_enabled, broker_tier) {
+            match shared.ensure_mesh_bus(tier, "org.projectkennel.dbus-broker", None) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(tier, "org.projectkennel.dbus-broker".to_owned(), None);
+                    // The device lands at `MESH_DBUS_DEVICE` (`/dev/binderfs-mesh/binder`); its
+                    // mount dir is the parent. `facade-dbus` opens that path (the `SVC_CONNECT(dbus)`
+                    // reply names it).
+                    if let Some(target_dir) =
+                        std::path::Path::new(crate::binder::MESH_DBUS_DEVICE).parent()
+                    {
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "kenneld: consumer `{}`: mesh bus for `{name}`: {e}",
-                            req.kennel
-                        );
-                    }
+                }
+                Err(e) => {
+                    eprintln!("kenneld: consumer `{}`: dbus mesh bus: {e}", req.kennel);
                 }
             }
         }
@@ -1777,11 +1824,6 @@ pub fn run_kennel<P, L>(
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
-    // Capture the D-Bus rules before spec consumes dbus — we'll push them to the
-    // dbus-broker's control node via REGISTER_CONSUMER after the kennel is running.
-    let dbus_session_rules = dbus.session.as_ref().map(|p| p.rules.clone());
-    let dbus_system_rules = dbus.system.as_ref().map(|p| p.rules.clone());
-
     let mut spec = crate::Spec {
         id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
@@ -1800,6 +1842,7 @@ pub fn run_kennel<P, L>(
         dbus,
         binder: None,
         oci: oci_prep,
+        mesh_mounts,
         tracer: tr,
     };
 
@@ -1877,7 +1920,7 @@ pub fn run_kennel<P, L>(
             consumes: loaded.consumes,
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
-            dbus_transactor: {
+            brokered_dbus: {
                 let has_broker = {
                     let cat = shared
                         .catalogue
@@ -1885,12 +1928,13 @@ pub fn run_kennel<P, L>(
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     !cat.resolve("org.projectkennel.dbus-broker").is_empty()
                 };
+                // Brokered: record this kennel's filter under its ctx so the D-Bus mesh bus's
+                // node-0 handler can resolve a future connect (sender_pid → cgroup → ctx → here)
+                // and mint the session. The per-kennel relay then only *locates* the mesh bus.
                 if has_broker {
-                    Some(std::sync::Arc::clone(shared)
-                        as std::sync::Arc<dyn crate::dbus::MeshTransactor>)
-                } else {
-                    None
+                    shared.register_dbus_filter(ctx, loaded.dbus.clone());
                 }
+                has_broker
             },
         });
     }
@@ -1941,32 +1985,9 @@ pub fn run_kennel<P, L>(
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(&req.kennel, pid);
 
-    // Push the consumer's D-Bus filter set to the dbus-broker.
-    // Best-effort: a missing broker or failed push is logged, not fatal — the consumer's
-    // DBUS_* verbs will be denied by the broker until re-registered.
-    let has_broker = {
-        let cat = shared
-            .catalogue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        !cat.resolve("org.projectkennel.dbus-broker").is_empty()
-    };
-    if has_broker {
-        if let Some(ref rules) = dbus_session_rules {
-            if let Err(e) =
-                shared.register_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SESSION, rules)
-            {
-                eprintln!("kenneld: dbus-broker session registration for ctx={ctx}: {e}");
-            }
-        }
-        if let Some(ref rules) = dbus_system_rules {
-            if let Err(e) =
-                shared.register_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SYSTEM, rules)
-            {
-                eprintln!("kenneld: dbus-broker system registration for ctx={ctx}: {e}");
-            }
-        }
-    }
+    // D-Bus sessions are brokered lazily: the consumer's filter rides the brokered DbusRelay
+    // (resolved at construction), and a session node is minted per SVC_CONNECT(dbus-name) via
+    // ACCEPT_SESSION — no standing per-consumer registration at the broker.
     // Hard-reaper race close (§7.12.7): a spawned sibling's construction is async to the SPAWN reply,
     // so the requester can die — and its `reap_children` run — while this build is still in flight,
     // before the cgroup exists for the reaper to `cgroup.kill`. The requester's `SpawnRuntime::Drop`
@@ -2101,10 +2122,8 @@ pub fn run_kennel<P, L>(
     // tool that ignored the soft-reaper EOF dies with the agent (a no-op for a kennel that spawned
     // nothing, including every spawned kennel itself, which is depth-1).
     shared.reap_children(ctx);
-    // Best-effort: unregister this consumer's D-Bus filter sets from the broker.
-    // A missing broker or already-gone entry is harmless (the broker returns NOT_FOUND).
-    shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SESSION);
-    shared.unregister_dbus_consumer(ctx, kennel_lib_binder::service::dbus::SYSTEM);
+    // D-Bus sessions need no explicit teardown: when this consumer's kennel exits, its
+    // session-node handles are released and the broker reclaims each on Br::Release.
     shared.deregister_ssh(&req.kennel);
     shared.release(&req.kennel, ctx);
     // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
@@ -2449,33 +2468,6 @@ fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, Strin
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     Ok(command)
-}
-
-impl<P, L> crate::dbus::MeshTransactor for Shared<P, L>
-where
-    P: Privileged + Send + Sync + 'static,
-    L: PolicyLoader + Send + Sync + 'static,
-{
-    fn transact_broker(&self, code: u32, data: &[u8]) -> io::Result<Vec<u8>> {
-        let broker_bus_key = mesh_bus_key(
-            crate::catalogue::Tier::Host,
-            "org.projectkennel.dbus-broker",
-            None,
-        );
-        let buses = self
-            .mesh_buses
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(bus) = buses.get(&broker_bus_key) else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "dbus-broker mesh bus not running",
-            ));
-        };
-        let reply = bus.transact_service("org.projectkennel.dbus-broker", code, data);
-        drop(buses);
-        reply
-    }
 }
 
 /// Derive the map key for a mesh bus from its `(tier, name, key)` triple.

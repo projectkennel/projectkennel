@@ -1,0 +1,59 @@
+# ============================================================================
+# dbus-brokered — the PROVIDER half: the standing D-Bus broker service kennel (§7.7).
+#
+# An ondemand service kennel whose workload IS `dbus-broker` (the kennel-shipped mediation
+# binary, staged to the facades dir). It:
+#   * [[provides]] a `binder-connector` control node on the mesh bus — kenneld pushes
+#     `ACCEPT_SESSION` here; the endpoint is the mesh binder device kenneld bind-mounts in.
+#   * [[provides]] the `dbus-name` capability consumers `[[consumes]]` — the catalogue entry
+#     that makes the consumer's per-kennel `SVC_CONNECT` resolve + activate this broker.
+#   * reaches the operator's REAL session bus through a `[[unix.allow]]` leg (the broker is the
+#     mediator — it parses + filters frames itself, exactly as the legacy host-dbus delegate does,
+#     so it needs raw bus access). `DBUS_SESSION_BUS_ADDRESS` points at the in-view shim.
+#
+# run.sh substitutes __REAL_BUS__ with the operator's session-bus socket before signing.
+# ============================================================================
+
+name = "dbus-broker"
+template_base = "base-confined@v1"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/usr/libexec/kennel-facades/dbus-broker", "/bin/sh"]
+
+# The workload IS the service: open the mesh device, register the control node, mediate.
+[workload]
+argv = ["/usr/libexec/kennel-facades/dbus-broker"]
+pinned = true
+
+# The broker connects to the real bus at the in-view shim path the unix leg binds.
+[env.set]
+DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/kennel-broker-bus.sock"
+
+# Raw access to the operator's real session bus: the broker mediates + filters itself, so it needs
+# the bus the way host-dbus has it. facade-afunix binds the shim; kenneld brokers to the real socket.
+[unix]
+[[unix.allow]]
+name = "session-bus"
+real = "__REAL_BUS__"
+shim = "/tmp/kennel-broker-bus.sock"
+reason = "the dbus-broker is the mediator and needs raw access to the operator's session bus"
+
+# The control node kenneld reaches with ACCEPT_SESSION (endpoint = the mesh binder device).
+[[provides]]
+name = "org.projectkennel.dbus-broker"
+shape = "binder-connector"
+endpoint = "/dev/binderfs-mesh/binder"
+reason = "kenneld pushes per-session ACCEPT_SESSION to the broker's control node on the mesh bus"
+
+# The D-Bus mediation capability consumers reach — resolving this activates the broker.
+[[provides]]
+name = "org.projectkennel.dbus"
+shape = "dbus-name"
+endpoint = "org.freedesktop.DBus"
+reason = "D-Bus mediation capability for consumer kennels"

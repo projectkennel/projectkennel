@@ -118,6 +118,28 @@ pub fn kennel_cgroup(base: &Path, ctx: u16) -> PathBuf {
     base.join(format!("{KENNEL_PREFIX}{ctx}"))
 }
 
+/// Resolve the kernel-attested `pid` to the kennel context it belongs to, by reading
+/// `/proc/<pid>/cgroup` and locating the `kennel-<ctx>` component of its v2 path.
+///
+/// This is the mesh bus's per-connect identity check (§7.7): a process in a kennel lives in that
+/// kennel's cgroup subtree (`<base>/kennel-<ctx>/…`), born at spawn and gone at reap, so the
+/// cgroup is a restart-invariant name for the kennel — unlike the facade pid, which a crash-restart
+/// changes. `None` if the pid is gone, has no v2 line, or is not under a kennel cgroup (e.g. a
+/// host-side caller).
+#[must_use]
+pub fn pid_to_ctx(pid: i32) -> Option<u16> {
+    let content = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    ctx_from_cgroup(&content)
+}
+
+/// Extract `<ctx>` from the `kennel-<ctx>` component of a `/proc/<pid>/cgroup` body's v2 line.
+fn ctx_from_cgroup(content: &str) -> Option<u16> {
+    let path = content.lines().find_map(|line| line.strip_prefix("0::"))?;
+    path.split('/')
+        .find_map(|comp| comp.strip_prefix(KENNEL_PREFIX))
+        .and_then(|n| n.parse().ok())
+}
+
 /// Forcibly kill **every** process in `cgroup` (`SIGKILL`) by writing `1` to its
 /// `cgroup.kill` (cgroup v2, kernel 5.14+).
 ///
@@ -230,6 +252,23 @@ mod tests {
     fn kennel_cgroup_is_a_child_named_by_ctx() {
         let base = PathBuf::from("/sys/fs/cgroup/user.slice/user@1000.service/kenneld.service");
         assert_eq!(kennel_cgroup(&base, 7), base.join("kennel-7"));
+    }
+
+    #[test]
+    fn ctx_from_cgroup_finds_the_kennel_component() {
+        // A workload's /proc/<pid>/cgroup: the unified line ends in the kennel subtree (possibly
+        // with the workload's own nested leaf below it).
+        let base = "0::/user.slice/user@1000.service/kenneld.service/kennel-42";
+        assert_eq!(ctx_from_cgroup(&format!("{base}\n")), Some(42));
+        assert_eq!(ctx_from_cgroup(&format!("{base}/payload\n")), Some(42));
+    }
+
+    #[test]
+    fn ctx_from_cgroup_rejects_non_kennel_and_malformed() {
+        // A host-side caller (not under a kennel cgroup) and a non-numeric suffix resolve to None.
+        assert_eq!(ctx_from_cgroup("0::/user.slice/user@1000.service\n"), None);
+        assert_eq!(ctx_from_cgroup("0::/kennel-notanumber\n"), None);
+        assert_eq!(ctx_from_cgroup("1:name=systemd:/kennel-3\n"), None); // no v2 line
     }
 
     #[test]

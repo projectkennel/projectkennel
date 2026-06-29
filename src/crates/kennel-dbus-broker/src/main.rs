@@ -1,96 +1,140 @@
 //! `dbus-broker@v1`: the standing D-Bus mediation service kennel (§7.7).
 //!
-//! A single long-running service — the intended replacement for the per-consumer `host-dbus`
-//! delegate — that receives per-consumer filter sets from `kenneld` over the `binder-connector`
-//! mesh and mediates relayed D-Bus frames. Runs inside its own kennel, not on the host.
+//! A long-running service — the replacement for the per-consumer `host-dbus` delegate —
+//! that mediates D-Bus for consumer kennels over the connector mesh bus. It runs inside
+//! its own kennel, not on the host, and decides nothing: kenneld is the only authority.
 //!
-//! **Status: the frame relay is not yet implemented.** The control channel (consumer
-//! registration) and the mesh wiring are in place, but `handle_relay` is a stub — frames are
-//! not parsed, filtered, or forwarded to the real bus. D-Bus mediation currently flows through
-//! `kenneld`'s legacy `host-dbus` delegate; the broker is dormant unless a deployment selects it.
+//! **Control plane (kenneld → broker):** kenneld owns node 0 of the mesh bus and reaches
+//! the broker's **control node** (the cookie it registered via `ADD_SERVICE`). When a
+//! consumer asks to connect, kenneld resolves the consumer's identity and filter *in its
+//! own namespace* and sends one `ACCEPT_SESSION(bus, filter)` to the control node. The
+//! broker mints a fresh **per-session node**, stores the filter against that node's cookie,
+//! and replies with the node — which kenneld forwards to the consumer. The broker honors the
+//! control verb only on its control node, which consumers are never handed; the auth is
+//! structural, not a check on anything the consumer says.
 //!
-//! **Control channel** (the `binder-connector` verb set):
-//!
-//! - `REGISTER_CONSUMER(ctx, bus, filter_set)` — `kenneld` pushes when a D-Bus consumer
-//!   kennel is constructed. The broker stores the filter set keyed by `(ctx, bus)`.
-//! - `UNREGISTER_CONSUMER(ctx, bus)` — `kenneld` pushes at consumer teardown. The broker
-//!   drops the entry.
-//! - `RELAY_FRAME(ctx, bus, frame)` — intended to apply the stored filter and forward approved
-//!   frames to the real bus (currently stubbed; see Status above).
-//!
-//! **Architecture:**
+//! **Data plane (consumer → broker, kenneld absent):** the consumer transacts its session
+//! node directly with `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE`. The broker keys the session by
+//! the kernel-attested **target node cookie** (never by the sender — a confined broker
+//! cannot resolve sibling-namespace pids) and mediates each frame through the reused
+//! `host-dbus::mediate` engine against the real bus. When the consumer's kennel exits, its
+//! last reference to the session node drops, the broker is told via `Br::Release`, and the
+//! session is reclaimed — no teardown verb.
 //!
 //! ```text
-//! workload → facade-dbus → binder(node 0) → kenneld → RELAY_FRAME → dbus-broker → real bus
-//!                                                        ↑
-//!                                       kenneld pushes DbusBusRuntime
-//!                                       via REGISTER_CONSUMER
+//! kenneld(node 0) ──ACCEPT_SESSION──▶ broker control node ──mints──▶ session node
+//!        │                                                               ▲
+//!        └──forwards session node──▶ consumer ──DBUS_SEND/RECV──────────┘──▶ real bus
 //! ```
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
-use std::io;
+use std::collections::{HashMap, VecDeque};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use kennel_lib_binder::client::{Connection, Incoming};
-use kennel_lib_binder::service::{broker, status};
+use kennel_lib_binder::dbus::{frame_len, Bus};
+use kennel_lib_binder::service::{broker, dbus as dbus_svc, status, verb};
 use kennel_lib_dbus::filter::{BusRules, Filter};
 
 /// The mesh binder device path — the `[[provides]]` endpoint, bind-mounted by `kenneld`.
 const MESH_DEVICE: &str = "/dev/binderfs-mesh/binder";
 
-/// The service name registered on the mesh bus via `ADD_SERVICE`.
+/// The control service registered on the mesh bus via `ADD_SERVICE`. kenneld reaches this
+/// node to push `ACCEPT_SESSION`; consumers are never handed it.
 const SERVICE_NAME: &str = "org.projectkennel.dbus-broker";
 
-/// The mmap size for the broker's binder connection.
-const MAP_SIZE: usize = 128 * 1024;
+/// The mmap size for the broker's binder connection. Sized for D-Bus frames in transit.
+const MAP_SIZE: usize = 1024 * 1024;
 
 /// Poll timeout for the binder serve loop (milliseconds).
 const POLL_MS: i32 = 5000;
 
-/// Per-consumer state: the compiled filter for one (consumer, bus) pair.
-#[derive(Debug)]
-struct ConsumerEntry {
-    filter: Filter,
+/// The control node's local pointer and cookie. Session cookies start above it, so the
+/// control node is distinguishable from every session node by `Incoming::node_cookie`.
+const CONTROL_NODE_PTR: u64 = 1;
+const CONTROL_NODE_COOKIE: u64 = 1;
+const FIRST_SESSION_COOKIE: u64 = 2;
+
+/// Inbound frames a session has mediated from the bus (replies and allowlisted signals),
+/// queued for the consumer's next `DBUS_RECV`.
+#[derive(Default)]
+struct Inbound {
+    queue: Mutex<VecDeque<Vec<u8>>>,
 }
 
-/// The broker's in-memory state.
+/// One active D-Bus session: the mediation running over a socketpair, keyed by node cookie.
+struct Session {
+    /// The broker's end of the conduit to the mediation; consumer frames are written here.
+    to_mediate: UnixStream,
+    /// Mediated inbound frames, drained from the conduit by this session's reader thread.
+    inbound: Arc<Inbound>,
+}
+
+/// The broker's in-memory state: the live sessions, keyed by their node cookie.
 struct Broker {
-    /// Per-consumer filter tables, keyed by `(consumer_id, bus)`.
-    consumers: HashMap<(u16, u8), ConsumerEntry>,
+    sessions: HashMap<u64, Session>,
+    next_cookie: u64,
+    session_bus_addr: String,
+    system_bus_addr: String,
 }
 
 impl Broker {
     fn new() -> Self {
         Self {
-            consumers: HashMap::new(),
+            sessions: HashMap::new(),
+            next_cookie: FIRST_SESSION_COOKIE,
+            session_bus_addr: std::env::var("DBUS_SESSION_BUS_ADDRESS")
+                .unwrap_or_else(|_| "unix:path=/run/user/dbus/bus".to_owned()),
+            system_bus_addr: std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
+                .unwrap_or_else(|_| "unix:path=/run/dbus/system_bus_socket".to_owned()),
         }
     }
 
-    fn handle(&mut self, incoming: &Incoming) -> Vec<u8> {
-        match incoming.code {
-            broker::REGISTER_CONSUMER => self.handle_register(incoming),
-            broker::UNREGISTER_CONSUMER => self.handle_unregister(incoming),
-            broker::RELAY_FRAME => self.handle_relay(incoming),
-            _ => vec![status::BAD_REQUEST],
+    /// Dispatch one incoming transaction, replying through `conn`. Control verbs are honored
+    /// only on the control node; everything else addresses a session node.
+    fn handle(&mut self, conn: &Connection, incoming: &Incoming) {
+        if incoming.node_cookie == CONTROL_NODE_COOKIE {
+            self.handle_control(conn, incoming);
+        } else {
+            self.handle_session(conn, incoming);
         }
     }
 
-    fn handle_register(&mut self, incoming: &Incoming) -> Vec<u8> {
-        let Some(reg) = broker::decode_register(&incoming.data) else {
-            return vec![status::BAD_REQUEST];
+    /// The control node: kenneld pushes `ACCEPT_SESSION` here. Consumers never hold this
+    /// node, so reaching it is itself the authorization.
+    fn handle_control(&mut self, conn: &Connection, incoming: &Incoming) {
+        if incoming.code == broker::ACCEPT_SESSION {
+            self.accept_session(conn, incoming);
+        } else {
+            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+        }
+    }
+
+    /// Mint a per-session node for a session kenneld has authorized, start its mediation
+    /// against the real bus with the supplied filter, and reply with the node so kenneld can
+    /// forward it to the consumer.
+    fn accept_session(&mut self, conn: &Connection, incoming: &Incoming) {
+        let Some(acc) = broker::decode_accept(&incoming.data) else {
+            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+            return;
         };
-        // Build a per-bus Filter from the pushed rules. The bus byte selects which
-        // slot (session/system) the rules populate.
+        let (bus, bus_addr) = if acc.bus == dbus_svc::SESSION {
+            (Bus::Session, self.session_bus_addr.clone())
+        } else {
+            (Bus::System, self.system_bus_addr.clone())
+        };
         let rules = BusRules {
-            talk: reg.talk,
-            call: reg.call,
-            broadcast: reg.broadcast,
-            own: reg.own,
-            deny_talk: reg.deny_talk,
+            talk: acc.talk,
+            call: acc.call,
+            broadcast: acc.broadcast,
+            own: acc.own,
+            deny_talk: acc.deny_talk,
         };
-        let filter = if reg.bus == kennel_lib_binder::service::dbus::SESSION {
+        let filter = if acc.bus == dbus_svc::SESSION {
             Filter {
                 session: Some(rules),
                 system: None,
@@ -101,80 +145,165 @@ impl Broker {
                 system: Some(rules),
             }
         };
-        self.consumers
-            .insert((reg.consumer_id, reg.bus), ConsumerEntry { filter });
-        eprintln!(
-            "dbus-broker: registered consumer ctx={} bus={}",
-            reg.consumer_id, reg.bus,
-        );
-        vec![status::OK]
-    }
 
-    fn handle_unregister(&mut self, incoming: &Incoming) -> Vec<u8> {
-        let Some((consumer_id, bus)) = broker::decode_unregister(&incoming.data) else {
-            return vec![status::BAD_REQUEST];
+        // Bridge the consumer's frames to a reused `host-dbus::mediate` over a socketpair:
+        // the broker keeps one end (and a clone for the inbound reader); the mediation owns
+        // the other and drives the real bus.
+        let Ok((broker_end, mediate_end)) = UnixStream::pair() else {
+            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+            return;
         };
-        if self.consumers.remove(&(consumer_id, bus)).is_some() {
-            eprintln!("dbus-broker: unregistered consumer ctx={consumer_id} bus={bus}");
-            vec![status::OK]
-        } else {
-            vec![status::NOT_FOUND]
+        let Ok(reader_end) = broker_end.try_clone() else {
+            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+            return;
+        };
+
+        std::thread::spawn(move || {
+            let _ = kennel_host_dbus::mediate(mediate_end, bus, &bus_addr, filter);
+        });
+        let inbound = Arc::new(Inbound::default());
+        let inbound_reader = Arc::clone(&inbound);
+        std::thread::spawn(move || drain_inbound(reader_end, &inbound_reader));
+
+        let cookie = self.next_cookie;
+        self.next_cookie = self.next_cookie.saturating_add(1);
+        self.sessions.insert(
+            cookie,
+            Session {
+                to_mediate: broker_end,
+                inbound,
+            },
+        );
+
+        // Hand kenneld the freshly-minted session node (ptr == cookie); it forwards the
+        // handle to the consumer, which then transacts the session directly.
+        if conn.reply_with_node(incoming, cookie, cookie, 0).is_err() {
+            self.sessions.remove(&cookie); // mint failed → tear the half-built session down
         }
     }
 
-    fn handle_relay(&self, incoming: &Incoming) -> Vec<u8> {
-        let Some((consumer_id, bus, frame)) = broker::decode_relay(&incoming.data) else {
-            return vec![status::BAD_REQUEST];
-        };
-        let Some(consumer) = self.consumers.get(&(consumer_id, bus)) else {
-            return vec![status::NOT_FOUND];
-        };
-        // Frame relay is not yet implemented: the consumer filter is registered and the wire
-        // path is in place, but the frame is not parsed, run through `consumer.filter.decide()`,
-        // or forwarded to the real D-Bus bus. D-Bus mediation flows through kenneld's legacy
-        // host-dbus delegate until this is built; the broker is dormant unless selected.
-        let _ = &consumer.filter;
-        let _ = frame;
-        vec![status::OK]
+    /// A session node: the consumer's data-plane verbs, keyed by the target node cookie.
+    fn handle_session(&mut self, conn: &Connection, incoming: &Incoming) {
+        let cookie = incoming.node_cookie;
+        match incoming.code {
+            verb::DBUS_SEND => {
+                let wrote = self
+                    .sessions
+                    .get_mut(&cookie)
+                    .map(|s| s.to_mediate.write_all(&incoming.data).is_ok());
+                let reply = match wrote {
+                    Some(true) => vec![status::OK],
+                    Some(false) => {
+                        // The mediation is gone — drop the session and report it closed.
+                        self.sessions.remove(&cookie);
+                        vec![status::NOT_FOUND]
+                    }
+                    None => vec![status::NOT_FOUND],
+                };
+                let _ = conn.reply_and_free(incoming, &reply);
+            }
+            verb::DBUS_RECV => {
+                let reply = self.sessions.get(&cookie).map_or_else(
+                    || vec![status::NOT_FOUND],
+                    |s| {
+                        let mut q = s
+                            .inbound
+                            .queue
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        q.pop_front().map_or_else(
+                            || vec![status::AGAIN],
+                            |frame| {
+                                let mut out = Vec::with_capacity(frame.len().saturating_add(1));
+                                out.push(status::OK);
+                                out.extend_from_slice(&frame);
+                                out
+                            },
+                        )
+                    },
+                );
+                let _ = conn.reply_and_free(incoming, &reply);
+            }
+            verb::DBUS_CLOSE => {
+                self.sessions.remove(&cookie); // drop closes the conduit → mediation exits
+                let _ = conn.reply_and_free(incoming, &[status::OK]);
+            }
+            _ => {
+                let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+            }
+        }
+    }
+
+    /// Reclaim a session whose node lost its last external reference (`Br::Release`) — the
+    /// consumer's kennel exited. Dropping the [`Session`] closes the conduit, ending the
+    /// mediation and its reader thread.
+    fn release(&mut self, cookie: u64) {
+        if self.sessions.remove(&cookie).is_some() {
+            eprintln!("dbus-broker: session {cookie} released");
+        }
     }
 }
 
-fn run() -> io::Result<()> {
+/// Drain whole `[u32 len][frame]` conduit units the mediation produces, queueing each for
+/// the consumer's `DBUS_RECV`. Returns on EOF (the conduit closed → session over).
+fn drain_inbound(mut conduit: UnixStream, inbound: &Inbound) {
+    loop {
+        let mut len_buf = [0u8; 4];
+        if conduit.read_exact(&mut len_buf).is_err() {
+            return;
+        }
+        let Ok(Some(len)) = frame_len(&len_buf) else {
+            return; // malformed / over-long prefix — end this session's reader
+        };
+        let mut body = vec![0u8; len];
+        if conduit.read_exact(&mut body).is_err() {
+            return;
+        }
+        let mut unit = Vec::with_capacity(len.saturating_add(4));
+        unit.extend_from_slice(&len_buf);
+        unit.extend_from_slice(&body);
+        inbound
+            .queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(unit);
+    }
+}
+
+fn run() -> std::io::Result<()> {
     eprintln!("dbus-broker: starting");
 
-    // Open the mesh binder device (bind-mounted into our view by kenneld).
     let device_fd = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(MESH_DEVICE)?;
-
-    // Become a binder client on the mesh bus.
     let conn = Connection::open(device_fd.into(), MAP_SIZE)?;
 
-    // Register our control node via ADD_SERVICE on node 0 of the mesh bus.
-    // transact_node sends our binder node alongside the name bytes; the context
-    // manager (kenneld) acquires the translated handle.
+    // Register the control node on node 0 of the mesh bus. Its cookie distinguishes it
+    // from every session node the broker later mints.
     let name_bytes = kennel_lib_binder::service::mesh::encode_add_service(SERVICE_NAME);
     conn.transact_node(
-        0, // node-0 of the mesh bus = kenneld
+        0,
         kennel_lib_binder::service::verb::ADD_SERVICE,
         &name_bytes,
-        1, // node_ptr: arbitrary non-zero local pointer for our service node
-        0, // node_cookie
-        0, // node_flags
+        CONTROL_NODE_PTR,
+        CONTROL_NODE_COOKIE,
+        0,
     )?;
-    eprintln!("dbus-broker: registered service `{SERVICE_NAME}` on mesh bus");
+    eprintln!("dbus-broker: registered control service `{SERVICE_NAME}` on mesh bus");
 
-    // Enter the binder server loop: sleep for incoming transactions, wake, process.
     conn.enter_looper()?;
     let mut state = Broker::new();
     loop {
         if !conn.poll(POLL_MS)? {
-            continue; // idle poll cycle — no work
+            continue;
         }
-        for incoming in conn.recv()? {
-            let reply_data = state.handle(&incoming);
-            let _ = conn.reply_and_free(&incoming, &reply_data);
+        let batch = conn.recv_batch()?;
+        for cookie in batch.released {
+            state.release(cookie);
+        }
+        for incoming in batch.transactions {
+            state.handle(&conn, &incoming);
         }
     }
 }
@@ -186,74 +315,5 @@ fn main() -> ExitCode {
             eprintln!("dbus-broker: fatal: {e}");
             ExitCode::FAILURE
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_broker_lifecycle() {
-        let mut broker = Broker::new();
-
-        // 1. REGISTER_CONSUMER
-        let talk = vec!["org.freedesktop.DBus".to_owned()];
-        let reg_data = kennel_lib_binder::service::broker::encode_register(
-            42,                                        // consumer_id
-            kennel_lib_binder::service::dbus::SESSION, // bus
-            &talk,
-            &[],
-            &[],
-            &[],
-            &[],
-        );
-        let incoming_reg = Incoming {
-            code: broker::REGISTER_CONSUMER,
-            data: reg_data,
-            fds: Vec::new(),
-            sender_pid: 100,
-            sender_euid: 1000,
-            buffer: 0,
-        };
-        let reply_reg = broker.handle(&incoming_reg);
-        assert_eq!(reply_reg, vec![status::OK]);
-
-        // 2. RELAY_FRAME (registered consumer)
-        let relay_data = kennel_lib_binder::service::broker::encode_relay(
-            42,
-            kennel_lib_binder::service::dbus::SESSION,
-            &[0x01, 0x02, 0x03],
-        );
-        let incoming_relay = Incoming {
-            code: broker::RELAY_FRAME,
-            data: relay_data,
-            fds: Vec::new(),
-            sender_pid: 100,
-            sender_euid: 1000,
-            buffer: 0,
-        };
-        let reply_relay = broker.handle(&incoming_relay);
-        assert_eq!(reply_relay, vec![status::OK]);
-
-        // 3. UNREGISTER_CONSUMER
-        let unreg_data = kennel_lib_binder::service::broker::encode_unregister(
-            42,
-            kennel_lib_binder::service::dbus::SESSION,
-        );
-        let incoming_unreg = Incoming {
-            code: broker::UNREGISTER_CONSUMER,
-            data: unreg_data,
-            fds: Vec::new(),
-            sender_pid: 100,
-            sender_euid: 1000,
-            buffer: 0,
-        };
-        let reply_unreg = broker.handle(&incoming_unreg);
-        assert_eq!(reply_unreg, vec![status::OK]);
-
-        // 4. RELAY_FRAME (unregistered consumer)
-        let reply_relay_post = broker.handle(&incoming_relay);
-        assert_eq!(reply_relay_post, vec![status::NOT_FOUND]);
     }
 }

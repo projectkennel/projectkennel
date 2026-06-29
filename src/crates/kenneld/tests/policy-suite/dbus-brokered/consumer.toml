@@ -1,0 +1,50 @@
+# ============================================================================
+# dbus-brokered — the CONSUMER half + the verdict (§7.7).
+#
+# A D-Bus client kennel whose session bus is mediated by the standing broker over the connector
+# mesh, NOT the legacy per-consumer host-dbus delegate. Two declarations drive that:
+#   * `[dbus.session]` enables the bus + the filter (talk to the bus driver). kenneld seals
+#     facade-dbus into the view and, because the broker is enabled, marks the relay brokered and
+#     binds the mesh device into the view.
+#   * `[[consumes]] org.projectkennel.dbus` is the service-mesh trigger: the facade's per-kennel
+#     `SVC_CONNECT` resolves the broker in the catalogue, socket-activates it (W6), and waits until
+#     Ready — then gets the mesh path back. The facade connects there; kenneld resolves THIS
+#     consumer by its cgroup → ctx → the `[dbus.session]` filter, and `ACCEPT_SESSION`s it to the
+#     broker. Mediation is then consumer↔broker direct.
+#
+# The workload runs `dbus-send GetId` against the facade; it exits 0 iff the call round-trips the
+# whole brokered path to the real bus and back. The kennel's exit code IS the verdict.
+# ============================================================================
+
+name = "dbus-consumer"
+template_base = "base-confined@v1"
+
+[dbus.session]
+enabled = true
+
+[dbus.session.allow]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/bin/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
+
+# The mesh trigger: resolving this activates the broker and yields the brokered mesh path.
+[[consumes]]
+name = "org.projectkennel.dbus"
+shape = "dbus-name"
+required = true
+reason = "reach the standing D-Bus broker's mediation over the connector mesh"
+
+[workload]
+argv = [
+    "/usr/bin/dbus-send",
+    "--session",
+    "--print-reply",
+    "--dest=org.freedesktop.DBus",
+    "/org/freedesktop/DBus",
+    "org.freedesktop.DBus.GetId",
+]

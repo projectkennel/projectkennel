@@ -123,6 +123,77 @@ pub fn send_with_raw_fds(sock: BorrowedFd<'_>, data: &[u8], fds: &[RawFd]) -> io
     Ok(n)
 }
 
+/// Create an `AF_UNIX` `SOCK_DGRAM` socket bound to `path` (`O_CLOEXEC`), clearing any stale node.
+///
+/// The receiving end of a **connectionless** `SCM_RIGHTS` rendezvous: a datagram socket buffers a
+/// message until [`recv_with_fds`] reads it, so the sender ([`send_to_with_fds`]) need not wait for
+/// the receiver. `kennel-bin-init` binds one in its view; `kenneld` sends to it via `/proc/<init>/root`.
+///
+/// # Errors
+///
+/// The OS error if `socket(2)` or `bind(2)` fails.
+pub fn bind_dgram(path: &std::path::Path) -> io::Result<OwnedFd> {
+    use nix::sys::socket::{bind, socket};
+    let _ = std::fs::remove_file(path);
+    let sock = socket(
+        AddressFamily::Unix,
+        SockType::Datagram,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let addr = UnixAddr::new(path).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    bind(sock.as_raw_fd(), &addr).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    Ok(sock)
+}
+
+/// Send `data` (+ `fds` as `SCM_RIGHTS`) as one datagram to the `AF_UNIX` socket bound at `path`.
+///
+/// The connectionless counterpart of [`send_with_fds`]: an unconnected `SOCK_DGRAM` socket sends to
+/// the named address, so no `connect`/`accept` is needed. `kenneld` aims it at
+/// `/proc/<init>/root/<rendezvous>` to deliver detached mesh-mount fds into a kennel.
+///
+/// # Errors
+///
+/// The OS error if `socket(2)` or `sendmsg(2)` fails, or `InvalidInput` for an empty `data` or more
+/// than [`MAX_FDS`] fds.
+pub fn send_to_with_fds(
+    path: &std::path::Path,
+    data: &[u8],
+    fds: &[BorrowedFd<'_>],
+) -> io::Result<()> {
+    use nix::sys::socket::socket;
+    if data.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "SCM_RIGHTS needs at least one data byte",
+        ));
+    }
+    if fds.len() > MAX_FDS {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many fds"));
+    }
+    let sock = socket(
+        AddressFamily::Unix,
+        SockType::Datagram,
+        SockFlag::SOCK_CLOEXEC,
+        None,
+    )
+    .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let addr = UnixAddr::new(path).map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    let raw: Vec<RawFd> = fds.iter().map(AsRawFd::as_raw_fd).collect();
+    let iov = [IoSlice::new(data)];
+    let cmsgs = [ControlMessage::ScmRights(&raw)];
+    let cmsgs: &[ControlMessage<'_>] = if raw.is_empty() { &[] } else { &cmsgs };
+    sendmsg(
+        sock.as_raw_fd(),
+        &iov,
+        cmsgs,
+        MsgFlags::MSG_NOSIGNAL,
+        Some(&addr),
+    )?;
+    Ok(())
+}
+
 /// Receive into `buf` from `sock`, collecting any `SCM_RIGHTS` fds (up to
 /// [`MAX_FDS`]). Returns the number of data bytes read and the received fds, each
 /// already `O_CLOEXEC`.

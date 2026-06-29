@@ -87,20 +87,85 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
   - **binder-connector mesh bus** — `kenneld` runs a `MeshBus` controller as node 0 of a shared binder
     bus; providers acquire a node handle via `ADD_SERVICE` and consumers receive it via `SVC_CONNECT`.
     New binder primitive: `Reply::Handle(u32)` / `reply_with_handle()` (kennel-lib-binder).
-  - **dbus-broker@v1** — a new standing **service kennel** (`templates/dbus-broker/`, new crate
-    `kennel-dbus-broker`) is the intended replacement for the per-consumer `host-dbus` delegate:
-    `kenneld` pushes per-consumer D-Bus filter sets over the mesh and relays frames for mediation.
-    New node-0 verbs (kennel-lib-binder `service.rs`): `REGISTER_CONSUMER`, `UNREGISTER_CONSUMER`,
-    `RELAY_FRAME`. `DbusRelay` routes to the broker if a transactor is configured, else falls back to
-    the legacy `host-dbus` delegate.
-  - **dbus-name / binder-connector handoff** (`svc_connect_handoff`): `Shape::DbusName` replies `OK`
-    (filter set already registered at startup); `Shape::BinderConnector` replies `UNAVAILABLE`
-    (connector transactions happen directly on the mesh bus).
+  - **dbus-broker@v1** — a standing **service kennel** (`templates/dbus-broker/`, new crate
+    `kennel-dbus-broker`) replacing the per-consumer `host-dbus` delegate. It `ADD_SERVICE`s one
+    **control node** on the D-Bus mesh bus (`org.projectkennel.dbus-broker`), which only kenneld
+    holds. The single control verb (kennel-lib-binder `service.rs::broker`) is **`ACCEPT_SESSION`**
+    `[bus | talk | call | broadcast | own | deny_talk]`: kenneld tells the broker to accept one
+    session and apply that filter; the broker mints a **per-session node**, stores the filter
+    against the node's cookie, and replies with the node. Consumer→broker is then direct
+    (`DBUS_SEND`/`RECV`/`CLOSE` on the session node, mediated by the reused `host-dbus::mediate`
+    engine); the session is reclaimed on the node's `Br::Release`. kenneld never relays frames.
+  - **Mesh-bus caller identity** — the D-Bus mesh bus's node-0 handler resolves a connecting
+    consumer **fresh, per `SVC_CONNECT`**: kernel-attested `sender_pid` → `/proc/<pid>/cgroup` →
+    `kennel-<ctx>` → that ctx's one settled `[dbus]` filter (`kenneld` holds a ctx→filter map,
+    populated when a brokered kennel is prepared, dropped when its ctx is released). No cookie, no
+    session table, no facade-pid keying — the cgroup is the restart-invariant kennel name and the
+    only standing state is the policy. The handler then issues `ACCEPT_SESSION` as a *nested*
+    transaction on its own context-manager connection and returns the session node via
+    `Reply::Handle`. Distinct per-bus capability names carry the bus selector
+    (`org.projectkennel.dbus` = session, `org.projectkennel.dbus-system` = system).
+  - **dbus-name handoff is a pure locator** (`svc_connect_handoff`, `Shape::DbusName`): on the
+    *per-kennel* bus kenneld replies `[OK][mesh-device-path]` when D-Bus is brokered (the facade
+    then opens the mesh bus and connects there) or `[OK]` when not (legacy `host-dbus` route). It
+    resolves no identity and mints no session — that is the mesh handler's job.
+    `Shape::BinderConnector` replies `UNAVAILABLE` (connector transactions happen on the mesh bus).
   - **MeshBusGuard** — RAII guard that decrements participant refcounts and unmounts the per-mesh
     binderfs on the last participant's exit (both normal teardown and bring-up failure).
-  - **⚠ NOT-yet-built:** the broker's **frame relay is a stub** — `handle_relay` registers the filter
-    and the wire path but does NOT parse/filter/forward frames to the real D-Bus bus. D-Bus mediation
-    currently flows through the legacy `host-dbus` delegate; the broker is dormant unless selected. The
-    rewrite should describe the broker as the *designed* mediation path with the relay as a known gap.
 - **Why:** docs/design + docs/architecture are frozen; W1 ships this architecture with no doc updates.
-- **Source:** PR (W1 integration) — branch feat/w1-integration; agent branch feat/w1-connector-shapes.
+- **Source:** PR (W1 integration) — branch feat/w1-integration. Supersedes the earlier draft of this
+  entry (the `REGISTER_CONSUMER`/`UNREGISTER_CONSUMER`/`RELAY_FRAME` relay model and the startup-time
+  filter registration were replaced before merge by the per-session `ACCEPT_SESSION` + cgroup-identity
+  shape above; those verbs and the stub frame-relay no longer exist).
+
+---
+
+## 2026-06-29 — W1: mesh binderfs mountable unprivileged + exposed into views; binder handle-ref fix
+
+- **Target:** docs/design §7.13.4a (connector mesh bus), §7.7 (D-Bus mediation), 02-4-binder.md (node 0
+  / handle refs), 07-2 (kennel-bin-init role); docs/architecture 01-process-model / 02-8-internal-api.
+- **Change (as-built to capture in the rewrite):**
+  - **Unprivileged mesh-bus mount holder (§7.13.4a)** — the shared connector binderfs is mounted by a
+    **forked, not exec'd** child of `kenneld` (`kenneld::mesh_holder`) under kenneld's own AppArmor
+    profile (which carries the `userns` grant across the fork but NOT an exec). The holder creates a
+    user namespace with a single-uid **self-map `0 <kenneld-uid> 1`** (unprivileged — no `cap_setuid`,
+    no subuids) and mounts the binderfs there; nodes are owned by kenneld's own uid, so kenneld serves
+    node 0 by opening the device via `/proc/<holder>/root`. **No privhelper, no host privilege** —
+    the privhelper construct protocol, the boot-sync handshake, and the view construction are all
+    UNTOUCHED. (A privhelper that *holds* a namespace would be a long-lived privileged process — the
+    drift this deliberately avoids.)
+  - **Mount handoff is fd-based, not path-based.** A kennel cannot reach the holder's mount by path
+    (its construction has its own PID namespace, so `/proc/<holder>/root` does not resolve there), and
+    only the holder — the namespace that *has* the mount — may `open_tree(OPEN_TREE_CLONE)` it. So the
+    holder **serves clone requests**: on demand it clones a detached, movable binderfs mount and hands
+    the fd back over `SCM_RIGHTS`. `kenneld` relays each detached fd into the kennel over a
+    **connectionless `AF_UNIX` datagram** the init binds at a fixed in-view path (`RENDEZVOUS_SOCK`,
+    on the writable `/dev` tmpfs), reached via `/proc/<init>/root` after boot-sync READY.
+    `kennel-bin-init` `move_mount`s each clone into the view (`/dev/binderfs-mesh`) and adds the device
+    to the **workload's Landlock ruleset** — all *before* it forks the workload, so the broker/facade
+    open the device by path unchanged. `open_tree(CLONE)` shares the binderfs superblock/inode (same
+    binder context), so cross-userns object translation works (verified by root probe: the mount/clone/
+    userns are not the constraint). New primitives: `kennel_lib_syscall::namespace::{fork_mount_holder,
+    open_tree_clone, move_mount_fd}`, `kennel_lib_scm::{bind_dgram, send_to_with_fds}`,
+    `kennel_lib_spawn::mesh_rendezvous` (frame + `RENDEZVOUS_SOCK`). `Spec.mesh_mounts` carries the
+    detached fds + in-view targets from `kenneld`'s plan into `bring_up`.
+  - **Binder handle ref-acquire (correctness fix, 02-4 / 07-7).** `Connection::transact_handle` now
+    **acquires a strong ref on the returned handle before freeing the reply buffer** — binder drops a
+    transaction's object refs on `BC_FREE_BUFFER`, so without this the returned handle was already
+    dangling (the node's refcount hit zero, its owner got `BR_RELEASE`, and the first transaction on
+    the handle failed `BR_FAILED_REPLY`). This is what made the brokered D-Bus `ACCEPT_SESSION` handoff
+    work end to end (latent until W1 first exercised it). New `Reply::HandleOnce(u32)`: forward a
+    handle then **release the endpoint's own ref** — for the per-session node `kenneld` only relays
+    (so the broker reclaims the session when the consumer disconnects), distinct from `Reply::Handle`
+    (a persistent provider node the node-0 endpoint keeps).
+  - **Brokered-consumer mesh-bus tier** — the consumer's brokered-D-Bus path resolves the broker's
+    tier **from the catalogue** (not a hardcoded `Host`), so consumer and broker key the *same* mesh
+    binderfs instance (a user-enabled broker is `User`-tier). A tier mismatch put them on separate
+    buses and `ACCEPT_SESSION` failed closed with the broker's control node "not registered".
+  - **Mesh-bus audit is durable** — the `MeshBus` uses a real journal-backed daemon writer
+    (`audit::daemon_writer`, `stdout` sink → kenneld's journal), not a noop drain: every
+    `SVC_CONNECT` / `ACCEPT_SESSION` / provider-death verdict on the most-trusted cross-kennel
+    mediation path is recorded.
+- **Why:** docs/design + docs/architecture are frozen; this lands the W1 mountability + the binder
+  ref-lifetime correctness with no doc edits. e2e `dbus-brokered` round-trips `GetId` end to end.
+- **Source:** branch feat/w1-integration.
