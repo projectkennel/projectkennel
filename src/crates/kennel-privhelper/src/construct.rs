@@ -604,6 +604,9 @@ fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io
     let bpf_helper = kennel_lib_config::Deployment::load()
         .map_err(|e| io::Error::other(format!("resolve kennel-privhelper-bpf: {e}")))?
         .privhelper_bpf();
+    // stdout/stderr are inherited from the factory (itself inherited from kenneld), so the
+    // sub-helper's per-step `eprintln` cause lands in the same journal — the net/mounts
+    // sub-helpers report the same way. stdin is piped to carry the egress payload.
     let mut child = std::process::Command::new(&bpf_helper)
         .arg("attach")
         .arg(cgroup)
