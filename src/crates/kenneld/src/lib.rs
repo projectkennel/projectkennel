@@ -731,6 +731,24 @@ pub fn start<P: Privileged + Sync>(
     }
 }
 
+/// Whether `target` lands on the FHS executable closure an OCI image owns itself
+/// (§7.11.4a) — the dirs a host bind must not shadow over the image overlay.
+///
+/// `/usr`, `/bin`, `/sbin`, and the `/lib*` family. Matched as path components (so
+/// `/lib` matches `/lib/...` but not `/library`), the same closure `derive_closure_readonly`
+/// locks.
+fn is_image_owned_system_path(target: &Path) -> bool {
+    const ROOTS: &[&str] = &["usr", "bin", "sbin", "lib", "lib64", "lib32", "libx32"];
+    let mut comps = target.components();
+    if comps.next() != Some(std::path::Component::RootDir) {
+        return false;
+    }
+    matches!(
+        comps.next(),
+        Some(std::path::Component::Normal(c)) if ROOTS.iter().any(|r| c == *r)
+    )
+}
+
 /// The bring-up steps, recording provisioning into `state` as it goes.
 // allow: one ordered bring-up sequence (cgroup, addresses, egress, proxy, /etc, ssh,
 // unix, view, spawn) whose steps share `state` for the reverse-order unwind.
@@ -1035,7 +1053,30 @@ fn bring_up<P: Privileged + Sync>(
     let oci_view = plan.view.as_ref().is_some_and(|v| v.image.is_some());
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
-            if !oci_view {
+            if oci_view {
+                // The image carries its OWN executable closure (§7.11.4a): drop any host
+                // bind landing on the image-owned FHS system roots. A base template's
+                // `fs.read = ["/usr/lib/**", "/lib/**", …]` is meant for a constructed
+                // host-mirror view; materialised over the image overlay it shadows the
+                // image's `/lib/libc.so.6` with the HOST glibc, so the image's `ld.so`
+                // loads a mismatched libc and the workload faults (SIGBUS). Kennel-injected
+                // binds (launcher, ssh dialer, config) are added below, after this filter.
+                view.binds
+                    .retain(|b| !is_image_owned_system_path(&b.target));
+                // The kennel facades (the OCI launcher + the binder/dbus/ssh conduits) live
+                // under `/usr/libexec/kennel-facades`. A constructed view inherits that dir via
+                // the host `/usr` bind; the strip above removes it, so bind the facades dir
+                // DIRECTLY — always, never inferring it from the image. They are static-pie, so
+                // no host libc rides in; the dir over-mounts any image `/usr/libexec`, intended.
+                if let Some(dir) = oci.launcher_bin.as_deref().and_then(Path::parent) {
+                    view.binds.push(kennel_lib_spawn::BindMount {
+                        source: dir.to_path_buf(),
+                        target: dir.to_path_buf(),
+                        writable: false,
+                        exclusive: false,
+                    });
+                }
+            } else {
                 for sub in crate::etc::essential_etc_subtrees() {
                     view.binds.push(kennel_lib_spawn::BindMount {
                         source: sub.clone(),
