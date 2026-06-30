@@ -55,8 +55,8 @@ Home\-relative paths that persist writably across runs (else reconstructed each 
 \fBfs.home.readonly\fR \(em bool
 Make the constructed $HOME read\-only.
 .TP
-\fBfs.tmp.private / .size / .mode\fR \(em bool / string / string
-Private /tmp tmpfs, its size cap ("512M"), and mode ("0700").
+\fBfs.tmp.writable / .size\fR \(em bool / string
+Whether the workload may write its /tmp tmpfs (the Landlock grant), and its size cap ("512M").
 .TP
 \fBfs.proc.visibility / .hidepid\fR \(em string / bool
 Procfs visibility ("self") and hidepid=2.

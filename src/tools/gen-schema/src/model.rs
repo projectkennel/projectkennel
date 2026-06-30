@@ -173,7 +173,7 @@ pub static TABLES: &[Table] = &[
             f("exclusive", Ty::StrArray, "Writable paths bound exclusively: kenneld over-mounts an opaque sentinel on the host path during the run (T2.8). Each must also appear in `write`."),
             f("deny", Ty::StrArray, "Categorical denies (belt-and-braces over the constructed view)."),
             f("home", Ty::Obj("fs_home"), "The constructed $HOME view."),
-            f("tmp", Ty::Obj("fs_tmp"), "The private /tmp tmpfs."),
+            f("tmp", Ty::Obj("fs_tmp"), "The workload's /tmp tmpfs."),
             f("proc", Ty::Obj("fs_proc"), "procfs visibility."),
             f("dev", Ty::Obj("fs_dev"), "The minimal /dev."),
         ],
@@ -189,11 +189,10 @@ pub static TABLES: &[Table] = &[
     },
     Table {
         name: "fs_tmp",
-        title: "`[fs.tmp]` — private /tmp.",
+        title: "`[fs.tmp]` — the workload's /tmp tmpfs.",
         fields: &[
-            f("private", Ty::Bool, "Whether /tmp is a private tmpfs."),
+            f("writable", Ty::Bool, "Whether the workload may write to its /tmp tmpfs (the Landlock write grant). Absent means /tmp is a read-only fresh tmpfs."),
             f("size", Ty::Str, "Size cap in human form (`512M`, `1G`)."),
-            f("mode", Ty::Str, "Mount mode (octal digits, e.g. `0700`)."),
         ],
     },
     Table {

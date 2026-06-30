@@ -107,9 +107,8 @@ shadow = true
 
 # Private /tmp (T1.1): a fresh tmpfs; the host /tmp is invisible.
 [fs.tmp]
-private = true
+writable = true
 size = "512M"
-mode = "0700"
 
 # Procfs: PID namespace + hidepid=2 — the workload sees only its own tree (T1.1, T1.6).
 [fs.proc]
@@ -251,4 +250,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOuXW3qFHvOCpFW5jJpSvioD94H8lRdp/Q\ngWZeqM2ejgPze+CJ30Qxob6GLAQ8BpF65DPkbWhzbLsCQpPCbFxw8=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDesixZhpjySLZxwXMszmxg4IEvpJSa0pU\n6BZtTUz7kybGnGGD006NP7EYGcPZjQ1oNtjttD0WoNQ5G1WINXkQM=\n-----END SSH SIGNATURE-----\n"

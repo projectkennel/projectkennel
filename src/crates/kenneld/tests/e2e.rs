@@ -135,9 +135,8 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 tmp: TmpPolicy {
-                    private: true,
+                    writable: true,
                     size_mib: 512,
-                    mode: "0700".to_owned(),
                 },
                 dev: DevPolicy { allow: dev_allow() },
             },

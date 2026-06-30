@@ -685,20 +685,22 @@ pub struct FsHome {
     pub readonly: Option<bool>,
 }
 
-/// `[fs.tmp]`: private `/tmp`. `size` is the human form (`"512M"`); the resolver
-/// converts it to mebibytes for the settled policy.
+/// `[fs.tmp]`: the workload's own `/tmp` tmpfs.
+///
+/// `/tmp` is always a fresh per-kennel tmpfs in the constructed view; `writable` is the Landlock
+/// write grant that lets the workload use it (without it `/tmp` is a read-only tmpfs). `size` is the
+/// human form (`"512M"`); the resolver converts it to mebibytes for the settled policy. The tmpfs is
+/// owned by the workload user inside its own mount namespace, so it carries no DAC-mode knob.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsTmp {
-    /// Whether `/tmp` is a private tmpfs.
+    /// Whether the workload may **write** to its `/tmp` tmpfs (the Landlock write grant). Absent ⇒
+    /// `/tmp` is a read-only fresh tmpfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub private: Option<bool>,
+    pub writable: Option<bool>,
     /// Size cap in human form (`"512M"`, `"1G"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
-    /// Mount mode (octal digits, e.g. `"0700"`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
 }
 
 /// `[fs.proc]`: procfs visibility and hidepid.

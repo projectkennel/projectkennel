@@ -606,13 +606,10 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     mount::mount_proc(&proc, view.proc_hidepid)?;
     let tmp = under(Path::new("/tmp"));
     std::fs::create_dir_all(&tmp)?;
-    mount::mount_tmpfs(
-        &tmp,
-        Some(view.tmp_size_mib),
-        Some(&view.tmp_mode),
-        false,
-        true,
-    )?;
+    // Mode 0700: the tmpfs is owned by the workload user inside its own mount namespace, so
+    // owner-only is private-and-usable (no other uid exists in the kennel to grant). Fixed, not
+    // policy-derived — a per-policy DAC mode gated no real adversary here.
+    mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some("0700"), false, true)?;
     // Private POSIX shared memory at /dev/shm — a fresh per-kennel tmpfs like /tmp, so `shm_open(3)`
     // works (Wayland compositors, Chromium, …). The constructed minimal /dev exists above; this adds
     // the conventional shm tmpfs inside it (mode 1777 like the host's).
@@ -997,9 +994,8 @@ mod tests {
                     home_persist: Vec::new(),
                     home_readonly: false,
                     tmp: TmpPolicy {
-                        private: true,
+                        writable: true,
                         size_mib: 512,
-                        mode: "0700".to_owned(),
                     },
                     dev: DevPolicy {
                         allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
@@ -1697,21 +1693,6 @@ mod tests {
             "writes resolve to the persistent host path"
         );
         assert!(bind.writable);
-    }
-
-    #[test]
-    fn from_policy_rejects_non_octal_tmp_mode() {
-        // A non-octal mode would inject extra comma-separated tmpfs mount options.
-        let mut p = policy_with_placeholders();
-        p.effective_policy.fs.tmp.mode = "0700,size=10G".to_owned();
-        let err = Plan::from_policy(
-            &substitute(&p, &subst()).expect("subst"),
-            7,
-            "kennel-dev",
-            Path::new("/home/dev"),
-        )
-        .expect_err("must reject");
-        assert!(matches!(err, SpawnError::InvalidPolicy(_)), "got {err:?}");
     }
 
     #[test]

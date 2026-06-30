@@ -20,11 +20,11 @@ the code whose compromise would break confinement.
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
 | `kenneld` | 7969 | — | **yes** | *(2 bins)* | basic-toml, serde |
-| `kennel-lib-compile` | 5048 | — | — | cli, compose | basic-toml, serde |
+| `kennel-lib-compile` | 5043 | — | — | cli, compose | basic-toml, serde |
 | `kennel-cli` | 4475 | — | — | *(binary)* | lexopt, serde, serde_json |
-| `kennel-lib-policy` | 2357 | — | **yes** | cli, compile, compose, kenneld, spawn | basic-toml, ed25519-compact, hmac-sha512, object, serde |
+| `kennel-lib-policy` | 2355 | — | **yes** | cli, compile, compose, kenneld, spawn | basic-toml, ed25519-compact, hmac-sha512, object, serde |
 | `kennel-lib-binder` | 2264 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn | libc |
-| `kennel-lib-spawn` | 2027 | — | **yes** | bin-init, kenneld, privhelper | — |
+| `kennel-lib-spawn` | 2007 | — | **yes** | bin-init, kenneld, privhelper | — |
 | `kennel-privhelper` | 1844 | — | **yes** | kenneld | — |
 | `kennel-facade` | 1341 | — | — | *(10 bins)* | — |
 | `kennel-lib-audit` | 1287 | — | **yes** | cli, kenneld | — |
@@ -66,7 +66,7 @@ the code whose compromise would break confinement.
 - `kennel-privhelper` → bpf, config, spawn, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, privhelper
 
-**Totals.** 28 crates, **36401 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **22433 SLOC**; the remaining 12 crates (13968 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 28 crates, **36374 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 16 crates, **22411 SLOC**; the remaining 12 crates (13963 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 

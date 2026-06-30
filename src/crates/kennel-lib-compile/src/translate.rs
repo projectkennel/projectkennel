@@ -1260,17 +1260,15 @@ fn translate_fs(
 
     let tmp = match &fs.tmp {
         Some(t) => TmpPolicy {
-            private: t.private.unwrap_or(false),
+            writable: t.writable.unwrap_or(false),
             size_mib: match &t.size {
                 Some(s) => parse_size_mib(s)?,
                 None => DEFAULT_TMP_MIB,
             },
-            mode: t.mode.clone().unwrap_or_else(|| "0700".to_owned()),
         },
         None => TmpPolicy {
-            private: false,
+            writable: false,
             size_mib: DEFAULT_TMP_MIB,
-            mode: "0700".to_owned(),
         },
     };
 
@@ -2779,7 +2777,7 @@ mod tests {
 
         assert!(ep.fs.home_shadow);
         assert_eq!(ep.fs.tmp.size_mib, 512);
-        assert_eq!(ep.fs.tmp.mode, "0700");
+        assert!(ep.fs.tmp.writable);
         assert!(ep.fs.dev.allow.iter().any(|d| d == "/dev/null"));
 
         assert!(ep.exec.deny_setuid && ep.exec.deny_writable);

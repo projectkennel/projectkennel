@@ -65,13 +65,13 @@ pub use spawn::spawn_eligible;
 
 /// The newest `settled_schema_version` this build accepts.
 ///
-/// Bumped to 2 with the SSHSIG signature format: a v1 artefact carries the old
-/// bare-Ed25519 signature this build no longer reads.
-pub const SETTLED_SCHEMA_VERSION: u32 = 2;
+/// Bumped to 2 with the SSHSIG signature format; to 3 when `[fs.tmp]` lost its DAC-mode knob and
+/// renamed `private` → `writable` (the Landlock write grant), changing the settled `TmpPolicy` shape.
+pub const SETTLED_SCHEMA_VERSION: u32 = 3;
 
-/// The oldest `settled_schema_version` this build still verifies. A v1 settled policy
-/// predates the SSHSIG signature format and must be recompiled to be re-signed.
-pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 2;
+/// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
+/// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.
+pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// Verify a settled-policy document and return its body.
 ///
@@ -422,9 +422,8 @@ mod tests {
         let key = signing_key();
         let mut policy = sample_policy();
         policy.effective_policy.fs.tmp = TmpPolicy {
-            private: true,
+            writable: true,
             size_mib: 256,
-            mode: "0750".to_owned(),
         };
         policy.effective_policy.fs.dev = DevPolicy {
             allow: vec![

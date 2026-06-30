@@ -294,15 +294,12 @@ pub const MAX_BPF_DENY_PER_FAMILY: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TmpPolicy {
-    /// Whether `/tmp` is a private tmpfs. Confined templates always set this
-    /// true; `false` would bind-mount the host `/tmp` (which templates never do).
-    pub private: bool,
+    /// Whether the workload may **write** to its `/tmp` tmpfs (the Landlock write grant). `/tmp` is
+    /// always a fresh per-kennel tmpfs in the constructed view; `false` withholds the write grant,
+    /// leaving it read-only. (It never binds the host `/tmp`.)
+    pub writable: bool,
     /// Size cap of the tmpfs, in mebibytes.
     pub size_mib: u32,
-    /// Mount mode for the tmpfs root, as octal digits (e.g. `"0700"`). The
-    /// runtime validates it is octal-only before it reaches the mount data
-    /// string (it would otherwise be an option-injection vector).
-    pub mode: String,
 }
 
 /// Device-file policy (§7.4.8): which `/dev` nodes the kennel's constructed
@@ -1559,9 +1556,8 @@ pub fn sample_settled() -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 tmp: TmpPolicy {
-                    private: true,
+                    writable: true,
                     size_mib: 512,
-                    mode: "0700".to_owned(),
                 },
                 dev: DevPolicy {
                     allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],

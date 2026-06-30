@@ -19,6 +19,28 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-30 — `[fs.tmp]`: `private` → `writable`, drop the DAC-mode knob (settled schema v3)
+
+- **Target:** the config-schema chapter (the `[fs.tmp]` section) and the filesystem chapter's
+  `/tmp` construction. In the frozen trees: docs/architecture/02-2-config-schema.md and
+  docs/design/07-4-filesystem.md.
+- **Change (as-built to capture in the rewrite):**
+  - `[fs.tmp].private` is renamed **`writable`** — that is what it always was: the Landlock write
+    grant on `/tmp`. `/tmp` is *always* a fresh per-kennel tmpfs in the constructed view; `writable =
+    true` lets the workload use it, absent/false leaves it read-only. Drop the stale claim that
+    `private = false` "bind-mounts the host `/tmp`" — it never did; it only withholds the write grant.
+  - `[fs.tmp].mode` is **removed**. The tmpfs lives in the workload's own mount namespace and is owned
+    by the workload uid, so a per-policy DAC mode gated no real adversary (the host can't reach it
+    across the namespace; the kennel is single-uid). The mount now fixes `0700` internally — owner =
+    the workload, private-and-usable. The octal-mode validation (an option-injection guard for a knob
+    that no longer exists) is gone with it.
+  - The settled `TmpPolicy` loses `mode` and renames `private` → `writable`; this bumps
+    **`SETTLED_SCHEMA_VERSION` 2 → 3** (and `MIN` → 3): a pre-v3 settled carries the old shape and must
+    be recompiled. The spawn plan wire format drops `tmp_mode` accordingly.
+- **Why:** `private`/`mode` were a misleading name and security theatre; the schema should say what
+  the field does (grant write) and not offer a knob that isn't a real choice.
+- **Source:** the schema-fs-tmp-writable PR.
+
 ## 2026-06-30 — one policy type: list fields replace *or* increment at the same key
 
 - **Target:** the templates chapter, design §5.2-5.3 (the composition model) and the config-schema

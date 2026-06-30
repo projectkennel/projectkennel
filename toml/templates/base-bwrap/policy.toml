@@ -63,9 +63,8 @@ write = []
 shadow = true
 
 [fs.tmp]
-private = true
+writable = true
 size = "512M"
-mode = "0700"
 
 [fs.proc]
 visibility = "self"
@@ -122,4 +121,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCGI+PphGCGNmbOfCHxw7M8qKNvJ9KbUXh\n+fm+gjyD0/eDww4HQG9/feXlUmYOnUV6pXi8vjKzKgqVm4uEA5UAI=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQL3e3KxMUIham6kkE7Y692VNMyGMpKQ7WA\nfKh9TYOnr9EEj4Wc0M/FG2GHN4qpzD2HIO5oHoG7U8h/yVMUlcQws=\n-----END SSH SIGNATURE-----\n"

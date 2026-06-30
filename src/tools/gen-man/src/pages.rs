@@ -529,7 +529,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 fields: &[
                     Field { name: "fs.home.persist", kind: "array", desc: "Home-relative paths that persist writably across runs (else reconstructed each spawn)." },
                     Field { name: "fs.home.readonly", kind: "bool", desc: "Make the constructed $HOME read-only." },
-                    Field { name: "fs.tmp.private / .size / .mode", kind: "bool / string / string", desc: "Private /tmp tmpfs, its size cap (\"512M\"), and mode (\"0700\")." },
+                    Field { name: "fs.tmp.writable / .size", kind: "bool / string", desc: "Whether the workload may write its /tmp tmpfs (the Landlock grant), and its size cap (\"512M\")." },
                     Field { name: "fs.proc.visibility / .hidepid", kind: "string / bool", desc: "Procfs visibility (\"self\") and hidepid=2." },
                     Field { name: "fs.dev.allow", kind: "array of paths", desc: "Trivial pseudo-device baseline (/dev/null, /dev/urandom, ...)." },
                     Field { name: "[[fs.dev.passthrough]]", kind: "array of tables", desc: "Real host devices: path, group, reason (required), threats (exposed tag required)." },

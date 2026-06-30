@@ -370,7 +370,7 @@
           ]
         },
         "tmp": {
-          "description": "The private /tmp tmpfs.",
+          "description": "The workload's /tmp tmpfs.",
           "allOf": [
             {
               "$ref": "#/definitions/fs_tmp"
@@ -418,20 +418,16 @@
       }
     },
     "fs_tmp": {
-      "description": "`[fs.tmp]` — private /tmp.",
+      "description": "`[fs.tmp]` — the workload's /tmp tmpfs.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "private": {
-          "description": "Whether /tmp is a private tmpfs.",
+        "writable": {
+          "description": "Whether the workload may write to its /tmp tmpfs (the Landlock write grant). Absent means /tmp is a read-only fresh tmpfs.",
           "type": "boolean"
         },
         "size": {
           "description": "Size cap in human form (`512M`, `1G`).",
-          "type": "string"
-        },
-        "mode": {
-          "description": "Mount mode (octal digits, e.g. `0700`).",
           "type": "string"
         }
       }

@@ -600,9 +600,8 @@ fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
 
 fn fold_fs_tmp(p: &FsTmp, c: &FsTmp) -> FsTmp {
     FsTmp {
-        private: or(&c.private, &p.private),
+        writable: or(&c.writable, &p.writable),
         size: or(&c.size, &p.size),
-        mode: or(&c.mode, &p.mode),
     }
 }
 
