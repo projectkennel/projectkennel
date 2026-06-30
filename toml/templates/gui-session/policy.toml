@@ -1,0 +1,77 @@
+# ============================================================================
+# Template: gui-session
+# Inherits: interactive
+# Threat catalogue: THREATS.md v0.5
+#
+# The confined DESKTOP-session shape: a full wlroots compositor (sway) running a multi-window
+# session inside ONE kennel, rendering into a single window on the host through the maintainer-signed
+# `gui-broker` GUI-service kennel. Where gui-interactive relays ONE app into the broker's kiosk
+# compositor, gui-session runs its OWN nested compositor as the single mesh client and launches the
+# session apps as ITS clients — the whole desktop is one host window, and every app stays in-kennel.
+#
+# Display: it holds NO host reach and NO GPU. It `[[consumes]]` org.projectkennel.wayland over the
+# W1 connector mesh (the broker's per-connection nested compositor is its upstream), and because it
+# has no render node, sway renders in SOFTWARE (WLR_RENDERER=pixman) and hands wl_shm buffers up the
+# mesh — the broker holds the GPU and composites.
+#
+# Session IPC: a PRIVATE per-kennel D-Bus bus, not a host-bus filter. The leaf's workload runs the
+# session under `dbus-run-session`, which binds a path socket in the kennel's own /tmp; the panel,
+# launcher, and apps talk only to each other on it. No host bus is reachable, so there is none to
+# mediate (a deliberate host-service reach-through would be a separate, narrow [dbus] grant).
+#
+# The [workload] is FIXED and pinned here, not a leaf choice: the session is only correct when it
+# runs under `dbus-run-session` (no private bus ⇒ no session IPC) with sway as the nested compositor,
+# so the command is part of the template's contract. `pinned = true` refuses a CLI `-- override` (it
+# would launch a bare command with no bus and the wrong display server); `--force` stays the
+# deliberate escape for debugging. A leaf is therefore a thin runnable alias. It inherits the
+# interactive workstation toolset (host egress, shells, coreutils, editors, git, python3); for a
+# sealed desktop with no egress, derive base-confined instead and add the GUI legs by hand.
+#
+# Consuming a reserved name is not the gated act (providing it is), so this template needs no special
+# tier; it is maintainer-signed as reference content.
+# ============================================================================
+
+template_name = "gui-session"
+template_base = "interactive"
+
+# The nested-session runtime (sway + the private-bus tools, from gui-session-runtime) plus the
+# standard confined-desktop app set: terminals + fonts (gui-desktop), a text editor (gui-editor),
+# the small utilities (gui-accessories: calculator, clocks, characters, fonts), the image/document
+# viewers (gui-viewers), and the file manager (gui-files). Each is exec-only — their UI data is in
+# the base /usr/share read floor. Drop a fragment to slim the desktop, or add more to widen it.
+include = [
+    "gui-session-runtime",
+    "gui-desktop",
+    "gui-editor",
+    "gui-accessories",
+    "gui-viewers",
+    "gui-files",
+]
+
+# The display arrives over the mesh at /tmp/wayland-0 — sway's UPSTREAM, not a host socket.
+# WLR_BACKENDS=wayland nests sway as a client of the broker's compositor; WLR_RENDERER=pixman renders
+# in software because this kennel holds no GPU (the broker owns the render node).
+[env.set]
+WAYLAND_DISPLAY = "/tmp/wayland-0"
+XDG_RUNTIME_DIR = "/tmp"
+WLR_BACKENDS = "wayland"
+WLR_RENDERER = "pixman"
+
+[[consumes]]
+name = "org.projectkennel.wayland"
+shape = "af-unix"
+at = "/tmp/wayland-0"
+required = true
+reason = "the confined desktop session reaches its display server — a broker-spawned nested compositor — over the mesh"
+
+# The fixed session command: a private session bus (dbus-run-session) wrapping the nested sway
+# compositor. Pinned so a CLI `-- override` is refused (it would run with no bus / wrong display);
+# --force remains the deliberate escape.
+[workload]
+argv = ["/usr/bin/dbus-run-session", "/usr/bin/sway"]
+pinned = true
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIMYzBnlDGNfaGecnN18zJwmGinmhNXwm2\nGt77PTAh2bseILxuuOAbuFxoxt6QNUIaBs49Pc4GHBNspXE3wcdg0=\n-----END SSH SIGNATURE-----\n"

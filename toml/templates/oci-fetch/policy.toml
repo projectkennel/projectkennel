@@ -1,5 +1,5 @@
 # ============================================================================
-# Template: oci-fetch  (v1)  — the vetted confinement for `kennel oci build`.
+# Template: oci-fetch — the vetted confinement for `kennel oci build`.
 # Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4  (T3.8 — substrate trust)
 #

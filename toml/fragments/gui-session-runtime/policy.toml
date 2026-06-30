@@ -1,0 +1,49 @@
+# ============================================================================
+# Fragment: gui-session-runtime
+#
+# A composable capability bundle: the runtime a confined DESKTOP session needs to be
+# its own display server — a wlroots compositor (sway) the kennel runs nested, plus a
+# PRIVATE per-kennel D-Bus session bus (dbus-run-session) for the session's internal IPC.
+#
+#   include = ["gui-session-runtime"]
+#
+# The bus is the point of the no-host-bus design: dbus-run-session starts dbus-daemon on a
+# PATH socket in the kennel's own /tmp and execs the session under it, so the panel, launcher,
+# and apps talk only to EACH OTHER — never a host bus, never the mesh. The mount namespace
+# contains it; the abstract-socket scope stays denied.
+#
+# Additive-only: widens exec.allow with the compositor + the private-bus tools. The DISPLAY LEG
+# (the gui-broker [[consumes]] and the WLR_BACKENDS/WLR_RENDERER env that nest sway as a software
+# client of the broker's compositor) is the session template's job, not this fragment's — env is
+# not a fragment-additive field. Pair this with a template that brings the leg, e.g. gui-session.
+# ============================================================================
+
+name = "gui-session-runtime"
+
+[[exec.allow.add]]
+path = "/usr/bin/sway"
+reason = "the in-kennel wlroots compositor: the session's own display server, nested as a single client of the broker's compositor"
+
+[[exec.allow.add]]
+path = "/usr/bin/dbus-run-session"
+reason = "starts a private session bus (a path socket in the kennel's /tmp) and execs the session under it — the session's internal IPC, isolated from any host bus"
+
+[[exec.allow.add]]
+path = "/usr/bin/dbus-daemon"
+reason = "the session bus that dbus-run-session launches"
+
+# sway reads its config from /etc/sway/config (the kennel's $HOME is a fresh tmpfs, so there is no
+# ~/.config/sway/config). Without a config sway exits with a fatal error, so this read is load-bearing.
+[[fs.read.add]]
+path = "/etc/sway"
+
+# sway renders its own chrome (title bars, the status bar) through cairo/pango, which resolve fonts
+# via fontconfig (/etc/fonts). Carried here so the runtime is self-sufficient: a session built on
+# this fragment alone gets font discovery without having to also pull a terminal fragment.
+[[fs.read.add]]
+path = "/etc/fonts"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIqKOx96SyayuSl5Ejs5AfO/A3ZQ1PG7LW\nkK6A9/TDGp77Os1PCkrqZlkRbJHU2k26eGWLxk999CLeBxIJY0/wQ=\n-----END SSH SIGNATURE-----\n"

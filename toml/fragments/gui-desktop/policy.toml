@@ -9,8 +9,8 @@
 #   include = ["gui-desktop"]
 #
 # Additive-only: widens exec.allow with the GUI clients and fs.read with /etc/fonts (the font
-# files themselves live under /usr/share, already read by the base; /etc/fonts is bound by the
-# etc-binds catalogue). No network, no extra writable path.
+# files themselves live under /usr/share, already read by the base; this fs.read bind-mounts
+# /etc/fonts into the view). No network, no extra writable path.
 # ============================================================================
 
 name = "gui-desktop"
@@ -24,9 +24,9 @@ path = "/usr/bin/foot"
 reason = "a lightweight Wayland terminal emulator"
 
 [[fs.read.add]]
-path = "/etc/fonts/**"
+path = "/etc/fonts"
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQJGGNEecMGVj+ThmDgMjanApTxrDKE8M1G\ncInoFCqHbWbFmEJ5wOyL7W6iOsxLcru8a2Mjf19kZL0myZp682swA=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI1+R4gYhbnx5VT+jfApzAEn/JE8mDmW1V\nXJK+bTeQs1I4MEdSrdeXmFDCZAsWJSkSbh6J0kKQIpJMmBBW/UsQc=\n-----END SSH SIGNATURE-----\n"

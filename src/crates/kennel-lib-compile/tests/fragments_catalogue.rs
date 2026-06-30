@@ -72,6 +72,39 @@ const CATALOGUE: &[Expect] = &[
         fragment: "dev-headers",
         grants: &["/usr/include/", "/usr/src/"],
     },
+    Expect {
+        fragment: "gui-session-runtime",
+        grants: &[
+            "/usr/bin/sway",
+            "/usr/bin/dbus-run-session",
+            "/etc/sway",
+            "/etc/fonts",
+        ],
+    },
+    Expect {
+        fragment: "gui-desktop",
+        grants: &["/usr/bin/weston-terminal", "/usr/bin/foot", "/etc/fonts"],
+    },
+    Expect {
+        fragment: "gui-editor",
+        grants: &["/usr/bin/gnome-text-editor", "/usr/bin/gedit"],
+    },
+    Expect {
+        fragment: "gui-accessories",
+        grants: &[
+            "/usr/bin/gnome-calculator",
+            "/usr/bin/gnome-clocks",
+            "/usr/bin/baobab",
+        ],
+    },
+    Expect {
+        fragment: "gui-viewers",
+        grants: &["/usr/bin/loupe", "/usr/bin/evince", "/usr/bin/papers"],
+    },
+    Expect {
+        fragment: "gui-files",
+        grants: &["/usr/bin/nautilus"],
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -145,6 +178,24 @@ fn every_fragment_is_signed_additive_and_composes() {
     let keys = maintainer_keys();
     // The baseline (no fragments) — its grants are what the fragments must add *to*.
     let baseline = settle_with(&[], &keys);
+
+    // Completeness: every committed fragment directory MUST have a CATALOGUE entry, so a
+    // newly added fragment cannot silently escape the signed/additive/composes checks below.
+    let catalogued: std::collections::HashSet<&str> =
+        CATALOGUE.iter().map(|e| e.fragment).collect();
+    for entry in std::fs::read_dir(repo_root().join("toml").join("fragments"))
+        .expect("read fragments dir")
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                catalogued.contains(name.as_str()),
+                "fragment `{name}` has no CATALOGUE entry — add one so it is \
+                 signature/additive/compose-checked"
+            );
+        }
+    }
 
     for entry in CATALOGUE {
         // (1) signature verifies against the maintainer key, and (2) additive-only —

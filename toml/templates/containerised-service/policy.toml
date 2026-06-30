@@ -1,5 +1,5 @@
 # ============================================================================
-# Template: containerised-service  (v1)
+# Template: containerised-service
 # Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #

@@ -33,8 +33,3 @@
 # Without it the symlink dangles in the view and the tool is "command not found". Symlinks only
 # (no secrets); the targets live under /usr (bound).
 /etc/alternatives
-
-# --- fontconfig (confined GUI: the compositor + GUI apps need font discovery) -----------
-# §7.14 confined GUI — weston/cage/cairo resolve fonts via fontconfig, which reads /etc/fonts.
-# Symlinks + XML config only (no secrets); the font files live under /usr/share/fonts (bound).
-/etc/fonts

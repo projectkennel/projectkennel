@@ -1,5 +1,5 @@
 # ============================================================================
-# Template: gui-broker  (v1)
+# Template: gui-broker
 # Inherits: base-confined
 # Threat catalogue: THREATS.md v0.5
 #
@@ -38,8 +38,9 @@ restart = "on-failure"
 # Inherit base-confined's read floor unchanged — the broker runs the compositor + relays bytes; it
 # renders no text itself, so it needs no font read. The one delta is a single writable dir: kenneld
 # binds the host rendezvous dir here and the broker binds its mesh listen socket under it.
-[fs]
-write = ["/run/mesh"]
+[[fs.write.add]]
+path = "/run/mesh"
+reason = "kenneld binds the host mesh rendezvous dir here; the broker binds its mesh listen socket under it"
 
 
 # --- Execution: the compositor SET ------------------------------------------
@@ -95,4 +96,4 @@ reason = "the confined display capability: each consumer is relayed into its own
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFkx7enNGJ8VGrMiOhm6JLGH+yecD5BaE8\nQ6PM6mQJy46vRDpc2rE4lPc4EJNhbs1Fu3xEDfethUxgRyJw+39w8=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQL8QC7r6kCQkfGd928scq4S4C9uX/9XHZZ\nfBgHXGuPt+E/+Kk3nwGq5hBxe59BRuQeCFyFZ20yTqhl+UxIyABAI=\n-----END SSH SIGNATURE-----\n"
