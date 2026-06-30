@@ -50,13 +50,19 @@ impl TemplateSource for Templates {
 }
 fn templates() -> Templates {
     Templates {
-        root: repo_root().join("templates"),
+        root: repo_root().join("toml").join("templates"),
     }
 }
 
 fn read_template(name: &str) -> Vec<u8> {
-    std::fs::read(repo_root().join("templates").join(name).join("policy.toml"))
-        .expect("read a spawn template's policy.toml")
+    std::fs::read(
+        repo_root()
+            .join("toml")
+            .join("templates")
+            .join(name)
+            .join("policy.toml"),
+    )
+    .expect("read a spawn template's policy.toml")
 }
 
 /// The maintainer trust store from the committed `keys/*.pub` (as in `fragments_catalogue`).

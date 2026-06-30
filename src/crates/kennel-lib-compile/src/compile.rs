@@ -411,9 +411,10 @@ mod tests {
     use kennel_lib_policy::keys::{KeySet, SigningKey};
     use kennel_lib_policy::{sign_settled, to_bytes, verify_settled};
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
-        include_str!("../../../../templates/ai-coding-strict/policy.toml");
+        include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {

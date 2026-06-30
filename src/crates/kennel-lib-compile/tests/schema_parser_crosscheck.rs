@@ -144,7 +144,7 @@ fn resolve(path: &str) -> Resolved {
 /// field a template exercises that `gen_schema::model` forgot fails here.
 #[test]
 fn every_template_table_and_key_is_schema_declared() {
-    let root_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../templates");
+    let root_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../toml/templates");
     for entry in std::fs::read_dir(root_dir).expect("templates dir") {
         let policy = entry.expect("dir entry").path().join("policy.toml");
         if !policy.is_file() {
@@ -215,7 +215,7 @@ fn every_in_tree_template_parses() {
     // The real authoring corpus must round-trip through the same parser the schema
     // mirrors; a template field the schema forgot would be one the parser accepts but
     // the kitchen sink (built from the schema) never exercises.
-    let root_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../templates");
+    let root_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../toml/templates");
     let mut checked = 0;
     for entry in std::fs::read_dir(root_dir).expect("templates dir") {
         let dir = entry.expect("dir entry").path();

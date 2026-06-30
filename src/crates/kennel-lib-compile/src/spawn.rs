@@ -151,7 +151,8 @@ mod tests {
     struct RealTemplates;
     impl TemplateSource for RealTemplates {
         fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
-            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../templates");
+            let root =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../toml/templates");
             std::fs::read(root.join(name).join("policy.toml")).ok()
         }
     }

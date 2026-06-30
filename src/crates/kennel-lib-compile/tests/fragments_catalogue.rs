@@ -129,7 +129,10 @@ fn settle_with(includes: &[&str], keys: &KeySet) -> String {
     );
     let leaf = parse_source(leaf_src.as_bytes()).expect("parse leaf");
     let source = CatalogueSource {
-        roots: vec![repo_root().join("templates"), repo_root().join("fragments")],
+        roots: vec![
+            repo_root().join("toml").join("templates"),
+            repo_root().join("toml").join("fragments"),
+        ],
     };
     let compiled = compile(&leaf, &source, &Trust::require(keys), "0.0.0")
         .expect("compile leaf with fragment (signature must verify, deltas must apply)");
@@ -145,10 +148,11 @@ fn every_fragment_is_signed_additive_and_composes() {
 
     for entry in CATALOGUE {
         // (1) signature verifies against the maintainer key, and (2) additive-only —
-        // both are enforced by compile_leaf under Trust::require: an unsigned/forged or
+        // both are enforced by compile under Trust::require: an unsigned/forged or
         // `.remove`-bearing fragment makes this fail.
         let frag_bytes = std::fs::read(
             repo_root()
+                .join("toml")
                 .join("fragments")
                 .join(entry.fragment)
                 .join("policy.toml"),

@@ -94,7 +94,8 @@ mod tests {
     };
     use std::path::Path;
 
-    const BASE_CONFINED: &[u8] = include_bytes!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &[u8] =
+        include_bytes!("../../../../toml/templates/base-confined/policy.toml");
 
     #[test]
     fn a_template_is_detected_as_a_source_policy() {

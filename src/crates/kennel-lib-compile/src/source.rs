@@ -2018,14 +2018,17 @@ mod dbus_tests {
 mod tests {
     use super::*;
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
-        include_str!("../../../../templates/ai-coding-strict/policy.toml");
-    const PACKAGE_INSTALL: &str = include_str!("../../../../templates/package-install/policy.toml");
-    const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
-    const INSPECT_ONLY: &str = include_str!("../../../../templates/inspect-only/policy.toml");
+        include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
+    const PACKAGE_INSTALL: &str =
+        include_str!("../../../../toml/templates/package-install/policy.toml");
+    const UNTRUSTED_BUILD: &str =
+        include_str!("../../../../toml/templates/untrusted-build/policy.toml");
+    const INSPECT_ONLY: &str = include_str!("../../../../toml/templates/inspect-only/policy.toml");
     const CONTAINERISED_SERVICE: &str =
-        include_str!("../../../../templates/containerised-service/policy.toml");
+        include_str!("../../../../toml/templates/containerised-service/policy.toml");
 
     const ALL_TEMPLATES: &[(&str, &str)] = &[
         ("base-confined", BASE_CONFINED),

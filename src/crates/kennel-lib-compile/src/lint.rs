@@ -106,7 +106,7 @@ mod tests {
     }
 
     fn templates_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../templates")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../toml/templates")
     }
 
     /// Compile a shipped template to its settled form via the real `compile` path (dev trust,

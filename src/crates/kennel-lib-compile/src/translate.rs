@@ -1933,10 +1933,12 @@ mod tests {
         assert!(translate_dbus(&SourcePolicy::default()).is_empty());
     }
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
-        include_str!("../../../../templates/ai-coding-strict/policy.toml");
-    const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
+        include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
+    const UNTRUSTED_BUILD: &str =
+        include_str!("../../../../toml/templates/untrusted-build/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
