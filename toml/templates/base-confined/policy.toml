@@ -112,7 +112,6 @@ size = "512M"
 
 # Procfs: PID namespace + hidepid=2 — the workload sees only its own tree (T1.1, T1.6).
 [fs.proc]
-visibility = "self"
 hidepid = true
 
 # Minimal /dev: a constructed tmpfs with only these nodes bound in (T1.1, T1.6). Each
@@ -197,7 +196,6 @@ level = "summary"
 # namespace sockets are denied categorically — enforced natively by Landlock
 # scoping (ABI 6, §8.1), not the legacy seccomp/AppArmor fallback. (T1.6.)
 [unix]
-default = "deny"
 abstract = "deny"
 
 
@@ -207,7 +205,6 @@ abstract = "deny"
 # namespace — there is no separate control the runtime enforces, so none is declared.
 # The advisory [unsafe.ptrace]/[unsafe.signal] sub-sections exist to *express* intent
 # but warn that scoping comes from PID-ns/seccomp; this template needs neither. T1.6.)
-# Procfs visibility is set once in [fs.proc] above (it is part of the constructed view).
 
 
 # --- Environment ------------------------------------------------------------
@@ -250,4 +247,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDesixZhpjySLZxwXMszmxg4IEvpJSa0pU\n6BZtTUz7kybGnGGD006NP7EYGcPZjQ1oNtjttD0WoNQ5G1WINXkQM=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDsPeZbOWN2+fz2sKRAYM0wF767qb47gmL\nJ0QGDrmS8sGoanb9KwJeGGUt0zTWW5Dn1MaO8wjIghm7RjLnwzIA8=\n-----END SSH SIGNATURE-----\n"

@@ -44,10 +44,10 @@
 //! [`compile`](mod@crate::compile), after this stage folds the `template_base` chain.
 
 use crate::source::{
-    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BinderSection, BoundaryAcl,
-    CapSection, DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome,
-    FsProc, FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind,
-    NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
+    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BoundaryAcl, CapSection,
+    DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
+    FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind, NetBpf,
+    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
     SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection, TrustSection,
     TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
@@ -301,7 +301,6 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         unix: merge(&parent.unix, &child.unix, fold_unix),
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
-        binder: merge(&parent.binder, &child.binder, fold_binder),
         // `[[provides]]` / `[[consumes]]` fold like a bare list (the SSH set model): a child's
         // non-empty list replaces the inherited one, an absent one inherits.
         provides: if child.provides.is_empty() {
@@ -607,7 +606,6 @@ fn fold_fs_tmp(p: &FsTmp, c: &FsTmp) -> FsTmp {
 
 fn fold_fs_proc(p: &FsProc, c: &FsProc) -> FsProc {
     FsProc {
-        visibility: or(&c.visibility, &p.visibility),
         hidepid: or(&c.hidepid, &p.hidepid),
     }
 }
@@ -741,7 +739,6 @@ fn fold_audit_class(p: &AuditClassSection, c: &AuditClassSection) -> AuditClassS
 
 fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
     UnixSection {
-        default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
         // Replace or increment (`[[unix.allow.add]]`), keyed by name/real.
         allow: fold_listfield(&c.allow, &p.allow, unix_key),
@@ -758,22 +755,6 @@ fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
             p.groups.clone()
         } else {
             c.groups.clone()
-        },
-    }
-}
-
-fn fold_binder(p: &BinderSection, c: &BinderSection) -> BinderSection {
-    // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-    BinderSection {
-        provide: if c.provide.is_empty() {
-            p.provide.clone()
-        } else {
-            c.provide.clone()
-        },
-        consume: if c.consume.is_empty() {
-            p.consume.clone()
-        } else {
-            c.consume.clone()
         },
     }
 }

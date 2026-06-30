@@ -68,15 +68,6 @@ pub enum Protocol {
     Udp,
 }
 
-/// Procfs visibility. Only `self` is permitted (a framework invariant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcVisibility {
-    /// `hidepid` such that the workload sees only its own processes.
-    #[serde(rename = "self")]
-    SelfOnly,
-}
-
 /// The default action for syscalls not explicitly allowed by the seccomp filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -465,14 +456,15 @@ fn is_default_shell(s: &str) -> bool {
 }
 
 /// Procfs policy.
+///
+/// Procfs is always mounted self-only (the workload sees only its own processes);
+/// that is structural, not a setting.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcPolicy {
-    /// Procfs visibility (must be `self`).
-    pub visibility: ProcVisibility,
-    /// Mount `/proc` with `hidepid=2` (§7.4.7): even within the PID namespace,
-    /// `/proc/<pid>` is accessible only to the process owner. Belt-and-braces
-    /// atop the namespace, which is the strong isolation.
+    /// Mount `/proc` with `hidepid=2`: even within the PID namespace, `/proc/<pid>`
+    /// is accessible only to the process owner. Belt-and-braces atop the namespace,
+    /// which is the strong isolation.
     pub hidepid: bool,
 }
 
@@ -719,34 +711,6 @@ pub struct UnixSocket {
     pub env: Option<String>,
 }
 
-/// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4): the user-defined
-/// services this kennel may register and look up.
-///
-/// Like [`UnixRuntime`], a *service* input `kenneld`'s context manager realises, not
-/// part of the kernel-enforcement core: it gates `addService` against `provide` and
-/// `getService` against the local/cross-instance grant. The reserved
-/// `org.projectkennel.*` facades are not represented here (they are enabled by their
-/// own sections). Carried in the signed settled policy; omitted from the canonical
-/// form when empty, so a no-`[binder]` policy signs exactly as before.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderRuntime {
-    /// Services a process in this kennel may register (`addService`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provide: Vec<BinderProvideRuntime>,
-    /// Services this kennel may look up (`getService`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub consume: Vec<BinderConsumeRuntime>,
-}
-
-impl BinderRuntime {
-    /// Whether there is no binder grant to realise.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.provide.is_empty() && self.consume.is_empty()
-    }
-}
-
 /// The per-kennel D-Bus runtime (§7.7) — a *service* input `kenneld` realises (the
 /// `IDBus` facade/delegate pair), not part of the enforcement core.
 ///
@@ -798,33 +762,10 @@ pub struct DbusBusRuntime {
     pub deny_talk: Vec<String>,
 }
 
-/// One registrable service: a name and the peer kennels allowed to look it up.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderProvideRuntime {
-    /// The service name.
-    pub name: String,
-    /// Peer kennels permitted to resolve it cross-instance (empty = local only).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accept_from: Vec<String>,
-}
-
-/// One consumable service: a name and the providing kennel (cross-instance).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderConsumeRuntime {
-    /// The service name.
-    pub name: String,
-    /// The providing kennel for a cross-instance lookup; absent for a local service.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-}
-
-/// The typed shape of a mesh capability: how its connector is delivered (§7.13.2).
+/// The typed shape of a mesh capability: how its connector is delivered.
 ///
-/// Declared on both `[[provides]]` and `[[consumes]]` (`docs/design/07-13-service-catalog.md`)
-/// and carried verbatim into the settled policy; defined here so the source parser and the
-/// signed runtime share one type.
+/// Declared on both `[[provides]]` and `[[consumes]]` and carried verbatim into the
+/// settled policy; defined here so the source parser and the signed runtime share one type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Shape {
@@ -1395,15 +1336,10 @@ pub struct SettledPolicy {
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4). A table like
-    /// [`identity`](Self::identity); omitted from the canonical form when empty, so a
-    /// no-`[binder]` policy signs exactly as before.
-    #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
-    pub binder: BinderRuntime,
-    /// The cross-kennel capability mesh runtime (`07-13-service-catalog.md` §7.13) — the
-    /// `[[provides]]`/`[[consumes]]` the broker and catalogue read. A table like
-    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a policy with
-    /// no mesh declarations signs exactly as before.
+    /// The cross-kennel capability mesh runtime — the `[[provides]]`/`[[consumes]]` the
+    /// broker and catalogue read. A table like [`identity`](Self::identity); omitted from
+    /// the canonical form when empty, so a policy with no mesh declarations signs exactly
+    /// as before.
     #[serde(default, skip_serializing_if = "MeshRuntime::is_empty")]
     pub mesh: MeshRuntime,
     /// The `[service]` supervision discipline (§7.13.7) — the restart policy `kenneld` applies to an
@@ -1412,7 +1348,7 @@ pub struct SettledPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceRuntime>,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set. A table like
-    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a
+    /// [`mesh`](Self::mesh); omitted from the canonical form when empty, so a
     /// no-`[dbus]` policy signs exactly as before.
     #[serde(default, skip_serializing_if = "DbusRuntime::is_empty")]
     pub dbus: DbusRuntime,
@@ -1574,10 +1510,7 @@ pub fn sample_settled() -> SettledPolicy {
                 shell: default_shell(),
                 loaders: Vec::new(),
             },
-            proc: ProcPolicy {
-                visibility: ProcVisibility::SelfOnly,
-                hidepid: true,
-            },
+            proc: ProcPolicy { hidepid: true },
             cap: CapPolicy { no_new_privs: true },
             seccomp: SeccompPolicy {
                 deny_action: SeccompAction::Errno,
@@ -1606,7 +1539,6 @@ pub fn sample_settled() -> SettledPolicy {
         ssh: SshRuntime::default(),
         unix: UnixRuntime::default(),
         identity: IdentityRuntime::default(),
-        binder: BinderRuntime::default(),
         mesh: MeshRuntime::default(),
         service: None,
         dbus: DbusRuntime::default(),

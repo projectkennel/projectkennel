@@ -415,8 +415,8 @@ pub struct ShimView {
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
     /// Mount a per-kennel binderfs instance in the view and expose the standard
-    /// `binder` device + `/dev/binder` symlink (`07-1`/`02-4`). Set when the settled
-    /// `[binder]` policy is non-empty; kenneld takes node 0 via `/proc` at spawn.
+    /// `binder` device + `/dev/binder` symlink. Always set: the binder bus is the
+    /// universal control plane, and kenneld takes node 0 via `/proc` at spawn.
     pub binder: bool,
     /// In-view absolute paths to **mask** with an empty over-mount: the workspace trust
     /// manifests (`<writable-bind>/.trust-manifest.json`, §7.4 / T2.8). The host inode is

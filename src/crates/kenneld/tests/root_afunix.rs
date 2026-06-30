@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use kennel_lib_binder::binderfs;
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
-use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
+use kennel_lib_policy::{AuditRuntime, UnixRuntime, UnixSocket};
 use kenneld::binder::{self, verb};
 
 const MAP_SIZE: usize = 128 * 1024;
@@ -75,7 +75,6 @@ fn run_manager() {
     let manager = binder::spawn(
         fd,
         7,
-        BinderRuntime::default(),
         unix,
         binder::Lifecycle::default(),
         kenneld::inet::NetRuntime::denied(),

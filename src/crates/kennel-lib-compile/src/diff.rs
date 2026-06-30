@@ -537,34 +537,6 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
         }
     }
 
-    // [binder] — provided and consumed user services.
-    if let Some(binder) = &p.binder {
-        for prov in &binder.provide {
-            out.push(Grant {
-                key: format!("binder.provide:{}", prov.name.as_deref().unwrap_or("?")),
-                carrier: label("[[binder.provide]]", prov.name.as_deref()),
-                section: "binder",
-                value: prov.accept_from.join(","),
-                reason: prov.reason.clone(),
-                exposed: exposed_of(prov.threats.as_ref()),
-                mitigated: mitigated_of(prov.threats.as_ref()),
-                polarity: Polarity::Allow,
-            });
-        }
-        for cons in &binder.consume {
-            out.push(Grant {
-                key: format!("binder.consume:{}", cons.name.as_deref().unwrap_or("?")),
-                carrier: label("[[binder.consume]]", cons.name.as_deref()),
-                section: "binder",
-                value: cons.from.clone().unwrap_or_default(),
-                reason: cons.reason.clone(),
-                exposed: exposed_of(cons.threats.as_ref()),
-                mitigated: mitigated_of(cons.threats.as_ref()),
-                polarity: Polarity::Allow,
-            });
-        }
-    }
-
     // [[provides]] / [[consumes]] — the cross-kennel capability mesh. Top-level,
     // distinguished by capability name; the shape is the grant's value.
     for prov in &p.provides {

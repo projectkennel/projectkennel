@@ -1,11 +1,11 @@
 //! Framework-invariant re-assertion.
 //!
-//! Framework invariants (`docs/architecture/02-2-config-schema.md` §Invariants) are
-//! re-checked against the `effective_policy` at runtime, even for a validly
-//! signed settled policy: a signature proves *who* authored the policy, not that
-//! it is safe. A settled policy that violates any invariant is refused at spawn.
+//! Framework invariants are re-checked against the `effective_policy` at runtime,
+//! even for a validly signed settled policy: a signature proves *who* authored the
+//! policy, not that it is safe. A settled policy that violates any invariant is
+//! refused at spawn.
 
-use crate::settled::{NetMode, ProcVisibility, SettledPolicy};
+use crate::settled::{NetMode, SettledPolicy};
 
 /// A single framework-invariant violation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,10 +82,6 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
             "the cloud-metadata deny (169.254.169.254) is mandatory and must not be removed",
         ));
     }
-    match ep.proc.visibility {
-        ProcVisibility::SelfOnly => {}
-    }
-
     if v.is_empty() {
         Ok(())
     } else {

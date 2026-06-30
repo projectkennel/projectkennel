@@ -97,14 +97,6 @@
         }
       ]
     },
-    "binder": {
-      "description": "User-defined binder IPC services this kennel may register/look up.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/binder"
-        }
-      ]
-    },
     "provides": {
       "description": "`[[provides]]` — capabilities this kennel offers to other kennels over the mesh.",
       "type": "array",
@@ -378,7 +370,7 @@
           ]
         },
         "proc": {
-          "description": "procfs visibility.",
+          "description": "procfs hidepid.",
           "allOf": [
             {
               "$ref": "#/definitions/fs_proc"
@@ -433,17 +425,10 @@
       }
     },
     "fs_proc": {
-      "description": "`[fs.proc]` — procfs visibility and hidepid.",
+      "description": "`[fs.proc]` — procfs hidepid (visibility is always self-only).",
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "visibility": {
-          "description": "Visibility (`self` is the only permitted value once resolved).",
-          "type": "string",
-          "enum": [
-            "self"
-          ]
-        },
         "hidepid": {
           "description": "Mount /proc with hidepid=2.",
           "type": "boolean"
@@ -1030,14 +1015,6 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "default": {
-          "description": "Default disposition (`allow` is forbidden once resolved).",
-          "type": "string",
-          "enum": [
-            "deny",
-            "allow"
-          ]
-        },
         "abstract": {
           "description": "Abstract-namespace socket disposition.",
           "type": "string",
@@ -1078,84 +1055,6 @@
         },
         "reason": {
           "description": "Why this socket is granted (required).",
-          "type": "string"
-        },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
-        }
-      }
-    },
-    "binder": {
-      "description": "`[binder]` — user-defined binder IPC services (the reserved `org.projectkennel.*` facades are never declared here).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "provide": {
-          "description": "`[[binder.provide]]` — services a process in this kennel may register.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/binder_provide"
-          }
-        },
-        "consume": {
-          "description": "`[[binder.consume]]` — services this kennel may look up (cross-instance).",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/binder_consume"
-          }
-        }
-      }
-    },
-    "binder_provide": {
-      "description": "One `[[binder.provide]]` entry.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "description": "The service name (must not begin with the reserved `org.projectkennel.`).",
-          "type": "string"
-        },
-        "accept_from": {
-          "description": "Peer kennels permitted to look this service up (cross-instance).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "reason": {
-          "description": "Why this service is provided (required).",
-          "type": "string"
-        },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
-        }
-      }
-    },
-    "binder_consume": {
-      "description": "One `[[binder.consume]]` entry.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "description": "The service name (must not begin with the reserved `org.projectkennel.`).",
-          "type": "string"
-        },
-        "from": {
-          "description": "The providing kennel (cross-instance); absent for a local service.",
-          "type": "string"
-        },
-        "reason": {
-          "description": "Why this service is consumed (required).",
           "type": "string"
         },
         "threats": {

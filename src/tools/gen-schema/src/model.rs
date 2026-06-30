@@ -113,7 +113,6 @@ pub static TABLES: &[Table] = &[
             f("unix", Ty::Obj("unix"), "AF_UNIX socket policy."),
             f("ssh", Ty::Obj("ssh"), "Per-kennel SSH egress (the re-origination bastion)."),
             f("identity", Ty::Obj("identity"), "The workload's masked identity and supplementary groups."),
-            f("binder", Ty::Obj("binder"), "User-defined binder IPC services this kennel may register/look up."),
             f("provides", Ty::ObjArray("provides_entry"), "`[[provides]]` — capabilities this kennel offers to other kennels over the mesh."),
             f("consumes", Ty::ObjArray("consumes_entry"), "`[[consumes]]` — capabilities this kennel reaches over the mesh."),
             f("service", Ty::Obj("service"), "`[service]` — supervision discipline for a service kennel (restart policy)."),
@@ -174,7 +173,7 @@ pub static TABLES: &[Table] = &[
             f("deny", Ty::StrArray, "Categorical denies (belt-and-braces over the constructed view)."),
             f("home", Ty::Obj("fs_home"), "The constructed $HOME view."),
             f("tmp", Ty::Obj("fs_tmp"), "The workload's /tmp tmpfs."),
-            f("proc", Ty::Obj("fs_proc"), "procfs visibility."),
+            f("proc", Ty::Obj("fs_proc"), "procfs hidepid."),
             f("dev", Ty::Obj("fs_dev"), "The minimal /dev."),
         ],
     },
@@ -197,9 +196,8 @@ pub static TABLES: &[Table] = &[
     },
     Table {
         name: "fs_proc",
-        title: "`[fs.proc]` — procfs visibility and hidepid.",
+        title: "`[fs.proc]` — procfs hidepid (visibility is always self-only).",
         fields: &[
-            f("visibility", Ty::Enum(&["self"]), "Visibility (`self` is the only permitted value once resolved)."),
             f("hidepid", Ty::Bool, "Mount /proc with hidepid=2."),
         ],
     },
@@ -381,7 +379,6 @@ pub static TABLES: &[Table] = &[
         name: "unix",
         title: "`[unix]` — AF_UNIX policy.",
         fields: &[
-            f("default", Ty::Enum(&["deny", "allow"]), "Default disposition (`allow` is forbidden once resolved)."),
             f("abstract", Ty::Enum(&["deny", "allow"]), "Abstract-namespace socket disposition."),
             f("allow", Ty::ObjArray("unix_allow"), "`[[unix.allow]]` — granted sockets, including per-kennel service instances."),
         ],
@@ -395,34 +392,6 @@ pub static TABLES: &[Table] = &[
             f("shim", Ty::Str, "The shim path the socket is bound at inside the kennel."),
             f("env", Ty::Str, "An environment variable to set to the shim path (e.g. `SSH_AUTH_SOCK`)."),
             f("reason", Ty::Str, "Why this socket is granted (required)."),
-            f("threats", Ty::Obj("threats"), "Threat tags."),
-        ],
-    },
-    Table {
-        name: "binder",
-        title: "`[binder]` — user-defined binder IPC services (the reserved `org.projectkennel.*` facades are never declared here).",
-        fields: &[
-            f("provide", Ty::ObjArray("binder_provide"), "`[[binder.provide]]` — services a process in this kennel may register."),
-            f("consume", Ty::ObjArray("binder_consume"), "`[[binder.consume]]` — services this kennel may look up (cross-instance)."),
-        ],
-    },
-    Table {
-        name: "binder_provide",
-        title: "One `[[binder.provide]]` entry.",
-        fields: &[
-            f("name", Ty::Str, "The service name (must not begin with the reserved `org.projectkennel.`)."),
-            f("accept_from", Ty::StrArray, "Peer kennels permitted to look this service up (cross-instance)."),
-            f("reason", Ty::Str, "Why this service is provided (required)."),
-            f("threats", Ty::Obj("threats"), "Threat tags."),
-        ],
-    },
-    Table {
-        name: "binder_consume",
-        title: "One `[[binder.consume]]` entry.",
-        fields: &[
-            f("name", Ty::Str, "The service name (must not begin with the reserved `org.projectkennel.`)."),
-            f("from", Ty::Str, "The providing kennel (cross-instance); absent for a local service."),
-            f("reason", Ty::Str, "Why this service is consumed (required)."),
             f("threats", Ty::Obj("threats"), "Threat tags."),
         ],
     },

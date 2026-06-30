@@ -4,7 +4,7 @@ policy.toml \- Project Kennel policy file format
 .SH SYNOPSIS
 \fIpolicy\fR.toml, \fItemplate\fR.toml, \fIfragment\fR.toml
 .SH DESCRIPTION
-A Project Kennel policy is a TOML file: a leaf policy, a template it inherits from, or a fragment it includes. The parser rejects unknown keys, duplicate keys, type mismatches, and out\-of\-range path forms. This page is a field summary; the full schema reference, inheritance and signing model, and the [net.*] / [binder] tables are in docs/architecture/02\-2\-config\-schema.md.
+A Project Kennel policy is a TOML file: a leaf policy, a template it inherits from, or a fragment it includes. The parser rejects unknown keys, duplicate keys, type mismatches, and out\-of\-range path forms. This page is a field summary; the machine\-generated schema/policy.toml.schema is the exhaustive field reference.
 .PP
 Paths use \fB~/\fR for the kennel persona home (\fI/home/<user>\fR, never a host path), \fB/abs\fR for host\-absolute, \fB<kennel>\fR for the runtime id, and \fB*\fR/\fB**\fR globs. Execution is deny\-by\-default.
 .SS top\-level
@@ -58,8 +58,8 @@ Make the constructed $HOME read\-only.
 \fBfs.tmp.writable / .size\fR \(em bool / string
 Whether the workload may write its /tmp tmpfs (the Landlock grant), and its size cap ("512M").
 .TP
-\fBfs.proc.visibility / .hidepid\fR \(em string / bool
-Procfs visibility ("self") and hidepid=2.
+\fBfs.proc.hidepid\fR \(em bool
+Mount /proc with hidepid=2 (procfs is always self\-only).
 .TP
 \fBfs.dev.allow\fR \(em array of paths
 Trivial pseudo\-device baseline (/dev/null, /dev/urandom, ...).
@@ -99,8 +99,8 @@ Kernel CIDR+port connect/bind ACL (every mode); author may only narrow.
 .SS [unix]
 AF_UNIX socket shim.
 .TP
-\fBdefault / abstract\fR \(em string
-Default floor and abstract\-namespace toggle (both default deny).
+\fBabstract\fR \(em string
+Abstract\-namespace toggle (default deny; the socket floor is structural default\-deny).
 .TP
 \fB[[unix.allow]]\fR \(em array of tables
 name, real, shim, env, reason, threats.

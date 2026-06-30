@@ -214,23 +214,6 @@ fn authored_carriers(p: &SourcePolicy) -> Vec<(String, Option<String>, Option<&T
         }
     }
 
-    if let Some(binder) = &p.binder {
-        for prov in &binder.provide {
-            out.push((
-                label("[[binder.provide]]", prov.name.as_deref()),
-                prov.reason.clone(),
-                prov.threats.as_ref(),
-            ));
-        }
-        for cons in &binder.consume {
-            out.push((
-                label("[[binder.consume]]", cons.name.as_deref()),
-                cons.reason.clone(),
-                cons.threats.as_ref(),
-            ));
-        }
-    }
-
     // [[provides]] / [[consumes]] — the cross-kennel capability mesh.
     for prov in &p.provides {
         out.push((

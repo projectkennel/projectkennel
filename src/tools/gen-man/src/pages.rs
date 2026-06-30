@@ -485,9 +485,8 @@ there and split across the user and system journals.",
         description: "\
 A Project Kennel policy is a TOML file: a leaf policy, a template it inherits from, \
 or a fragment it includes. The parser rejects unknown keys, duplicate keys, type \
-mismatches, and out-of-range path forms. This page is a field summary; the full \
-schema reference, inheritance and signing model, and the [net.*] / [binder] tables \
-are in docs/architecture/02-2-config-schema.md.
+mismatches, and out-of-range path forms. This page is a field summary; the \
+machine-generated schema/policy.toml.schema is the exhaustive field reference.
 
 Paths use \\fB~/\\fR for the kennel persona home (\\fI/home/<user>\\fR, never a host \
 path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and \
@@ -530,7 +529,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                     Field { name: "fs.home.persist", kind: "array", desc: "Home-relative paths that persist writably across runs (else reconstructed each spawn)." },
                     Field { name: "fs.home.readonly", kind: "bool", desc: "Make the constructed $HOME read-only." },
                     Field { name: "fs.tmp.writable / .size", kind: "bool / string", desc: "Whether the workload may write its /tmp tmpfs (the Landlock grant), and its size cap (\"512M\")." },
-                    Field { name: "fs.proc.visibility / .hidepid", kind: "string / bool", desc: "Procfs visibility (\"self\") and hidepid=2." },
+                    Field { name: "fs.proc.hidepid", kind: "bool", desc: "Mount /proc with hidepid=2 (procfs is always self-only)." },
                     Field { name: "fs.dev.allow", kind: "array of paths", desc: "Trivial pseudo-device baseline (/dev/null, /dev/urandom, ...)." },
                     Field { name: "[[fs.dev.passthrough]]", kind: "array of tables", desc: "Real host devices: path, group, reason (required), threats (exposed tag required)." },
                 ],
@@ -565,7 +564,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 heading: "[unix]",
                 intro: "AF_UNIX socket shim.",
                 fields: &[
-                    Field { name: "default / abstract", kind: "string", desc: "Default floor and abstract-namespace toggle (both default deny)." },
+                    Field { name: "abstract", kind: "string", desc: "Abstract-namespace toggle (default deny; the socket floor is structural default-deny)." },
                     Field { name: "[[unix.allow]]", kind: "array of tables", desc: "name, real, shim, env, reason, threats." },
                 ],
             },

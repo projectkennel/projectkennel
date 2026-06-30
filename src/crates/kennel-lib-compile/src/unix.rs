@@ -10,11 +10,11 @@
 //! enforcement core. So the *only* place to reject a malformed or unsafe socket grant
 //! is here, at compile time, on the resolved source policy.
 //!
+//! Default-deny is structural (the shim only contains what is bound in); there is
+//! no disposition key to set.
+//!
 //! # What this checks
 //!
-//! - **`default` is not `"allow"` once resolved.** Default-deny is structural (the
-//!   shim only contains what is bound in); a resolved `default = "allow"`
-//!   would contradict that and is refused.
 //! - **`abstract` is `"deny"`, absent, or `"allow"` (escape hatch).**
 //!   Abstract-namespace sockets are denied by default by the always-on Landlock
 //!   scope (ABI 6+). `abstract = "allow"` is accepted when the kennel
@@ -56,7 +56,7 @@ use kennel_lib_policy::PolicyError;
 /// # Errors
 ///
 /// Returns [`PolicyError::SourceValidation`] carrying one message per hard problem
-/// (a malformed grant or an unhonourable `default`/`abstract`).
+/// (a malformed grant or an unhonourable `abstract`).
 // allow(too_many_lines): one cohesive validation pass over the `[unix]` section — the
 // per-grant checks share the accumulated diagnostics and cannot split without threading state.
 #[allow(clippy::too_many_lines)]
@@ -66,16 +66,6 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
     };
     let mut errs: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
-
-    match unix.default.as_deref() {
-        None | Some("deny") => {}
-        Some("allow") => errs.push(
-            "[unix] default = \"allow\" is forbidden once resolved — default-deny is structural \
-             (only what is bound into the shim is present)"
-                .to_owned(),
-        ),
-        Some(other) => errs.push(format!("[unix] default `{other}` is not deny/allow")),
-    }
 
     // Resolve net.mode from the source policy: absent → "constrained" (the default).
     let net_mode = policy
@@ -232,7 +222,6 @@ mod tests {
     #[test]
     fn a_well_formed_grant_validates() {
         let unix = UnixSection {
-            default: Some("deny".to_owned()),
             abstract_ns: Some("deny".to_owned()),
             allow: vec![allow(
                 "gpg-agent",
@@ -248,7 +237,6 @@ mod tests {
     fn a_grant_targeting_the_control_socket_is_refused_by_rule() {
         // Exact structural form → refused (escalation, not a footgun warning).
         let unix = UnixSection {
-            default: Some("deny".to_owned()),
             allow: vec![allow(
                 "ctl",
                 "/run/user/1000/kennel/control.sock",
@@ -269,7 +257,6 @@ mod tests {
         // A path-string that differs but normalises to the control socket — a naive string check
         // would pass; the endpoint check catches it.
         let unix = UnixSection {
-            default: Some("deny".to_owned()),
             allow: vec![allow(
                 "sneaky",
                 "/run/user/1000/kennel/../kennel/control.sock",
@@ -289,7 +276,6 @@ mod tests {
         // The rule must not overcatch: a normal agent shim under the same runtime tree is allowed
         // (it draws the footgun warning, not the hard refusal).
         let unix = UnixSection {
-            default: Some("deny".to_owned()),
             allow: vec![allow(
                 "ssh-agent",
                 "/run/user/1000/kennel/agent.sock",
@@ -300,18 +286,6 @@ mod tests {
         };
         let warnings = validate(&policy_with(unix)).expect("valid (warned, not refused)");
         assert!(warnings.iter().any(|w| w.contains("SSH agent")));
-    }
-
-    #[test]
-    fn default_allow_is_refused() {
-        let unix = UnixSection {
-            default: Some("allow".to_owned()),
-            ..UnixSection::default()
-        };
-        let err = validate(&policy_with(unix)).expect_err("refused");
-        assert!(
-            matches!(err, PolicyError::SourceValidation(ref m) if m.iter().any(|s| s.contains("default-deny")))
-        );
     }
 
     // ─── abstract = "allow" escape hatch ──────────────────────────────────
@@ -461,7 +435,6 @@ mod tests {
         // A non-agent socket: no signing-oracle footgun, so no warning. (An `ssh-agent`
         // or `gpg-agent` grant deliberately DOES warn — see the dedicated tests above.)
         let unix = UnixSection {
-            default: Some("deny".to_owned()),
             abstract_ns: Some("deny".to_owned()),
             allow: vec![allow(
                 "app-bus",

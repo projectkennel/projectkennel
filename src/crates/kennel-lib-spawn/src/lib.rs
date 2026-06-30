@@ -933,8 +933,8 @@ mod tests {
     use super::*;
     use kennel_lib_policy::{
         CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
-        NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
-        SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
+        NetPolicy, NetRule, ProcPolicy, Protocol, Provenance, SeccompAction, SeccompPolicy,
+        SettledPolicy, SigningKey, TmpPolicy, TtlAction,
     };
     use kennel_lib_syscall::landlock::{AccessFs, AccessNet};
     use kennel_lib_syscall::namespace::Namespaces;
@@ -1012,10 +1012,7 @@ mod tests {
                     shell: "/bin/sh".to_owned(),
                     loaders: Vec::new(),
                 },
-                proc: ProcPolicy {
-                    visibility: ProcVisibility::SelfOnly,
-                    hidepid: true,
-                },
+                proc: ProcPolicy { hidepid: true },
                 cap: CapPolicy { no_new_privs: true },
                 seccomp: SeccompPolicy {
                     deny_action: SeccompAction::Errno,
@@ -1039,7 +1036,6 @@ mod tests {
             ssh: kennel_lib_policy::SshRuntime::default(),
             unix: kennel_lib_policy::UnixRuntime::default(),
             identity: kennel_lib_policy::IdentityRuntime::default(),
-            binder: kennel_lib_policy::BinderRuntime::default(),
             mesh: kennel_lib_policy::MeshRuntime::default(),
             service: None,
             dbus: kennel_lib_policy::DbusRuntime::default(),

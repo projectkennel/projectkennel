@@ -21,7 +21,7 @@ use std::time::Duration;
 use kennel_lib_binder::binderfs;
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
 use kennel_lib_binder::service::lifecycle;
-use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime};
+use kennel_lib_policy::{AuditRuntime, UnixRuntime};
 use kenneld::binder;
 
 const ROLE_ENV: &str = "KENNEL_BINDER_ROLE";
@@ -80,7 +80,6 @@ fn run_manager() {
     let manager = binder::spawn(
         fd,
         7,
-        BinderRuntime::default(),
         UnixRuntime::default(),
         lifecycle,
         kenneld::inet::NetRuntime::denied(),

@@ -35,7 +35,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod binder;
 pub mod compile;
 pub mod dev;
 pub mod diff;

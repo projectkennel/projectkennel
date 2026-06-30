@@ -19,6 +19,38 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-30 — remove the `[binder]` service section + two invariant-only schema keys (rides schema v3)
+
+- **Target:** the binder chapter (design §7.1, the user-defined service registry), the config-schema
+  chapter (the `[binder]`, `[fs.proc]`, and `[unix]` tables), and the procfs/AF_UNIX construction. In
+  the frozen trees: docs/design/07-1-binder.md, docs/architecture/02-2-config-schema.md,
+  docs/architecture/02-4-binder.md.
+- **Change (as-built to capture in the rewrite):**
+  - The **`[binder]` user-defined service section is removed** — `[[binder.provide]]` /
+    `[[binder.consume]]`, the settled `BinderRuntime`, and `kenneld`'s node-0 service `Registry`
+    (the `addService`/`getService` gate, plus the `GET_SERVICE`/`IS_DECLARED`/`LIST_SERVICES`
+    verbs). It was a wired-but-unused mechanism with zero corpus/test usage, superseded by the
+    cross-kennel capability **mesh** (`[[provides]]`/`[[consumes]]` → `MeshRuntime` → the
+    `SVC_CONNECT` broker). Drop any framing of `[binder]` as the way to publish a service. The
+    binder **transport** is untouched: `kenneld` still owns node 0 (the `Manager`/lifecycle), the
+    per-kennel binder *device* is still the universal control plane, and `ADD_SERVICE` survives as
+    the mesh-bus registration verb.
+  - **`fs.proc.visibility` is removed.** Procfs is always self-only (`hidepid` such that the
+    workload sees only its own tree); the field's only legal value was `self`, enforced as a
+    framework invariant. The invariant-only key was theatre — procfs is now structurally self-only
+    with no knob, and the `proc.visibility` framework-invariant marker is dropped. `[fs.proc]` keeps
+    `hidepid`.
+  - **`unix.default` is removed.** Default-deny is structural (the AF_UNIX shim contains only what is
+    bound in); the field's only legal value was `deny` (`allow` was a hard compile error). `[unix]`
+    keeps `abstract` (the real deny/allow escape hatch) and `[[unix.allow]]`.
+  - These ride the existing **`SETTLED_SCHEMA_VERSION` 3** (no new bump — one v3 absorbs the whole
+    schema cleanup); the settled `SettledPolicy` loses its `binder` field and `ProcPolicy.visibility`.
+- **Why:** the schema should carry only fields that express a real choice against a real adversary.
+  `[binder]` was unbuilt-in-practice dead weight (a TCB-shrinking removal of ~250 SLOC across the
+  three TCB crates); `fs.proc.visibility` and `unix.default` were invariant-only keys whose single
+  legal value made them cruft.
+- **Source:** the corpus-templates-fragments PR (#142).
+
 ## 2026-06-30 — `[fs.tmp]`: `private` → `writable`, drop the DAC-mode knob (settled schema v3)
 
 - **Target:** the config-schema chapter (the `[fs.tmp]` section) and the filesystem chapter's

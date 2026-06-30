@@ -47,7 +47,6 @@ pub const ASSERTED_INVARIANTS: &[&str] = &[
     "fs.home.shadow",
     "net.mode",
     "net.proxy.deny.invariant",
-    "proc.visibility",
 ];
 
 /// The `algorithm` marker used for a content-sealed but unsigned settled policy.
@@ -111,7 +110,6 @@ pub fn compile(
     // on the resolved policy, while the cross-referenced `net.proxy.allow` is still visible.
     crate::ssh::validate(&effective)?;
     let mut warnings = crate::unix::validate(&effective)?;
-    warnings.extend(crate::binder::validate(&effective)?);
     warnings.extend(crate::mesh::validate(
         &effective,
         &reserved_authority(provides_origin, trust),
@@ -358,7 +356,6 @@ fn assemble(
         ssh: translated.ssh.clone(),
         unix: translated.unix.clone(),
         identity: translated.identity.clone(),
-        binder: translated.binder.clone(),
         mesh: translated.mesh.clone(),
         service: translated.service,
         dbus: translated.dbus.clone(),

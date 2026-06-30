@@ -7,14 +7,9 @@
 /// Node-0 transaction verbs (the `code` field). `IServiceManager`-style semantics;
 /// the numeric codes are Project Kennel's own (not Android-wire-compatible).
 pub mod verb {
-    /// Register a service the caller provides.
+    /// Register a service the caller provides — on a mesh bus, the cross-kennel service
+    /// registration (codes 2–4 are retired `[binder]`-registry verbs).
     pub const ADD_SERVICE: u32 = 1;
-    /// Resolve a service name.
-    pub const GET_SERVICE: u32 = 2;
-    /// Whether a service is declared for the caller.
-    pub const IS_DECLARED: u32 = 3;
-    /// The service names the caller is granted to look up.
-    pub const LIST_SERVICES: u32 = 4;
     /// Connect a granted `AF_UNIX` socket and return the connected fd (the af-unix
     /// facade; sent with `transact_fd`, the reply carries the socket fd).
     pub const CONNECT_AFUNIX: u32 = 5;

@@ -39,12 +39,12 @@
 
 use crate::source::{PathField, SourcePolicy};
 use kennel_lib_policy::settled::{
-    AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
-    ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
-    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProvideRuntime, ProxyListen,
-    RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime, SshGrant,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    AuditRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
+    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
+    MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, Protocol, ProvideRuntime,
+    ProxyListen, RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime,
+    SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
+    WorkloadRuntime,
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
@@ -62,8 +62,6 @@ pub struct Translated {
     pub unix: UnixRuntime,
     /// The workload's in-kennel identity — the supplementary groups it retains.
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime — user-defined provide/consume grants.
-    pub binder: BinderRuntime,
     /// The cross-kennel capability mesh runtime — `[[provides]]`/`[[consumes]]`.
     pub mesh: MeshRuntime,
     /// The `[service]` supervision discipline — the restart policy, present only when
@@ -105,7 +103,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let net = translate_net(effective, &mut deferred)?;
     let fs = translate_fs(effective, &mut deferred)?;
     let exec = translate_exec(effective, &mut deferred)?;
-    let proc = translate_proc(effective)?;
+    let proc = translate_proc(effective);
     let cap = CapPolicy {
         no_new_privs: effective
             .cap
@@ -149,7 +147,6 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
-    let binder = translate_binder(effective);
     let mesh = translate_mesh(effective);
     let service = translate_service(effective)?;
     let dbus = translate_dbus(effective);
@@ -174,7 +171,6 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         ssh,
         unix,
         identity,
-        binder,
         mesh,
         service,
         dbus,
@@ -278,38 +274,6 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
-}
-
-/// Flatten the resolved `[binder]` section into the settled [`BinderRuntime`]: one
-/// runtime entry per `[[binder.provide]]`/`[[binder.consume]]`. Already
-/// compile-time-validated (`crate::binder`), so each entry has a non-reserved `name`.
-/// An absent or empty `[binder]` yields an empty runtime (omitted from the canonical
-/// form), so a no-`[binder]` policy signs exactly as before.
-fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
-    let Some(binder) = &src.binder else {
-        return BinderRuntime::default();
-    };
-    let provide = binder
-        .provide
-        .iter()
-        .filter_map(|p| {
-            p.name.as_ref().map(|name| BinderProvideRuntime {
-                name: name.clone(),
-                accept_from: p.accept_from.clone(),
-            })
-        })
-        .collect();
-    let consume = binder
-        .consume
-        .iter()
-        .filter_map(|c| {
-            c.name.as_ref().map(|name| BinderConsumeRuntime {
-                name: name.clone(),
-                from: c.from.clone(),
-            })
-        })
-        .collect();
-    BinderRuntime { provide, consume }
 }
 
 /// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]: one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
@@ -1441,24 +1405,14 @@ fn translate_exec(
 
 // ---- proc / lifecycle ----------------------------------------------------------
 
-fn translate_proc(src: &SourcePolicy) -> Result<ProcPolicy, PolicyError> {
-    // Procfs visibility/hidepid come from [fs.proc] (procfs is part of the constructed
-    // view, beside [fs.home]/[fs.tmp]/[fs.dev]); only "self" is valid.
+fn translate_proc(src: &SourcePolicy) -> ProcPolicy {
+    // hidepid comes from [fs.proc] (procfs is part of the constructed view, beside
+    // [fs.home]/[fs.tmp]/[fs.dev]). Procfs is always self-only; that is structural.
     let fs_proc = src.fs.as_ref().and_then(|f| f.proc.as_ref());
-    let visibility = fs_proc.and_then(|p| p.visibility.as_deref());
-    match visibility {
-        Some("self") | None => {}
-        Some(other) => {
-            return Err(translation(format!(
-                "fs.proc.visibility `{other}` is not `self`"
-            )))
-        }
-    }
     let hidepid = fs_proc.and_then(|p| p.hidepid);
-    Ok(ProcPolicy {
-        visibility: ProcVisibility::SelfOnly,
+    ProcPolicy {
         hidepid: hidepid.unwrap_or(false),
-    })
+    }
 }
 
 fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyError> {
@@ -2559,7 +2513,6 @@ mod tests {
         use crate::source::{SourcePolicy, UnixAllow, UnixSection};
         let src = SourcePolicy {
             unix: Some(UnixSection {
-                default: Some("deny".to_owned()),
                 abstract_ns: Some("deny".to_owned()),
                 allow: vec![UnixAllow {
                     name: Some("tool-daemon".to_owned()),
@@ -2784,7 +2737,6 @@ mod tests {
         assert!(ep.exec.allow.iter().any(|a| a.contains("git")));
 
         assert!(ep.cap.no_new_privs);
-        assert_eq!(ep.proc.visibility, ProcVisibility::SelfOnly);
         assert!(ep.proc.hidepid);
 
         // 8h TTL, warn.
@@ -2812,7 +2764,6 @@ mod tests {
             ssh: t.ssh,
             unix: t.unix,
             identity: t.identity,
-            binder: t.binder,
             mesh: t.mesh,
             service: t.service,
             dbus: t.dbus,
