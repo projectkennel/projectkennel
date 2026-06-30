@@ -277,6 +277,10 @@
           "description": "Threat tags."
         }
       },
+      "required": [
+        "name",
+        "shape"
+      ],
       "type": "object"
     },
     "dbus": {
@@ -1263,7 +1267,7 @@
       "description": "One `[[provides]]` entry, a capability this kennel offers over the mesh.",
       "properties": {
         "endpoint": {
-          "description": "Where the capability is exposed, in the provider's own view.",
+          "description": "Where the capability is exposed, in the provider's own view. Optional: an omitted",
           "type": "string"
         },
         "key": {
@@ -1296,6 +1300,10 @@
           "description": "Threat tags."
         }
       },
+      "required": [
+        "name",
+        "shape"
+      ],
       "type": "object"
     },
     "rootfs": {

@@ -541,13 +541,10 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
     // distinguished by capability name; the shape is the grant's value.
     for prov in &p.provides {
         out.push(Grant {
-            key: format!("provides:{}", prov.name.as_deref().unwrap_or("?")),
-            carrier: label("[[provides]]", prov.name.as_deref()),
+            key: format!("provides:{}", prov.name),
+            carrier: label("[[provides]]", Some(prov.name.as_str())),
             section: "mesh",
-            value: prov
-                .shape
-                .map(|s| s.as_str().to_owned())
-                .unwrap_or_default(),
+            value: prov.shape.as_str().to_owned(),
             reason: prov.reason.clone(),
             exposed: exposed_of(prov.threats.as_ref()),
             mitigated: mitigated_of(prov.threats.as_ref()),
@@ -556,13 +553,10 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
     }
     for cons in &p.consumes {
         out.push(Grant {
-            key: format!("consumes:{}", cons.name.as_deref().unwrap_or("?")),
-            carrier: label("[[consumes]]", cons.name.as_deref()),
+            key: format!("consumes:{}", cons.name),
+            carrier: label("[[consumes]]", Some(cons.name.as_str())),
             section: "mesh",
-            value: cons
-                .shape
-                .map(|s| s.as_str().to_owned())
-                .unwrap_or_default(),
+            value: cons.shape.as_str().to_owned(),
             reason: cons.reason.clone(),
             exposed: exposed_of(cons.threats.as_ref()),
             mitigated: mitigated_of(cons.threats.as_ref()),
