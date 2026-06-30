@@ -66,15 +66,18 @@ done
 HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-privhelper kennel-privhelper-net kennel-privhelper-bpf kennel-privhelper-mounts"
 HOST_STAT_BINS="kennel-bin-init"
 # In-cage (→ facades/): the conduit facades, the OCI launcher, the spawn execution unit
-# (`kennel-spawn` → `spawn`), and the standing D-Bus broker (`dbus-broker`, the §7.7 mediation
-# service kennel's workload) — all static, all reached by path inside a constructed view.
-FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry dbus-broker"
+# (`kennel-spawn` → `spawn`), the standing D-Bus broker (`dbus-broker`, the mediation service
+# kennel's workload), and the GUI compositor broker (`compositor-broker`, the confined-GUI service
+# kennel's workload — it spawns a per-connection nested compositor and relays the consumer
+# into it) — all static, all reached by path inside a constructed view.
+FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry dbus-broker compositor-broker"
 
-# The in-kennel SPAWN test drivers — `kennel-facade` builds them, but they are the TEST SUITE, not
-# part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload and
-# `facade-spawn-bench` drives spawn-spinup.sh. Staged into `facades/` ONLY under --with-test-bins (they
-# run in-cage); a real release never carries them.
-TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe compositor-broker"
+# The in-kennel SPAWN/mesh TEST drivers — `kennel-facade` builds them, but they are the TEST SUITE,
+# not part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload,
+# `facade-spawn-bench` drives spawn-spinup.sh, and `facade-mesh-probe` is the mesh/gui suite's
+# headless stand-in. Staged into `facades/` ONLY under --with-test-bins (they run in-cage); a real
+# release never carries them.
+TEST_BINS="facade-spawn-probe facade-spawn-bench facade-mesh-probe"
 
 install -d "$DEST/bin" "$DEST/facades" "$DEST/pathbin"
 for b in $HOST_REL_BINS;    do install -m 0755 "$REL/$b"  "$DEST/bin/$b";     done
@@ -86,6 +89,9 @@ for b in $FACADE_STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; do
 install -m 0755 "$STAT/kennel"       "$DEST/pathbin/kennel"
 install -m 0755 "$REL/kennel-host"   "$DEST/bin/host"
 install -m 0755 "$STAT/kennel-spawn" "$DEST/facades/spawn"
+# The standalone policy-authoring tool (`kennel-compose`): a host-side CLI on PATH, disjunct from
+# the `kennel` dispatch tree and the runtime — dynamic (host glibc), like the other host tools.
+install -m 0755 "$REL/kennel-compose" "$DEST/pathbin/kennel-compose"
 if [ "$WITH_TEST_BINS" = 1 ]; then
 	for b in $TEST_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; done
 fi
@@ -109,7 +115,7 @@ done
 
 # The signed reference templates (policy.toml + meta.toml; not the README) and the composable
 # fragments (policy.toml only). install.sh ships these into the template cascade.
-for d in "$ROOT"/templates/*/; do
+for d in "$ROOT"/toml/templates/*/; do
 	[ -f "${d}policy.toml" ] || continue
 	n="$(basename "$d")"
 	for f in "${d}"*.toml; do
@@ -117,7 +123,7 @@ for d in "$ROOT"/templates/*/; do
 		install -D -m 0644 "$f" "$DEST/templates/$n/$(basename "$f")"
 	done
 done
-for d in "$ROOT"/fragments/*/; do
+for d in "$ROOT"/toml/fragments/*/; do
 	[ -f "${d}policy.toml" ] || continue
 	install -D -m 0644 "${d}policy.toml" "$DEST/fragments/$(basename "$d")/policy.toml"
 done

@@ -1,0 +1,21 @@
+# ============================================================================
+# Provider policy: dbus-broker — the standing D-Bus mediation service kennel.
+#
+# Thin leaf: it derives the maintainer-signed dbus-broker@v1 template (which carries the whole
+# shape — the host session-bus leg, the exec grant, the `org.projectkennel.dbus` provide) and adds
+# only the [workload]: the broker facade to run. The reserved provide's authority is inherited from
+# the vendor-signed template, so a host key may compile and sign this at install with no maintainer
+# private key on the target.
+# ============================================================================
+
+name = "dbus-broker"
+template_base = "dbus-broker@v1"
+
+[workload]
+argv = ["/usr/libexec/kennel-facades/dbus-broker"]
+pinned = true
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEHaIt/oZVMFJle5YWmHMXUlW8FFSS0NeP\nrwi/nBrQGV1222tTpBaG6ip+DdubFtARUZmVSPnVLSKJqNxUn8Pw0=\n-----END SSH SIGNATURE-----\n"

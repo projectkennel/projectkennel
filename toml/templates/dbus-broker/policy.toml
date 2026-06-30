@@ -1,26 +1,25 @@
 # ============================================================================
 # Template: dbus-broker  (v1)
 # Inherits: base-confined@v1
-# Threat catalogue: THREATS.md v0.4
+# Threat catalogue: THREATS.md v0.5
 #
-# The standing D-Bus mediation service kennel (§7.7): the intended replacement for the
-# per-consumer host-dbus delegate — a single long-running broker that receives per-consumer
-# filter sets from kenneld via the binder-connector mesh and mediates relayed D-Bus frames.
+# The standing D-Bus mediation service kennel: a desktop-class service that holds the ONE host
+# session-bus connection and mediates it for consumer kennels over the connector mesh. A consumer
+# `[[consumes]]` `org.projectkennel.dbus`; on connect, kenneld resolves the consumer's identity +
+# per-method filter in its own namespace and pushes one ACCEPT_SESSION to the broker's control
+# node, which mints a filtered session for that consumer. No consumer ever holds the raw bus.
 #
-# The frame relay is not yet implemented (the broker is a stub); D-Bus mediation currently
-# flows through the legacy host-dbus delegate. This template is the deployment shape for the
-# broker once the relay lands — started when the first D-Bus consumer connects and kept
-# running (restart = on-failure) until all consumers exit.
+# This is the service-kennel multi-leg exemption's worked instance: an operator/maintainer-signed
+# service may hold the host session-bus leg, which an ordinary workload may not. A reserved
+# `org.projectkennel.*` provide is vendor-tier material, so THIS template carries the maintainer
+# signature; a leaf that derives it inherits the authority and need only pick the [workload].
 #
-# Shape:
-#   * [[provides]] a binder-connector for kenneld's REGISTER_CONSUMER push.
-#   * [[provides]] a dbus-name shape for consumers that [[consumes]] D-Bus.
-#   * The real session-bus socket is bind-mounted into the broker's view via
-#     the base-confined unix section.
-#   * [service] restart = "on-failure".
-#   * Minimal [fs]: the real bus socket, nothing else.
-#
-# Defends: T1.6 (sandbox escapes via D-Bus — the filter is the real boundary).
+# Shape (a leaf adds only the [workload] — the dbus-broker facade argv):
+#   * inherit base-confined's read floor unchanged — the facade is statically linked and reached
+#     by path under /usr/libexec/** (already in the floor), so it needs no extra read;
+#   * exec.allow the broker facade + a shell (base-confined denies all exec);
+#   * [[unix.allow]] the one host session-bus leg, named via DBUS_SESSION_BUS_ADDRESS;
+#   * [[provides]] org.projectkennel.dbus — the mediation capability consumers reach over the mesh.
 # ============================================================================
 
 template_name = "dbus-broker"
@@ -29,37 +28,53 @@ template_base = "base-confined@v1"
 
 
 # --- Service lifecycle -------------------------------------------------------
-# Restart on failure (a clean exit is intentional); default backoff doubles
-# from 500ms, up to 8 attempts before declared-but-failed.
 [service]
 restart = "on-failure"
 
 
-# --- Capabilities provided ---------------------------------------------------
+# --- Network -----------------------------------------------------------------
+# A local mediator: no egress. The host bus leg below is an AF_UNIX shim, not network.
+[net]
+mode = "none"
 
-# The control channel: kenneld pushes per-consumer filter sets here.
+
+# --- Execution: the broker facade -------------------------------------------
+# base-confined denies all exec; this is the genuine grant. The facade is statically linked and
+# reached by absolute path, so the inherited read floor (which covers /usr/libexec/**) suffices.
+[exec]
+allow = ["/usr/libexec/kennel-facades/dbus-broker", "/bin/sh"]
+path = ["/usr/bin", "/bin"]
+
+
+# --- The host session-bus leg ------------------------------------------------
+# The broker proxies consumer traffic to the operator's real session bus. The bus is shimmed in
+# and named through DBUS_SESSION_BUS_ADDRESS; `real` carries $XDG_RUNTIME_DIR, resolved per-user by
+# kenneld at spawn, so one signed policy serves every user. The single bounded host-bus leg.
+[env.set]
+DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/kennel-broker-bus.sock"
+
+[unix]
+[[unix.allow]]
+name = "session-bus"
+real = "$XDG_RUNTIME_DIR/bus"
+shim = "/tmp/kennel-broker-bus.sock"
+reason = "the broker is the mediator; it holds the single raw connection to the operator's session bus"
+
+
+# --- Capabilities provided (reserved → vendor-tier; this template is maintainer-signed) ----------
 [[provides]]
 name = "org.projectkennel.dbus-broker"
 shape = "binder-connector"
 endpoint = "/dev/binderfs-mesh/binder"
-reason = "kenneld pushes per-consumer D-Bus filter sets to the broker's control node"
+reason = "kenneld pushes per-consumer ACCEPT_SESSION (bus + method filter) to the broker's control node on the mesh"
 
-# The D-Bus mediation capability consumers reach.
 [[provides]]
 name = "org.projectkennel.dbus"
 shape = "dbus-name"
 endpoint = "org.freedesktop.DBus"
-reason = "D-Bus mediation capability for consumer kennels"
-
-
-# --- Execution ---------------------------------------------------------------
-[exec]
-allow = ["dbus-broker", "/bin/sh"]
-
-# --- Network -----------------------------------------------------------------
-# Inherited from base-confined: constrained mode (no proxy allowlist = no egress).
+reason = "the mediated D-Bus capability consumer kennels reach over the connector mesh"
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDokRKdwylECpJ6LBhvVDVqtOFY7EwHoQd\n6wXKVt/a1Pyxqac7ZvLurd2WRAz7qUpBWk4MiKOyg69tX8xZshPAk=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQN8euAwA5coivnCelEvZsB0iZEvefwH47o\nSwDUQgldWEnmIKNkU1Ei7tgHXBF7EOhbl+bZWqA+gnf0c2iQY62wI=\n-----END SSH SIGNATURE-----\n"

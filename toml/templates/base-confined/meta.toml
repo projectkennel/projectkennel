@@ -1,10 +1,9 @@
-# Template identity + signing metadata (docs/design/05-templates.md §5.2, §5.10).
+# Template identity + signing metadata.
 name = "base-confined"
 version = "1"
 # Root template — no parent.
 template_base = ""
-# The signing key this version is signed under (id in the template trust store,
-# §5.10). policy.toml carries the matching [signature]; verify with
+# The signing key this version is signed under (id in the template trust store). policy.toml carries the matching [signature]; verify with
 # `kennel validate --require-signed` against keys/kennel-maint-2026.pub.
 maintainer_key = "kennel-maint-2026"
 threat_catalogue_version = "0.4"

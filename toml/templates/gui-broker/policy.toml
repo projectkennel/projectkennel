@@ -1,0 +1,99 @@
+# ============================================================================
+# Template: gui-broker  (v1)
+# Inherits: base-confined@v1
+# Threat catalogue: THREATS.md v0.5
+#
+# The confined-GUI display service kennel shape: a GUI-service kennel that holds the
+# ONE host-compositor connection and the GPU render node, and whose workload is the
+# `compositor-broker` — per accepted mesh connection it spawns a fresh nested compositor and relays
+# the consuming app into it, so each app gets its own display server and the host compositor is
+# absent from the app's world.
+#
+# This is the service-kennel multi-leg exemption's worked instance: an
+# operator/maintainer-signed service may hold the host-Wayland leg + the render-node passthrough,
+# which an ordinary workload may not. A reserved `org.projectkennel.*` provide is vendor-tier
+# material, so THIS template carries the maintainer signature — a leaf that derives it inherits the
+# authority and need only pick its compositor in the [workload].
+#
+# Shape (a leaf adds only the [workload] — the compositor-broker argv, picking ONE compositor):
+#   * `exec.allow` the SET of compositors the service may run (cage / weston / sway) + the broker;
+#   * [[unix.allow]] the one host-Wayland leg (the brokered connect, fds and all);
+#   * [[fs.dev.passthrough]] the GPU render node;
+#   * [[provides]] org.projectkennel.wayland — the reserved display capability consumers reach.
+#
+# Defends the X11 categorical capability + T2.7/T2.6: the display server is constructed, not
+# the host compositor's socket handed over.
+# ============================================================================
+
+template_name = "gui-broker"
+template_version = "1"
+template_base = "base-confined@v1"
+
+
+# --- Service lifecycle -------------------------------------------------------
+[service]
+restart = "on-failure"
+
+
+# --- Filesystem --------------------------------------------------------------
+# Inherit base-confined's read floor unchanged — the broker runs the compositor + relays bytes; it
+# renders no text itself, so it needs no font read. The one delta is a single writable dir: kenneld
+# binds the host rendezvous dir here and the broker binds its mesh listen socket under it.
+[fs]
+write = ["/run/mesh"]
+
+
+# --- Execution: the compositor SET ------------------------------------------
+# The service may run any of these compositors; the leaf's [workload] picks ONE. Plus the broker
+# itself. (base-confined denies all exec; this is the genuine grant.)
+[exec]
+allow = [
+    "/usr/libexec/kennel-facades/compositor-broker",
+    "/usr/bin/cage",
+    "/usr/bin/weston",
+    "/usr/bin/sway",
+    "/bin/sh",
+]
+path = ["/usr/bin", "/bin"]
+
+
+# --- Environment -------------------------------------------------------------
+# The wlroots backend (nested-Wayland) and the broker's own runtime dir; the broker overrides
+# XDG_RUNTIME_DIR per spawned compositor. WAYLAND_DISPLAY (the host leg, absolute) is set by the
+# [[unix.allow]] leg below and is each nested compositor's upstream.
+[env.set]
+WLR_BACKENDS = "wayland"
+XDG_RUNTIME_DIR = "/tmp"
+
+
+# --- The one host-compositor leg ---------------------------------------------
+# The brokered AF_UNIX connect (relays bytes + SCM_RIGHTS fds). `real` carries $XDG_RUNTIME_DIR,
+# resolved per-user by kenneld at spawn, so one signed policy serves every user. The one bounded,
+# reasoned host-reach (T1.6 analogue).
+[unix]
+[[unix.allow]]
+name = "host-wayland"
+real = "$XDG_RUNTIME_DIR/wayland-0"
+shim = "/tmp/wayland-host.sock"
+env = "WAYLAND_DISPLAY"
+reason = "the GUI-service kennel holds the single host-compositor connection; each nested compositor reaches the host desktop through this brokered leg"
+
+
+# --- The GPU render node -----------------------------------------------------
+[[fs.dev.passthrough]]
+path = "/dev/dri/renderD128"
+reason = "the nested wlroots compositor's GL renderer and gbm buffer allocator"
+threats.exposed = ["T1.6"]
+
+
+# --- Capability provided (reserved → vendor-tier; this template is maintainer-signed) --------------
+[[provides]]
+name = "org.projectkennel.wayland"
+shape = "af-unix"
+endpoint = "/run/mesh/gui.sock"
+reason = "the confined display capability: each consumer is relayed into its own per-connection nested compositor"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKRY2vdX0nZWCmstbdPffFK6pLvjC1/6qj\nDyQTjdVsZk372yUMHmCb/SaezWPg4jaX5ZLScAlWcaoAxQGg+frgI=\n-----END SSH SIGNATURE-----\n"

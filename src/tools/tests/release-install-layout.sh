@@ -41,7 +41,7 @@ trap 'rm -rf "$tmp"' EXIT
 # in-kennel set: host init, the facades, the spawn unit (kennel-spawn), the shim (kennel), test drivers.
 fake_rel="$tmp/rel"; fake_stat="$tmp/stat"
 install -d "$fake_rel" "$fake_stat"
-for b in $host_rel_bins kennel-host;                                       do : > "$fake_rel/$b";  chmod 0755 "$fake_rel/$b";  done
+for b in $host_rel_bins kennel-host kennel-compose;                                       do : > "$fake_rel/$b";  chmod 0755 "$fake_rel/$b";  done
 for b in $host_stat_bins $facade_stat_bins $test_bins kennel kennel-spawn; do : > "$fake_stat/$b"; chmod 0755 "$fake_stat/$b"; done
 
 # Assemble the payload exactly as build-release.sh and the e2e install do.
@@ -81,7 +81,7 @@ check_dir() {
 }
 check_dir bin     "$host_rel_bins $host_stat_bins host"
 check_dir facades "$facade_stat_bins spawn"
-check_dir pathbin "kennel"
+check_dir pathbin "kennel kennel-compose"
 
 # The integrity manifest must cover EVERYTHING shipped — and the verify must actually pass from the
 # payload root. Especially the trust-store public key(s): the anchor the signature chain hangs from.
