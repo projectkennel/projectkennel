@@ -287,8 +287,8 @@ fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
         .iter()
         .filter_map(|p| {
             use kennel_lib_policy::settled::Shape;
-            let name = p.name.clone()?;
-            let shape = p.shape?;
+            let name = p.name.clone();
+            let shape = p.shape;
             let key = p.key.clone();
             // An omitted `af-unix` endpoint defaults to `/run/<name>[.key]/sock`; other
             // shapes author a required endpoint, so a missing one drops the provide (caught at compile).
@@ -310,15 +310,13 @@ fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
     let consumes = src
         .consumes
         .iter()
-        .filter_map(|c| {
-            Some(ConsumeRuntime {
-                name: c.name.clone()?,
-                shape: c.shape?,
-                at: c.at.clone(),
-                env: c.env.clone(),
-                key: c.key.clone(),
-                required: c.required,
-            })
+        .map(|c| ConsumeRuntime {
+            name: c.name.clone(),
+            shape: c.shape,
+            at: c.at.clone(),
+            env: c.env.clone(),
+            key: c.key.clone(),
+            required: c.required,
         })
         .collect();
     MeshRuntime { provides, consumes }
@@ -2211,15 +2209,15 @@ mod tests {
         use crate::source::{ConsumesEntry, ProvidesEntry, Shape, SourcePolicy};
         let src = SourcePolicy {
             provides: vec![ProvidesEntry {
-                name: Some("org.projectkennel.wayland".to_owned()),
-                shape: Some(Shape::AfUnix),
+                name: "org.projectkennel.wayland".to_owned(),
+                shape: Shape::AfUnix,
                 endpoint: Some("$XDG_RUNTIME_DIR/wayland-0".to_owned()),
                 reason: Some("the display service".to_owned()),
                 ..ProvidesEntry::default()
             }],
             consumes: vec![ConsumesEntry {
-                name: Some("org.projectkennel.wayland".to_owned()),
-                shape: Some(Shape::AfUnix),
+                name: "org.projectkennel.wayland".to_owned(),
+                shape: Shape::AfUnix,
                 at: Some("$XDG_RUNTIME_DIR/wayland-0".to_owned()),
                 env: vec!["WAYLAND_DISPLAY".to_owned()],
                 required: true,
@@ -2245,8 +2243,8 @@ mod tests {
         // An omitted af-unix endpoint is defaulted to /run/<name>[.key]/sock.
         let defaulted = SourcePolicy {
             provides: vec![ProvidesEntry {
-                name: Some("org.x.cache".to_owned()),
-                shape: Some(Shape::AfUnix),
+                name: "org.x.cache".to_owned(),
+                shape: Shape::AfUnix,
                 key: Some("K1".to_owned()),
                 reason: Some("a reason".to_owned()),
                 ..ProvidesEntry::default()

@@ -217,14 +217,14 @@ fn authored_carriers(p: &SourcePolicy) -> Vec<(String, Option<String>, Option<&T
     // [[provides]] / [[consumes]] — the cross-kennel capability mesh.
     for prov in &p.provides {
         out.push((
-            label("[[provides]]", prov.name.as_deref()),
+            label("[[provides]]", Some(prov.name.as_str())),
             prov.reason.clone(),
             prov.threats.as_ref(),
         ));
     }
     for cons in &p.consumes {
         out.push((
-            label("[[consumes]]", cons.name.as_deref()),
+            label("[[consumes]]", Some(cons.name.as_str())),
             cons.reason.clone(),
             cons.threats.as_ref(),
         ));

@@ -113,37 +113,32 @@ pub fn validate(
     let mut seen: BTreeSet<&str> = BTreeSet::new();
 
     for p in &policy.provides {
-        match p.name.as_deref() {
-            None | Some("") => errs.push("[[provides]] entry is missing `name`".to_owned()),
-            Some(name) => {
-                if !authority.permits(name) {
-                    errs.push(format!(
-                        "[[provides]] `{name}` is a reserved capability name: it may be claimed only \
-                         through a template signed at the tier the name requires — \
-                         `{RESERVED_PREFIX}*` needs a vendor (maintainer) template, a host \
-                         `[[reserved]]` name a host template; an unreserved name is free to any \
-                         signed template"
-                    ));
-                }
-                if !seen.insert(name) {
-                    errs.push(format!(
-                        "[[provides]] `{name}` is declared more than once in this policy \
-                         (duplicate provide)"
-                    ));
-                }
+        if p.name.is_empty() {
+            errs.push("[[provides]] entry is missing `name`".to_owned());
+        } else {
+            let name = p.name.as_str();
+            if !authority.permits(name) {
+                errs.push(format!(
+                    "[[provides]] `{name}` is a reserved capability name: it may be claimed only \
+                     through a template signed at the tier the name requires — \
+                     `{RESERVED_PREFIX}*` needs a vendor (maintainer) template, a host \
+                     `[[reserved]]` name a host template; an unreserved name is free to any \
+                     signed template"
+                ));
+            }
+            if !seen.insert(name) {
+                errs.push(format!(
+                    "[[provides]] `{name}` is declared more than once in this policy \
+                     (duplicate provide)"
+                ));
             }
         }
-        if p.shape.is_none() {
-            errs.push(format!(
-                "[[provides]] `{}` is missing `shape`",
-                who(p.name.as_deref())
-            ));
-        }
-        // An `af-unix` endpoint is optional — `kenneld` defaults it to `/run/<name>[.key]/sock`. When supplied, it must be a safe rendezvous bind target: absolute, under `/run`,
-        // with a subdirectory, since construction binds `dirname(endpoint)` into the view. Other
-        // shapes author a required `endpoint` (a bus name, a node).
+        // `shape` is required at parse. An `af-unix` endpoint is optional — `kenneld` defaults it to
+        // `/run/<name>[.key]/sock`. When supplied, it must be a safe rendezvous bind target: absolute,
+        // under `/run`, with a subdirectory, since construction binds `dirname(endpoint)` into the
+        // view. Other shapes author a required `endpoint` (a bus name, a node).
         match p.shape {
-            Some(Shape::AfUnix) => {
+            Shape::AfUnix => {
                 if let Some(e) = p
                     .endpoint
                     .as_deref()
@@ -154,39 +149,33 @@ pub fn validate(
                          a subdirectory (e.g. `/run/<dir>/<sock>`) — `kenneld` binds \
                          `dirname(endpoint)` at construction; omit it for the \
                          `/run/<name>[.key]/sock` default",
-                        who(p.name.as_deref())
+                        who(Some(p.name.as_str()))
                     ));
                 }
             }
             // Other (deferred) shapes author a required `endpoint` (a bus name, a node).
-            Some(_) if p.endpoint.as_deref().unwrap_or("").is_empty() => errs.push(format!(
+            _ if p.endpoint.as_deref().unwrap_or("").is_empty() => errs.push(format!(
                 "[[provides]] `{}` is missing `endpoint`",
-                who(p.name.as_deref())
+                who(Some(p.name.as_str()))
             )),
-            _ => {} // valid af-unix endpoint, a present other-shape endpoint, or a missing shape
+            _ => {} // a valid af-unix endpoint, or a present other-shape endpoint
         }
         if p.reason.as_deref().unwrap_or("").is_empty() {
             errs.push(format!(
                 "[[provides]] `{}` is missing a `reason`",
-                who(p.name.as_deref())
+                who(Some(p.name.as_str()))
             ));
         }
     }
 
     for c in &policy.consumes {
-        if c.name.as_deref().unwrap_or("").is_empty() {
+        if c.name.is_empty() {
             errs.push("[[consumes]] entry is missing `name`".to_owned());
-        }
-        if c.shape.is_none() {
-            errs.push(format!(
-                "[[consumes]] `{}` is missing `shape`",
-                who(c.name.as_deref())
-            ));
         }
         if c.reason.as_deref().unwrap_or("").is_empty() {
             errs.push(format!(
                 "[[consumes]] `{}` is missing a `reason`",
-                who(c.name.as_deref())
+                who(Some(c.name.as_str()))
             ));
         }
     }
@@ -219,8 +208,8 @@ mod tests {
     fn provide(name: &str) -> ProvidesEntry {
         // A well-formed af-unix provide omits `endpoint`: kenneld defaults it.
         ProvidesEntry {
-            name: Some(name.to_owned()),
-            shape: Some(Shape::AfUnix),
+            name: name.to_owned(),
+            shape: Shape::AfUnix,
             reason: Some("a reason".to_owned()),
             ..ProvidesEntry::default()
         }
@@ -228,8 +217,8 @@ mod tests {
 
     fn consume(name: &str) -> ConsumesEntry {
         ConsumesEntry {
-            name: Some(name.to_owned()),
-            shape: Some(Shape::AfUnix),
+            name: name.to_owned(),
+            shape: Shape::AfUnix,
             reason: Some("a reason".to_owned()),
             ..ConsumesEntry::default()
         }
@@ -362,7 +351,7 @@ mod tests {
     fn a_missing_provide_name_rejects() {
         let p = policy_with(
             vec![ProvidesEntry {
-                name: None,
+                name: String::new(),
                 ..provide("x")
             }],
             vec![],
@@ -371,15 +360,11 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_provide_shape_rejects() {
-        let p = policy_with(
-            vec![ProvidesEntry {
-                shape: None,
-                ..provide("build-cache")
-            }],
-            vec![],
-        );
-        assert!(err_has(&p, &refused(), "missing `shape`"));
+    fn a_shapeless_mesh_entry_fails_to_parse() {
+        // `shape` is required at parse now (a non-`Option` field), so a missing one is a hard parse
+        // error rather than a compile diagnostic — for both provides and consumes.
+        assert!(crate::source::parse(b"[[provides]]\nname = \"x\"\nreason = \"r\"\n").is_err());
+        assert!(crate::source::parse(b"[[consumes]]\nname = \"x\"\nreason = \"r\"\n").is_err());
     }
 
     #[test]
@@ -441,17 +426,5 @@ mod tests {
             vec![],
         );
         assert!(err_has(&p, &refused(), "missing a `reason`"));
-    }
-
-    #[test]
-    fn a_missing_consume_shape_rejects() {
-        let p = policy_with(
-            vec![],
-            vec![ConsumesEntry {
-                shape: None,
-                ..consume("metrics")
-            }],
-        );
-        assert!(err_has(&p, &refused(), "missing `shape`"));
     }
 }

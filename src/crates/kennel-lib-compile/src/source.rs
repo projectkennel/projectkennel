@@ -1133,20 +1133,22 @@ pub use kennel_lib_policy::settled::Shape;
 
 /// One `[[provides]]` entry, a capability this kennel offers over the mesh.
 ///
-/// `name`/`shape`/`reason` are validated present at compile, not required at parse,
-/// so a malformed entry yields one problem per missing field rather than a parse abort.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+/// `name` and `shape` are required at parse (a missing one is a parse error); `reason` and a
+/// non-af-unix `endpoint` are validated present at compile, yielding one problem per missing field
+/// rather than a parse abort.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ProvidesEntry {
     /// The capability's public identifier, what the catalogue advertises. A reserved
     /// `org.projectkennel.*` name may be claimed only by a maintainer-signed template.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: String,
     /// The typed transport.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape: Option<Shape>,
-    /// Where the capability is exposed, in the provider's own view.
+    pub shape: Shape,
+    /// Where the capability is exposed, in the provider's own view. Optional: an omitted
+    /// `af-unix` endpoint defaults to `/run/<name>[.key]/sock` — the rendezvous socket
+    /// `kenneld` binds (`mesh::default_af_unix_endpoint`). Other shapes require it; a missing
+    /// one is a compile error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
     /// An optional private match token, never advertised in the catalogue.
@@ -1166,11 +1168,9 @@ pub struct ProvidesEntry {
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ConsumesEntry {
     /// The capability's public identifier, resolved against the catalogue at runtime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: String,
     /// The transport it expects; the broker refuses a mismatched shape.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shape: Option<Shape>,
+    pub shape: Shape,
     /// Where the brokered connector is delivered, in this kennel's own view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
@@ -1192,11 +1192,24 @@ pub struct ConsumesEntry {
     pub threats: Option<Threats>,
 }
 
+impl Default for ProvidesEntry {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            shape: Shape::AfUnix,
+            endpoint: None,
+            key: None,
+            reason: None,
+            threats: None,
+        }
+    }
+}
+
 impl Default for ConsumesEntry {
     fn default() -> Self {
         Self {
-            name: None,
-            shape: None,
+            name: String::new(),
+            shape: Shape::AfUnix,
             at: None,
             env: Vec::new(),
             key: None,
