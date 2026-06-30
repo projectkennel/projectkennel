@@ -74,7 +74,6 @@ ports = [443]
 reason = "GitHub Container Registry"
 threats.exposed = ["T1.2", "T1.9"]
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

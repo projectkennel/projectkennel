@@ -108,8 +108,6 @@ threats.exposed = ["T1.9"]
 ttl = "8h"
 ttl_action = "warn"
 
-
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

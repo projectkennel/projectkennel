@@ -95,8 +95,6 @@ nproc = "512"
 [lifecycle]
 ttl_action = "warn"
 
-
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

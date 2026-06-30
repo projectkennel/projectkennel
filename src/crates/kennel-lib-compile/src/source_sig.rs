@@ -3,8 +3,7 @@
 //! # Purpose
 //!
 //! The settled policy is ed25519-signed; the same mechanism secures the source
-//! templates a settled policy is compiled from (`02-2-config-schema.md` §Signatures,
-//! `docs/design/05-templates.md` §5.10). A versioned reference resolves to bytes only if
+//! templates a settled policy is compiled from. A versioned reference resolves to bytes only if
 //! those bytes carry a `[signature]` that verifies against the trust store — so
 //! re-tagging a version to different content is caught: the deterministic ed25519
 //! signature over the canonical source *is* the content commitment, which is why no
@@ -26,8 +25,10 @@
 //! usable while authoring. A *present* signature is always checked when a trust
 //! store is supplied, in either mode.
 
-use crate::leaf::LeafPolicy;
+use std::collections::BTreeSet;
+
 use crate::source::SourcePolicy;
+use kennel_lib_config::ReservedNamespace;
 use kennel_lib_policy::keys::{KeySet, SigningKey};
 use kennel_lib_policy::signature::{verify_signature, SignatureEnvelope, SignatureError};
 use kennel_lib_policy::PolicyError;
@@ -35,8 +36,8 @@ use kennel_lib_policy::PolicyError;
 /// A signable artefact: an optional signature envelope plus the canonical bytes it
 /// covers.
 ///
-/// Implemented for both source templates ([`SourcePolicy`]) and included fragments
-/// ([`LeafPolicy`]), so [`Trust::check`] verifies either against the same trust store.
+/// Implemented for [`SourcePolicy`] — the one policy type, whether a template, a fragment, or a
+/// leaf — so [`Trust::check`] verifies any of them against the same trust store.
 pub trait Signable {
     /// The artefact's signature envelope, if present.
     fn signature(&self) -> Option<&SignatureEnvelope>;
@@ -57,15 +58,6 @@ impl Signable for SourcePolicy {
     }
 }
 
-impl Signable for LeafPolicy {
-    fn signature(&self) -> Option<&SignatureEnvelope> {
-        self.signature.as_ref()
-    }
-    fn canonical_bytes(&self) -> Result<Vec<u8>, PolicyError> {
-        canonical_leaf(self)
-    }
-}
-
 /// Whether unsigned source artefacts are tolerated during resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureMode {
@@ -76,12 +68,44 @@ pub enum SignatureMode {
     AllowUnsigned,
 }
 
+/// The trust **tier** a verified signing key belongs to.
+///
+/// The equivalence class the reserved-namespace gate keys on: a key's tier is *which trust dir loaded
+/// it* (`Vendor` = `/usr/lib/kennel/keys`, `Host` = `/etc/kennel/keys`, `User` = `~/.config/kennel/keys`),
+/// not its identity — **any** key at a tier is equivalent. Ordered `User < Host < Vendor`, so a higher
+/// tier may claim a lower tier's reserved names (a vendor key may provide a host-reserved name); the
+/// `>=` is what the gate checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// A user-tier key (`~/.config/kennel/keys`) — may claim only *unreserved* names.
+    User,
+    /// A host/admin-tier key (`/etc/kennel/keys`) — may claim host `[[reserved]]` names.
+    Host,
+    /// A vendor/maintainer-tier key (`/usr/lib/kennel/keys`) — may claim the built-in
+    /// `org.projectkennel.*` namespace.
+    Vendor,
+}
+
 /// The trust context resolution verifies ancestors against.
 /// (No `Debug`: [`KeySet`] holds opaque key material and does not implement it.)
 #[derive(Clone, Copy)]
 pub struct Trust<'a> {
     keys: Option<&'a KeySet>,
     mode: SignatureMode,
+    /// The vendor-tier key-ids (loaded from the vendor dir). A verified key in this set is
+    /// [`Tier::Vendor`]. `None` ⇒ no key is vendor-tier (development / untiered store).
+    vendor_keys: Option<&'a BTreeSet<String>>,
+    /// The host-tier key-ids (loaded from the system dir). A verified key in this set is
+    /// [`Tier::Host`]. A key in neither set is [`Tier::User`].
+    host_keys: Option<&'a BTreeSet<String>>,
+    /// The key-id that will sign the settled output (the `--key`), if known. It confers the tier for
+    /// an *entry-origin* reserved provide (one the leaf authors itself), since the entry is
+    /// not signature-checked during resolution. `None` ⇒ no output signer known (entry-origin reserved
+    /// names are then refused under enforcement).
+    signing_key: Option<&'a str>,
+    /// The host-declared reserved namespaces (`system.toml` `[[reserved]]`): a name under one is
+    /// gated at [`Tier::Host`]. Empty ⇒ only the built-in `org.projectkennel.*` namespace is reserved.
+    reserved: &'a [ReservedNamespace],
 }
 
 impl<'a> Trust<'a> {
@@ -91,6 +115,10 @@ impl<'a> Trust<'a> {
         Self {
             keys: Some(keys),
             mode: SignatureMode::Require,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
         }
     }
 
@@ -100,6 +128,10 @@ impl<'a> Trust<'a> {
         Self {
             keys,
             mode: SignatureMode::AllowUnsigned,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
         }
     }
 
@@ -109,6 +141,66 @@ impl<'a> Trust<'a> {
         Self {
             keys: None,
             mode: SignatureMode::AllowUnsigned,
+            vendor_keys: None,
+            host_keys: None,
+            signing_key: None,
+            reserved: &[],
+        }
+    }
+
+    /// Tag the trust store with its tier membership: `vendor` are the vendor-dir key-ids,
+    /// `host` the system-dir key-ids. A verified key in neither is [`Tier::User`]. Without
+    /// this, every verified key resolves to [`Tier::User`] (so reserved names are refused under
+    /// enforcement) — the CLI supplies it from the trust-dir cascade.
+    #[must_use]
+    pub const fn with_tiers(
+        mut self,
+        vendor: &'a BTreeSet<String>,
+        host: &'a BTreeSet<String>,
+    ) -> Self {
+        self.vendor_keys = Some(vendor);
+        self.host_keys = Some(host);
+        self
+    }
+
+    /// Record the key-id that will sign the settled output (the `--key`) — the tier authority for an
+    /// entry-origin reserved provide.
+    #[must_use]
+    pub const fn with_signing_key(mut self, key_id: Option<&'a str>) -> Self {
+        self.signing_key = key_id;
+        self
+    }
+
+    /// The tier the settled output's signing key sits at, if an output signer is known — the
+    /// authority for an entry-origin reserved provide. `None` ⇒ no signer known.
+    #[must_use]
+    pub fn signing_tier(&self) -> Option<Tier> {
+        self.signing_key.map(|k| self.tier_of(k))
+    }
+
+    /// Record the host-declared reserved namespaces (`system.toml` `[[reserved]]`).
+    #[must_use]
+    pub const fn with_reserved(mut self, reserved: &'a [ReservedNamespace]) -> Self {
+        self.reserved = reserved;
+        self
+    }
+
+    /// The host-declared reserved namespaces this context gates against.
+    #[must_use]
+    pub const fn reserved(&self) -> &'a [ReservedNamespace] {
+        self.reserved
+    }
+
+    /// The [`Tier`] of a verified signing key — vendor, host, or (the default) user. Any key at a
+    /// tier is equivalent; this never compares identities, only set membership by loading dir.
+    #[must_use]
+    pub fn tier_of(&self, key_id: &str) -> Tier {
+        if self.vendor_keys.is_some_and(|s| s.contains(key_id)) {
+            Tier::Vendor
+        } else if self.host_keys.is_some_and(|s| s.contains(key_id)) {
+            Tier::Host
+        } else {
+            Tier::User
         }
     }
 
@@ -168,36 +260,6 @@ impl<'a> Trust<'a> {
             }
         }
     }
-}
-
-/// The canonical bytes a fragment's ([`LeafPolicy`]) signature covers: its TOML
-/// serialisation with the `[signature]` table excluded.
-///
-/// # Errors
-///
-/// Returns [`PolicyError::Canonical`] if serialisation fails.
-pub fn canonical_leaf(leaf: &LeafPolicy) -> Result<Vec<u8>, PolicyError> {
-    let mut bare = leaf.clone();
-    bare.signature = None;
-    basic_toml::to_string(&bare)
-        .map(String::into_bytes)
-        .map_err(|e| PolicyError::Canonical(e.to_string()))
-}
-
-/// Sign a fragment ([`LeafPolicy`]), returning a copy with its `[signature]` set.
-///
-/// # Errors
-///
-/// Returns [`PolicyError::Canonical`] if the canonical form cannot be produced.
-pub fn sign_leaf(leaf: &LeafPolicy, key: &SigningKey) -> Result<LeafPolicy, PolicyError> {
-    let mut signed = leaf.clone();
-    signed.signature = Some(SignatureEnvelope {
-        algorithm: kennel_lib_policy::signature::SSHSIG_ALGORITHM.to_owned(),
-        key_id: key.key_id().to_owned(),
-        signature: kennel_lib_policy::sshsig::sign_ed25519(key, &canonical_leaf(leaf)?),
-        signed_fields: Vec::new(),
-    });
-    Ok(signed)
 }
 
 fn require_err(name: &str, why: &str) -> PolicyError {
@@ -340,11 +402,12 @@ mod tests {
     #[test]
     fn fragment_signing_verifies_through_trust_check() {
         let (key, ks) = keypair();
-        let frag = crate::leaf::parse(
+        // A fragment is an ordinary source policy whose list fields are add-only increments.
+        let frag = parse(
             b"name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
         )
         .expect("parse fragment");
-        let signed = sign_leaf(&frag, &key).expect("sign fragment");
+        let signed = sign_source(&frag, &key).expect("sign fragment");
         // Verified via the generic Signable path that includes use.
         assert_eq!(
             Trust::require(&ks)

@@ -18,26 +18,18 @@
 //! substitutes the per-instance placeholders, and translates the result into a
 //! [`Plan`] — all via [`kennel_lib_spawn::prepare`].
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use kennel_lib_config::{EnablementDir, ReservedNamespace};
+use kennel_lib_config::EnablementDir;
 use kennel_lib_policy::KeySet;
 use kennel_lib_spawn::{Plan, RuntimeSubstitutions};
 
 use crate::server::{Loaded, PolicyLoader};
 
-/// The daemon trust store: the verifiable keys plus which key-ids are **vendor-provenance**.
-///
-/// Vendor-provenance ids are those loaded from the vendor key dir (`/usr/lib/kennel/keys`), where the
-/// project maintainer key lives. The vendor set is the authority for the built-in
-/// `org.projectkennel.*` reserved namespace (`07-13-service-catalog.md` §7.13.5); the catalogue gate
-/// ([`crate::catalogue`]) consults it.
+/// The daemon trust store: the verifiable keys, looked up by id for signature verification.
 pub struct TrustStore {
     /// Every trusted key, looked up by id for signature verification.
     pub keys: KeySet,
-    /// The subset of key-ids loaded from the vendor key dir (provenance = authority).
-    pub vendor_key_ids: BTreeSet<String>,
 }
 
 /// Load every `*.pub` in `dir` into `keys`, the file stem as key id. A key id
@@ -48,11 +40,7 @@ pub struct TrustStore {
 /// fatal: the trust store is re-read on every request, so one fat-fingered key file
 /// must not brick verification of policies signed by the *valid* keys beside it.
 /// Only an error reading the directory itself propagates.
-fn load_dir_into(
-    keys: &mut KeySet,
-    dir: &Path,
-    inserted: &mut BTreeSet<String>,
-) -> std::io::Result<()> {
+fn load_dir_into(keys: &mut KeySet, dir: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) != Some("pub") {
@@ -79,8 +67,6 @@ fn load_dir_into(
                 "kenneld: warning: ignoring malformed trust key {}: {e:?}",
                 path.display()
             );
-        } else {
-            inserted.insert(key_id.to_owned());
         }
     }
     Ok(())
@@ -104,8 +90,6 @@ pub struct TrustStoreLoader {
     /// (the maintainer key is unshadowable) and are tagged vendor-provenance — the authority for the
     /// built-in `org.projectkennel.*` namespace (§7.13.5). `None` for the test/embedding constructors.
     vendor_dir: Option<PathBuf>,
-    /// Host-declared reserved namespaces (§7.13.5a) for the runtime reserved-provide gate.
-    reserved: Vec<ReservedNamespace>,
     /// The operator enablement directories (§7.13.6) the catalogue's membership is scanned from.
     enablement_dirs: Vec<EnablementDir>,
 }
@@ -117,7 +101,6 @@ impl TrustStoreLoader {
         Self {
             source: TrustSource::Dirs(vec![dir.to_path_buf()]),
             vendor_dir: None,
-            reserved: Vec::new(),
             enablement_dirs: Vec::new(),
         }
     }
@@ -132,13 +115,11 @@ impl TrustStoreLoader {
     pub fn from_trust_dirs(
         vendor_dir: Option<PathBuf>,
         rest: &[&Path],
-        reserved: Vec<ReservedNamespace>,
         enablement_dirs: Vec<EnablementDir>,
     ) -> Self {
         Self {
             source: TrustSource::Dirs(rest.iter().map(|d| d.to_path_buf()).collect()),
             vendor_dir,
-            reserved,
             enablement_dirs,
         }
     }
@@ -159,7 +140,6 @@ impl TrustStoreLoader {
         Self {
             source: TrustSource::Dirs(dirs.iter().map(|d| d.to_path_buf()).collect()),
             vendor_dir: None,
-            reserved: Vec::new(),
             enablement_dirs: Vec::new(),
         }
     }
@@ -170,7 +150,6 @@ impl TrustStoreLoader {
         Self {
             source: TrustSource::Fixed(keys),
             vendor_dir: None,
-            reserved: Vec::new(),
             enablement_dirs: Vec::new(),
         }
     }
@@ -185,33 +164,28 @@ impl TrustStoreLoader {
     /// An OS error if a present dir cannot be read, or `InvalidData` for a malformed key.
     fn current_keys(&self) -> std::io::Result<TrustStore> {
         match &self.source {
-            TrustSource::Fixed(keys) => Ok(TrustStore {
-                keys: keys.clone(),
-                vendor_key_ids: BTreeSet::new(),
-            }),
+            TrustSource::Fixed(keys) => Ok(TrustStore { keys: keys.clone() }),
             TrustSource::Dirs(dirs) => {
                 let mut keys = KeySet::new();
-                let mut vendor_key_ids = BTreeSet::new();
+                // The vendor dir loads first so its keys win an id clash (the maintainer key is
+                // unshadowable). Tier provenance is no longer tracked here: the reserved-namespace
+                // authority is resolved tier-aware at compile (§7.13.5), not at runtime.
                 if let Some(vendor) = &self.vendor_dir {
-                    match load_dir_into(&mut keys, vendor, &mut vendor_key_ids) {
+                    match load_dir_into(&mut keys, vendor) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                         Err(e) => return Err(e),
                     }
                 }
-                let mut rest = BTreeSet::new();
                 for dir in dirs {
-                    match load_dir_into(&mut keys, dir, &mut rest) {
+                    match load_dir_into(&mut keys, dir) {
                         Ok(()) => {}
                         // A missing layer (e.g. no ~/.config/kennel/keys) is fine.
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                         Err(e) => return Err(e),
                     }
                 }
-                Ok(TrustStore {
-                    keys,
-                    vendor_key_ids,
-                })
+                Ok(TrustStore { keys })
             }
         }
     }
@@ -244,26 +218,10 @@ impl PolicyLoader for TrustStoreLoader {
     }
 
     fn build_catalogue(&self) -> crate::catalogue::Catalogue {
-        let store = match self.current_keys() {
-            Ok(store) => store,
-            Err(e) => {
-                eprintln!("kenneld: catalogue: trust store unreadable, empty catalogue: {e}");
-                return crate::catalogue::Catalogue::default();
-            }
-        };
-        // Projection over the enabled membership: gate each `[[provides]]`; an unauthorized reserved
-        // claim is dropped and audited.
-        crate::catalogue::Catalogue::project(
-            &self.enabled_providers(),
-            &store.vendor_key_ids,
-            &self.reserved,
-            |name, provider| {
-                eprintln!(
-                    "kenneld: catalogue: provider `{provider}` is not authorized to provide reserved \
-                     `{name}` — dropped (§7.13.5)"
-                );
-            },
-        )
+        // Projection over the enabled membership. `enabled_providers` verifies each provider's settled
+        // signature against the trust store; the reserved-namespace authority was sealed tier-aware at
+        // compile into that signature (§7.13.5), so the catalogue admits what the scan trusts as-is.
+        crate::catalogue::Catalogue::project(&self.enabled_providers())
     }
 
     fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
@@ -274,29 +232,14 @@ impl PolicyLoader for TrustStoreLoader {
         let store = self
             .current_keys()
             .map_err(|e| format!("reading trust store: {e}"))?;
-        // Verify + recover the signing key id (the reserved-namespace gate turns on *which* trusted
-        // key signed the policy). Substitute once; derive both artefacts from the one policy (the same
-        // steps `kennel_lib_spawn::prepare` runs, kept open here so the net section is available to
-        // configure the egress proxy).
-        let (verified, signing_key_id) =
+        // Verify the settled signature against the trust store. That trusted signature is the whole
+        // boundary: the reserved-namespace authority was resolved tier-aware at compile and sealed into
+        // it (§7.13.5), so the daemon does not re-derive it. Substitute once; derive both artefacts
+        // from the one policy (the same steps `kennel_lib_spawn::prepare` runs, kept open here so the
+        // net section is available to configure the egress proxy).
+        let (verified, _signing_key_id) =
             kennel_lib_policy::verify_settled_signed(&bytes, &store.keys)
                 .map_err(|e| e.to_string())?;
-        // Authoritative reserved-namespace gate (§7.13.4): a settled policy may *provide* a reserved
-        // capability name only when an authorized key signed it. A self-signed `org.projectkennel.*`
-        // (or unauthorized host-namespace) provide is finally refused here — the runtime backstop to
-        // the compile-time fail-fast (W1), closing the provider-name-spoofing channel.
-        if let Some(name) = crate::catalogue::first_unauthorized_provide(
-            &verified.mesh.provides,
-            &signing_key_id,
-            &store.vendor_key_ids,
-            &self.reserved,
-        ) {
-            return Err(format!(
-                "policy {} provides reserved capability `{name}`, but its signing key `{signing_key_id}` \
-                 is not authorized for that namespace (§7.13.5)",
-                path.display()
-            ));
-        }
         loaded_from_settled(&verified, subst)
     }
 }
@@ -510,36 +453,25 @@ mod tests {
     }
 
     #[test]
-    fn vendor_dir_keys_are_provenance_tagged_and_unshadowable() {
-        // The vendor dir is searched first: its key-ids are recorded as vendor-provenance (the
-        // org.projectkennel.* authority), and a `rest` (admin/user) key reusing a vendor id cannot
-        // shadow it — the maintainer key is unshadowable.
+    fn a_vendor_dir_key_is_unshadowable_by_a_later_dir() {
+        // The vendor dir is searched FIRST, so an admin/user key reusing a vendor key-id cannot shadow
+        // it — the maintainer key is unshadowable (the first dir wins an id clash). Tier provenance is
+        // no longer tracked at runtime: the reserved-namespace authority is sealed at compile (§7.13.5).
         let vendor = temp_dir("prov-vendor");
         let admin = temp_dir("prov-admin");
-        let maint = SigningKey::from_seed("kennel-maint-2026", &[1u8; 32]).expect("maint key");
-        let imposter = SigningKey::from_seed("kennel-maint-2026", &[2u8; 32]).expect("imposter");
-        let admin_only = SigningKey::from_seed("acme-admin", &[3u8; 32]).expect("admin key");
-        write_pubkey(&vendor, &maint);
-        write_pubkey(&admin, &imposter); // same id as the maintainer key, in the admin dir
-        write_pubkey(&admin, &admin_only);
+        let trusted = SigningKey::from_seed("shared-id", &[1u8; 32]).expect("vendor key");
+        let imposter = SigningKey::from_seed("shared-id", &[2u8; 32]).expect("imposter");
+        write_pubkey(&vendor, &trusted);
+        write_pubkey(&admin, &imposter); // same id, in a later (admin) dir
 
-        let loader = TrustStoreLoader::from_trust_dirs(
-            Some(vendor.clone()),
-            &[&admin],
-            Vec::new(),
-            Vec::new(),
-        );
+        let loader = TrustStoreLoader::from_trust_dirs(Some(vendor.clone()), &[&admin], Vec::new());
         let store = loader.current_keys().expect("read keys");
 
-        // The maintainer id is vendor-provenance; the admin-only id is not.
-        assert!(store.vendor_key_ids.contains("kennel-maint-2026"));
-        assert!(!store.vendor_key_ids.contains("acme-admin"));
-
         // The vendor key wins the id clash — the admin imposter cannot shadow it.
-        let got = store.keys.get("kennel-maint-2026").expect("maint present");
+        let got = store.keys.get("shared-id").expect("present");
         let got_b64 = kennel_lib_policy::b64::encode(&**got);
-        let want_b64 = kennel_lib_policy::b64::encode(&maint.public_key_bytes());
-        assert_eq!(got_b64, want_b64, "the vendor maintainer key wins");
+        let want_b64 = kennel_lib_policy::b64::encode(&trusted.public_key_bytes());
+        assert_eq!(got_b64, want_b64, "the vendor-dir key wins");
 
         let _ = std::fs::remove_dir_all(&vendor);
         let _ = std::fs::remove_dir_all(&admin);

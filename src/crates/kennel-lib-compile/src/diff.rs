@@ -4,7 +4,7 @@
 //! `kennel policy diff` answers a question neither `policy show` (full effective
 //! dump) nor `policy upgrade` (raw source line diff) answers: *which grants
 //! widened or narrowed, and what does each change cost in threat exposure*. It is
-//! the semantic counterpart of the line diff — `05-templates.md` §5.11/§5.13.
+//! the semantic counterpart of the line diff —/
 //!
 //! The engine is pure over two folded [`SourcePolicy`] values (the same honest
 //! input the [risk engine](crate::risks) reads — threat tags live only in source,
@@ -12,7 +12,7 @@
 //! no I/O. The two common pairings are:
 //!
 //! - **leaf vs its template baseline** — what the leaf's own deltas add over the
-//!   template it inherits (the §5.13 "your deltas" view), and
+//!   template it inherits (the "your deltas" view), and
 //! - **two policies** — an org baseline against a user policy, or a before/after
 //!   across an upgrade.
 //!
@@ -565,7 +565,7 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
         }
     }
 
-    // [[provides]] / [[consumes]] — the cross-kennel capability mesh (§7.13). Top-level,
+    // [[provides]] / [[consumes]] — the cross-kennel capability mesh. Top-level,
     // distinguished by capability name; the shape is the grant's value.
     for prov in &p.provides {
         out.push(Grant {

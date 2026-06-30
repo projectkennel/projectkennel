@@ -15,7 +15,7 @@
 //! Adding a fragment without an entry here, or breaking one's signature/composition,
 //! fails CI.
 
-use kennel_lib_compile::{compile_leaf, parse_leaf, seal_unsigned, TemplateSource, Trust};
+use kennel_lib_compile::{compile, parse_source, seal_unsigned, TemplateSource, Trust};
 use kennel_lib_policy::keys::KeySet;
 use kennel_lib_policy::to_bytes;
 use std::path::{Path, PathBuf};
@@ -127,11 +127,11 @@ fn settle_with(includes: &[&str], keys: &KeySet) -> String {
          path = \"/bin/sh\"\n\
          reason = \"login shell\"\n"
     );
-    let leaf = parse_leaf(leaf_src.as_bytes()).expect("parse leaf");
+    let leaf = parse_source(leaf_src.as_bytes()).expect("parse leaf");
     let source = CatalogueSource {
         roots: vec![repo_root().join("templates"), repo_root().join("fragments")],
     };
-    let compiled = compile_leaf(&leaf, &source, &Trust::require(keys), "0.0.0")
+    let compiled = compile(&leaf, &source, &Trust::require(keys), "0.0.0")
         .expect("compile leaf with fragment (signature must verify, deltas must apply)");
     let sealed = seal_unsigned(&compiled.policy);
     String::from_utf8(to_bytes(&sealed).expect("serialise settled")).expect("utf8")
@@ -154,7 +154,7 @@ fn every_fragment_is_signed_additive_and_composes() {
                 .join("policy.toml"),
         )
         .expect("read fragment policy.toml");
-        let frag = parse_leaf(&frag_bytes).expect("fragment parses as a leaf");
+        let frag = parse_source(&frag_bytes).expect("fragment parses as a leaf");
         assert!(
             frag.is_additive_only(),
             "fragment `{}` must be additive-only (no `.remove` delta)",

@@ -59,8 +59,7 @@ allow = ["dbus-broker", "/bin/sh"]
 # --- Network -----------------------------------------------------------------
 # Inherited from base-confined: constrained mode (no proxy allowlist = no egress).
 
-
 [signature]
-algorithm = "ed25519"
+algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "f6FcsfUt2+3NikgQTJZgdzn73Pb9xjPz6QVPa4iwIc3fQItut90buaQHK+cEb60a6Y5JcVqWIP6nOYFbpwGwCQ=="
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDokRKdwylECpJ6LBhvVDVqtOFY7EwHoQd\n6wXKVt/a1Pyxqac7ZvLurd2WRAz7qUpBWk4MiKOyg69tX8xZshPAk=\n-----END SSH SIGNATURE-----\n"

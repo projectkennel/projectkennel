@@ -10,7 +10,7 @@
 //! `"169.254.169.254/32"` → `NetRule { cidr, prefix_len }`, `"512M"` → `size_mib`,
 //! `"8h"` → `ttl_seconds`, `"constrained"`/`"none"`/`"unconstrained"`/`"host"` → [`NetMode`].
 //!
-//! # The runtime-relevant subset (02-2 §The settled policy, 08 §8.2)
+//! # The runtime-relevant subset (02-2, 08)
 //!
 //! The settled `EffectivePolicy` carries only `net`, `fs`, `exec`, `proc`, `cap`,
 //! `seccomp`, `lifecycle`. The source-only sections (`unix`, `ssh`, `dbus`, `x11`,
@@ -25,7 +25,7 @@
 //! `<uid>`, `<home>`, `<user>`, and the per-user `<tag>`/`<gid>` — is left in place
 //! and recorded in `deferred_substitutions`; the daemon fills them all at spawn from
 //! the user's scope and identity (it loads the scope from `/etc/kennel/subkennel`),
-//! and refuses to spawn if any *other* placeholder survives (02-2 §Variable
+//! and refuses to spawn if any *other* placeholder survives (02-2
 //! substitution). The compiler never needs to know the installation's tag/gid.
 //!
 //! # Non-goals
@@ -37,7 +37,7 @@
 //! `kennel_lib_syscall::seccomp::syscall_number` (`libc::SYS_*`) — so the signed policy
 //! stays architecture-independent and no syscall-number table lives in this pure crate.
 
-use crate::source::SourcePolicy;
+use crate::source::{PathField, SourcePolicy};
 use kennel_lib_policy::settled::{
     AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
     ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
@@ -56,32 +56,32 @@ use std::collections::BTreeSet;
 pub struct Translated {
     /// The flat, runtime-enforced policy.
     pub effective_policy: EffectivePolicy,
-    /// The per-kennel SSH runtime (§7.10) — a service input, not enforcement.
+    /// The per-kennel SSH runtime — a service input, not enforcement.
     pub ssh: SshRuntime,
-    /// The per-kennel `AF_UNIX` socket shims (§7.6) — a service input, not enforcement.
+    /// The per-kennel `AF_UNIX` socket shims — a service input, not enforcement.
     pub unix: UnixRuntime,
-    /// The workload's in-kennel identity (§7.4) — the supplementary groups it retains.
+    /// The workload's in-kennel identity — the supplementary groups it retains.
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime (§7.1.4) — user-defined provide/consume grants.
+    /// The per-kennel binder IPC runtime — user-defined provide/consume grants.
     pub binder: BinderRuntime,
-    /// The cross-kennel capability mesh runtime (§7.13) — `[[provides]]`/`[[consumes]]`.
+    /// The cross-kennel capability mesh runtime — `[[provides]]`/`[[consumes]]`.
     pub mesh: MeshRuntime,
-    /// The `[service]` supervision discipline (§7.13.7) — the restart policy, present only when
+    /// The `[service]` supervision discipline — the restart policy, present only when
     /// the policy declares `[service]`.
     pub service: Option<ServiceRuntime>,
-    /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set.
+    /// The per-kennel D-Bus runtime — the `IDBus` facade's rule set.
     pub dbus: DbusRuntime,
-    /// The per-kennel audit runtime (§02-3) — sinks and per-class level deviations.
+    /// The per-kennel audit runtime (-3) — sinks and per-class level deviations.
     pub audit: AuditRuntime,
-    /// The synthesised environment (§7.9.2) — the fixed `[env].set` vars.
+    /// The synthesised environment — the fixed `[env].set` vars.
     pub env: EnvRuntime,
-    /// The per-kennel resource limits (§7.4) — applied via `setrlimit` in the seal.
+    /// The per-kennel resource limits — applied via `setrlimit` in the seal.
     pub ulimits: UlimitsRuntime,
-    /// The workload to run (§7.4) — argv, cwd, pin, and optional sha256.
+    /// The workload to run — argv, cwd, pin, and optional sha256.
     pub workload: WorkloadRuntime,
-    /// The per-kennel OCI substrate (§7.11) — the image root the daemon boots, when OCI-model.
+    /// The per-kennel OCI substrate — the image root the daemon boots, when OCI-model.
     pub rootfs: RootfsRuntime,
-    /// The mutable-field manifest (§7.12.3) — the signed variant constraints, present only on a
+    /// The mutable-field manifest — the signed variant constraints, present only on a
     /// spawn-target template. Empty otherwise.
     pub manifest: Manifest,
     /// Per-instance placeholders (`<kennel>`, `<ctx>`, …) still to be filled at spawn.
@@ -91,7 +91,7 @@ pub struct Translated {
 /// Translate an effective (resolved, folded) source policy into the settled form.
 ///
 /// `effective` must be the output of [`crate::resolve::resolve`] (nothing left to
-/// inherit). All placeholders are deferred to spawn (see the module §Substitution).
+/// inherit). All placeholders are deferred to spawn (see the module).
 ///
 /// # Errors
 ///
@@ -188,7 +188,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     })
 }
 
-/// Map the source `[[mutable]]` manifest (§7.12.3) into the settled [`Variant`] form carried on the
+/// Map the source `[[mutable]]` manifest into the settled [`Variant`] form carried on the
 /// signed template. The source well-formedness (exactly one constraint kind, etc.) is enforced by
 /// [`validate_mutable_manifest`]; here we shape each entry into its settled variant. The settled
 /// `Variant` is flat (the constraint kind is which fields are set), mirroring the source.
@@ -208,7 +208,7 @@ fn translate_manifest(src: &SourcePolicy) -> Manifest {
         .collect()
 }
 
-/// Translate `[rootfs]` into the settled [`RootfsRuntime`] (§7.11). Carries the substrate `path`
+/// Translate `[rootfs]` into the settled [`RootfsRuntime`]. Carries the substrate `path`
 /// (`subst`-resolved for `~`/`<home>` like other in-view paths) and the provenance `image`. The
 /// loud-grant well-formedness (path/image/reason all present) is already enforced by
 /// [`validate_rootfs`] at the top of [`translate`], so this only shapes the runtime; `reason`
@@ -236,7 +236,7 @@ fn translate_rootfs_runtime(src: &SourcePolicy, deferred: &mut BTreeSet<String>)
     }
 }
 
-/// Translate `[workload]` into the settled [`WorkloadRuntime`] (§7.4). `argv` carries
+/// Translate `[workload]` into the settled [`WorkloadRuntime`]. `argv` carries
 /// through verbatim (a bare `argv[0]` is resolved against the kennel `PATH` at spawn,
 /// not here); `cwd` is `subst`-ed for `~`/`<home>` like other in-view paths; `sha256`,
 /// when set, is validated as 64 lowercase hex (the spawn verifies the binary against it
@@ -312,8 +312,7 @@ fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
     BinderRuntime { provide, consume }
 }
 
-/// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]
-/// (§7.13): one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
+/// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]: one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
 /// required fields are present — `filter_map` skips a malformed entry defensively. An empty
 /// mesh yields an empty runtime (omitted from the canonical form), so a policy with no mesh
 /// declarations signs exactly as before.
@@ -326,7 +325,7 @@ fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
             let name = p.name.clone()?;
             let shape = p.shape?;
             let key = p.key.clone();
-            // An omitted `af-unix` endpoint defaults to `/run/<name>[.key]/sock` (§7.13.4b); other
+            // An omitted `af-unix` endpoint defaults to `/run/<name>[.key]/sock`; other
             // shapes author a required endpoint, so a missing one drops the provide (caught at compile).
             let endpoint = match p.endpoint.clone() {
                 Some(e) => e,
@@ -360,7 +359,7 @@ fn translate_mesh(src: &SourcePolicy) -> MeshRuntime {
     MeshRuntime { provides, consumes }
 }
 
-/// Translate `[dbus]` into the settled [`DbusRuntime`] (§7.7): one resolved rule set per
+/// Translate `[dbus]` into the settled [`DbusRuntime`]: one resolved rule set per
 /// *enabled* bus. A bus with `enabled` unset/false yields no entry (no connection), so a
 /// no-`[dbus]` (or all-disabled) policy signs exactly as before. The refuse-to-broker set
 /// was already rejected at validation (`SourcePolicy::check_dbus`).
@@ -391,7 +390,7 @@ fn translate_dbus(src: &SourcePolicy) -> DbusRuntime {
     }
 }
 
-/// Translate `[ulimits]` into the settled [`UlimitsRuntime`] (§7.4). Each entry is a
+/// Translate `[ulimits]` into the settled [`UlimitsRuntime`]. Each entry is a
 /// `setrlimit` resource name (validated against [`kennel_lib_policy::settled::ULIMIT_RESOURCES`]) and a value of
 /// the form `soft` or `soft:hard`, every token a number (optional `K`/`M`/`G`, 1024-
 /// based) or `unlimited`. The value is normalised to the settled form `soft` (when
@@ -459,7 +458,7 @@ fn parse_rlim_token(field: &str, tok: &str) -> Result<String, PolicyError> {
     Ok(scaled.to_string())
 }
 
-/// Flatten the source `[env].set` into the settled [`EnvRuntime`] (§7.9.2). The
+/// Flatten the source `[env].set` into the settled [`EnvRuntime`]. The
 /// environment is *synthesised* from policy, not curated from the parent: only the
 /// explicit `set` map is carried (the legacy `pass`/`deny` curation fields are
 /// ignored — there is no inheritance to filter). Placeholders in the values are
@@ -477,7 +476,7 @@ fn translate_env(src: &SourcePolicy, deferred: &mut BTreeSet<String>) -> EnvRunt
 
 /// Flatten the source `[audit]` section into the settled [`AuditRuntime`],
 /// validating sink names, per-class levels, sizes, and the syslog facility.
-/// Only deviations from the `02-3` defaults are carried; an absent or all-default
+/// Only deviations from the defaults are carried; an absent or all-default
 /// section yields the empty runtime (omitted from the canonical form).
 ///
 /// The translation itself lives in [`kennel_lib_policy::audit`] (the single source of truth
@@ -493,7 +492,7 @@ fn translate_audit(
     )
 }
 
-/// Gather the workload's retained supplementary groups (§7.4): the explicit
+/// Gather the workload's retained supplementary groups: the explicit
 /// `[identity].groups` plus every group named by a `[[fs.dev.passthrough]]` (a device
 /// is unusable without its DAC group), de-duplicated in first-seen order. `kenneld`
 /// resolves these names to GIDs and membership-checks them at spawn.
@@ -537,7 +536,7 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
 /// and the *path component* of `$HOME` (`/home/<user>`); `identity.group` becomes the
 /// synthetic primary-group name. A `/`, `:`, NUL, or whitespace would corrupt the
 /// passwd/group file or escape the home path — refuse, never sanitise.
-/// Validate `[rootfs]` (§7.11): the OCI substrate grant is loud and self-contained. When present
+/// Validate `[rootfs]`: the OCI substrate grant is loud and self-contained. When present
 /// it must carry `path`, `image`, and a non-empty `reason` — the substrate-trust waiver (T3.8) is
 /// loud the way `mode = host` requires `net.reason`. Absent ⇒ not an OCI-model policy, nothing to
 /// check here; the `kennel run` vs `kennel oci run` consumer split is enforced at the verb.
@@ -556,7 +555,7 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
     need("path", &rootfs.path)?;
     need("image", &rootfs.image)?;
     need("reason", &rootfs.reason)?;
-    // Grammar partition (§7.11.2): `[rootfs]` and `[workload]` are mutually exclusive — an OCI
+    // Grammar partition: `[rootfs]` and `[workload]` are mutually exclusive — an OCI
     // policy runs the image entrypoint via the launcher and has no per-binary pin, so a
     // `[workload]` block is a category error, not a silently-ignored field.
     if src.workload.is_some() {
@@ -588,7 +587,7 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
     Ok(())
 }
 
-/// Install-time ceiling on a spawn's mutable-field patch (§7.12.3; 02-10 "the patch is bounded by
+/// Install-time ceiling on a spawn's mutable-field patch (; 02-10 "the patch is bounded by
 /// the binder transaction buffer"). The patch rides one binder transaction (a ~1 MiB shared buffer
 /// that also carries the template ref, the spawn uuid, and framing); a field-selection patch
 /// approaching this is already pathological. Bounding the manifest's *worst case* here turns an
@@ -602,7 +601,7 @@ const SPAWN_PRED_VALUE_MAX: usize = 4096;
 /// A length-prefixed wire field costs a 4-byte count plus its bytes.
 const WIRE_LEN_PREFIX: usize = 4;
 
-/// Validate `[spawn]` (§7.12.2) local well-formedness: the delegated-instantiation grant is loud and
+/// Validate `[spawn]` local well-formedness: the delegated-instantiation grant is loud and
 /// bounded. Cross-template eligibility of each named target (depth-1, ceilings, manifest) is the
 /// *spawner's* compile-time gate in [`crate::compile`], which can resolve the targets; here we check
 /// only what the grant's own bytes settle.
@@ -619,8 +618,7 @@ fn validate_spawn(src: &SourcePolicy) -> Result<(), PolicyError> {
     match spawn.max_instances {
         None => {
             return Err(translation(
-                "[spawn] requires `max_instances` (the concurrent fork-bomb ceiling, §7.12.7)"
-                    .to_owned(),
+                "[spawn] requires `max_instances` (the concurrent fork-bomb ceiling)".to_owned(),
             ));
         }
         Some(0) => {
@@ -657,7 +655,7 @@ fn validate_spawn(src: &SourcePolicy) -> Result<(), PolicyError> {
     Ok(())
 }
 
-/// Validate a `[[mutable]]` manifest (§7.12.3) on a spawn-target template: each entry names a
+/// Validate a `[[mutable]]` manifest on a spawn-target template: each entry names a
 /// `field` and carries exactly one well-formed bound — pool (`from` + `max`), `oneof`, or predicate
 /// (`type` + `under`) — and the manifest's worst-case patch fits the spawn transaction bound (so an
 /// oversized manifest fails here, not as a runtime transport error). "Mutable" is writable *within*
@@ -687,7 +685,7 @@ fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
         }
         // A variant opens an EXISTING, registered policy leaf — never a coined field. The applicator's
         // registry (the verify half) is the authority; an unknown field cannot be applied at spawn, so
-        // reject it here at the spawner's compile (§7.12.3).
+        // reject it here at the spawner's compile.
         if !kennel_lib_policy::patch::is_mutable_field(field) {
             return Err(translation(format!(
                 "[[mutable]] field = \"{field}\" is not a mutable policy leaf (must be one the schema \
@@ -700,7 +698,7 @@ fn validate_mutable_manifest(src: &SourcePolicy) -> Result<(), PolicyError> {
     if worst_case > SPAWN_PATCH_MAX_BYTES {
         return Err(translation(format!(
             "[[mutable]] manifest worst-case patch is {worst_case} bytes, over the \
-             {SPAWN_PATCH_MAX_BYTES}-byte spawn transaction bound (§7.12.3); reduce a pool `max` \
+             {SPAWN_PATCH_MAX_BYTES}-byte spawn transaction bound; reduce a pool `max` \
              or shorten the pools"
         )));
     }
@@ -921,8 +919,7 @@ fn translate_net(
     let net = src.net.as_ref().ok_or_else(|| missing("net"))?;
     let mode = parse_net_mode(net.mode.as_deref())?;
     // `host` shares the host net-ns and reinstates the host-recon residual (T1.6), so it is
-    // gated on a non-empty `net.reason` — the operator must justify the tradeoff
-    // (`07-5-network.md` §7.5.1). Refuse it otherwise.
+    // gated on a non-empty `net.reason` — the operator must justify the tradeoff. Refuse it otherwise.
     if mode == NetMode::Host && net.reason.as_deref().unwrap_or("").trim().is_empty() {
         return Err(translation(
             "net.mode = host shares the host network stack (reinstates T1.6 host-recon) and \
@@ -931,7 +928,7 @@ fn translate_net(
         ));
     }
     // `host` runs no egress proxy (it shares the host net-ns and egresses directly), so any
-    // `[net.proxy]` rule under it can never be enforced (`07-5` §7.5.4). CIDR rules belong in
+    // `[net.proxy]` rule under it can never be enforced. CIDR rules belong in
     // `[net.bpf]` (the kernel ACL); by-name rules cannot be enforced in host mode at all.
     if mode == NetMode::Host {
         // Only AUTHOR proxy rules (`allow`, `deny.policy`) are rejected: the framework
@@ -954,7 +951,7 @@ fn translate_net(
         translate_proxy(net.proxy.as_ref(), deferred)?;
 
     // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
-    // host-side `ssh` the bastion runs as the operator (§7.10.4), entirely outside the
+    // host-side `ssh` the bastion runs as the operator, entirely outside the
     // kennel's egress. The only egress the kennel needs is the bastion's own loopback
     // endpoint, which `kenneld` grants as a host-service literal at spawn — not a policy
     // `net.proxy.allow` rule. So a destination never appears in the kennel's allowlist.
@@ -965,10 +962,10 @@ fn translate_net(
     let (bpf_bind_allow, bpf_bind_deny) =
         translate_bpf_acl(net.bpf.as_ref().and_then(|b| b.bind.as_ref()), deferred)?;
 
-    // The bind floor (§7.5.7): a workload bind below `min_port` is denied by the
+    // The bind floor: a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
     let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
-    // The bind-port allowlist (§7.5.7): when non-empty, only these ports may be bound.
+    // The bind-port allowlist: when non-empty, only these ports may be bound.
     // Capped at the bind_subnet array size; an over-long list is a translation error
     // (a hard map limit, not a footgun), so the author learns it rather than having
     // ports silently dropped.
@@ -1115,8 +1112,8 @@ fn translate_bpf_acl(
     let Some(acl) = acl else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let allow = translate_bpf_rules(&acl.allow, deferred)?;
-    let deny = translate_bpf_rules(&acl.deny, deferred)?;
+    let allow = translate_bpf_rules(acl.allow.resolved(), deferred)?;
+    let deny = translate_bpf_rules(acl.deny.resolved(), deferred)?;
     Ok((allow, deny))
 }
 
@@ -1244,8 +1241,14 @@ fn translate_fs(
     let fs = src.fs.as_ref().ok_or_else(|| missing("fs"))?;
     let home = fs.home.as_ref().ok_or_else(|| missing("fs.home"))?;
 
-    let mut read = subst_each(fs.read.as_deref().unwrap_or_default(), deferred);
-    let write = subst_each(fs.write.as_deref().unwrap_or_default(), deferred);
+    let mut read = subst_each(
+        fs.read.as_ref().map_or(&[][..], PathField::resolved),
+        deferred,
+    );
+    let write = subst_each(
+        fs.write.as_ref().map_or(&[][..], PathField::resolved),
+        deferred,
+    );
     // Implied rule: a writable path is readable. A policy author granting `fs.write` on a tree
     // means it to be usable, which requires read; restating it as `fs.read` is noise. Fold each
     // write path into read if not already present (order-preserving, deduped).
@@ -1272,7 +1275,7 @@ fn translate_fs(
     };
 
     // The constructed-/dev bind set: the pseudo-device baseline (`fs.dev.allow`) plus
-    // every `[[fs.dev.passthrough]]` device path (§7.4.8). Both bind identically at
+    // every `[[fs.dev.passthrough]]` device path. Both bind identically at
     // spawn; the passthrough's reason/threats/group are compile-time-only (validated
     // by `crate::dev`, then dropped — like the other informational source fields).
     let mut dev_allow = subst_each(
@@ -1292,7 +1295,7 @@ fn translate_fs(
     let dev = DevPolicy { allow: dev_allow };
 
     let home_persist = subst_each(&home.persist, deferred);
-    // Exclusive (§2.7) is a subset of write — a path bound exclusively must be a writable bind.
+    // Exclusive is a subset of write — a path bound exclusively must be a writable bind.
     // An exclusive path not in `write` is a policy error (the over-mount would shadow a host path
     // the kennel never binds). Ownership / write-access of the host path is verified separately
     // (host-side, at validate and again in the privhelper) — translate is pure.
@@ -1315,7 +1318,7 @@ fn translate_fs(
             return Err(translation(format!(
                 "fs grant `{p}` exposes the kenneld control socket — the CLI→daemon trust boundary. \
                  Reaching it from inside a kennel is privilege escalation; it is refused by rule, \
-                 grantable by no policy (§7.13 / W10)"
+                 grantable by no policy"
             )));
         }
     }
@@ -1373,10 +1376,11 @@ fn translate_exec(
     let flag =
         |f: fn(&crate::source::ExecSection) -> Option<bool>| exec.and_then(f).unwrap_or(false);
     let mut allow = subst_each(
-        exec.and_then(|e| e.allow.as_deref()).unwrap_or_default(),
+        exec.and_then(|e| e.allow.as_ref())
+            .map_or(&[][..], PathField::resolved),
         deferred,
     );
-    // exec.deny (§7.3.4) is composed up the chain (folded in resolve) and carried into
+    // exec.deny is composed up the chain (folded in resolve) and carried into
     // the settled policy for audit and runtime warning. "deny evaluated before allow":
     // a deny that exactly matches an allow entry is *subtracted* here, so Landlock never
     // grants EXECUTE on it (the only deny the allow-only LSM can actually enforce). A
@@ -1391,7 +1395,7 @@ fn translate_exec(
         exec.and_then(|e| e.path.as_deref()).unwrap_or_default(),
         deferred,
     );
-    // The login shell (§7.9.2a): default /bin/sh. Execution is deny-by-default, so the
+    // The login shell: default /bin/sh. Execution is deny-by-default, so the
     // shell must itself be allowed or the kennel would set a shell it then refuses to
     // run. The exceptions: an empty allowlist (a no-exec floor like `base-confined` —
     // there is no shell to run, by design), and the explicit `**` permissive opt-in
@@ -1423,7 +1427,7 @@ fn translate_exec(
     }
     // The resolved `loaders` set (each allowlisted dynamic binary's PT_INTERP) is filled at
     // compile time by `kennel_lib_policy::libresolve` (it reads the binaries from disk), so it is
-    // empty here. There is no `[lib]` section: libraries are not execute-gated (`07-3-exec`).
+    // empty here. There is no `[lib]` section: libraries are not execute-gated.
     Ok(ExecPolicy {
         deny_setuid: flag(|e| e.deny_setuid),
         deny_setgid: flag(|e| e.deny_setgid),
@@ -1465,7 +1469,7 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
         Some(s) => Some(parse_duration_secs(s)?),
         None => None,
     };
-    // §9.7: exit | warn | renew, defaulting to exit. "stop" is accepted as a
+    // The `ttl_action`: exit | warn | renew, defaulting to exit. "stop" is accepted as a
     // backward-compatible alias for "exit" (the token earlier builds shipped).
     let ttl_action = match lc.and_then(|l| l.ttl_action.as_deref()) {
         Some("exit" | "stop") | None => TtlAction::Exit,
@@ -1483,12 +1487,12 @@ fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyErro
     })
 }
 
-/// Default initial restart backoff when `[service].backoff` is unset (§7.13.7).
+/// Default initial restart backoff when `[service].backoff` is unset.
 const DEFAULT_BACKOFF_MS: u64 = 500;
-/// Default crash-loop restart bound when `[service].max_attempts` is unset (§7.13.7).
+/// Default crash-loop restart bound when `[service].max_attempts` is unset.
 const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
-/// Translate `[service]` (§7.13.7) into the settled [`ServiceRuntime`] — the supervision discipline
+/// Translate `[service]` into the settled [`ServiceRuntime`] — the supervision discipline
 /// `kenneld` applies to an enabled provider. Present only when the policy declares `[service]`; the
 /// fields default (restart `on-failure`, 500ms backoff, 5 attempts) so an empty `[service]` is the
 /// stated defaults. `max_attempts = 0` is rejected (use `restart = "never"` to not restart).
@@ -1846,7 +1850,7 @@ mod tests {
 
     #[test]
     fn rootfs_and_workload_are_mutually_exclusive() {
-        // An OCI policy carrying a [workload] is a category error (§7.11.2 grammar partition).
+        // An OCI policy carrying a [workload] is a category error (grammar partition).
         let both = parse(
             b"name = \"x\"\n[rootfs]\npath = \"~/img/rootfs\"\n\
               image = \"ghcr.io/o/a@sha256:abc\"\nreason = \"v\"\n\
@@ -2139,7 +2143,7 @@ mod tests {
         translate(&effective).expect("translate")
     }
 
-    // ---- [service] supervision discipline (§7.13.7) ----
+    // ---- [service] supervision discipline ----
 
     #[test]
     fn service_absent_yields_no_runtime() {
@@ -2226,7 +2230,8 @@ mod tests {
                     options: vec!["-i".to_owned(), "~/.ssh/id_github".to_owned()],
                     reason: Some("push".to_owned()),
                     threats: None,
-                }],
+                }]
+                .into(),
                 ..SshSection::default()
             }),
             ..SourcePolicy::default()
@@ -2278,7 +2283,7 @@ mod tests {
         // No mesh ⇒ empty runtime, omitted from the canonical form (back-compat).
         assert!(translate_mesh(&SourcePolicy::default()).is_empty());
 
-        // An omitted af-unix endpoint is defaulted to /run/<name>[.key]/sock (§7.13.4b).
+        // An omitted af-unix endpoint is defaulted to /run/<name>[.key]/sock.
         let defaulted = SourcePolicy {
             provides: vec![ProvidesEntry {
                 name: Some("org.x.cache".to_owned()),
@@ -2562,7 +2567,8 @@ mod tests {
                     shim: Some("/run/tool.sock".to_owned()),
                     reason: Some("a project-scoped helper daemon, per kennel".to_owned()),
                     ..UnixAllow::default()
-                }],
+                }]
+                .into(),
             }),
             ..SourcePolicy::default()
         };
@@ -2615,7 +2621,8 @@ mod tests {
                                 mitigated: vec![],
                             }),
                         },
-                    ],
+                    ]
+                    .into(),
                 }),
                 ..FsSection::default()
             }),
@@ -2707,7 +2714,8 @@ mod tests {
                             exposed: vec!["T2.1".to_owned()],
                             mitigated: vec![],
                         }),
-                    }],
+                    }]
+                    .into(),
                 }),
                 ..FsSection::default()
             }),
@@ -2727,8 +2735,8 @@ mod tests {
     fn ai_coding_strict_grants_no_agent_unix_shim() {
         let t = translate_template(AI_CODING_STRICT);
         // No agent shim at all: GPG signing cannot be made safe in a kennel (a signing
-        // oracle, §11.2), and an exposed ssh-agent is a destination-blind oracle (SSH
-        // egress goes through the §7.10 bastion, never a shim).
+        // oracle), and an exposed ssh-agent is a destination-blind oracle (SSH
+        // egress goes through the bastion, never a shim).
         assert!(
             t.unix.sockets.iter().all(|s| s.name != "gpg-agent"
                 && s.name != "ssh-agent"
@@ -2843,7 +2851,7 @@ mod tests {
 
     #[test]
     fn net_bind_min_port_carries_into_the_settled_policy() {
-        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor, §7.5.7);
+        // `[net.bind].min_port` → `NetPolicy.bind_port_min` (the BPF bind floor);
         // absent ⇒ 0 (no floor).
         let with =
             parse(b"name = \"k\"\n[net]\nmode = \"constrained\"\n[net.bind]\nmin_port = 8080\n")
@@ -3016,7 +3024,7 @@ mod tests {
     fn ssh_destination_derives_no_kennel_egress() {
         // The SSH destination is reached host-side by the bastion's forced command, never by
         // the kennel itself, so an [[ssh.destinations]] entry derives NO net.allow rule. The
-        // bastion endpoint is granted separately as a host-service literal at spawn (§7.10.4).
+        // bastion endpoint is granted separately as a host-service literal at spawn.
         let src = parse(
             b"name = \"k\"\n[net]\nmode = \"constrained\"\n[[ssh.destinations]]\ndest = \"git@git.internal\"\nreason = \"push\"\n",
         )

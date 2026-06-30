@@ -1,79 +1,34 @@
 //! The service catalogue: a derived projection of the enabled providers' `[[provides]]`
-//! (`07-13-service-catalog.md` §7.13.4), and the **authoritative reserved-namespace gate** (§7.13.5).
+//! (`07-13-service-catalog.md` §7.13.4).
 //!
 //! The catalogue is a projection, never authored state: [`Catalogue::project`] reads the
 //! `[[provides]]` of the enabled providers and resolves a capability `name` to its candidate
 //! provider(s) ([`Catalogue::resolve`]) — never collapsed, since the optional `key` (§7.13.1) lets a
 //! consumer bind to a *specific* provider of a shared public name, and collapsing would let one
-//! provider revoke another's name. It carries the [`Readiness`] every reader sees (§7.13.7). It is also
-//! the **authoritative gate**: a reserved name is admitted only when an *authorized* key signed the
-//! providing policy ([`provide_authorized`]) — the runtime backstop the compile-time check (W1) fails
-//! fast for, closing the provider-name-spoofing channel. The broker that resolves against the
-//! catalogue (W5) and the supervisor that drives readiness (W6) build on this; its *membership* is the
-//! operator's enabled set (§7.13.6).
+//! provider revoke another's name. It carries the [`Readiness`] every reader sees (§7.13.7). The broker
+//! that resolves against the catalogue (W5) and the supervisor that drives readiness (W6) build on
+//! this; its *membership* is the operator's enabled set (§7.13.6).
 //!
-//! **Two reserved tiers, one rule** — only an authorized key may *provide* a reserved name:
-//! - the built-in `org.projectkennel.*` namespace (§7.13.5) is the project's, claimable only by a
-//!   **vendor-provenance** key: a trusted key loaded from the vendor key dir (`/usr/lib/kennel/keys`),
-//!   where the project maintainer key lives. It is **not host-redefinable**, so a host `[[reserved]]`
-//!   entry that overlaps `org.projectkennel.` cannot grant it;
-//! - a **host-declared** namespace (§7.13.5a, the root-owned `system.toml` `[[reserved]]` table) is
-//!   claimable by exactly the key-ids that entry authorizes.
-//!
-//! An *unreserved* name (`doe.john.cache`) falls under neither and needs no authorization — any
-//! trusted signing key, exactly like an ordinary run policy.
+//! **The reserved-namespace authority is not here.** A reserved capability name (`org.projectkennel.*`
+//! at vendor tier, a host `[[reserved]]` prefix at host tier, §7.13.5) is gated **at compile**, tier-
+//! aware, and sealed into the settled policy's signature (`kennel-lib-compile::mesh`). The enablement
+//! scan admits only a provider whose settled signature verifies against the trust store, so by the time
+//! a provider reaches this projection it is already a trusted artefact: the catalogue admits its offers
+//! as-is and never re-derives the authority. A runtime re-check keyed on the settled *signer*'s tier
+//! would be theatre — a holder of any trusted key can re-sign a forged settled, and its only reach is
+//! that operator's own per-user daemon.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use kennel_lib_config::ReservedNamespace;
 use kennel_lib_control::readiness::Readiness;
-use kennel_lib_policy::settled::{ProvideRuntime, Shape, RESERVED_PREFIX};
+use kennel_lib_policy::settled::{ProvideRuntime, Shape};
 
-/// Whether a settled policy signed by `signing_key_id` may **provide** the capability `name`.
-///
-/// `vendor_key_ids` is the set of trusted key-ids loaded from the vendor key dir — the authority for
-/// the built-in `org.projectkennel.*` namespace; `reserved` is the host-declared `[[reserved]]` table.
-/// The signing key is already known-trusted (the policy verified against the store before this gate);
-/// the question here is the *additional* one of whether that particular key may speak for this name.
-#[must_use]
-pub fn provide_authorized(
-    name: &str,
-    signing_key_id: &str,
-    vendor_key_ids: &BTreeSet<String>,
-    reserved: &[ReservedNamespace],
-) -> bool {
-    // The built-in project namespace is checked FIRST and is **not host-redefinable**: a host
-    // `[[reserved]]` entry overlapping `org.projectkennel.` cannot grant it (§7.13.5a). Only a
-    // vendor-provenance key (the maintainer key in the vendor trust dir) may claim it.
-    if name.starts_with(RESERVED_PREFIX) {
-        return vendor_key_ids.contains(signing_key_id);
-    }
-    // Otherwise the longest-matching host-declared namespace governs (the most specific reservation
-    // wins when prefixes nest); a name under none is unreserved and free to any trusted key.
-    reserved
-        .iter()
-        .filter(|ns| name.starts_with(&ns.prefix))
-        .max_by_key(|ns| ns.prefix.len())
-        .is_none_or(|ns| ns.authorizes(signing_key_id))
-}
-
-/// The first `[[provides]]` name this policy is **not** authorized to claim, if any.
-///
-/// The runtime reserved-namespace refusal (§7.13.4: the catalogue is where a self-signed reserved
-/// provide is finally refused, closing the provider-name-spoofing channel). `None` means every
-/// provide is authorized for `signing_key_id`.
-#[must_use]
-pub fn first_unauthorized_provide<'a>(
-    provides: &'a [ProvideRuntime],
-    signing_key_id: &str,
-    vendor_key_ids: &BTreeSet<String>,
-    reserved: &[ReservedNamespace],
-) -> Option<&'a str> {
-    provides
-        .iter()
-        .map(|p| p.name.as_str())
-        .find(|name| !provide_authorized(name, signing_key_id, vendor_key_ids, reserved))
-}
+// The reserved-namespace authority is resolved entirely at COMPILE, tier-aware, and sealed into the
+// settled policy's signature (§7.13.5, `kennel-lib-compile::mesh`). The daemon does not re-check it:
+// it loads only a settled policy whose signature verifies against the trust store
+// (`verify_settled_signed`), and that trusted signature is the whole boundary. A former runtime
+// "backstop" keyed on the settled *signer*'s tier was theatre — a holder of any trusted key can
+// re-sign a forged settled regardless, and its only reach is that operator's own per-user daemon.
 
 /// The operator's enablement posture for a provider (§7.13.6): which directory links it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,35 +153,29 @@ pub struct Catalogue {
 }
 
 impl Catalogue {
-    /// Project the catalogue from the enabled providers, applying the reserved-namespace gate.
+    /// Project the catalogue from the enabled providers.
     ///
-    /// A `[[provides]]` is admitted only if [`provide_authorized`] passes — an unauthorized reserved
-    /// claim is dropped (the spoofing backstop) and reported via `audit_unauthorized(name, provider)`
-    /// for the caller to log. **A name offered by more than one authorized provider is kept from
-    /// *all* of them** as candidates, never collapsed: the broker (W5) selects by the consumer's
-    /// `key` (§7.13.1), so a second provider claiming a name *adds* a candidate and can never revoke
-    /// the name another provider serves (no denial-of-service by name-claim). Every provider starts
+    /// Each enabled provider's `[[provides]]` are admitted as-is: the reserved-namespace authority was
+    /// resolved tier-aware at compile and sealed into the settled signature, and the enablement scan
+    /// only admits a provider whose settled signature verified against the trust store
+    /// ([`verify_settled_signed`](kennel_lib_policy::verify_settled_signed)) — so a catalogued provider
+    /// is already a trusted artefact. **A name offered by more than one provider is kept from *all* of
+    /// them** as candidates, never collapsed: the broker (W5) selects by the consumer's `key`
+    /// (§7.13.1), so a second provider claiming a name *adds* a candidate and can never revoke the name
+    /// another provider serves (no denial-of-service by name-claim). Every provider starts
     /// [`Readiness::Pending`] until construction reports in.
-    pub fn project(
-        providers: &[EnabledProvider],
-        vendor_key_ids: &BTreeSet<String>,
-        reserved: &[ReservedNamespace],
-        mut audit_unauthorized: impl FnMut(&str, &str),
-    ) -> Self {
+    #[must_use]
+    pub fn project(providers: &[EnabledProvider]) -> Self {
         let mut prov_map = BTreeMap::new();
         let mut by_name: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for prov in providers {
             let mut offers = Vec::new();
             for offer in &prov.provides {
-                if provide_authorized(&offer.name, &prov.signing_key_id, vendor_key_ids, reserved) {
-                    by_name
-                        .entry(offer.name.clone())
-                        .or_default()
-                        .push(prov.provider.clone());
-                    offers.push(offer.clone());
-                } else {
-                    audit_unauthorized(&offer.name, &prov.provider);
-                }
+                by_name
+                    .entry(offer.name.clone())
+                    .or_default()
+                    .push(prov.provider.clone());
+                offers.push(offer.clone());
             }
             if !offers.is_empty() {
                 prov_map.insert(
@@ -371,167 +320,6 @@ impl Catalogue {
 mod tests {
     use super::*;
 
-    fn vendor(ids: &[&str]) -> BTreeSet<String> {
-        ids.iter().map(|s| (*s).to_owned()).collect()
-    }
-
-    fn ns(prefix: &str, keys: &[&str]) -> ReservedNamespace {
-        ReservedNamespace {
-            prefix: prefix.to_owned(),
-            keys: keys.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
-
-    #[test]
-    fn unreserved_name_is_free_to_any_trusted_key() {
-        // No built-in prefix, no host-declared namespace governs → any trusted signature.
-        assert!(provide_authorized(
-            "doe.john.cache",
-            "alice-key",
-            &vendor(&["kennel-maint-2026"]),
-            &[]
-        ));
-    }
-
-    #[test]
-    fn builtin_namespace_admits_only_a_vendor_provenance_key() {
-        let vendor = vendor(&["kennel-maint-2026"]);
-        // The maintainer (vendor) key may claim org.projectkennel.*.
-        assert!(provide_authorized(
-            "org.projectkennel.wayland",
-            "kennel-maint-2026",
-            &vendor,
-            &[]
-        ));
-        // An admin or user key — trusted enough to sign a run policy, but NOT vendor-provenance —
-        // is refused. This is the provider-name-spoofing block.
-        assert!(!provide_authorized(
-            "org.projectkennel.wayland",
-            "admin-key",
-            &vendor,
-            &[]
-        ));
-        assert!(!provide_authorized(
-            "org.projectkennel.wayland",
-            "alice-key",
-            &vendor,
-            &[]
-        ));
-    }
-
-    #[test]
-    fn builtin_namespace_is_not_host_redefinable() {
-        // A malicious/over-eager host declares a [[reserved]] entry overlapping the project's own
-        // namespace and authorises its own key. It must NOT be able to claim org.projectkennel.* —
-        // the built-in check runs first and ignores the host entry (§7.13.5a).
-        let host = [ns("org.projectkennel.", &["admin-key"])];
-        assert!(!provide_authorized(
-            "org.projectkennel.wayland",
-            "admin-key",
-            &vendor(&["kennel-maint-2026"]),
-            &host
-        ));
-    }
-
-    #[test]
-    fn host_declared_namespace_admits_only_its_authorized_keys() {
-        let host = [ns("com.acme.", &["acme-platform-2026"])];
-        let v = vendor(&["kennel-maint-2026"]);
-        // The authorised org key may claim its own namespace…
-        assert!(provide_authorized(
-            "com.acme.build-cache",
-            "acme-platform-2026",
-            &v,
-            &host
-        ));
-        // …but neither a random user key nor even the project maintainer key may.
-        assert!(!provide_authorized(
-            "com.acme.build-cache",
-            "alice-key",
-            &v,
-            &host
-        ));
-        assert!(!provide_authorized(
-            "com.acme.build-cache",
-            "kennel-maint-2026",
-            &v,
-            &host
-        ));
-    }
-
-    #[test]
-    fn an_undeclared_prefix_is_unreserved() {
-        // com.acme.* is reserved, but org.example.* is declared by no one → unreserved, any key.
-        let host = [ns("com.acme.", &["acme-platform-2026"])];
-        assert!(provide_authorized(
-            "org.example.thing",
-            "alice-key",
-            &vendor(&[]),
-            &host
-        ));
-    }
-
-    #[test]
-    fn the_longest_matching_reservation_wins() {
-        // A nested reservation: com.acme.* (any acme key) and a tighter com.acme.secret.* (locked to
-        // a single key). The most specific prefix governs the name under it.
-        let host = [
-            ns("com.acme.", &["acme-platform-2026"]),
-            ns("com.acme.secret.", &["acme-secrets-key"]),
-        ];
-        let v = vendor(&[]);
-        // Under the tighter prefix, only the secrets key qualifies — the broad acme key does not.
-        assert!(provide_authorized(
-            "com.acme.secret.vault",
-            "acme-secrets-key",
-            &v,
-            &host
-        ));
-        assert!(!provide_authorized(
-            "com.acme.secret.vault",
-            "acme-platform-2026",
-            &v,
-            &host
-        ));
-        // Outside the tighter prefix, the broad acme key still governs.
-        assert!(provide_authorized(
-            "com.acme.build-cache",
-            "acme-platform-2026",
-            &v,
-            &host
-        ));
-    }
-
-    #[test]
-    fn first_unauthorized_provide_finds_the_offender_or_none() {
-        let v = vendor(&["kennel-maint-2026"]);
-        let provides = |names: &[&str]| -> Vec<ProvideRuntime> {
-            names
-                .iter()
-                .map(|n| ProvideRuntime {
-                    name: (*n).to_owned(),
-                    shape: kennel_lib_policy::settled::Shape::AfUnix,
-                    endpoint: "/run/x".to_owned(),
-                    key: None,
-                })
-                .collect()
-        };
-        // A user-signed policy with an unreserved provide AND a stolen reserved one: the reserved
-        // claim is the offender returned.
-        let mixed = provides(&["doe.john.cache", "org.projectkennel.wayland"]);
-        assert_eq!(
-            first_unauthorized_provide(&mixed, "alice-key", &v, &[]),
-            Some("org.projectkennel.wayland")
-        );
-        // The maintainer key claiming the same set is fully authorised.
-        assert_eq!(
-            first_unauthorized_provide(&mixed, "kennel-maint-2026", &v, &[]),
-            None
-        );
-        // No provides at all is trivially authorised.
-        assert_eq!(first_unauthorized_provide(&[], "alice-key", &v, &[]), None);
-    }
-
     fn provide(name: &str, shape: Shape, endpoint: &str, key: Option<&str>) -> ProvideRuntime {
         ProvideRuntime {
             name: name.to_owned(),
@@ -563,17 +351,8 @@ mod tests {
         }
     }
 
-    /// Project, collecting the unauthorized rejections (name:provider) for assertion.
-    fn project_with_rejections(
-        providers: &[EnabledProvider],
-        vendor_key_ids: &BTreeSet<String>,
-        reserved: &[ReservedNamespace],
-    ) -> (Catalogue, Vec<String>) {
-        let mut rejected = Vec::new();
-        let cat = Catalogue::project(providers, vendor_key_ids, reserved, |name, provider| {
-            rejected.push(format!("unauthorized:{name}:{provider}"));
-        });
-        (cat, rejected)
+    fn project_test(providers: &[EnabledProvider]) -> Catalogue {
+        Catalogue::project(providers)
     }
 
     #[test]
@@ -590,8 +369,7 @@ mod tests {
                 Some("tok"),
             )],
         )];
-        let (cat, rejected) = project_with_rejections(&providers, &vendor(&[]), &[]);
-        assert!(rejected.is_empty());
+        let cat = project_test(&providers);
         let cands = cat.resolve("doe.john.cache");
         assert_eq!(cands.len(), 1);
         let e = cands.first().expect("one candidate");
@@ -618,8 +396,7 @@ mod tests {
                 provide("doe.john.build", Shape::AfUnix, "/tmp/build.sock", None),
             ],
         )];
-        let (cat, rejected) = project_with_rejections(&providers, &vendor(&[]), &[]);
-        assert!(rejected.is_empty());
+        let cat = project_test(&providers);
 
         let entries: Vec<(&str, &CatalogueProvider)> = cat.entries().collect();
         assert_eq!(entries.len(), 1, "one catalogued provider");
@@ -664,7 +441,7 @@ mod tests {
                 )],
             ),
         ];
-        let (cat, _) = project_with_rejections(&providers, &vendor(&[]), &[]);
+        let cat = project_test(&providers);
         // The idle-reap census key: an ondemand provider's af-unix offers only (dbus is excluded).
         assert_eq!(
             cat.ondemand_provider_offers("od"),
@@ -676,43 +453,22 @@ mod tests {
     }
 
     #[test]
-    fn project_admits_a_reserved_name_only_from_a_vendor_key() {
-        let wayland = || {
+    fn project_admits_a_provider_offering_a_reserved_name() {
+        // The reserved-namespace authority is sealed at compile (§7.13.5); the catalogue admits a
+        // provider's offers as-is — its settled signature was already verified by the enablement scan.
+        let cat = project_test(&[enabled(
+            "gui",
+            "a-vendor-key",
+            Tier::Host,
+            Enablement::Autorun,
             vec![provide(
                 "org.projectkennel.wayland",
                 Shape::AfUnix,
                 "$XDG_RUNTIME_DIR/wayland-0",
                 None,
-            )]
-        };
-        // The maintainer (vendor) key: admitted.
-        let (cat, rej) = project_with_rejections(
-            &[enabled(
-                "gui",
-                "kennel-maint-2026",
-                Tier::Host,
-                Enablement::Autorun,
-                wayland(),
             )],
-            &vendor(&["kennel-maint-2026"]),
-            &[],
-        );
+        )]);
         assert!(!cat.resolve("org.projectkennel.wayland").is_empty());
-        assert!(rej.is_empty());
-        // A self-signed impostor: dropped, and the name resolves to nothing (spoofing backstop).
-        let (cat, rej) = project_with_rejections(
-            &[enabled(
-                "evil",
-                "alice-key",
-                Tier::User,
-                Enablement::Autorun,
-                wayland(),
-            )],
-            &vendor(&["kennel-maint-2026"]),
-            &[],
-        );
-        assert!(cat.resolve("org.projectkennel.wayland").is_empty());
-        assert_eq!(rej, vec!["unauthorized:org.projectkennel.wayland:evil"]);
     }
 
     #[test]
@@ -728,12 +484,7 @@ mod tests {
                 vec![provide("doe.john.cache", Shape::AfUnix, "/run/x", None)],
             )
         };
-        let (cat, rejected) = project_with_rejections(
-            &[cache("zzz-host", Tier::Host), cache("aaa-user", Tier::User)],
-            &vendor(&[]),
-            &[],
-        );
-        assert!(rejected.is_empty(), "a shared name is not a rejection");
+        let cat = project_test(&[cache("zzz-host", Tier::Host), cache("aaa-user", Tier::User)]);
         let cands = cat.resolve("doe.john.cache");
         assert_eq!(cands.len(), 2, "both providers are kept");
         // Equivalent (no key divergence) → the per-USER provider is preferred (ordered first),
@@ -746,21 +497,16 @@ mod tests {
     #[test]
     fn set_readiness_drives_a_provider_across_its_names() {
         // Readiness is per-provider: one provider offering two names goes Ready for both at once.
-        let mut cat = project_with_rejections(
-            &[enabled(
-                "svc",
-                "k",
-                Tier::Host,
-                Enablement::Autorun,
-                vec![
-                    provide("x.y", Shape::BinderConnector, "node", None),
-                    provide("x.z", Shape::AfUnix, "/run/z", None),
-                ],
-            )],
-            &vendor(&[]),
-            &[],
-        )
-        .0;
+        let mut cat = project_test(&[enabled(
+            "svc",
+            "k",
+            Tier::Host,
+            Enablement::Autorun,
+            vec![
+                provide("x.y", Shape::BinderConnector, "node", None),
+                provide("x.z", Shape::AfUnix, "/run/z", None),
+            ],
+        )]);
         assert_eq!(
             cat.set_readiness("svc", Readiness::Ready),
             Some(Readiness::Ready)
@@ -779,18 +525,13 @@ mod tests {
     #[test]
     fn apply_event_drives_readiness_through_the_machine() {
         use kennel_lib_control::readiness::Event;
-        let mut cat = project_with_rejections(
-            &[enabled(
-                "svc",
-                "k",
-                Tier::Host,
-                Enablement::Autorun,
-                vec![provide("x.y", Shape::AfUnix, "/run/x", None)],
-            )],
-            &vendor(&[]),
-            &[],
-        )
-        .0;
+        let mut cat = project_test(&[enabled(
+            "svc",
+            "k",
+            Tier::Host,
+            Enablement::Autorun,
+            vec![provide("x.y", Shape::AfUnix, "/run/x", None)],
+        )]);
         // Pending → Ready on a sealed construction; Ready → Pending on a restart.
         assert_eq!(
             cat.apply_event("svc", Event::ConstructionSucceeded),
@@ -820,8 +561,8 @@ mod tests {
 
     #[test]
     fn an_empty_enabled_set_yields_an_empty_catalogue() {
-        let (cat, rej) = project_with_rejections(&[], &vendor(&[]), &[]);
-        assert!(cat.is_empty() && rej.is_empty());
+        let cat = project_test(&[]);
+        assert!(cat.is_empty());
         assert_eq!(cat.names().count(), 0);
         assert_eq!(cat.providers().count(), 0);
     }

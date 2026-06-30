@@ -13,7 +13,7 @@
 // operator reviews and tightens. `--no-prompts` produces a maximally-restrictive
 // skeleton for CI.
 //
-// "How can I do less" — the output is a `LeafPolicy` struct serialised to TOML
+// "How can I do less" — the output is a `SourcePolicy` struct serialised to TOML
 // via `basic_toml::to_string()`. Template/fragment discovery uses the same
 // cascade and parsers (`kennel_lib_config`, `kennel_lib_compile`) every other
 // tool uses. Validation feeds the emitted bytes through `build_settled()`.
@@ -24,11 +24,23 @@ mod templates;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kennel_lib_compile::leaf::{
-    ExecLeaf, FsLeaf, LifecycleLeaf, NetAllowDelta, NetLeaf, NetProxyLeaf, PathEntry, PathListDelta,
+use kennel_lib_compile::source::{ExecSection, FsSection, LifecycleSection, NetProxy, NetSection};
+use kennel_lib_compile::{
+    Delta, ListField, NetAllow, PathDelta, PathEntry, PathField, SourcePolicy,
 };
-use kennel_lib_compile::source::LifecycleSection;
-use kennel_lib_compile::{LeafPolicy, NetAllow};
+
+/// Append a path entry to a path field's add-increment (`[[….add]]`), creating the delta if absent.
+fn push_add(field: &mut Option<PathField>, entry: PathEntry) {
+    match field.get_or_insert_with(|| PathField::Delta(PathDelta::default())) {
+        PathField::Delta(d) => d.add.push(entry),
+        slot => {
+            *slot = PathField::Delta(PathDelta {
+                add: vec![entry],
+                remove: Vec::new(),
+            });
+        }
+    }
+}
 
 /// Parsed command-line arguments.
 struct Args {
@@ -86,7 +98,7 @@ fn run(args: Args) -> ExitCode {
 
     let is_script = probe_result.is_script;
 
-    // Build a LeafPolicy directly from the probe result.
+    // Build a SourcePolicy directly from the probe result.
     let leaf = if args.no_prompts {
         build_leaf_from_probe(&args.name, &probe_result)
     } else {
@@ -219,12 +231,12 @@ fn run_compose(args: &Args) -> ExitCode {
         }
     };
 
-    // --- Step 3: build a LeafPolicy ---
-    let mut leaf = LeafPolicy {
+    // --- Step 3: build a SourcePolicy ---
+    let mut leaf = SourcePolicy {
         name: Some(args.name.clone()),
         template_base: Some(selected_base),
         include: selected_fragments,
-        ..LeafPolicy::default()
+        ..SourcePolicy::default()
     };
 
     // Ask the capability questions and populate the leaf.
@@ -238,13 +250,13 @@ fn run_compose(args: &Args) -> ExitCode {
     emit_leaf(&leaf, args, false)
 }
 
-/// Build a LeafPolicy from probe results with all-default (maximally restrictive)
+/// Build a SourcePolicy from probe results with all-default (maximally restrictive)
 /// answers. This is the `--no-prompts` path.
-fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> LeafPolicy {
-    let mut leaf = LeafPolicy {
+fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> SourcePolicy {
+    let mut leaf = SourcePolicy {
         name: Some(name.to_owned()),
         template_base: Some("base-confined@v1".to_owned()),
-        ..LeafPolicy::default()
+        ..SourcePolicy::default()
     };
 
     // Exec deltas from probe.
@@ -252,21 +264,19 @@ fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> LeafP
     populate_fs_from_probe(&mut leaf, probe_result);
 
     // TTL.
-    leaf.lifecycle = Some(LifecycleLeaf {
-        over: Some(LifecycleSection {
-            ttl: Some("30m".to_owned()),
-            ..LifecycleSection::default()
-        }),
+    leaf.lifecycle = Some(LifecycleSection {
+        ttl: Some("30m".to_owned()),
+        ..LifecycleSection::default()
     });
 
     leaf
 }
 
-/// Build a LeafPolicy from probe + interactive input.
+/// Build a SourcePolicy from probe + interactive input.
 fn build_leaf_interactive(
     name: &str,
     probe_result: &probe::ProbeResult,
-) -> Result<LeafPolicy, String> {
+) -> Result<SourcePolicy, String> {
     let mut leaf = build_leaf_from_probe(name, probe_result);
 
     // Override template base interactively.
@@ -280,7 +290,7 @@ fn build_leaf_interactive(
 }
 
 /// Ask capability questions and populate the leaf in-place.
-fn ask_capabilities(leaf: &mut LeafPolicy) -> Result<(), String> {
+fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
     use std::io::{self, BufRead, Write};
 
     let stdin = io::stdin();
@@ -308,16 +318,15 @@ fn ask_capabilities(leaf: &mut LeafPolicy) -> Result<(), String> {
             });
         }
         if !allows.is_empty() {
-            leaf.net = Some(NetLeaf {
-                proxy: Some(NetProxyLeaf {
-                    allow: Some(NetAllowDelta {
+            leaf.net = Some(NetSection {
+                proxy: Some(NetProxy {
+                    allow: ListField::Delta(Delta {
                         add: allows,
                         remove: Vec::new(),
                     }),
                     deny: None,
                 }),
-                bpf: None,
-                audit: None,
+                ..NetSection::default()
             });
         }
     }
@@ -336,23 +345,23 @@ fn ask_capabilities(leaf: &mut LeafPolicy) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let home_path = line.trim();
     if !home_path.is_empty() {
-        let fs = leaf.fs.get_or_insert_with(FsLeaf::default);
-        let write = fs.write.get_or_insert_with(PathListDelta::default);
-        write.add.push(PathEntry {
-            path: home_path.to_owned(),
-            reason: Some("operator-specified write access".to_owned()),
-            threats: None,
-        });
+        let fs = leaf.fs.get_or_insert_with(FsSection::default);
+        push_add(
+            &mut fs.write,
+            PathEntry {
+                path: home_path.to_owned(),
+                reason: Some("operator-specified write access".to_owned()),
+                threats: None,
+            },
+        );
     }
 
     // TTL.
     let ttl = ask_line("TTL [30m]: ")?;
     if !ttl.is_empty() {
-        leaf.lifecycle = Some(LifecycleLeaf {
-            over: Some(LifecycleSection {
-                ttl: Some(ttl),
-                ..LifecycleSection::default()
-            }),
+        leaf.lifecycle = Some(LifecycleSection {
+            ttl: Some(ttl),
+            ..LifecycleSection::default()
         });
     }
 
@@ -360,7 +369,7 @@ fn ask_capabilities(leaf: &mut LeafPolicy) -> Result<(), String> {
 }
 
 /// Populate exec deltas from probe results.
-fn populate_exec_from_probe(leaf: &mut LeafPolicy, probe_result: &probe::ProbeResult) {
+fn populate_exec_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::ProbeResult) {
     if probe_result.exec_allow.is_empty() {
         return;
     }
@@ -373,16 +382,17 @@ fn populate_exec_from_probe(leaf: &mut LeafPolicy, probe_result: &probe::ProbeRe
             threats: None,
         })
         .collect();
-    leaf.exec = Some(ExecLeaf {
-        allow: Some(PathListDelta {
+    leaf.exec = Some(ExecSection {
+        allow: Some(PathField::Delta(PathDelta {
             add: entries,
             remove: Vec::new(),
-        }),
+        })),
+        ..ExecSection::default()
     });
 }
 
 /// Populate fs.read deltas from probe results (non-standard paths).
-fn populate_fs_from_probe(leaf: &mut LeafPolicy, probe_result: &probe::ProbeResult) {
+fn populate_fs_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::ProbeResult) {
     if probe_result.extra_fs_read.is_empty() {
         return;
     }
@@ -395,16 +405,16 @@ fn populate_fs_from_probe(leaf: &mut LeafPolicy, probe_result: &probe::ProbeResu
             threats: None,
         })
         .collect();
-    let fs = leaf.fs.get_or_insert_with(FsLeaf::default);
-    fs.read = Some(PathListDelta {
+    let fs = leaf.fs.get_or_insert_with(FsSection::default);
+    fs.read = Some(PathField::Delta(PathDelta {
         add: entries,
         remove: Vec::new(),
-    });
+    }));
 }
 
-/// Serialise the LeafPolicy to TOML and write it. If templates are available,
+/// Serialise the SourcePolicy to TOML and write it. If templates are available,
 /// validate the output by feeding it through the compile pipeline.
-fn emit_leaf(leaf: &LeafPolicy, args: &Args, is_script: bool) -> ExitCode {
+fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
     // Validate the leaf's own structure first.
     if let Err(e) = leaf.validate() {
         eprintln!("kennel-compose: generated policy has structural errors: {e}");

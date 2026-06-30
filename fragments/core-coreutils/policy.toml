@@ -207,7 +207,6 @@ reason = "pager"
 path = "/usr/bin/more"
 reason = "simple pager"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

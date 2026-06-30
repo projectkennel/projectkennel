@@ -3,7 +3,7 @@
 //! # Purpose
 //!
 //! This is the **input** to `kennel compile`: a template or leaf policy as authored
-//! in TOML (`docs/architecture/02-2-config-schema.md`, `docs/design/05-templates.md`). It is the
+//! in TOML. It is the
 //! rich, human-facing surface — every resource section (`exec`, `fs`, `net`, `unix`,
 //! `ssh`, `binder`, `env`, `cap`, `seccomp`, `proc`, `ptrace`, `signal`,
 //! `lifecycle`), identity and inheritance (`template_base`, `template_name`, `name`,
@@ -13,13 +13,13 @@
 //! # Invariants
 //!
 //! - Every struct is `#[serde(deny_unknown_fields)]`: an unrecognised key is a hard
-//!   parse error (`02-2` §File layout). The schema is the allowlist.
+//!   parse error. The schema is the allowlist.
 //! - All section fields are optional. A section absent from a file contributes
 //!   nothing; presence is what a delta/merge step (the resolver) acts on. Faithful
 //!   *parsing* is this module's job; *composition* is the resolver's (`source.rs`
 //!   stays I/O-free and merge-free).
 //! - Paths are carried verbatim as strings. Tilde/`<…>` expansion happens later, and
-//!   only after signature verification (`02-2` §Path syntax) — never at parse time.
+//!   only after signature verification — never at parse time.
 //!
 //! # Threat bearing
 //!
@@ -31,15 +31,16 @@
 //!
 //! # Non-goals
 //!
-//! This build parses the **template direct form** (the six in-tree templates). The
-//! leaf-policy *delta operators* (`[[fs.read.add]]`, `[[net.allow.remove]]`,
-//! `[net.audit.override]`) and their folding are the resolver increment's concern —
-//! a delta is inert without a folder to apply it — and are added there alongside the
-//! composition logic, not here.
+//! A template and a leaf are the one [`SourcePolicy`] type. Each list field parses as either the
+//! bare-sequence **replace** form (`fs.read = ["…"]`, the template direct form) or the `{ add, remove }`
+//! **increment** form (`[[fs.read.add]]`, the `+=` / `-=` leaf/fragment delta) at the same key —
+//! [`PathField`] / [`ListField`] choose by TOML shape. Applying the increments (folding a delta onto
+//! the inherited list) is the resolver's job ([the resolver](mod@crate::resolve)); this module only *parses* them.
 
 use kennel_lib_policy::audit::AuditSection;
 use kennel_lib_policy::signature::SignatureEnvelope;
 use kennel_lib_policy::PolicyError;
+use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -89,30 +90,30 @@ pub struct SourcePolicy {
     /// SSH egress section (`[ssh]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshSection>,
-    /// Identity section (`[identity]`) — the supplementary groups carried in.
+    /// Identity section (`[identity]`): the supplementary groups carried in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<IdentitySection>,
-    /// Binder IPC section (`[binder]`) — user-defined services this kennel may
+    /// Binder IPC section (`[binder]`): user-defined services this kennel may
     /// register (`[[binder.provide]]`) and look up (`[[binder.consume]]`). The
     /// reserved `org.projectkennel.*` facades are enabled by their own sections,
-    /// never declared here (`07-1-binder.md` §7.1.4).
+    /// never declared here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binder: Option<BinderSection>,
-    /// `[[provides]]` — capabilities this kennel offers to other kennels over the mesh
-    /// (`docs/design/07-13-service-catalog.md` §7.13.1). Top-level; each entry names a
-    /// capability and its typed shape. Additive to `[binder]` (§7.13.2): the cross-kennel
+    /// `[[provides]]`: capabilities this kennel offers to other kennels over the mesh.
+    /// Top-level; each entry names a
+    /// capability and its typed shape. Additive to `[binder]`: the cross-kennel
     /// `binder-connector` shape and the legacy `[[binder.provide]]` are reconciled later.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provides: Vec<ProvidesEntry>,
-    /// `[[consumes]]` — capabilities this kennel reaches over the mesh (§7.13.1).
+    /// `[[consumes]]`: capabilities this kennel reaches over the mesh.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consumes: Vec<ConsumesEntry>,
-    /// `[service]` — the supervision discipline for a service kennel (§7.13.7): the restart policy
+    /// `[service]`: the supervision discipline for a service kennel: the restart policy
     /// `kenneld` applies once the operator enables this provider. Meaningful on a kennel with
     /// `[[provides]]`; folds scalar-wins up the chain like `[lifecycle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceSection>,
-    /// `[unsafe]` — advisory footgun sub-sections whose scoping is real but enforced
+    /// `[unsafe]`: advisory footgun sub-sections whose scoping is real but enforced
     /// elsewhere (the PID namespace + seccomp), not by the section. Grouped under one
     /// `[unsafe]` umbrella so an author sees they are in footgun territory; each
     /// present sub-section is warned at compile (`footgun-warn-dont-forbid`).
@@ -127,10 +128,10 @@ pub struct SourcePolicy {
     /// Lifecycle section (`[lifecycle]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle: Option<LifecycleSection>,
-    /// Audit section (`[audit]` and `[audit.*]`) — sinks and per-class levels.
+    /// Audit section (`[audit]` and `[audit.*]`): sinks and per-class levels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<AuditSection>,
-    /// Resource limits (`[ulimits]`) — a table of `name = "value"` pairs applied via
+    /// Resource limits (`[ulimits]`): a table of `name = "value"` pairs applied via
     /// `setrlimit(2)` in the seal. Nothing is set by default. The name is a short
     /// `setrlimit` resource (`nofile`, `nproc`, `as`, `cpu`, …); the value is `soft`,
     /// or `"soft:hard"`, each a number (with optional `K`/`M`/`G`) or `"unlimited"`.
@@ -141,29 +142,29 @@ pub struct SourcePolicy {
     /// at `kennel run … -- <cmd>`. Folds scalar-wins up the chain like `[lifecycle]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workload: Option<WorkloadSection>,
-    /// Terminal hardening (`[tty]`, §7.9.5): the escape-sequence filter on the
+    /// Terminal hardening (`[tty]`): the escape-sequence filter on the
     /// workload→operator PTY stream. Folds scalar-wins up the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tty: Option<TtySection>,
-    /// Workspace trust marker (`[trust]`, §7.4): the masked `.trust-manifest.json` at
+    /// Workspace trust marker (`[trust]`): the masked `.trust-manifest.json` at
     /// each writable root. Folds scalar-wins up the chain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<TrustSection>,
-    /// D-Bus mediation (`[dbus]`, §7.7): the per-method allowlist the `IDBus` facade
+    /// D-Bus mediation (`[dbus]`): the per-method allowlist the `IDBus` facade
     /// enforces. Absent ⇒ no bus access (no facade node).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dbus: Option<DbusSection>,
-    /// OCI substrate (`[rootfs]`, §7.11): an unpacked image used as the kennel root. Its
-    /// presence marks the policy OCI-model — `kennel run` rejects it, `kennel oci run` requires
+    /// OCI substrate (`[rootfs]`): an unpacked image used as the kennel root. Its
+    /// presence marks the policy OCI-model: `kennel run` rejects it, `kennel oci run` requires
     /// it. A loud substrate-trust grant (T3.8); the `reason` is mandatory (validated at compile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<RootfsSection>,
-    /// Dynamic-spawn grant (`[spawn]`, §7.12.2) — the templates this workload may instantiate as
+    /// Dynamic-spawn grant (`[spawn]`): the templates this workload may instantiate as
     /// ephemeral sibling kennels. A loud delegated-instantiation capability (T3.9); the `reason` is
     /// mandatory, and eligibility of each named template is checked at *this* policy's compile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn: Option<SpawnSection>,
-    /// Mutable-field manifest (`[[mutable]]`, §7.12.3) — present on a *spawn-target template*, it
+    /// Mutable-field manifest (`[[mutable]]`): present on a *spawn-target template*, it
     /// names which leaf fields a spawn of this template may write and the bound each write must
     /// satisfy. Everything outside the manifest is frozen and inherited verbatim; absent on a
     /// non-target policy.
@@ -171,7 +172,7 @@ pub struct SourcePolicy {
     pub mutable: Vec<MutableField>,
 }
 
-/// `[rootfs]` (§7.11) — an OCI image unpacked as the kennel's root filesystem.
+/// `[rootfs]`: an OCI image unpacked as the kennel's root filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RootfsSection {
@@ -185,31 +186,31 @@ pub struct RootfsSection {
     /// Why this substrate is trusted (required; the substrate-trust waiver is loud).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Rootfs persistence (§7.11.4a): `"discard"` (default) | `"persist"`. `"persist"` is a
+    /// Rootfs persistence: `"discard"` (default) | `"persist"`. `"persist"` is a
     /// loud value the risk engine derives an exposure from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persistence: Option<String>,
-    /// Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to — the executable-closure
+    /// Closure-lock: rootfs paths Landlock denies writes to, the executable-closure
     /// boundary the DAC-flatten erased, build-derived for a non-root image. `["/"]` is
     /// whole-tree-immutable. Longest-prefix wins with `writable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readonly: Option<Vec<String>>,
-    /// Closure-lock holes (§7.11.4c): rootfs paths kept writable, carved back out of `readonly`
+    /// Closure-lock holes: rootfs paths kept writable, carved back out of `readonly`
     /// (longest-prefix wins). Each carve-out derives its own risk line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writable: Option<Vec<String>>,
 }
 
-/// `[spawn]` (§7.12.2) — the delegated-instantiation grant.
+/// `[spawn]`: the delegated-instantiation grant.
 ///
 /// A workload carrying this may ask `kenneld` to instantiate ephemeral sibling kennels from the
 /// operator-signed templates it names in `[[spawn.allow]]`. A loud capability (T3.9), derived the way
-/// `mode = host` derives T1.6. It names *which* templates, never capabilities — those live in the
-/// (frozen, signed) templates; the agent only writes manifest fields (§7.12.3).
+/// `mode = host` derives T1.6. It names *which* templates, never capabilities; those live in the
+/// (frozen, signed) templates; the agent only writes manifest fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnSection {
-    /// Concurrent-instance ceiling across this grant's spawns — the fork-bomb bound (§7.12.7).
+    /// Concurrent-instance ceiling across this grant's spawns, the fork-bomb bound.
     /// Mandatory: an unbounded grant is a fork bomb (validated at compile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_instances: Option<u32>,
@@ -222,7 +223,7 @@ pub struct SpawnSection {
     pub allow: Vec<SpawnAllow>,
 }
 
-/// One `[[spawn.allow]]` entry — a single signed template this grant may instantiate.
+/// One `[[spawn.allow]]` entry, a single signed template this grant may instantiate.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnAllow {
@@ -230,17 +231,17 @@ pub struct SpawnAllow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     /// Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields
-    /// this requester may write (default: the template's full manifest). Narrows, never widens
-    /// (§7.12.2/§7.12.3) — every entry must name a field the template's manifest declares.
+    /// this requester may write (default: the template's full manifest). Narrows, never widens:
+    /// every entry must name a field the template's manifest declares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mutable: Option<Vec<String>>,
 }
 
-/// One `[[mutable]]` manifest entry (§7.12.3) — a leaf field a spawn of this template may write.
+/// One `[[mutable]]` manifest entry: a leaf field a spawn of this template may write.
 ///
-/// Each entry carries the **bound** that write must satisfy — exactly one bound kind: `pool`
-/// (`from` + `max` — append from a fixed set), `oneof` (pick from an enumerated list), or
-/// `predicate` (`type` + `under` — the loud traversal-free runtime-relative escape hatch).
+/// Each entry carries the **bound** that write must satisfy, exactly one bound kind: `pool`
+/// (`from` + `max`: append from a fixed set), `oneof` (pick from an enumerated list), or
+/// `predicate` (`type` + `under`: the loud traversal-free runtime-relative escape hatch).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MutableField {
@@ -267,7 +268,7 @@ pub struct MutableField {
     /// Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub under: Option<String>,
-    /// Freeform bound: no shape at all — the loud, last-resort footgun. Any value is accepted; a
+    /// Freeform bound: no shape at all, the loud last-resort footgun. Any value is accepted; a
     /// `reason` is mandatory and the variant is warned at compile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freeform: Option<bool>,
@@ -288,7 +289,212 @@ pub struct Threats {
     pub mitigated: Vec<String>,
 }
 
-/// `[cap]` — capabilities and `no_new_privs`.
+/// One entry in the `{ add, remove }` increment of a path-list field.
+///
+/// A `path` plus the required `reason` (and optional threat tags): the `+=` / `-=` unit for
+/// `fs.read`, `fs.write`, `fs.deny`, and `exec.allow`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathEntry {
+    /// The path to add or remove.
+    pub path: String,
+    /// Why (required on every delta entry; validated at compile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Threat tags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threats: Option<Threats>,
+}
+
+/// The `{ add, remove }` increment over a path list (`[[fs.read.add]]` / `[[fs.read.remove]]`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathDelta {
+    /// Entries to add (`+=`), appended if not already present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<PathEntry>,
+    /// Entries to remove (`-=`), dropped by matching `path`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<PathEntry>,
+}
+
+/// A path-list field: replace or increment at the same key (-5.3).
+///
+/// A bare sequence of paths (`fs.read = ["…"]`, the SSH `Ciphers = …` set form) *replaces* the
+/// inherited list; an `{ add, remove }` table of `{ path, reason }` entries (`[[fs.read.add]]`)
+/// *increments* it. The deserializer picks by TOML shape (a sequence is a `Set`, a table is a
+/// `Delta`), so one key carries both forms. After chain resolution every field is a `Set` (the
+/// deltas have been folded in).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PathField {
+    /// The bare-sequence replace form.
+    Set(Vec<String>),
+    /// The `{ add, remove }` increment form.
+    Delta(PathDelta),
+}
+
+impl PathField {
+    /// The resolved path list when this is the `Set` (replace) form: what every field is once the
+    /// chain is folded. `None` for an unfolded `Delta`.
+    #[must_use]
+    pub fn set(&self) -> Option<&[String]> {
+        match self {
+            Self::Set(v) => Some(v),
+            Self::Delta(_) => None,
+        }
+    }
+    /// The resolved path list, treating a (post-fold-impossible) `Delta` as empty.
+    #[must_use]
+    pub fn resolved(&self) -> &[String] {
+        self.set().unwrap_or(&[])
+    }
+    /// Whether this is the bare-sequence `Set` (replace) form.
+    #[must_use]
+    pub const fn is_set(&self) -> bool {
+        matches!(self, Self::Set(_))
+    }
+    /// The `{ add, remove }` increment's entries (`add` ∪ `remove`), each of which carries a
+    /// required `reason`. Empty for the `Set` form (whose bare-string entries carry no reason).
+    pub fn delta_entries(&self) -> impl Iterator<Item = &PathEntry> {
+        let (add, remove): (&[PathEntry], &[PathEntry]) = match self {
+            Self::Set(_) => (&[], &[]),
+            Self::Delta(d) => (&d.add, &d.remove),
+        };
+        add.iter().chain(remove)
+    }
+    /// Whether this increment carries any `remove` (a non-additive delta, refused in a fragment).
+    #[must_use]
+    pub const fn has_remove(&self) -> bool {
+        matches!(self, Self::Delta(d) if !d.remove.is_empty())
+    }
+    /// Whether this field is *additive-only*: an add-only increment. A bare-sequence `Set`
+    /// *replaces* the inherited list, so it is never additive; a `Delta` is additive iff it carries
+    /// no `remove`. The additive-only gate a fragment must satisfy.
+    #[must_use]
+    pub const fn is_additive(&self) -> bool {
+        matches!(self, Self::Delta(d) if d.remove.is_empty())
+    }
+    /// Iterate the resolved path list (the `Set` slice; empty for an unfolded `Delta`).
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.resolved().iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a PathField {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.resolved().iter()
+    }
+}
+
+/// The `{ add, remove }` increment over a typed list (`[[unix.allow.add]]`, `[[net.proxy.allow.add]]`, …).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Delta<T> {
+    /// Entries to add (`+=`), appended if not already present.
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<T>,
+    /// Entries to remove (`-=`), dropped by matching unique key.
+    #[serde(default = "Vec::new", skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<T>,
+}
+
+/// A typed-list field: replace or increment at the same key (-5.3).
+///
+/// A bare array-of-tables (`[[unix.allow]]`, the set form) *replaces* the inherited list; an
+/// `{ add, remove }` table (`[[unix.allow.add]]`) *increments* it. The deserializer picks by TOML
+/// shape (an array is a `Set`, a table is a `Delta`). After chain resolution every field is a `Set`.
+/// An empty `Set` means *absent* (inherits the parent's list), preserving the original bare-list fold.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ListField<T> {
+    /// The array-of-tables replace form.
+    Set(Vec<T>),
+    /// The `{ add, remove }` increment form.
+    Delta(Delta<T>),
+}
+
+impl<T> Default for ListField<T> {
+    fn default() -> Self {
+        Self::Set(Vec::new())
+    }
+}
+
+impl<T> ListField<T> {
+    /// The resolved list when this is the `Set` (replace) form: what every field is once the chain
+    /// is folded. An unfolded `Delta` resolves to an empty slice.
+    #[must_use]
+    pub fn resolved(&self) -> &[T] {
+        match self {
+            Self::Set(v) => v,
+            Self::Delta(_) => &[],
+        }
+    }
+    /// Whether this field is the *absent* sentinel: an empty `Set` (the bare-list "inherit" signal).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Set(v) if v.is_empty())
+    }
+    /// Whether this is the bare-array `Set` (replace) form.
+    #[must_use]
+    pub const fn is_set(&self) -> bool {
+        matches!(self, Self::Set(_))
+    }
+    /// Every entry this field carries (the `Set` list, or a `Delta`'s `add` ∪ `remove`), for
+    /// the per-entry `reason` check (each grant records intent whether set or incremented).
+    pub fn entries(&self) -> impl Iterator<Item = &T> {
+        let (set, add, remove): (&[T], &[T], &[T]) = match self {
+            Self::Set(v) => (v, &[], &[]),
+            Self::Delta(d) => (&[], &d.add, &d.remove),
+        };
+        set.iter().chain(add).chain(remove)
+    }
+    /// Whether this increment carries any `remove` (a non-additive delta, refused in a fragment).
+    #[must_use]
+    pub const fn has_remove(&self) -> bool {
+        matches!(self, Self::Delta(d) if !d.remove.is_empty())
+    }
+    /// Whether this field is *additive-only*: absent (the empty `Set` sentinel) or an add-only
+    /// increment. A non-empty `Set` *replaces* and is never additive.
+    #[must_use]
+    pub const fn is_additive(&self) -> bool {
+        match self {
+            Self::Set(v) => v.is_empty(),
+            Self::Delta(d) => d.remove.is_empty(),
+        }
+    }
+    /// Iterate the resolved list (the `Set` slice; empty for an unfolded `Delta`), what every field
+    /// is once the chain is folded, so a reader iterates the effective grants directly.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.resolved().iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ListField<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.resolved().iter()
+    }
+}
+
+impl<T> From<Vec<T>> for ListField<T> {
+    /// A bare list is the `Set` (replace) form: the common case, and what a callsite that builds a
+    /// concrete list means.
+    fn from(v: Vec<T>) -> Self {
+        Self::Set(v)
+    }
+}
+
+impl From<Vec<String>> for PathField {
+    fn from(v: Vec<String>) -> Self {
+        Self::Set(v)
+    }
+}
+
+/// `[cap]`: capabilities and `no_new_privs`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapSection {
@@ -300,15 +506,20 @@ pub struct CapSection {
     pub bounding_set: Option<Vec<String>>,
 }
 
-/// `[exec]` — what may be `execve()`'d.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+/// `[exec]`: what may be `execve`'d.
+///
+/// `Serialize` is hand-written (not derived) so the `allow` field can serialise as a value (its
+/// `Set` form, a bare array) or a sub-table (its `Delta` form) while still emitting all values
+/// before all tables: the `basic-toml` canonical-form requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecSection {
     /// Allowlisted binary paths (the execve allowlist). Execution is deny-by-default:
     /// an empty/absent allow denies ALL execve; a bare `**`/`/**` is the explicit
-    /// `permissive-exec` opt-out (the one case the compiler warns on). §7.3.4.
+    /// `permissive-exec` opt-out (the one case the compiler warns on).
+    /// Replace (`allow = ["…"]`) or increment (`[[exec.allow.add]]`) at the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allow: Option<Vec<String>>,
+    pub allow: Option<PathField>,
     /// Denylisted absolute paths or globs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<String>>,
@@ -327,62 +538,146 @@ pub struct ExecSection {
     /// `PATH` search roots the resolver records for the workload's environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<Vec<String>>,
-    /// The kennel's login shell (§7.9.2a): the synthetic-`passwd` `pw_shell` and
+    /// The kennel's login shell: the synthetic-`passwd` `pw_shell` and
     /// `$SHELL`. Default `/bin/sh`; must be in [`allow`](Self::allow) when an
     /// allowlist is enforced (compile error otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
 }
 
+impl Serialize for ExecSection {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let mut m = ser.serialize_map(None)?;
+        // Value-class first: `allow` only when it is the bare-array `Set` form, then the scalar
+        // arrays and flags. A `Delta` `allow` is a sub-table and must come after every value.
+        if let Some(a) = self.allow.as_ref().filter(|a| a.is_set()) {
+            m.serialize_entry("allow", a)?;
+        }
+        if let Some(v) = &self.deny {
+            m.serialize_entry("deny", v)?;
+        }
+        for (k, v) in [
+            ("deny_setuid", self.deny_setuid),
+            ("deny_setgid", self.deny_setgid),
+            ("deny_setcap", self.deny_setcap),
+            ("deny_writable", self.deny_writable),
+        ] {
+            if let Some(b) = v {
+                m.serialize_entry(k, &b)?;
+            }
+        }
+        if let Some(v) = &self.path {
+            m.serialize_entry("path", v)?;
+        }
+        if let Some(v) = &self.shell {
+            m.serialize_entry("shell", v)?;
+        }
+        // Table-class last: a `Delta` `allow` (the `{ add, remove }` sub-table).
+        if let Some(a) = self.allow.as_ref().filter(|a| !a.is_set()) {
+            m.serialize_entry("allow", a)?;
+        }
+        m.end()
+    }
+}
+
 /// `[fs]` and its sub-tables.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+///
+/// `Serialize` is hand-written (not derived) so the `read`/`write`/`deny` fields can each serialise
+/// as a value (their `Set` form) or a sub-table (their `Delta` form) while still emitting all values
+/// before all tables: the `basic-toml` canonical-form requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsSection {
-    /// Paths granted read (and directory traversal / execute).
+    /// Paths granted read (and directory traversal / execute). Replace (`read = ["…"]`) or
+    /// increment (`[[fs.read.add]]`) at the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub read: Option<Vec<String>>,
-    /// Paths granted write.
+    pub read: Option<PathField>,
+    /// Paths granted write. Replace or increment at the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub write: Option<Vec<String>>,
-    /// Writable paths bound **exclusively** (§2.7, T2.8): while the kennel runs, `kenneld`
+    pub write: Option<PathField>,
+    /// Writable paths bound **exclusively** (T2.8): while the kennel runs, `kenneld`
     /// over-mounts an opaque sentinel on the host path (a transient privhelper op) so the
-    /// operator and the workload cannot use it concurrently — severing the live confused-deputy
+    /// operator and the workload cannot use it concurrently, severing the live confused-deputy
     /// channel. Opt-in, per path; each must also appear in `write`. Default: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclusive: Option<Vec<String>>,
-    /// Categorical denies (belt-and-braces over the constructed view).
+    /// Categorical denies (belt-and-braces over the constructed view). Replace or increment
+    /// at the same key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deny: Option<Vec<String>>,
-    /// `[fs.home]` — the constructed `$HOME` view.
+    pub deny: Option<PathField>,
+    /// `[fs.home]`: the constructed `$HOME` view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<FsHome>,
-    /// `[fs.tmp]` — the private `/tmp` tmpfs.
+    /// `[fs.tmp]`: the private `/tmp` tmpfs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tmp: Option<FsTmp>,
-    /// `[fs.proc]` — procfs visibility.
+    /// `[fs.proc]`: procfs visibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proc: Option<FsProc>,
-    /// `[fs.dev]` — the minimal `/dev`.
+    /// `[fs.dev]`: the minimal `/dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<FsDev>,
 }
 
-/// `[fs.home]` — the mandatory constructed-`$HOME` shim.
+impl Serialize for FsSection {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        let mut m = ser.serialize_map(None)?;
+        // Value-class first: the `read`/`write`/`deny` path lists only when they are the bare-array
+        // `Set` form, then `exclusive`. A `Delta` path list is a sub-table and follows every value.
+        for (k, f) in [
+            ("read", &self.read),
+            ("write", &self.write),
+            ("deny", &self.deny),
+        ] {
+            if let Some(pf) = f.as_ref().filter(|p| p.is_set()) {
+                m.serialize_entry(k, pf)?;
+            }
+        }
+        if let Some(v) = &self.exclusive {
+            m.serialize_entry("exclusive", v)?;
+        }
+        // Table-class: first the `Delta` path lists, then the genuine sub-tables.
+        for (k, f) in [
+            ("read", &self.read),
+            ("write", &self.write),
+            ("deny", &self.deny),
+        ] {
+            if let Some(pf) = f.as_ref().filter(|p| !p.is_set()) {
+                m.serialize_entry(k, pf)?;
+            }
+        }
+        if let Some(v) = &self.home {
+            m.serialize_entry("home", v)?;
+        }
+        if let Some(v) = &self.tmp {
+            m.serialize_entry("tmp", v)?;
+        }
+        if let Some(v) = &self.proc {
+            m.serialize_entry("proc", v)?;
+        }
+        if let Some(v) = &self.dev {
+            m.serialize_entry("dev", v)?;
+        }
+        m.end()
+    }
+}
+
+/// `[fs.home]`: the mandatory constructed-`$HOME` shim.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsHome {
     /// Whether `$HOME` is shadowed by a constructed view (must be true once resolved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadow: Option<bool>,
-    /// Home-relative paths that **persist** across runs (§7.9.2a). By default the
+    /// Home-relative paths that **persist** across runs. By default the
     /// synthesised dotfiles are reconstructed read-only each spawn (no
     /// self-poisoning); a path named here is *not* reconstructed, so a writable
-    /// home grant for it survives. Opt-in, per path — this list is where the
+    /// home grant for it survives. Opt-in, per path; this list is where the
     /// persistent-`~/.bashrc` re-execution trade-off is taken, visible in the diff.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub persist: Vec<String>,
     /// Make the constructed `$HOME` **read-only** (default: writable). The home root
-    /// is writable by default — a non-system user owns their home — but it is a fresh
+    /// is writable by default (a non-system user owns their home) but it is a fresh
     /// tmpfs, so writes are ephemeral. Setting this suppresses the home write grant:
     /// only explicitly `write`-granted `~/` paths are then writable, the rest of the
     /// home read-only. The escape hatch for a workload that must not write its home.
@@ -390,7 +685,7 @@ pub struct FsHome {
     pub readonly: Option<bool>,
 }
 
-/// `[fs.tmp]` — private `/tmp`. `size` is the human form (`"512M"`); the resolver
+/// `[fs.tmp]`: private `/tmp`. `size` is the human form (`"512M"`); the resolver
 /// converts it to mebibytes for the settled policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -406,7 +701,7 @@ pub struct FsTmp {
     pub mode: Option<String>,
 }
 
-/// `[fs.proc]` — procfs visibility and hidepid.
+/// `[fs.proc]`: procfs visibility and hidepid.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsProc {
@@ -418,25 +713,26 @@ pub struct FsProc {
     pub hidepid: Option<bool>,
 }
 
-/// `[fs.dev]` — the constructed `/dev` allowlist.
+/// `[fs.dev]`: the constructed `/dev` allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsDev {
     /// The trivial pseudo-device baseline bound into the kennel's `/dev` (`/dev/null`,
-    /// `/dev/urandom`, `/dev/tty`, …) — bare paths, no documentation needed.
+    /// `/dev/urandom`, `/dev/tty`, …): bare paths, no documentation needed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<String>>,
-    /// `[[fs.dev.passthrough]]` — specific *real host devices* exposed to the kennel
-    /// (a serial console, `/dev/ppp`, `/dev/net/tun`; `docs/design/07-4-filesystem.md`
-    /// §7.4.8). Each is loud: a documented `reason` and a threat tag are required,
+    /// `[[fs.dev.passthrough]]`: specific *real host devices* exposed to the kennel
+    /// (a serial console, `/dev/ppp`, `/dev/net/tun`). Each is loud: a documented `reason` and a
+    /// threat tag are required,
     /// because passing a hardware device through widens the kernel attack surface and
-    /// its DAC group right reaches into the kennel.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub passthrough: Vec<DevPassthrough>,
+    /// its DAC group right reaches into the kennel. Replace (`[[fs.dev.passthrough]]`) or
+    /// increment (`[[fs.dev.passthrough.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub passthrough: ListField<DevPassthrough>,
 }
 
 /// One `[[fs.dev.passthrough]]` entry: a specific host device made available in the
-/// kennel's constructed `/dev` (§7.4.8).
+/// kennel's constructed `/dev`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DevPassthrough {
@@ -453,7 +749,7 @@ pub struct DevPassthrough {
     /// Why this device is exposed (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Threat tags — required to carry an `exposed` tag (passthrough widens the
+    /// Threat tags, required to carry an `exposed` tag (passthrough widens the
     /// kernel attack surface and carries a group right into the kennel).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
@@ -464,16 +760,16 @@ pub struct DevPassthrough {
 #[serde(deny_unknown_fields)]
 pub struct NetSection {
     /// Egress mode: `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns,
-    /// SOCKS proxy, default-deny — the default), `"unconstrained"` (own net-ns, SOCKS proxy,
+    /// SOCKS proxy, default-deny, the default), `"unconstrained"` (own net-ns, SOCKS proxy,
     /// default-allow minus invariant + `net.deny` carve-outs), or `"host"` (host net-ns,
-    /// direct egress, `net.allow` enforced by BPF/Landlock — no proxy).
+    /// direct egress, `net.allow` enforced by BPF/Landlock, no proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Required (non-empty) only when `mode = "host"`: the documented justification for
     /// sharing the host network stack, which reinstates the host-recon residual (T1.6).
     /// The compiler refuses `mode = host` without it; the T1.6 exposure is *derived*
     /// from the mode (surfaced by `kennel policy risks` / the `risks` engine), not
-    /// stored on a `threats.reinstated` field (`07-5-network.md` §7.5.1).
+    /// stored on a `threats.reinstated` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// IPv4 proxy listen address as `"offset:port"` within the kennel's subnet. A
@@ -483,49 +779,50 @@ pub struct NetSection {
     /// IPv6 proxy listen address as `"offset:port"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_listen_v6_address: Option<String>,
-    /// `[net.proxy]` — the user-space egress policy the per-kennel proxy enforces
+    /// `[net.proxy]`: the user-space egress policy the per-kennel proxy enforces
     /// (`constrained`/`unconstrained`): by-name (+CIDR) allow/deny, resolve-and-pin, plus
     /// the non-removable `[[net.proxy.deny.invariant]]` floor. Not enforced in `mode=host`
-    /// (no proxy runs there) — a `[net.proxy]` rule under `host` is a compile error.
+    /// (no proxy runs there): a `[net.proxy]` rule under `host` is a compile error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<NetProxy>,
-    /// `[net.bpf]` — the kernel/syscall ACL (the cgroup `connect4/6` + `bind4/6` BPF and the
+    /// `[net.bpf]`: the kernel/syscall ACL (the cgroup `connect4/6` + `bind4/6` BPF and the
     /// matching Landlock grants): CIDR + port allow/deny, deny-first, **no names**. Present in
     /// every mode: in `host` it is the egress gate; in the proxied modes it is defence-in-depth
-    /// (intersected with the framework's proxy-endpoint lock — an author rule can only narrow).
+    /// (intersected with the framework's proxy-endpoint lock, an author rule can only narrow).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bpf: Option<NetBpf>,
-    /// `[net.bind]` — bind-address rewriting policy (the wildcard-rewrite knobs; the bind
+    /// `[net.bind]`: bind-address rewriting policy (the wildcard-rewrite knobs; the bind
     /// *allow/deny gate* is `[net.bpf.bind]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<NetBind>,
-    /// `[net.ipv6]` — IPv6-specific options.
+    /// `[net.ipv6]`: IPv6-specific options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<NetIpv6>,
-    /// `[net.audit]` — per-kennel egress audit log.
+    /// `[net.audit]`: per-kennel egress audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<NetAudit>,
 }
 
-/// `[net.proxy]` — the user-space egress policy kenneld's proxy enforces (`07-5` §7.5.4).
+/// `[net.proxy]`: the user-space egress policy kenneld's proxy enforces.
 ///
 /// Meaningful only in the proxied modes (`constrained`/`unconstrained`): kenneld resolves a
 /// name, vets the answer against `allow`, re-checks the resolved address against `deny` +
 /// `deny_invariant`, and pins it. In `mode=host` there is no proxy, so any rule here is a
-/// compile error (names cannot be enforced by the kernel ACL — use `[net.bpf]`).
+/// compile error (names cannot be enforced by the kernel ACL; use `[net.bpf]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetProxy {
-    /// `[[net.proxy.allow]]` — by-name (or by-CIDR) egress allow entries.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<NetAllow>,
-    /// `[net.proxy.deny]` — the deny table: the non-removable `invariant` floor and the
+    /// `[[net.proxy.allow]]`: by-name (or by-CIDR) egress allow entries. Replace
+    /// (`[[net.proxy.allow]]`) or increment (`[[net.proxy.allow.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub allow: ListField<NetAllow>,
+    /// `[net.proxy.deny]`: the deny table: the non-removable `invariant` floor and the
     /// optional author `policy` denylist, both CIDR, both evaluated deny-first before `allow`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<NetProxyDeny>,
 }
 
-/// `[net.proxy.deny]` — the proxy denies: the framework floor + the optional author list.
+/// `[net.proxy.deny]`: the proxy denies: the framework floor + the optional author list.
 ///
 /// Two arrays in one table (TOML cannot nest `[[net.proxy.deny]]` under
 /// `[[net.proxy.deny.invariant]]`): `invariant` is the non-removable floor (cloud-metadata /
@@ -533,15 +830,16 @@ pub struct NetProxy {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetProxyDeny {
-    /// `[[net.proxy.deny.invariant]]` — cloud-metadata / link-local, non-removable (T1.6).
+    /// `[[net.proxy.deny.invariant]]`: cloud-metadata / link-local, non-removable (T1.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invariant: Vec<NetDenyRule>,
-    /// `[[net.proxy.deny.policy]]` — the author's optional denylist (NOT mandatory).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub policy: Vec<NetDenyRule>,
+    /// `[[net.proxy.deny.policy]]`: the author's optional denylist (NOT mandatory). Replace
+    /// or increment (`[[net.proxy.deny.policy.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub policy: ListField<NetDenyRule>,
 }
 
-/// `[net.bpf]` — the kernel/syscall ACL (`07-5` §7.5.4): socket-family shaping + the
+/// `[net.bpf]`: the kernel/syscall ACL: socket-family shaping + the
 /// directional connect/bind allow-deny gates the cgroup BPF and Landlock enforce.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -552,10 +850,10 @@ pub struct NetBpf {
     /// Denied socket families (`inet_sock_create` returns EPERM): `AF_NETLINK`, `AF_PACKET`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny_families: Option<Vec<String>>,
-    /// `[net.bpf.connect]` — the outbound CONNECT ACL (cidr + ports, deny-first).
+    /// `[net.bpf.connect]`: the outbound CONNECT ACL (cidr + ports, deny-first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connect: Option<NetBpfAcl>,
-    /// `[net.bpf.bind]` — the inbound BIND ACL (cidr + ports, deny-first).
+    /// `[net.bpf.bind]`: the inbound BIND ACL (cidr + ports, deny-first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bind: Option<NetBpfAcl>,
 }
@@ -564,15 +862,17 @@ pub struct NetBpf {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetBpfAcl {
-    /// `[[net.bpf.connect.allow]]` / `[[net.bpf.bind.allow]]` — CIDR+port allow rules.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<BpfRule>,
-    /// `[[net.bpf.connect.deny]]` / `[[net.bpf.bind.deny]]` — CIDR+port deny rules (deny-first).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deny: Vec<BpfRule>,
+    /// `[[net.bpf.connect.allow]]` / `[[net.bpf.bind.allow]]`: CIDR+port allow rules. Replace
+    /// or increment (`[[net.bpf.connect.allow.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub allow: ListField<BpfRule>,
+    /// `[[net.bpf.connect.deny]]` / `[[net.bpf.bind.deny]]`: CIDR+port deny rules (deny-first).
+    /// Replace or increment at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub deny: ListField<BpfRule>,
 }
 
-/// One `[net.bpf]` rule: a CIDR (or `"*"` = any host) + ports + protocol. **No name field** —
+/// One `[net.bpf]` rule: a CIDR (or `"*"` = any host) + ports + protocol. **No name field**:
 /// the kernel ACL cannot resolve names, so a by-name rule is structurally inexpressible here.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -647,7 +947,7 @@ pub struct NetDenyRule {
     pub threats: Option<Threats>,
 }
 
-/// `[net.bind]` — bind-address handling.
+/// `[net.bind]`: bind-address handling.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetBind {
@@ -666,8 +966,8 @@ pub struct NetBind {
     /// Lowest bindable port.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_port: Option<u16>,
-    /// Explicit allowlist of bindable ports (§7.5.7). When non-empty, the workload may
-    /// `bind()` only these ports (in addition to passing [`min_port`](Self::min_port));
+    /// Explicit allowlist of bindable ports. When non-empty, the workload may
+    /// `bind` only these ports (in addition to passing [`min_port`](Self::min_port));
     /// empty/absent means any port at or above `min_port`. At most
     /// [`MAX_BIND_PORTS`](kennel_lib_policy::settled::MAX_BIND_PORTS) entries survive translation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -695,7 +995,7 @@ pub struct NetAudit {
     pub level: Option<String>,
 }
 
-/// `[unix]` — `AF_UNIX` policy.
+/// `[unix]`: `AF_UNIX` policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnixSection {
@@ -705,9 +1005,10 @@ pub struct UnixSection {
     /// Abstract-namespace socket disposition (`"deny"` / `"allow"`).
     #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
     pub abstract_ns: Option<String>,
-    /// `[[unix.allow]]` — granted sockets, including per-kennel service instances.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<UnixAllow>,
+    /// `[[unix.allow]]`: granted sockets, including per-kennel service instances. Replace
+    /// (`[[unix.allow]]`) or increment (`[[unix.allow.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub allow: ListField<UnixAllow>,
 }
 
 /// One `[[unix.allow]]` entry.
@@ -734,7 +1035,7 @@ pub struct UnixAllow {
     pub threats: Option<Threats>,
 }
 
-/// `[binder]` — binder IPC policy (`docs/design/07-1-binder.md` §7.1.4).
+/// `[binder]`: binder IPC policy.
 ///
 /// Covers **user-defined** services only: the reserved `org.projectkennel.*` facades
 /// (the af-unix shim) are enabled by their own sections and are never named
@@ -743,10 +1044,10 @@ pub struct UnixAllow {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinderSection {
-    /// `[[binder.provide]]` — services a process in this kennel may register.
+    /// `[[binder.provide]]`: services a process in this kennel may register.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provide: Vec<BinderProvide>,
-    /// `[[binder.consume]]` — services this kennel may look up (cross-instance).
+    /// `[[binder.consume]]`: services this kennel may look up (cross-instance).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub consume: Vec<BinderConsume>,
 }
@@ -758,7 +1059,7 @@ pub struct BinderProvide {
     /// The service name (must not begin with the reserved `org.projectkennel.`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Peer kennels permitted to look this service up (cross-instance, §7.1.6).
+    /// Peer kennels permitted to look this service up (cross-instance).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accept_from: Vec<String>,
     /// Why this service is provided (required).
@@ -776,7 +1077,7 @@ pub struct BinderConsume {
     /// The service name (must not begin with the reserved `org.projectkennel.`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The providing kennel (cross-instance, §7.1.6); absent for a local service.
+    /// The providing kennel (cross-instance); absent for a local service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
     /// Why this service is consumed (required).
@@ -787,11 +1088,11 @@ pub struct BinderConsume {
     pub threats: Option<Threats>,
 }
 
-/// The typed shape of a mesh capability (§7.13.2) — defined in the settled crate so the
+/// The typed shape of a mesh capability: defined in the settled crate so the
 /// source parser and the signed runtime share one type.
 pub use kennel_lib_policy::settled::Shape;
 
-/// One `[[provides]]` entry — a capability this kennel offers over the mesh (§7.13.1).
+/// One `[[provides]]` entry, a capability this kennel offers over the mesh.
 ///
 /// `name`/`shape`/`reason` are validated present at compile (like `[[binder.provide]]`),
 /// not required at parse, so a malformed entry yields one problem per missing field
@@ -799,11 +1100,11 @@ pub use kennel_lib_policy::settled::Shape;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProvidesEntry {
-    /// The capability's public identifier — what the catalogue advertises. A reserved
-    /// `org.projectkennel.*` name may be claimed only by a maintainer-signed template (§7.13.5).
+    /// The capability's public identifier, what the catalogue advertises. A reserved
+    /// `org.projectkennel.*` name may be claimed only by a maintainer-signed template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The typed transport (§7.13.2).
+    /// The typed transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<Shape>,
     /// Where the capability is exposed, in the provider's own view.
@@ -820,14 +1121,14 @@ pub struct ProvidesEntry {
     pub threats: Option<Threats>,
 }
 
-/// One `[[consumes]]` entry — a capability this kennel reaches over the mesh (§7.13.1).
+/// One `[[consumes]]` entry, a capability this kennel reaches over the mesh.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsumesEntry {
     /// The capability's public identifier, resolved against the catalogue at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The transport it expects; the broker refuses a mismatched shape (§7.13.4).
+    /// The transport it expects; the broker refuses a mismatched shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shape: Option<Shape>,
     /// Where the brokered connector is delivered, in this kennel's own view.
@@ -840,7 +1141,7 @@ pub struct ConsumesEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// Whether the capability's absence fails kennel construction. Hard dependency by
-    /// default; `false` starts the kennel without it (§7.13.1).
+    /// default; `false` starts the kennel without it.
     #[serde(default = "default_required")]
     pub required: bool,
     /// Why this capability is consumed (required).
@@ -866,24 +1167,24 @@ impl Default for ConsumesEntry {
     }
 }
 
-/// The `required` default: a consume is a hard dependency unless stated otherwise (§7.13.1).
+/// The `required` default: a consume is a hard dependency unless stated otherwise.
 const fn default_required() -> bool {
     true
 }
 
-/// `[identity]` — the workload's identity inside the kennel (`docs/design/07-4-filesystem.md`).
+/// `[identity]`: the workload's identity inside the kennel.
 ///
 /// Source-only and realised by `kenneld`: the supplementary Unix groups the confined
 /// workload retains. By default a kennel carries **none** (the inherited host groups
-/// are dropped by the privileged seal, §7.4); each name listed here is kept — but only
-/// if the operator is actually a member (a group the user lacks is refused, never
+/// are dropped by the privileged seal); each name listed here is kept, but only
+/// if the operator is a member (a group the user lacks is refused, never
 /// granted, since the privileged `setgroups` could otherwise over-grant). Groups named
 /// by `[[fs.dev.passthrough]]` are added automatically. The resolved set drives the
 /// seal's `setgroups` and is named in the synthetic `/etc/group` so `id` shows names.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct IdentitySection {
-    /// The workload's masked user name — `$USER`/`$LOGNAME` and the synthetic
+    /// The workload's masked user name, `$USER`/`$LOGNAME` and the synthetic
     /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
     /// `kennel` (a non-system, non-privileged account) when unset; an operator may
     /// override it. Validated as a portable username at translation.
@@ -901,32 +1202,33 @@ pub struct IdentitySection {
     pub groups: Vec<String>,
 }
 
-/// `[ssh]` — per-kennel SSH egress (source-only; `docs/design/07-10-ssh.md` §7.10).
+/// `[ssh]`: per-kennel SSH egress (source-only).
 ///
 /// Resolved and folded like [`UnixSection`] and dropped from the settled
 /// `EffectivePolicy` (`translate.rs`): its effect is realised by `kenneld`'s SSH
 /// re-origination bastion (`kennel-sshd`), the synthetic `~/.ssh`, and the egress
-/// allowlist — never by the runtime artefact. A kennel never holds a real key.
+/// allowlist, never by the runtime artefact. A kennel never holds a real key.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SshSection {
     /// Whether a granted key may be driven by a non-interactive (CI) kennel with no
     /// per-use touch/confirmation. Loud and threat-tagged; default `false`. When
-    /// `true`, [`threats`](Self::threats) must carry an `exposed` tag (§7.10.6).
+    /// `true`, [`threats`](Self::threats) must carry an `exposed` tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_headless: Option<bool>,
-    /// Threat tags for the section — required to carry an `exposed` tag whenever
+    /// Threat tags for the section, required to carry an `exposed` tag whenever
     /// `allow_headless = true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
-    /// `[[ssh.destinations]]` — the SSH egress allowlist. Each entry is one destination
+    /// `[[ssh.destinations]]`: the SSH egress allowlist. Each entry is one destination
     /// the kennel may reach; `kenneld` mints a per-destination synthetic key (the
     /// capability the kennel authenticates to the bastion with) bound to a forced
-    /// command that runs `ssh <options> -- <dest>` **as the operator on the host**
-    /// (§7.10.3). The destination — and which real key/port/config the host-side `ssh`
-    /// uses — is fixed by *which synthetic key authenticated*, never by the workload.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub destinations: Vec<SshDestination>,
+    /// command that runs `ssh <options> -- <dest>` **as the operator on the host**.
+    /// The destination (and which real key/port/config the host-side `ssh`
+    /// uses) is fixed by *which synthetic key authenticated*, never by the workload. Replace
+    /// (`[[ssh.destinations]]`) or increment (`[[ssh.destinations.add]]`) at the same key.
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub destinations: ListField<SshDestination>,
 }
 
 /// One `[[ssh.destinations]]` entry: a destination the kennel may reach over the bastion.
@@ -941,7 +1243,7 @@ pub struct SshDestination {
     /// Host-side `ssh` invocation options for this destination, passed verbatim as argv
     /// tokens before `<dest>` in the bastion's forced command (`-i ~/.ssh/id_x`,
     /// `-o IdentitiesOnly=yes`, `-p 2222`, …). They run **as the operator** and name
-    /// which real key/port/config the outbound hop uses — host-side, never the kennel's
+    /// which real key/port/config the outbound hop uses, host-side, never the kennel's
     /// choice. Trusted because the policy is operator-signed; passed as separate argv
     /// tokens (no shell), so a metacharacter cannot break out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -954,7 +1256,7 @@ pub struct SshDestination {
     pub threats: Option<Threats>,
 }
 
-/// `[workload]` — the command the kennel runs, optionally pinned.
+/// `[workload]`: the command the kennel runs, optionally pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadSection {
@@ -974,7 +1276,7 @@ pub struct WorkloadSection {
     pub sha256: Option<Vec<String>>,
 }
 
-/// `[unsafe]` — the advisory footgun umbrella.
+/// `[unsafe]`: the advisory footgun umbrella.
 ///
 /// Its sub-sections describe controls whose *scoping is real* but is enforced by the
 /// PID namespace + seccomp, not by the section itself. Grouping them under `[unsafe]`
@@ -983,10 +1285,10 @@ pub struct WorkloadSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnsafeSection {
-    /// `[unsafe.ptrace]` — ptrace across the kennel boundary (scoping from PID-ns + seccomp).
+    /// `[unsafe.ptrace]`: ptrace across the kennel boundary (scoping from PID-ns + seccomp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ptrace: Option<BoundaryAcl>,
-    /// `[unsafe.signal]` — signalling across the kennel boundary (scoping from PID-ns).
+    /// `[unsafe.signal]`: signalling across the kennel boundary (scoping from PID-ns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal: Option<BoundaryAcl>,
 }
@@ -1004,7 +1306,7 @@ pub struct BoundaryAcl {
     pub allow_from: Option<Vec<String>>,
 }
 
-/// `[env]` — environment curation.
+/// `[env]`: environment curation.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvSection {
@@ -1020,7 +1322,7 @@ pub struct EnvSection {
     pub set: Option<BTreeMap<String, String>>,
 }
 
-/// `[seccomp]` — the seccomp filter (source carries a deny list; the resolver
+/// `[seccomp]`: the seccomp filter (source carries a deny list; the resolver
 /// produces the settled allow list + default action).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1036,7 +1338,7 @@ pub struct SeccompSection {
     pub allow: Option<Vec<String>>,
 }
 
-/// `[lifecycle]` — TTL and TTL action. `ttl` is the human form (`"8h"`); the
+/// `[lifecycle]`: TTL and TTL action. `ttl` is the human form (`"8h"`); the
 /// resolver converts it to seconds for the settled policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1046,12 +1348,12 @@ pub struct LifecycleSection {
     pub ttl: Option<String>,
     /// What to do at TTL expiry: `"exit"` (alias `"stop"`, the default) ends the
     /// kennel; `"warn"` emits an audit event and leaves it running; `"renew"` is an
-    /// audited `warn` today (the interactive renewal prompt is still owed, §9.7).
+    /// audited `warn` today (the interactive renewal prompt is still owed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_action: Option<String>,
 }
 
-/// `[service]` — the supervision discipline for a service kennel (§7.13.7).
+/// `[service]`: the supervision discipline for a service kennel.
 ///
 /// Present on a kennel that `[[provides]]` a capability; governs how `kenneld` restarts it once the
 /// operator enables it. The fields default (restart `on-failure`, 500ms backoff, 5 attempts), so a
@@ -1072,12 +1374,12 @@ pub struct ServiceSection {
     pub max_attempts: Option<u32>,
 }
 
-/// `[tty]` — terminal hardening for an interactive (PTY) workload (§7.9.5).
+/// `[tty]`: terminal hardening for an interactive (PTY) workload.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TtySection {
     /// Filter the dangerous escape sequences a workload could write toward the
-    /// operator's real terminal — OSC 52 (clipboard), OSC 9/777 (notifications),
+    /// operator's real terminal: OSC 52 (clipboard), OSC 9/777 (notifications),
     /// and the DCS/APC/PM/SOS opaque bands (`kennel-lib-term`, T2.6). Benign
     /// sequences (titles, hyperlinks, colour) pass through. Default `true`; set
     /// `false` only in an interactive template that needs raw terminal control.
@@ -1085,7 +1387,7 @@ pub struct TtySection {
     pub filter_terminal_escapes: Option<bool>,
 }
 
-/// `[trust]` — the masked workspace manifest (§7.4, T2.8).
+/// `[trust]`: the masked workspace manifest (T2.8).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustSection {
@@ -1096,47 +1398,47 @@ pub struct TrustSection {
     /// irrelevant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<bool>,
-    /// What `kenneld` does when a watched trigger is mutated during the run (§2.5):
+    /// What `kenneld` does when a watched trigger is mutated during the run:
     /// `warn` (audit, default), `freeze` (suspend the workload), or `kill` (terminate it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_change: Option<kennel_lib_policy::OnChangeAction>,
 }
 
-/// `[dbus]` — D-Bus mediation (§7.7).
+/// `[dbus]`: D-Bus mediation.
 ///
 /// The per-method allowlist the `IDBus` facade enforces; the operator writes structured
-/// policy, never proxy flags. A kennel with no `[dbus]` gets no facade node — the secure
+/// policy, never proxy flags. A kennel with no `[dbus]` gets no facade node, the secure
 /// default by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbusSection {
-    /// `[dbus.session]` — the user session bus (the common case: notifications, portals).
+    /// `[dbus.session]`: the user session bus (the common case: notifications, portals).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<DbusBus>,
-    /// `[dbus.system]` — the system bus (rarely needed; mostly refuse-listed services).
+    /// `[dbus.system]`: the system bus (rarely needed; mostly refuse-listed services).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<DbusBus>,
-    /// `[dbus.audit]` — per-kennel D-Bus call audit verbosity.
+    /// `[dbus.audit]`: per-kennel D-Bus call audit verbosity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<DbusAudit>,
 }
 
-/// `[dbus.session]` / `[dbus.system]` — one bus's enable flag and rule set.
+/// `[dbus.session]` / `[dbus.system]`: one bus's enable flag and rule set.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbusBus {
     /// Whether this bus is reachable at all. Absent/`false` ⇒ no connection to this bus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    /// `[dbus.<bus>.allow]` — what the kennel may reach (an allowlist; default-deny).
+    /// `[dbus.<bus>.allow]`: what the kennel may reach (an allowlist; default-deny).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow: Option<DbusRules>,
-    /// `[dbus.<bus>.deny]` — belt-and-braces explicit denies over the allowlist.
+    /// `[dbus.<bus>.deny]`: belt-and-braces explicit denies over the allowlist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<DbusRules>,
 }
 
-/// `[dbus.<bus>.allow]` / `[dbus.<bus>.deny]` — the four rule classes at
+/// `[dbus.<bus>.allow]` / `[dbus.<bus>.deny]`: the four rule classes at
 /// destination / interface / member granularity.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1165,11 +1467,11 @@ pub struct DbusAudit {
     pub level: Option<String>,
 }
 
-/// Destinations that cannot be brokered to a kennel at all (§7.7.5).
+/// Destinations that cannot be brokered to a kennel at all.
 ///
 /// A credential oracle or a session/process-control escape. Naming one (or a pattern that
-/// admits one) in an `allow` list is a compile error, not a warning — the same axiom
-/// carve-out as the §11.2 signing oracle, not a footgun the operator may choose.
+/// admits one) in an `allow` list is a compile error, not a warning; the same axiom
+/// carve-out as the signing oracle, not a footgun the operator may choose.
 pub const DBUS_REFUSE_TO_BROKER: &[&str] = &[
     "org.freedesktop.secrets", // Secret Service: a read-stored-credentials oracle
     "org.freedesktop.systemd1", // StartTransientUnit: spawn an unconfined process
@@ -1178,7 +1480,7 @@ pub const DBUS_REFUSE_TO_BROKER: &[&str] = &[
     "org.kde.ksmserver",       // KDE session control
 ];
 
-/// Whether a D-Bus `allow` pattern admits `name` — exact, a trailing `.*` prefix
+/// Whether a D-Bus `allow` pattern admits `name`: exact, a trailing `.*` prefix
 /// wildcard (`org.freedesktop.*`), or the catch-all `*`.
 #[must_use]
 pub fn dbus_pattern_admits(pattern: &str, name: &str) -> bool {
@@ -1235,6 +1537,7 @@ impl SourcePolicy {
         self.check_identity(&mut errs);
         self.check_references(&mut errs);
         self.check_reasons(&mut errs);
+        self.check_leaf_invariants(&mut errs);
         self.check_dbus(&mut errs);
         if errs.is_empty() {
             Ok(())
@@ -1293,7 +1596,7 @@ impl SourcePolicy {
     fn check_reasons(&self, errs: &mut Vec<String>) {
         if let Some(net) = &self.net {
             if let Some(proxy) = &net.proxy {
-                for a in &proxy.allow {
+                for a in proxy.allow.entries() {
                     let who = a
                         .name
                         .as_deref()
@@ -1306,7 +1609,7 @@ impl SourcePolicy {
                     }
                 }
                 if let Some(deny) = &proxy.deny {
-                    for d in deny.invariant.iter().chain(&deny.policy) {
+                    for d in deny.invariant.iter().chain(deny.policy.entries()) {
                         if is_blank(d.reason.as_deref()) {
                             errs.push(format!(
                                 "[[net.proxy.deny]] \"{}\" is missing a `reason`",
@@ -1319,7 +1622,7 @@ impl SourcePolicy {
             if let Some(bpf) = &net.bpf {
                 let acls = bpf.connect.iter().chain(&bpf.bind);
                 for acl in acls {
-                    for r in acl.allow.iter().chain(&acl.deny) {
+                    for r in acl.allow.entries().chain(acl.deny.entries()) {
                         let who = r.cidr.as_deref().unwrap_or("<no-cidr>");
                         if is_blank(r.reason.as_deref()) {
                             errs.push(format!("[[net.bpf]] \"{who}\" is missing a `reason`"));
@@ -1329,7 +1632,7 @@ impl SourcePolicy {
             }
         }
         if let Some(unix) = &self.unix {
-            for a in &unix.allow {
+            for a in unix.allow.entries() {
                 let who = a
                     .name
                     .as_deref()
@@ -1341,8 +1644,24 @@ impl SourcePolicy {
             }
         }
         if let Some(fs) = &self.fs {
+            // A path-list *increment* requires a `reason` on every add/remove; the bare-set form
+            // carries plain paths with no reason.
+            for (label, field) in [
+                ("fs.read", &fs.read),
+                ("fs.write", &fs.write),
+                ("fs.deny", &fs.deny),
+            ] {
+                for e in field.iter().flat_map(PathField::delta_entries) {
+                    if is_blank(e.reason.as_deref()) {
+                        errs.push(format!(
+                            "[[{label}.*]] \"{}\" is missing a `reason`",
+                            e.path
+                        ));
+                    }
+                }
+            }
             if let Some(dev) = &fs.dev {
-                for d in &dev.passthrough {
+                for d in dev.passthrough.entries() {
                     let who = d.path.as_deref().unwrap_or("<no-path>");
                     if is_blank(d.reason.as_deref()) {
                         errs.push(format!(
@@ -1352,8 +1671,18 @@ impl SourcePolicy {
                 }
             }
         }
+        if let Some(exec) = &self.exec {
+            for e in exec.allow.iter().flat_map(PathField::delta_entries) {
+                if is_blank(e.reason.as_deref()) {
+                    errs.push(format!(
+                        "[[exec.allow.*]] \"{}\" is missing a `reason`",
+                        e.path
+                    ));
+                }
+            }
+        }
         if let Some(ssh) = &self.ssh {
-            for d in &ssh.destinations {
+            for d in ssh.destinations.entries() {
                 let who = d.dest.as_deref().unwrap_or("<no-dest>");
                 if is_blank(d.reason.as_deref()) {
                     errs.push(format!(
@@ -1364,10 +1693,24 @@ impl SourcePolicy {
         }
     }
 
-    /// Refuse-to-broker check (§7.7.5): a `[dbus.*.allow]` entry that names — or whose
-    /// wildcard admits — a categorically un-brokerable destination (Secret Service,
+    /// A runnable **leaf** (a `name` + `template_base`) may not declare
+    /// `[[net.proxy.deny.invariant]]` floors; invariants are template- and fragment-author tools.
+    /// A template (`template_name`) or a fragment (`name`, no
+    /// `template_base`) may; only the most-derived runnable leaf is barred.
+    fn check_leaf_invariants(&self, errs: &mut Vec<String>) {
+        if self.is_leaf() && self.template_base.is_some() && !self.invariant_denies().is_empty() {
+            errs.push(
+                "a leaf policy may not declare `[[net.proxy.deny.invariant]]`; invariants are \
+                 template- and fragment-author tools"
+                    .to_owned(),
+            );
+        }
+    }
+
+    /// Refuse-to-broker check: a `[dbus.*.allow]` entry that names (or whose
+    /// wildcard admits) a categorically un-brokerable destination (Secret Service,
     /// session/process control) is a compile error, not a footgun. The same axiom
-    /// carve-out as the §11.2 signing oracle.
+    /// carve-out as the signing oracle.
     fn check_dbus(&self, errs: &mut Vec<String>) {
         let Some(dbus) = &self.dbus else { return };
         for (bus_name, bus) in [("session", &dbus.session), ("system", &dbus.system)] {
@@ -1388,18 +1731,164 @@ impl SourcePolicy {
                 {
                     errs.push(format!(
                         "[dbus.{bus_name}.allow] `{entry}` reaches `{refused}`, which cannot be \
-                         brokered to a kennel (§7.7.5: a credential oracle or session-control \
+                         brokered to a kennel (a credential oracle or session-control \
                          escape — refused by axiom, not a footgun)"
                     ));
                 }
             }
         }
     }
+
+    /// Whether this artefact is *additive-only*: the gate an included **fragment** must pass. It
+    /// may **add** rules but never remove or override.
+    ///
+    /// In the unified model a fragment is an ordinary [`SourcePolicy`] whose list fields are all
+    /// add-only increments ([`PathField::is_additive`] / [`ListField::is_additive`]) and which sets
+    /// none of the override-prone scalar/replace sections (a fragment carries only `name`, `include`,
+    /// additive deltas, and `[[net.proxy.deny.invariant]]` floors). A `Set`-replace or a `*.remove`
+    /// on any list, or any scalar section that would override an inherited value, makes it non-additive.
+    #[must_use]
+    pub fn is_additive_only(&self) -> bool {
+        let path_ok = |f: &Option<PathField>| f.as_ref().is_none_or(PathField::is_additive);
+        let fs_ok = self.fs.as_ref().is_none_or(|fs| {
+            path_ok(&fs.read)
+                && path_ok(&fs.write)
+                && path_ok(&fs.deny)
+                && fs.exclusive.is_none()
+                && fs.home.is_none()
+                && fs.tmp.is_none()
+                && fs.proc.is_none()
+                && fs.dev.as_ref().is_none_or(|d| d.passthrough.is_additive())
+        });
+        let exec_ok = self.exec.as_ref().is_none_or(|e| {
+            path_ok(&e.allow)
+                && e.deny.is_none()
+                && e.path.is_none()
+                && e.shell.is_none()
+                && e.deny_setuid.is_none()
+                && e.deny_setgid.is_none()
+                && e.deny_setcap.is_none()
+                && e.deny_writable.is_none()
+        });
+        let net_ok = self.net.as_ref().is_none_or(|n| {
+            // mode/listen/bind/ipv6/audit are overrides; the proxy allow + deny.policy and the bpf
+            // ACLs must be add-only. The `[[net.proxy.deny.invariant]]` floor is additive (unioned).
+            n.mode.is_none()
+                && n.proxy_listen_v4_address.is_none()
+                && n.proxy_listen_v6_address.is_none()
+                && n.bind.is_none()
+                && n.ipv6.is_none()
+                && n.audit.is_none()
+                && n.proxy.as_ref().is_none_or(|p| {
+                    p.allow.is_additive() && p.deny.as_ref().is_none_or(|d| d.policy.is_additive())
+                })
+                && n.bpf.as_ref().is_none_or(|b| {
+                    b.families.is_none()
+                        && b.deny_families.is_none()
+                        && b.connect
+                            .as_ref()
+                            .is_none_or(|a| a.allow.is_additive() && a.deny.is_additive())
+                        && b.bind
+                            .as_ref()
+                            .is_none_or(|a| a.allow.is_additive() && a.deny.is_additive())
+                })
+        });
+        let unix_ok = self.unix.as_ref().is_none_or(|u| {
+            u.default.is_none() && u.abstract_ns.is_none() && u.allow.is_additive()
+        });
+        let ssh_ok = self
+            .ssh
+            .as_ref()
+            .is_none_or(|s| s.destinations.is_additive());
+        // No override-prone top-level section: a fragment adds capability, never reshapes the cage.
+        let top_ok = self.cap.is_none()
+            && self.identity.is_none()
+            && self.binder.is_none()
+            && self.provides.is_empty()
+            && self.consumes.is_empty()
+            && self.service.is_none()
+            && self.unsafe_section.is_none()
+            && self.env.is_none()
+            && self.seccomp.is_none()
+            && self.lifecycle.is_none()
+            && self.audit.is_none()
+            && self.ulimits.is_none()
+            && self.workload.is_none()
+            && self.tty.is_none()
+            && self.trust.is_none()
+            && self.dbus.is_none()
+            && self.rootfs.is_none()
+            && self.spawn.is_none()
+            && self.mutable.is_empty();
+        fs_ok && exec_ok && net_ok && unix_ok && ssh_ok && top_ok
+    }
+
+    /// A fragment's `[[net.proxy.allow.add]]` entries: the increment a conflicting-include check
+    /// compares across fragments. Empty when the proxy allow is absent or a (non-fragment) `Set`.
+    #[must_use]
+    pub fn net_allow_adds(&self) -> &[NetAllow] {
+        match self
+            .net
+            .as_ref()
+            .and_then(|n| n.proxy.as_ref())
+            .map(|p| &p.allow)
+        {
+            Some(ListField::Delta(d)) => &d.add,
+            _ => &[],
+        }
+    }
+
+    /// A fragment's `[[net.proxy.deny.invariant]]` floors: the non-removable denies it contributes.
+    #[must_use]
+    pub fn invariant_denies(&self) -> &[NetDenyRule] {
+        self.net
+            .as_ref()
+            .and_then(|n| n.proxy.as_ref())
+            .and_then(|p| p.deny.as_ref())
+            .map_or(&[], |d| d.invariant.as_slice())
+    }
 }
 
 /// Whether an optional string is absent or whitespace-only.
 fn is_blank(s: Option<&str>) -> bool {
     s.is_none_or(|v| v.trim().is_empty())
+}
+
+/// Unique key for a `[[net.proxy.allow]]` entry (name, else cidr): the dedup/match key the fold
+/// and the include-conflict check use.
+#[must_use]
+pub(crate) fn net_key(a: &NetAllow) -> &str {
+    a.name.as_deref().or(a.cidr.as_deref()).unwrap_or("")
+}
+
+/// Unique key for a `[[unix.allow]]` entry (name, else real).
+#[must_use]
+pub(crate) fn unix_key(a: &UnixAllow) -> &str {
+    a.name.as_deref().or(a.real.as_deref()).unwrap_or("")
+}
+
+/// Unique key for a `[[ssh.destinations]]` entry (the destination string).
+#[must_use]
+pub(crate) fn ssh_key(a: &SshDestination) -> &str {
+    a.dest.as_deref().unwrap_or("")
+}
+
+/// Unique key for a `[[fs.dev.passthrough]]` entry (the device path).
+#[must_use]
+pub(crate) fn dev_key(a: &DevPassthrough) -> &str {
+    a.path.as_deref().unwrap_or("")
+}
+
+/// Unique key for a `[[net.bpf.*]]` rule (its cidr).
+#[must_use]
+pub(crate) fn bpf_key(a: &BpfRule) -> &str {
+    a.cidr.as_deref().unwrap_or("")
+}
+
+/// Unique key for a `[[net.proxy.deny.policy]]` rule (its cidr).
+#[must_use]
+pub(crate) const fn deny_key(a: &NetDenyRule) -> &str {
+    a.cidr.as_str()
 }
 
 /// Validate a full versioned reference `<name>@v<semver-core>`.
@@ -1624,8 +2113,8 @@ mod tests {
             "every allow has a reason"
         );
         // No agent sockets at all. GPG/commit signing cannot be made safe in a kennel
-        // (a signing oracle, §11.2) — there is no gpg-agent shim; and an exposed ssh-agent
-        // is a destination-blind oracle, so SSH is routed via the §7.10 bastion, not a shim.
+        // (a signing oracle) — there is no gpg-agent shim; and an exposed ssh-agent
+        // is a destination-blind oracle, so SSH is routed via the bastion, not a shim.
         let has_agent = pol.unix.as_ref().is_some_and(|u| {
             u.allow.iter().any(|a| {
                 a.name.as_deref() == Some("gpg-agent")
@@ -1672,8 +2161,8 @@ image = \"docker.io/library/postgres:17\"
         let fs = pol.fs.expect("fs");
         assert!(
             fs.write
-                .as_deref()
-                .is_some_and(|w| w.iter().any(|p| p.contains("data/<kennel>"))),
+                .as_ref()
+                .is_some_and(|w| w.resolved().iter().any(|p| p.contains("data/<kennel>"))),
             "persists one data dir"
         );
     }

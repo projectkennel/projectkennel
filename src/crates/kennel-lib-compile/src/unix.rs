@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[unix]` section (`docs/design/07-6-afunix.md` §7.6).
+//! Compile-time validation of the `[unix]` section.
 //!
 //! # Purpose
 //!
@@ -10,14 +10,14 @@
 //! enforcement core. So the *only* place to reject a malformed or unsafe socket grant
 //! is here, at compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.6)
+//! # What this checks
 //!
 //! - **`default` is not `"allow"` once resolved.** Default-deny is structural (the
-//!   shim only contains what is bound in, §7.6.2); a resolved `default = "allow"`
+//!   shim only contains what is bound in); a resolved `default = "allow"`
 //!   would contradict that and is refused.
 //! - **`abstract` is `"deny"`, absent, or `"allow"` (escape hatch).**
 //!   Abstract-namespace sockets are denied by default by the always-on Landlock
-//!   scope (§7.6.3, ABI 6+). `abstract = "allow"` is accepted when the kennel
+//!   scope (ABI 6+). `abstract = "allow"` is accepted when the kennel
 //!   owns its `CLONE_NEWNET` (`net.mode` ≠ `"host"`) — the net-ns boundary is
 //!   the structural control; ABI-6 scoping is defence-in-depth. The combination
 //!   `abstract = "allow"` + `net.mode = "host"` is a **hard compile error**
@@ -26,10 +26,9 @@
 //! - **Every `[[unix.allow]]` has `real` and `shim`.** A shim is a bind mount from a
 //!   real host path to a path in the view; both ends are required.
 //! - **A `[[unix.allow]]` that shims an SSH or GPG agent is a *footgun*, warned not
-//!   forbidden.** An exposed `ssh-agent` socket is a destination-blind signing oracle
-//!   (§7.10.1); a `gpg-agent` socket is the same oracle and worse (a signature stamps the
-//!   user's identity permanently onto arbitrary artefacts — there is no bastion equivalent,
-//!   design §11.1). The intended path for SSH egress is the `[ssh]` section and the §7.10
+//!   forbidden.** An exposed `ssh-agent` socket is a destination-blind signing oracle; a `gpg-agent` socket is the same oracle and worse (a signature stamps the
+//!   user's identity permanently onto arbitrary artefacts — there is no bastion equivalent by
+//!   design). The intended path for SSH egress is the `[ssh]` section and the
 //!   re-origination bastion; for commit signing the safe default is to sign on the host.
 //!   But a policy author *may* deliberately shim a real agent — the framework warns loudly
 //!   (here at compile, and again at runtime when `kenneld` realises the shim) rather than
@@ -72,7 +71,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         None | Some("deny") => {}
         Some("allow") => errs.push(
             "[unix] default = \"allow\" is forbidden once resolved — default-deny is structural \
-             (only what is bound into the shim is present, §7.6.2)"
+             (only what is bound into the shim is present)"
                 .to_owned(),
         ),
         Some(other) => errs.push(format!("[unix] default `{other}` is not deny/allow")),
@@ -157,7 +156,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
             }
         }
         // Shimming a real ssh-agent socket is a footgun, not a crime: an exposed agent
-        // is a destination-blind signing oracle (§7.10.1) and the [ssh] bastion is the
+        // is a destination-blind signing oracle and the [ssh] bastion is the
         // intended path — but the framework warns loudly rather than forbidding it
         // (footguns are warned, not amputated). The warning fires again at runtime.
         let shims_ssh = a
@@ -168,8 +167,8 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         if shims_ssh {
             warnings.push(format!(
                 "[[unix.allow]] `{who}` shims an SSH agent (name = \"ssh-agent\" / env = \"SSH_AUTH_SOCK\"): \
-                 an exposed agent is a destination-blind signing oracle (§7.10.1). This is the intended \
-                 job of the [ssh] section and the §7.10 re-origination bastion — shim a raw agent only if \
+                 an exposed agent is a destination-blind signing oracle. This is the intended \
+                 job of the [ssh] section and the re-origination bastion — shim a raw agent only if \
                  you accept that any code in the kennel can sign for any destination"
             ));
         }
@@ -177,7 +176,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
         // oracle stamps the user's verified identity permanently onto arbitrary artefacts
         // (malware, releases, forged commits), not just one authenticated session. There
         // is no bastion equivalent (commit signing is data-integrity, not transport — the
-        // §7.10 re-origination trick does not carry over; design §11.1). Warned, not
+        // re-origination trick does not carry over, by design). Warned, not
         // forbidden, per the footgun discipline.
         let shims_gpg = a
             .name
@@ -189,7 +188,7 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
                 "[[unix.allow]] `{who}` shims a GPG agent (name = \"gpg-agent\" / env = \"GPG_AGENT_INFO\"): \
                  an exposed agent is a destination-blind signing oracle — worse than ssh-agent, because a \
                  signature permanently stamps your identity onto whatever the kennel asks it to sign \
-                 (malware, releases, forged commits). There is no bastion equivalent (design §11.1). Shim \
+                 (malware, releases, forged commits). There is no bastion equivalent. Shim \
                  it only if you accept that any code in the kennel can sign as you; the safe default is to \
                  leave commit signing to the host (the workload commits unsigned)"
             ));
@@ -239,7 +238,8 @@ mod tests {
                 "gpg-agent",
                 "~/.gnupg/kennels/<kennel>/S.gpg-agent",
                 "~/.gnupg/S.gpg-agent",
-            )],
+            )]
+            .into(),
         };
         validate(&policy_with(unix)).expect("valid");
     }
@@ -253,7 +253,8 @@ mod tests {
                 "ctl",
                 "/run/user/1000/kennel/control.sock",
                 "~/ctl.sock",
-            )],
+            )]
+            .into(),
             ..UnixSection::default()
         };
         let err = validate(&policy_with(unix)).expect_err("refused");
@@ -273,7 +274,8 @@ mod tests {
                 "sneaky",
                 "/run/user/1000/kennel/../kennel/control.sock",
                 "~/x.sock",
-            )],
+            )]
+            .into(),
             ..UnixSection::default()
         };
         let err = validate(&policy_with(unix)).expect_err("refused");
@@ -292,7 +294,8 @@ mod tests {
                 "ssh-agent",
                 "/run/user/1000/kennel/agent.sock",
                 "~/.ssh/agent.sock",
-            )],
+            )]
+            .into(),
             ..UnixSection::default()
         };
         let warnings = validate(&policy_with(unix)).expect("valid (warned, not refused)");
@@ -392,7 +395,8 @@ mod tests {
                 name: Some("x".to_owned()),
                 reason: Some("r".to_owned()),
                 ..UnixAllow::default()
-            }],
+            }]
+            .into(),
             ..UnixSection::default()
         };
         let err = validate(&policy_with(unix)).expect_err("refused");
@@ -410,7 +414,8 @@ mod tests {
                 "ssh-agent",
                 "/run/kennel/<kennel>/ssh-agent.sock",
                 "~/.ssh/agent.sock",
-            )],
+            )]
+            .into(),
             ..UnixSection::default()
         };
         // Footgun: permitted, but loudly warned (not refused).
@@ -425,7 +430,8 @@ mod tests {
                 "gpg-agent",
                 "~/.gnupg/kennels/<kennel>/S.gpg-agent",
                 "~/.gnupg/S.gpg-agent",
-            )],
+            )]
+            .into(),
             ..UnixSection::default()
         };
         // Same footgun as ssh-agent, worse oracle: permitted, loudly warned.
@@ -443,7 +449,7 @@ mod tests {
         let mut a = allow("custom", "/run/x.sock", "~/.ssh/agent.sock");
         a.env = Some("SSH_AUTH_SOCK".to_owned());
         let unix = UnixSection {
-            allow: vec![a],
+            allow: vec![a].into(),
             ..UnixSection::default()
         };
         let warnings = validate(&policy_with(unix)).expect("allowed with a warning");
@@ -461,7 +467,8 @@ mod tests {
                 "app-bus",
                 "/run/user/1000/app.sock",
                 "~/.local/run/app.sock",
-            )],
+            )]
+            .into(),
         };
         assert!(validate(&policy_with(unix)).expect("valid").is_empty());
     }

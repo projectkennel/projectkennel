@@ -1,4 +1,4 @@
-//! Install-time spawn-eligibility (`docs/design/07-12-dynamic-spawn.md` §7.12.8).
+//! Install-time spawn-eligibility.
 //!
 //! # Purpose
 //!
@@ -6,18 +6,18 @@
 //! checked at the **spawner's** compile, not the target's: when a policy carrying `[spawn]` is
 //! compiled, each template it names is resolved from the trust store and refused unless it is a
 //! sound spawn target. The target cannot know which future policy will name it, and depth-1 means
-//! there is no chain to walk — so the check runs when the *spawner* is compiled (§7.12.8). The
+//! there is no chain to walk — so the check runs when the *spawner* is compiled. The
 //! grant's own local well-formedness (reason, `max_instances`, ref shape) is checked separately in
 //! [`crate::translate`](mod@crate::translate); this module is the cross-template half, which needs the [`TemplateSource`]
 //! and [`Trust`] to resolve and signature-verify each named target.
 //!
-//! # What makes a template spawn-eligible (§7.12.8)
+//! # What makes a template spawn-eligible
 //!
 //! - **Depth-1.** It carries no `[spawn]` of its own. Recursion would turn `max_instances` from a
 //!   global ceiling into a per-node one (`max_instances`^N N levels deep); the rule keeps the
 //!   ceiling global by construction. A fork-bomb prohibition, fail-closed before any instantiation.
 //! - **A lifetime bound.** It declares `[lifecycle].ttl` — the self-reap that backstops the
-//!   fate-sharing reaper (§7.12.7); a tool that never exits must still be torn down.
+//!   fate-sharing reaper; a tool that never exits must still be torn down.
 //! - **Resource ceilings.** It declares an explicit memory, pids, and CPU ceiling
 //!   (`[ulimits].as` / `.nproc` / `.cpu`). These are **mandatory, not defaulted**: the open
 //!   eligibility-default question (02-10) is resolved fail-closed — a spawn target bounds its own
@@ -30,7 +30,7 @@
 //!
 //! Install-time eligibility is **fail-fast authoring feedback**, not the authoritative gate: the
 //! trust store is mutable, so `kenneld` re-verifies the content-pin and re-runs eligibility on the
-//! resolved bytes at `SPAWN` (§7.12.8, 02-10). Catching an ineligible target at the spawner's
+//! resolved bytes at `SPAWN` (02-10). Catching an ineligible target at the spawner's
 //! install turns a runtime spawn failure into a compile error.
 
 use std::collections::BTreeSet;
@@ -79,7 +79,7 @@ pub fn resolve_grant(
             PolicyError::Resolution(format!(
                 "[[spawn.allow]] template = \"{reference}\" has no settled artefact in the trust \
                  store — compile and sign it (`kennel policy compile`) so a spawn instantiates the \
-                 complete signed template (§7.12.8)"
+                 complete signed template"
             ))
         })?;
         // Read the settled signature envelope (the content-pin). Verify it cryptographically when the
@@ -116,7 +116,7 @@ pub fn resolve_grant(
 }
 
 /// Check a per-requester `mutable` narrowing selects only fields the settled template's `[[mutable]]`
-/// manifest declares (narrowing selects from the manifest, it cannot add fields — §7.12.2).
+/// manifest declares (narrowing selects from the manifest, it cannot add fields —).
 fn check_narrowing(
     reference: &str,
     entry: &SpawnAllow,
@@ -131,7 +131,7 @@ fn check_narrowing(
             return Err(PolicyError::Spawn(format!(
                 "[[spawn.allow]] template = \"{reference}\": `mutable` narrowing names `{field}`, \
                  which the template's manifest does not declare — narrowing selects from the \
-                 manifest, it cannot add fields (§7.12.2)"
+                 manifest, it cannot add fields"
             )));
         }
     }

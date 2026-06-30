@@ -5,7 +5,7 @@
 //! Given an entry source policy (a leaf, or a template being inspected), walk its
 //! `template_base` chain to the root template (`base-confined`) and fold the chain,
 //! root-first, into a single *effective* [`SourcePolicy`] with no `template_base`
-//! left to resolve (`docs/architecture/02-2-config-schema.md` §Template inheritance).
+//! left to resolve.
 //! The effective policy is what the later stages substitute, translate to a
 //! [`kennel_lib_policy::settled::SettledPolicy`], and sign.
 //!
@@ -15,16 +15,16 @@
 //!
 //! - **Scalars** (`net.mode`, `cap.no_new_privs`, `lifecycle.ttl`, …): the most-derived
 //!   value that sets the field wins; an absent field inherits.
-//! - **List fields** (`exec.allow`, `fs.read`, `env.pass`, …): a child's bare list
-//!   *sets* (replaces) the inherited list — the SSH `Ciphers = …` form. An absent
-//!   field inherits. The additive/subtractive `+=` / `-=` operators (leaf-policy
-//!   `[[*.add]]` / `[[*.remove]]`) are a later increment; this stage implements the
-//!   `=` (set/override/merge) half, which is everything the in-tree templates use.
+//! - **List fields** (`exec.allow`, `fs.read`, `env.pass`, …): replace *or* increment at the same
+//!   key. A child's bare list — a [`PathField::Set`](crate::source::PathField) /
+//!   [`ListField::Set`](crate::source::ListField) — *sets* (replaces) the inherited list (the SSH
+//!   `Ciphers = …` form); a child's `{ add, remove }` table (`[[*.add]]` / `[[*.remove]]`)
+//!   *increments* it (the `+=` / `-=` form). An absent field inherits. The fold collapses every
+//!   field to a `Set`, so the effective policy carries concrete lists.
 //! - **Object sub-tables** (`fs.home`, `net.bind`, `dbus`, …): merged shallowly,
 //!   field-by-field, with the child overriding.
 //! - **Invariant denies** (`net.proxy.deny.invariant`): *unioned*, never replaced —
-//!   invariants propagate down the chain and a child can only add to them
-//!   (`02-2` §Framework invariants, `docs/design/05-templates.md` §5.5). This is the one
+//!   invariants propagate down the chain and a child can only add to them. This is the one
 //!   list field that does not follow the bare-set rule, precisely because its
 //!   non-removability is the point.
 //!
@@ -40,24 +40,24 @@
 //!
 //! I/O-free by construction: callers supply a [`TemplateSource`] that maps a
 //! `<name>@<version>` reference to bytes (the CLI reads files; tests use an
-//! in-memory map). Signature verification, lockfile byte-pinning, includes, and
-//! the `+=`/`-=` delta operators land in later increments.
+//! in-memory map). Included fragments and lockfile byte-pinning are applied by
+//! [`compile`](mod@crate::compile), after this stage folds the `template_base` chain.
 
 use crate::source::{
-    self, BinderSection, BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection,
-    EnvSection, ExecSection, FsDev, FsHome, FsProc, FsSection, FsTmp, IdentitySection,
-    LifecycleSection, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny,
-    NetSection, RootfsSection, SeccompSection, ServiceSection, SourcePolicy, SpawnSection,
-    SshSection, TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
+    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BinderSection, BoundaryAcl,
+    CapSection, DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome,
+    FsProc, FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind,
+    NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
+    SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection, TrustSection,
+    TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
-use crate::source_sig::Trust;
+use crate::source_sig::{Tier, Trust};
 use kennel_lib_policy::audit::{
     AuditClassSection, AuditFileSection, AuditSection, AuditSyslogSection,
 };
 use kennel_lib_policy::PolicyError;
 
-/// Maximum inheritance-chain depth (number of `template_base` hops), per
-/// `02-2-config-schema.md` §Resolution order.
+/// Maximum inheritance-chain depth (number of `template_base` hops).
 pub const MAX_CHAIN_DEPTH: usize = 16;
 
 /// A source of template/fragment artefacts by versioned reference. Keeps
@@ -101,15 +101,15 @@ pub struct ResolvedChain {
     /// The parents that were fetched and folded in, root-first.
     pub chain: Vec<ChainLink>,
     /// Where the folded `[[provides]]` came from — the provenance the reserved-namespace
-    /// gate keys on (`07-13-service-catalog.md` §7.13.5).
+    /// gate keys on.
     pub provides_origin: ProvidesOrigin,
 }
 
 /// Where a resolved policy's effective `[[provides]]` originated.
 ///
-/// Provides fold *set-replace* (a child's non-empty list replaces the inherited one, §7.13), so
+/// Provides fold *set-replace* (a child's non-empty list replaces the inherited one), so
 /// exactly one layer supplies the whole effective set, and a single origin describes it. The
-/// reserved-namespace gate (§7.13.5) keys on this: a reserved `org.projectkennel.*` name is
+/// reserved-namespace gate keys on this: a reserved `org.projectkennel.*` name is
 /// maintainer-trust material, so it is permitted only when it traces to a signature-verified
 /// template — never an unverified layer that could inject it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,14 +117,16 @@ pub enum ProvidesOrigin {
     /// No `[[provides]]` in the resolved policy.
     Absent,
     /// The entry (the most-derived artefact) authored them — the template-authoring path. Its
-    /// reserved-name authority is conferred by the maintainer signing the settled output, checked
-    /// at the catalogue (§7.13.4), not at this resolution.
+    /// reserved-name authority is conferred by the **tier** of the key that signs the settled output
+    /// (the `--key`), checked at compile, since the entry itself is not signature-checked here.
     Entry,
-    /// An ancestor template supplied them; `verified` is whether that ancestor's signature checked
-    /// against the resolution trust store (i.e. it is a maintainer-signed template).
+    /// An ancestor template supplied them. `tier` is the [`Tier`] the supplying template's signature
+    /// verified at (which trust dir loaded the key), or `None` if it did not verify. The
+    /// reserved-namespace gate keys on this: `org.projectkennel.*` is permitted only when `tier` is
+    /// [`Tier::Vendor`] — any vendor key qualifies, identity never enters it.
     Ancestor {
-        /// Whether the supplying ancestor's signature verified against the trust store.
-        verified: bool,
+        /// The trust tier the supplying ancestor's signature verified at, or `None` if unverified.
+        tier: Option<Tier>,
     },
 }
 
@@ -152,7 +154,7 @@ pub fn resolve(
 /// Identical to [`resolve`] but each parent's `[signature]` is checked according to
 /// `trust` ([`Trust::require`] in attested deployments, [`Trust::dev`] / unsigned in
 /// development). The entry itself is *not* signature-checked — a leaf policy is loaded
-/// under the user's own authority (`02-2` §Signatures).
+/// under the user's own authority.
 ///
 /// # Errors
 ///
@@ -201,7 +203,7 @@ pub fn resolve_verified(
     }
 
     // Provides fold set-replace, so the effective set comes from one layer; record which, for
-    // the reserved-namespace gate (§7.13.5). The entry (most-derived) wins if it declares any;
+    // the reserved-namespace gate. The entry (most-derived) wins if it declares any;
     // else the most-derived *ancestor* that does (parents is leaf-first, so `position` finds it),
     // tagged with whether that ancestor's signature verified against the trust store.
     let provides_origin = if !entry.provides.is_empty() {
@@ -210,7 +212,10 @@ pub fn resolve_verified(
         // `i` indexes the parent that supplies the provides; `links[i]` is its verification record
         // (built in the same leaf-first order). `.get` keeps clippy's no-indexing rule satisfied.
         ProvidesOrigin::Ancestor {
-            verified: links.get(i).is_some_and(|l| l.signing_key_id.is_some()),
+            tier: links
+                .get(i)
+                .and_then(|l| l.signing_key_id.as_deref())
+                .map(|kid| trust.tier_of(kid)),
         }
     } else {
         ProvidesOrigin::Absent
@@ -242,6 +247,25 @@ pub fn resolve_verified(
         chain: links,
         provides_origin,
     })
+}
+
+/// Fold an additive included **fragment** onto an already-resolved effective policy.
+///
+/// Applies the fragment's add-only increments (and unions its `[[net.proxy.deny.invariant]]` floors)
+/// the same way [`fold`] folds a chain step, but the identity, `include`, and signature fields stay
+/// the base's — a fragment contributes capability, never identity. The caller has already
+/// checked [`SourcePolicy::is_additive_only`].
+#[must_use]
+pub(crate) fn apply_fragment(base: &SourcePolicy, fragment: &SourcePolicy) -> SourcePolicy {
+    let mut folded = fold(base, fragment);
+    base.template_base.clone_into(&mut folded.template_base);
+    base.template_version
+        .clone_into(&mut folded.template_version);
+    base.template_name.clone_into(&mut folded.template_name);
+    base.name.clone_into(&mut folded.name);
+    folded.include.clone_from(&base.include);
+    folded.signature = None;
+    folded
 }
 
 /// Split and validate a versioned reference into `(name, version)`.
@@ -279,7 +303,7 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         identity: merge(&parent.identity, &child.identity, fold_identity),
         binder: merge(&parent.binder, &child.binder, fold_binder),
         // `[[provides]]` / `[[consumes]]` fold like a bare list (the SSH set model): a child's
-        // non-empty list replaces the inherited one, an absent one inherits (§7.13).
+        // non-empty list replaces the inherited one, an absent one inherits.
         provides: if child.provides.is_empty() {
             parent.provides.clone()
         } else {
@@ -469,6 +493,57 @@ fn merge<T: Clone>(parent: &Option<T>, child: &Option<T>, f: impl Fn(&T, &T) -> 
     }
 }
 
+/// Fold a path-list field one chain step (`fs.read`/`fs.write`/`fs.deny`/`exec.allow`): a child
+/// `Set` *replaces*, a child `Delta` *increments* the inherited value, an absent field inherits.
+/// The result is always a `Set` — the deltas have been folded into a concrete list.
+#[allow(clippy::ref_option)]
+fn fold_pathfield(child: &Option<PathField>, parent: &Option<PathField>) -> Option<PathField> {
+    match child {
+        None => parent.clone(),
+        Some(PathField::Set(v)) => Some(PathField::Set(v.clone())),
+        Some(PathField::Delta(d)) => {
+            let mut base: Vec<String> = match parent {
+                Some(PathField::Set(v)) => v.clone(),
+                _ => Vec::new(),
+            };
+            for e in &d.add {
+                if !base.iter().any(|p| p == &e.path) {
+                    base.push(e.path.clone());
+                }
+            }
+            base.retain(|p| !d.remove.iter().any(|e| &e.path == p));
+            Some(PathField::Set(base))
+        }
+    }
+}
+
+/// Fold a typed-list field one chain step (`unix.allow`, `net.proxy.allow`, …): a non-empty child
+/// `Set` *replaces*, an empty `Set` inherits (the bare-list "absent" sentinel), a `Delta`
+/// *increments* (dedup/match by `key`). The result is always a `Set`.
+fn fold_listfield<T: Clone>(
+    child: &ListField<T>,
+    parent: &ListField<T>,
+    key: fn(&T) -> &str,
+) -> ListField<T> {
+    match child {
+        ListField::Set(v) if v.is_empty() => parent.clone(),
+        ListField::Set(v) => ListField::Set(v.clone()),
+        ListField::Delta(d) => {
+            let mut base: Vec<T> = match parent {
+                ListField::Set(v) => v.clone(),
+                ListField::Delta(_) => Vec::new(),
+            };
+            for e in &d.add {
+                if !base.iter().any(|x| key(x) == key(e)) {
+                    base.push(e.clone());
+                }
+            }
+            base.retain(|x| !d.remove.iter().any(|r| key(r) == key(x)));
+            ListField::Set(base)
+        }
+    }
+}
+
 /// Union of two string lists, parent-first, de-duplicated (order preserved).
 fn union_strings(parent: &[String], child: &[String]) -> Vec<String> {
     let mut out = parent.to_vec();
@@ -491,7 +566,7 @@ fn fold_cap(p: &CapSection, c: &CapSection) -> CapSection {
 
 fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
     ExecSection {
-        allow: or(&c.allow, &p.allow),
+        allow: fold_pathfield(&c.allow, &p.allow),
         deny: or(&c.deny, &p.deny),
         deny_setuid: or(&c.deny_setuid, &p.deny_setuid),
         deny_setgid: or(&c.deny_setgid, &p.deny_setgid),
@@ -504,10 +579,10 @@ fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
 
 fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
     FsSection {
-        read: or(&c.read, &p.read),
-        write: or(&c.write, &p.write),
+        read: fold_pathfield(&c.read, &p.read),
+        write: fold_pathfield(&c.write, &p.write),
         exclusive: or(&c.exclusive, &p.exclusive),
-        deny: or(&c.deny, &p.deny),
+        deny: fold_pathfield(&c.deny, &p.deny),
         home: merge(&p.home, &c.home, fold_fs_home),
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),
         proc: merge(&p.proc, &c.proc, fold_fs_proc),
@@ -541,13 +616,8 @@ fn fold_fs_proc(p: &FsProc, c: &FsProc) -> FsProc {
 fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
     FsDev {
         allow: or(&c.allow, &p.allow),
-        // Bare-set: a child's non-empty passthrough list replaces the parent's (as
-        // `unix.allow`). A leaf adds individual devices via `[[fs.dev.passthrough.add]]`.
-        passthrough: if c.passthrough.is_empty() {
-            p.passthrough.clone()
-        } else {
-            c.passthrough.clone()
-        },
+        // Replace or increment (`[[fs.dev.passthrough.add]]`), keyed by device path.
+        passthrough: fold_listfield(&c.passthrough, &p.passthrough, dev_key),
     }
 }
 
@@ -567,12 +637,8 @@ fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
 
 fn fold_net_proxy(p: &NetProxy, c: &NetProxy) -> NetProxy {
     NetProxy {
-        // Bare-set: a child's non-empty allow list replaces the parent's.
-        allow: if c.allow.is_empty() {
-            p.allow.clone()
-        } else {
-            c.allow.clone()
-        },
+        // Replace or increment (`[[net.proxy.allow.add]]`), keyed by name/cidr.
+        allow: fold_listfield(&c.allow, &p.allow, net_key),
         deny: merge(&p.deny, &c.deny, fold_net_proxy_deny),
     }
 }
@@ -585,12 +651,8 @@ fn fold_net_proxy_deny(p: &NetProxyDeny, c: &NetProxyDeny) -> NetProxyDeny {
             invariant.push(d.clone());
         }
     }
-    // The author denylist is bare-set: a child's non-empty list replaces the parent's.
-    let policy = if c.policy.is_empty() {
-        p.policy.clone()
-    } else {
-        c.policy.clone()
-    };
+    // The author denylist replaces or increments (`[[net.proxy.deny.policy.add]]`), keyed by cidr.
+    let policy = fold_listfield(&c.policy, &p.policy, deny_key);
     NetProxyDeny { invariant, policy }
 }
 
@@ -605,18 +667,10 @@ fn fold_net_bpf(p: &NetBpf, c: &NetBpf) -> NetBpf {
 }
 
 fn fold_net_bpf_acl(p: &NetBpfAcl, c: &NetBpfAcl) -> NetBpfAcl {
-    // Each direction's allow/deny is bare-set: a child's non-empty list replaces the parent's.
+    // Each direction's allow/deny replaces or increments (`[[net.bpf.connect.allow.add]]`), by cidr.
     NetBpfAcl {
-        allow: if c.allow.is_empty() {
-            p.allow.clone()
-        } else {
-            c.allow.clone()
-        },
-        deny: if c.deny.is_empty() {
-            p.deny.clone()
-        } else {
-            c.deny.clone()
-        },
+        allow: fold_listfield(&c.allow, &p.allow, bpf_key),
+        deny: fold_listfield(&c.deny, &p.deny, bpf_key),
     }
 }
 
@@ -690,11 +744,8 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
     UnixSection {
         default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
-        allow: if c.allow.is_empty() {
-            p.allow.clone()
-        } else {
-            c.allow.clone()
-        },
+        // Replace or increment (`[[unix.allow.add]]`), keyed by name/real.
+        allow: fold_listfield(&c.allow, &p.allow, unix_key),
     }
 }
 
@@ -732,12 +783,8 @@ fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
     SshSection {
         allow_headless: or(&c.allow_headless, &p.allow_headless),
         threats: or(&c.threats, &p.threats),
-        // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-        destinations: if c.destinations.is_empty() {
-            p.destinations.clone()
-        } else {
-            c.destinations.clone()
-        },
+        // Replace or increment (`[[ssh.destinations.add]]`), keyed by destination.
+        destinations: fold_listfield(&c.destinations, &p.destinations, ssh_key),
     }
 }
 
@@ -905,7 +952,7 @@ mod tests {
             .iter()
             .any(|a| a.name.as_deref() == Some("github.com")));
         // ai-coding-strict grants no agent socket — no gpg-agent (GPG signing can't be
-        // made safe in a kennel, §11.2) and no ssh-agent (SSH goes via the bastion).
+        // made safe in a kennel) and no ssh-agent (SSH goes via the bastion).
         let has_agent = eff.unix.as_ref().is_some_and(|u| {
             u.allow.iter().any(|a| {
                 a.name.as_deref() == Some("gpg-agent") || a.name.as_deref() == Some("ssh-agent")
@@ -966,7 +1013,10 @@ mod tests {
         // deny: child's bare list REPLACES the parent's.
         assert_eq!(exec.deny.as_deref(), Some(&["/c".to_owned()][..]));
         // allow: child omitted it, so it INHERITS the parent's.
-        assert_eq!(exec.allow.as_deref(), Some(&["/x".to_owned()][..]));
+        assert_eq!(
+            exec.allow.as_ref().and_then(PathField::set),
+            Some(&["/x".to_owned()][..])
+        );
     }
 
     #[test]
@@ -1023,7 +1073,7 @@ mod tests {
 
     #[test]
     fn over_deep_chain_is_rejected() {
-        // Build a linear chain t0 -> t1 -> ... -> t20 (deeper than MAX_CHAIN_DEPTH).
+        // Build a linear chain t0 -> t1 ->... -> t20 (deeper than MAX_CHAIN_DEPTH).
         let mut src = MapSource::new();
         let depth = MAX_CHAIN_DEPTH.saturating_add(4);
         for i in 0..=depth {
@@ -1049,7 +1099,7 @@ mod tests {
 
     #[test]
     fn malformed_template_base_reference_is_rejected() {
-        // `@4` lacks the leading `v`. The entry's own validate() is the first gate,
+        // `@4` lacks the leading `v`. The entry's own validate is the first gate,
         // so this surfaces as a SourceValidation error before resolution walks it.
         let entry = "name = \"n\"\ntemplate_base = \"base-confined@4\"\n";
         let err = resolve(&parse(entry.as_bytes()).expect("parse"), &base_source())
@@ -1067,7 +1117,7 @@ mod tests {
         );
     }
 
-    // ---- provides_origin: the reserved-namespace gate's signature provenance (§7.13.5) ----
+    // ---- provides_origin: the reserved-namespace gate's signature provenance ----
 
     /// A well-formed `[[provides]]` body for a given name (resolve does not mesh-validate, but
     /// keeping it well-formed keeps these tests honest about what a real provider looks like).
@@ -1100,20 +1150,22 @@ mod tests {
         let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
-        assert_eq!(
-            r.provides_origin,
-            ProvidesOrigin::Ancestor { verified: false }
-        );
+        assert_eq!(r.provides_origin, ProvidesOrigin::Ancestor { tier: None });
     }
 
     #[test]
     fn provides_origin_is_verified_ancestor_when_the_supplier_is_signed_under_require() {
+        use std::collections::BTreeSet;
+
         use crate::source_sig::sign_source;
         use kennel_lib_policy::keys::{KeySet, SigningKey};
-        let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
+        let key = SigningKey::from_seed("a-vendor-key", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
         ks.insert(key.key_id(), &key.public_key_bytes())
             .expect("insert");
+        // Tag the key as vendor-tier (loaded from the vendor dir): any such key is equivalent.
+        let vendor: BTreeSet<String> = std::iter::once(key.key_id().to_owned()).collect();
+        let host = BTreeSet::new();
         let parent = parse(
             format!(
                 "template_name = \"p\"\n{}",
@@ -1127,10 +1179,17 @@ mod tests {
             .into_bytes();
         let src = MapSource::new().with("p", "v1", &signed);
         let child = parse(b"name = \"c\"\ntemplate_base = \"p@v1\"\n").expect("parse child");
-        let r = resolve_verified(&child, &src, &Trust::require(&ks)).expect("resolve");
+        let r = resolve_verified(
+            &child,
+            &src,
+            &Trust::require(&ks).with_tiers(&vendor, &host),
+        )
+        .expect("resolve");
         assert_eq!(
             r.provides_origin,
-            ProvidesOrigin::Ancestor { verified: true }
+            ProvidesOrigin::Ancestor {
+                tier: Some(Tier::Vendor)
+            }
         );
     }
 

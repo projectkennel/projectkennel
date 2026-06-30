@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[ssh]` section (`docs/design/07-10-ssh.md` §7.10.8).
+//! Compile-time validation of the `[ssh]` section.
 //!
 //! # Purpose
 //!
@@ -9,17 +9,17 @@
 //! So the *only* place the framework can reject a malformed SSH grant is here, at
 //! compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.10.8)
+//! # What this checks
 //!
 //! - **Every destination is non-empty.** A `[[ssh.destinations]]` entry with no `dest`
 //!   mints a synthetic key that stands for nothing — a dead grant; catch it here.
 //! - **`allow_headless = true` carries a threat tag.** Letting a non-interactive kennel
-//!   drive a granted destination with no per-use touch is a real exposure (§7.10.6); the
+//!   drive a granted destination with no per-use touch is a real exposure; the
 //!   policy must record it as one (`[ssh].threats.exposed`).
 //!
 //! There is deliberately **no** `dest ⊆ net.proxy.allow` check: the SSH destination is reached
 //! by the *host-side* `ssh` the bastion's forced command runs, as the operator, entirely
-//! outside the kennel's egress purview (§7.10.4). The only egress the kennel needs is the
+//! outside the kennel's egress purview. The only egress the kennel needs is the
 //! bastion's own loopback endpoint, which `kenneld` grants as a host-service literal — not
 //! a policy `net.proxy.allow` rule. So a destination is never a kennel egress target.
 //!
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn a_well_formed_destination_validates() {
         let ssh = SshSection {
-            destinations: vec![dest("git@github.com")],
+            destinations: vec![dest("git@github.com")].into(),
             ..SshSection::default()
         };
         assert!(validate(&policy_with(ssh)).is_ok());
@@ -122,7 +122,8 @@ mod tests {
                 options: vec!["-p".to_owned(), "2222".to_owned()],
                 reason: Some("deploy".to_owned()),
                 threats: None,
-            }],
+            }]
+            .into(),
             ..SshSection::default()
         };
         assert!(validate(&policy_with(ssh)).is_ok());
@@ -136,7 +137,8 @@ mod tests {
                 options: Vec::new(),
                 reason: Some("x".to_owned()),
                 threats: None,
-            }],
+            }]
+            .into(),
             ..SshSection::default()
         };
         assert!(validate(&policy_with(ssh)).is_err());
@@ -145,7 +147,7 @@ mod tests {
     #[test]
     fn an_empty_dest_is_rejected() {
         let ssh = SshSection {
-            destinations: vec![dest("   ")],
+            destinations: vec![dest("   ")].into(),
             ..SshSection::default()
         };
         assert!(validate(&policy_with(ssh)).is_err());
@@ -155,7 +157,7 @@ mod tests {
     fn allow_headless_without_a_threat_tag_is_rejected() {
         let ssh = SshSection {
             allow_headless: Some(true),
-            destinations: vec![dest("git@github.com")],
+            destinations: vec![dest("git@github.com")].into(),
             ..SshSection::default()
         };
         let err = validate(&policy_with(ssh)).expect_err("untagged headless");
@@ -172,7 +174,7 @@ mod tests {
                 exposed: vec!["T1.6".to_owned()],
                 mitigated: vec![],
             }),
-            destinations: vec![dest("git@github.com")],
+            destinations: vec![dest("git@github.com")].into(),
         };
         assert!(validate(&policy_with(ssh)).is_ok());
     }
@@ -186,7 +188,7 @@ mod tests {
         });
         let ssh = SshSection {
             allow_headless: Some(true),
-            destinations: vec![d],
+            destinations: vec![d].into(),
             ..SshSection::default()
         };
         assert!(validate(&policy_with(ssh)).is_ok());

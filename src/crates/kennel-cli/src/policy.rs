@@ -16,8 +16,8 @@ use kennel_lib_compile::TemplateSource;
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, default_settled_path, default_signing_key,
-    is_valid_policy_name, lexopt_unexpected, lexopt_value, load_trust_store, policy_error_code,
-    resolve_policy, settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, POLICY_VERBS,
+    is_valid_policy_name, lexopt_unexpected, lexopt_value, policy_error_code, resolve_policy,
+    settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, TrustContext, POLICY_VERBS,
 };
 
 // ---- `kennel compile` ----------------------------------------------------------
@@ -144,11 +144,11 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     // otherwise unsigned templates resolve (development), still verifying any present
     // signature against whatever keys are loaded.
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_compile::Trust::require(&keys)
+        tc.require()
     } else {
-        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
+        tc.allow_unsigned()
     };
 
     let mut compiled = match build_settled(&bytes, &source, &trust, version) {
@@ -233,13 +233,13 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
 /// Whether `bytes` is a **source** policy (a template or a leaf) rather than a
 /// compiled settled artefact.
 ///
-/// A source policy parses as a `SourcePolicy` or `LeafPolicy`; a settled document
-/// carries fields (`settled_schema_version`, `[signature]`, …) those
-/// `deny_unknown_fields` schemas reject, so the two parses are mutually exclusive.
-/// Used by `kennel run` to decide whether to compile.
+/// A source policy parses as a `SourcePolicy` (a template or a leaf — the one type); a settled
+/// document carries fields (`settled_schema_version`, `[signature]`, …) that schema's
+/// `deny_unknown_fields` rejects, so the two parses are mutually exclusive. Used by `kennel run` to
+/// decide whether to compile.
 #[must_use]
 pub fn is_source_policy(bytes: &[u8]) -> bool {
-    kennel_lib_compile::parse_source(bytes).is_ok() || kennel_lib_compile::parse_leaf(bytes).is_ok()
+    kennel_lib_compile::parse_source(bytes).is_ok()
 }
 
 /// A short-lived on-disk settled policy produced by `kennel run`'s in-memory
@@ -363,27 +363,22 @@ fn lock_path_for(output: &Path, name: &str) -> PathBuf {
 
 /// Compile policy `bytes` into a settled artefact.
 ///
-/// A template/direct policy parses as a `SourcePolicy`; a leaf in the delta form does
-/// not, so fall back to the leaf parser. On a double parse failure the source parse
-/// error is returned.
+/// A template and a leaf are the one `SourcePolicy` type — list fields replace (a bare sequence) or
+/// increment (`[[….add]]`) at the same key, and the chain fold applies the entry's own increments —
+/// so a single parse-and-compile handles both.
 ///
 /// # Errors
 ///
-/// Returns a `PolicyError` if `bytes` parses as neither a source nor a leaf policy
-/// (the source parse error is surfaced), or if resolving and compiling the parsed
-/// policy fails.
+/// Returns a `PolicyError` if `bytes` does not parse as a source policy, or if resolving and
+/// compiling it fails.
 pub fn build_settled(
     bytes: &[u8],
     source: &FsTemplateSource,
     trust: &kennel_lib_compile::Trust<'_>,
     version: &str,
 ) -> Result<kennel_lib_compile::Compiled, kennel_lib_policy::PolicyError> {
-    match kennel_lib_compile::parse_source(bytes) {
-        Ok(entry) => kennel_lib_compile::compile(&entry, source, trust, version),
-        Err(source_err) => kennel_lib_compile::parse_leaf(bytes).map_or(Err(source_err), |leaf| {
-            kennel_lib_compile::compile_leaf(&leaf, source, trust, version)
-        }),
-    }
+    let entry = kennel_lib_compile::parse_source(bytes)?;
+    kennel_lib_compile::compile(&entry, source, trust, version)
 }
 
 /// `kennel validate <policy> [--template-dir D] [--require-signed] [--trust-dir D]`
@@ -425,11 +420,11 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
     let trust = if require_signed {
-        kennel_lib_compile::Trust::require(&keys)
+        tc.require()
     } else {
-        kennel_lib_compile::Trust::allow_unsigned(Some(&keys))
+        tc.allow_unsigned()
     };
 
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
@@ -491,8 +486,8 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
-    let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+    let tc = TrustContext::load(&trust_dirs)?;
+    let trust = tc.allow_unsigned();
 
     // The risk engine reads the resolved *source* (threats survive only there).
     // `effective_source` folds either form — a template/source document or a
@@ -551,19 +546,19 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
     )?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
+    let tc = TrustContext::load(&trust_dirs)?;
 
     // The primary's *declared* identity (its own `name`/`template_base`, before the
     // fold loses them) drives the label and the one-arg baseline.
     let (primary_name, primary_base) = declared_meta(primary)?;
-    let primary_eff = resolve_effective(primary, &template_dirs, &keys)?;
+    let primary_eff = resolve_effective(primary, &template_dirs, &tc)?;
     let primary_label = primary_name.unwrap_or_else(|| primary.to_owned());
 
     // One arg: baseline → policy (what the leaf adds over its template). Two args:
     // <primary> → <other> (primary is the "before", other the "after").
     let (old_eff, old_label, new_eff, new_label) = if let Some(other) = positionals.get(1) {
         let (other_name, _) = declared_meta(other)?;
-        let other_eff = resolve_effective(other, &template_dirs, &keys)?;
+        let other_eff = resolve_effective(other, &template_dirs, &tc)?;
         let other_label = other_name.unwrap_or_else(|| (*other).to_owned());
         (primary_eff, primary_label, other_eff, other_label)
     } else {
@@ -573,7 +568,7 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
                  pass a second policy to compare two"
             )
         })?;
-        let baseline = resolve_template_baseline(&reference, &template_dirs, &keys)?;
+        let baseline = resolve_template_baseline(&reference, &template_dirs, &tc)?;
         (
             baseline,
             format!("{reference} (baseline)"),
@@ -602,27 +597,23 @@ fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), String> 
     if let Ok(src) = kennel_lib_compile::parse_source(&bytes) {
         return Ok((src.name.or(src.template_name), src.template_base));
     }
-    if let Ok(leaf) = kennel_lib_compile::parse_leaf(&bytes) {
-        return Ok((leaf.name, leaf.template_base));
-    }
     Ok((None, None))
 }
 
 /// Resolve a policy argument (a name in the search path or a literal path) to its
 /// folded effective *source* policy — the honest input for the diff/risk engines
-/// (threat tags survive only in source). Handles both the template/source and the
-/// delta-leaf forms.
+/// (threat tags survive only in source). A template and a leaf are the one source type.
 fn resolve_effective(
     arg: &str,
     template_dirs: &[PathBuf],
-    keys: &kennel_lib_policy::KeySet,
+    tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
     let (path, _) = resolve_policy(arg, false)?;
     let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
         .map_err(|e| format!("resolving {}: {e}", path.display()))
 }
@@ -632,7 +623,7 @@ fn resolve_effective(
 fn resolve_template_baseline(
     reference: &str,
     template_dirs: &[PathBuf],
-    keys: &kennel_lib_policy::KeySet,
+    tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
     let (name, version) = kennel_lib_compile::parse_reference(reference)
         .map_err(|e| format!("`template_base`: {e}"))?;
@@ -642,7 +633,7 @@ fn resolve_template_baseline(
     let bytes = source.fetch(&name, &version).ok_or_else(|| {
         format!("cannot read `{reference}` to diff against (pass --template-dir)")
     })?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(keys));
+    let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
         .map_err(|e| format!("resolving `{reference}`: {e}"))
 }
@@ -912,29 +903,27 @@ pub fn policy_kind(path: &Path) -> &'static str {
     let Ok(bytes) = std::fs::read(path) else {
         return "source";
     };
-    // A base/template is SourcePolicy syntax; a fragment or leaf is leaf-delta syntax.
-    if let Ok(p) = kennel_lib_compile::parse_source(&bytes) {
-        return if p.template_name.is_some() {
-            "template"
-        } else if p.name.is_some() {
-            "leaf"
-        } else {
-            "source"
-        };
-    }
-    // Leaf-delta syntax: a composable fragment (additive-only, included by reference,
-    // not anchored to a non-base parent) or an ordinary leaf kennel.
-    kennel_lib_compile::parse_leaf(&bytes).map_or("source", |leaf| {
-        let anchored_to_chain = leaf
+    // One `SourcePolicy` type carries all three roles, told apart by identity: a `template_name` is a
+    // template; a `name` + `template_base` is a runnable leaf; a `name` with no `template_base` is a
+    // composable fragment (additive-only, included by reference).
+    let Ok(p) = kennel_lib_compile::parse_source(&bytes) else {
+        return "source";
+    };
+    if p.template_name.is_some() {
+        "template"
+    } else if p.name.is_some() {
+        let anchored_to_chain = p
             .template_base
             .as_deref()
             .is_some_and(|b| !b.starts_with("base-confined@"));
-        if leaf.is_additive_only() && !anchored_to_chain {
+        if p.template_base.is_none() && p.is_additive_only() && !anchored_to_chain {
             "fragment"
         } else {
             "leaf"
         }
-    })
+    } else {
+        "source"
+    }
 }
 
 /// `kennel policy show <policy>` — resolve a policy and print what it actually means.
@@ -980,8 +969,8 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
-        let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let tc = TrustContext::load(&trust_dirs)?;
+        let trust = tc.allow_unsigned();
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         print_warnings(&compiled.warnings);
@@ -990,8 +979,8 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
         ));
         compiled.policy
     } else {
-        let keys = load_trust_store(&trust_dirs)?;
-        kennel_lib_policy::verify_settled(&bytes, &keys)
+        let tc = TrustContext::load(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, tc.keys())
             .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
     };
     print_effective_policy(&policy);
@@ -1276,8 +1265,8 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
     }
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
-    let keys = load_trust_store(&trust_dirs)?;
-    let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+    let tc = TrustContext::load(&trust_dirs)?;
+    let trust = tc.allow_unsigned();
     let source = FsTemplateSource {
         dirs: template_dirs.clone(),
     };
@@ -1368,32 +1357,18 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     let key_path = key_path.ok_or("sign needs --key <path>")?;
 
     let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
-    // A base/template is SourcePolicy syntax (`[fs] read = [...]`); a composable
-    // fragment is leaf-delta syntax (`[[fs.read.add]]`) and signs through the leaf
-    // path. Try the source form first; fall back to the leaf form so `policy sign`
-    // covers both templates and fragments (05-templates §5.10). Either way we need the
-    // canonical bytes the signature covers, which the signer then signs.
-    let payload = match kennel_lib_compile::parse_source(&bytes) {
-        Ok(policy) => {
-            if policy.signature.is_some() {
-                return Err(format!(
-                    "{path} already carries a [signature]; remove it before re-signing"
-                ));
-            }
-            kennel_lib_compile::canonical_source(&policy).map_err(|e| format!("signing: {e}"))?
-        }
-        Err(source_err) => {
-            let leaf = kennel_lib_compile::parse_leaf(&bytes).map_err(|_| {
-                format!("{path} is not a signable source template/fragment ({source_err})")
-            })?;
-            if leaf.signature.is_some() {
-                return Err(format!(
-                    "{path} already carries a [signature]; remove it before re-signing"
-                ));
-            }
-            kennel_lib_compile::canonical_leaf(&leaf).map_err(|e| format!("signing: {e}"))?
-        }
-    };
+    // A template (`[fs] read = [...]`) and a composable fragment (`[[fs.read.add]]`) are the one
+    // `SourcePolicy` type, so `policy sign` covers both through a single parse (05-templates §5.10).
+    // We need the canonical bytes the signature covers, which the signer then signs.
+    let policy = kennel_lib_compile::parse_source(&bytes)
+        .map_err(|e| format!("{path} is not a signable source template/fragment ({e})"))?;
+    if policy.signature.is_some() {
+        return Err(format!(
+            "{path} already carries a [signature]; remove it before re-signing"
+        ));
+    }
+    let payload =
+        kennel_lib_compile::canonical_source(&policy).map_err(|e| format!("signing: {e}"))?;
 
     // Templates are the security baseline: only a system/vendor key may sign one, so
     // the `key_id` resolves against the system trust dirs — never the user's keys. The
@@ -1678,14 +1653,14 @@ pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
         let source = FsTemplateSource {
             dirs: template_dirs,
         };
-        let keys = load_trust_store(&trust_dirs)?;
-        let trust = kennel_lib_compile::Trust::allow_unsigned(Some(&keys));
+        let tc = TrustContext::load(&trust_dirs)?;
+        let trust = tc.allow_unsigned();
         let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
             .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
         compiled.policy
     } else {
-        let keys = load_trust_store(&trust_dirs)?;
-        kennel_lib_policy::verify_settled(&bytes, &keys)
+        let tc = TrustContext::load(&trust_dirs)?;
+        kennel_lib_policy::verify_settled(&bytes, tc.keys())
             .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
     };
 

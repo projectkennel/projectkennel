@@ -3,8 +3,7 @@
 //! # Purpose
 //!
 //! Version pinning constrains *which* artefact a reference names; the lockfile
-//! constrains *what bytes* live under that version (`02-2-config-schema.md` §The
-//! lockfile, `docs/design/05-templates.md` §5.10). It records, for every reference resolved
+//! constrains *what bytes* live under that version. It records, for every reference resolved
 //! while loading a policy, the signing-key id and the artefact's ed25519 signature.
 //! On every later load the resolver recomputes the chain and compares: a `name@version`
 //! that resolved to a *different* signature than was locked is a hard error, not a

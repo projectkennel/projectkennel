@@ -54,7 +54,6 @@ reason = "create a temporary file/dir"
 path = "/usr/bin/install"
 reason = "copy and set permissions"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

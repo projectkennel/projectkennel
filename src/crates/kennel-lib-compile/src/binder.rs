@@ -1,4 +1,4 @@
-//! Compile-time validation of the `[binder]` section (`docs/design/07-1-binder.md` §7.1.4).
+//! Compile-time validation of the `[binder]` section.
 //!
 //! # Purpose
 //!
@@ -9,14 +9,14 @@
 //! against. This is the only place to reject a malformed or reserved-namespace
 //! declaration, at compile time, on the resolved source policy.
 //!
-//! # What this checks (§7.1.4)
+//! # What this checks
 //!
 //! - **No reserved name.** The `org.projectkennel.*` namespace is owned by kenneld
 //!   (the af-unix/dbus/wayland facades are enabled by their own sections, never
 //!   declared here). A `provide`/`consume` name in that namespace is a categorical
 //!   error — declaring it would shadow a kenneld-owned node.
 //! - **Every entry has a `name` and a `reason`.** A service grant is a capability;
-//!   like every other granting entry it carries a documented reason (`02-2`).
+//!   like every other granting entry it carries a documented reason.
 //!
 //! Validation runs on the *resolved* policy. Errors fail the compile; there are no
 //! footgun warnings for this section (unlike `[unix]`), so success returns an empty
@@ -79,7 +79,7 @@ fn check_entry(errs: &mut Vec<String>, label: &str, name: Option<&str>, reason: 
             errs.push(format!(
                 "[[{label}]] `{n}` is in the reserved `{RESERVED_PREFIX}*` namespace: reserved \
                  services are enabled by their own sections (e.g. [unix]/[ssh]), never \
-                 declared here (§7.1.4)"
+                 declared here"
             ));
         }
         Some(_) => {}

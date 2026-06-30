@@ -3,6 +3,7 @@
 //! Daemon connection, key loading, policy/template/trust-store resolution,
 //! exit-code mapping, lexopt helpers, and the command tables.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -384,6 +385,93 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
         }
     }
     Ok(keys)
+}
+
+/// The vendor- and host-tier key-id sets for the reserved-namespace gate (§7.13.5).
+///
+/// A key's tier is *which trust dir loads it* — vendor = `/usr/lib/kennel/keys`, host =
+/// `/etc/kennel/keys`. Any key at a tier is equivalent; this maps each tier to the set of key-ids
+/// whose `*.pub` sits in its dir.
+fn trust_tier_sets() -> (BTreeSet<String>, BTreeSet<String>) {
+    fn key_ids_in(dir: &Path) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) == Some("pub") {
+                    if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                        ids.insert(stem.to_owned());
+                    }
+                }
+            }
+        }
+        ids
+    }
+    let vendor_dir = kennel_lib_config::vendor_key_dir();
+    let host_dir = kennel_lib_config::User::load()
+        .unwrap_or_default()
+        .system_key_dirs()
+        .into_iter()
+        .find(|d| *d != vendor_dir);
+    let vendor = key_ids_in(&vendor_dir);
+    let host = host_dir.as_deref().map(key_ids_in).unwrap_or_default();
+    (vendor, host)
+}
+
+/// A loaded, tier-aware trust context (§7.13.5).
+///
+/// The trust store plus the vendor/host tier sets and the host `[[reserved]]` table the compiler's
+/// reserved-namespace gate resolves a declaring tier against. Holds the owned data so a borrowed
+/// [`kennel_lib_compile::Trust`] can reference it.
+pub struct TrustContext {
+    keys: kennel_lib_policy::KeySet,
+    vendor: BTreeSet<String>,
+    host: BTreeSet<String>,
+    reserved: Vec<kennel_lib_config::ReservedNamespace>,
+}
+
+impl TrustContext {
+    /// Load the trust store from `dirs` and the tier/reserved context from the deployment cascade.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message if a `.pub` file under `dirs` cannot be read or parsed.
+    pub fn load(dirs: &[PathBuf]) -> Result<Self, String> {
+        let keys = load_trust_store(dirs)?;
+        let (vendor, host) = trust_tier_sets();
+        let reserved = kennel_lib_config::Deployment::load()
+            .map(|d| d.reserved().to_vec())
+            .unwrap_or_default();
+        Ok(Self {
+            keys,
+            vendor,
+            host,
+            reserved,
+        })
+    }
+
+    /// The underlying trust store (for `verify_settled`, which checks a settled signature directly).
+    #[must_use]
+    pub const fn keys(&self) -> &kennel_lib_policy::KeySet {
+        &self.keys
+    }
+
+    fn tiered<'a>(&'a self, base: kennel_lib_compile::Trust<'a>) -> kennel_lib_compile::Trust<'a> {
+        base.with_tiers(&self.vendor, &self.host)
+            .with_reserved(&self.reserved)
+    }
+
+    /// A `require`-mode tier-aware trust context (attested: refuse unsigned ancestors).
+    #[must_use]
+    pub fn require(&self) -> kennel_lib_compile::Trust<'_> {
+        self.tiered(kennel_lib_compile::Trust::require(&self.keys))
+    }
+
+    /// An `allow_unsigned` tier-aware trust context (development: resolve unsigned ancestors).
+    #[must_use]
+    pub fn allow_unsigned(&self) -> kennel_lib_compile::Trust<'_> {
+        self.tiered(kennel_lib_compile::Trust::allow_unsigned(Some(&self.keys)))
+    }
 }
 
 // ─── Signing keys ────────────────────────────────────────────────────────────

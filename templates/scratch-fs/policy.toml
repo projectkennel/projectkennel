@@ -59,7 +59,6 @@ cpu = "30"
 field = "fs.write"
 oneof = ["~/scratch/work-a", "~/scratch/work-b"]
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
