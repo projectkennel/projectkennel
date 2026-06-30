@@ -10,6 +10,7 @@
 #     keys/*.pub                  the trust-store public key(s)
 #     templates/<n>/*.toml        the signed reference templates (policy + meta)
 #     fragments/<n>/policy.toml   the signed composable fragments
+#     policies/<n>/policy.toml    the reference policy sources (compiled host-signed at install)
 #     man/<page>.<section>        the committed man pages
 #     SHA256SUMS                  sha256 of every bin/ entry
 #
@@ -126,6 +127,19 @@ done
 for d in "$ROOT"/toml/fragments/*/; do
 	[ -f "${d}policy.toml" ] || continue
 	install -D -m 0644 "${d}policy.toml" "$DEST/fragments/$(basename "$d")/policy.toml"
+done
+
+# The reference policy SOURCES — runnable leaves (policies/<n>) and service providers
+# (policies/providers/<n>), policy.toml only. They are maintainer-signed sources; install.sh's
+# install_reference_policies compiles each to a host-signed settled artefact under
+# /etc/kennel/policies (the loader pin is host-specific, so a settled policy cannot be shipped).
+for d in "$ROOT"/toml/policies/*/; do
+	[ -f "${d}policy.toml" ] || continue
+	install -D -m 0644 "${d}policy.toml" "$DEST/policies/$(basename "$d")/policy.toml"
+done
+for d in "$ROOT"/toml/policies/providers/*/; do
+	[ -f "${d}policy.toml" ] || continue
+	install -D -m 0644 "${d}policy.toml" "$DEST/policies/providers/$(basename "$d")/policy.toml"
 done
 
 # The committed man pages (gen-man output; man/README.md).
