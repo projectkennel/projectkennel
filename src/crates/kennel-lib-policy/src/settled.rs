@@ -967,8 +967,6 @@ const fn is_false(b: &bool) -> bool {
 pub struct ResolvedArtifact {
     /// Artefact name.
     pub name: String,
-    /// Resolved version (e.g. `v4`, `v2.33.2`).
-    pub version: String,
     /// The `key_id` that signed this artefact.
     pub signing_key_id: String,
     /// The artefact's ed25519 signature (base64) — the content commitment lifted from the lockfile.
@@ -1416,7 +1414,7 @@ pub struct SpawnGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnTemplate {
-    /// The exact `name@version` trust-store reference.
+    /// The trust-store template name.
     pub template: String,
     /// The `key_id` the template's signature verified against at this policy's compile.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1424,7 +1422,7 @@ pub struct SpawnTemplate {
     /// The template's ed25519 signature (Base64) recorded at this policy's compile — the
     /// **content-pin**. A deterministic ed25519 signature over the canonical template *is* its
     /// content commitment (the lockfile idiom — no `sha2`): at `SPAWN`, `kenneld` re-resolves the
-    /// named `name@version` from the *mutable* trust store and fails closed unless the re-verified
+    /// named template from the *mutable* trust store and fails closed unless the re-verified
     /// signature matches this, defeating a re-signed-in-place TOCTOU (§7.12.8). Empty only when the
     /// template resolved unsigned (local-development `AllowUnsigned`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1531,7 +1529,6 @@ pub fn sample_settled() -> SettledPolicy {
             threat_catalogue_version: "0.1".to_owned(),
             resolved_artifacts: vec![ResolvedArtifact {
                 name: "base-confined".to_owned(),
-                version: "v3".to_owned(),
                 signing_key_id: "kennel-maint-2026-01".to_owned(),
                 signature: "c2ln".to_owned(),
             }],

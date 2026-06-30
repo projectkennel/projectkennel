@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: ai-coding-strict  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # Strict confinement for an AI coding agent on a single project tree. Adds, on
@@ -18,13 +18,12 @@
 # invariants are unchanged. See templates/README.md for enforcement status.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "ai-coding-strict"
-template_version = "1"
 
 # Exec floor composed from the fragment catalogue (05-templates.md §5.10):
 # the shells + POSIX userland + capability bundles, instead of hand-listing them.
-include = ["core-shell@v1", "core-coreutils@v1", "core-file-mutation@v1", "core-archive@v1", "net-clients@v1", "toolchain-c@v1", "vcs-git@v1"]
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "net-clients", "toolchain-c", "vcs-git"]
 
 
 
@@ -111,4 +110,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQO6raHWdOxeS9wD47NkiRPLh5cE+cCs0ji\nm6D+gXH89xiTIslarm7+zNx+rMH0bSlbPqlY8wYvln6ya2cn1UwAc=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCb2q245dDxf7en7sFpw3mI5hRVx0j8PzZ\nVd3kAvRGxrlvVzhe8EimdBnk73m08M0bXXsbW7c9PBA4ZxJpqiSQw=\n-----END SSH SIGNATURE-----\n"

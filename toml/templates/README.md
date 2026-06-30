@@ -65,7 +65,6 @@ templates govern the **policy**, not the tool binaries. Gated in CI by
 ## Conventions
 
 - `policy.toml` references its parent as `template_base = "<name>@v<version>"` and
-  carries `template_name`/`template_version` (§5.2/§5.10).
 - Substitution variables (`<kennel>`, `<uid>`, `<user>`, `<home>`, `<tag>`,
   `<ctx>`, `<gid>`) are expanded at spawn time (§5.4); a leftover variable is a
   hard error.

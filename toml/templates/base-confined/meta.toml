@@ -1,6 +1,5 @@
 # Template identity + signing metadata.
 name = "base-confined"
-version = "1"
 # Root template — no parent.
 template_base = ""
 # The signing key this version is signed under (id in the template trust store). policy.toml carries the matching [signature]; verify with

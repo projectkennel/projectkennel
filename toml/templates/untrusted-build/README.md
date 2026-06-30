@@ -9,7 +9,7 @@ second-stage payload.
 ## What the user adds
 
 ```toml
-template = "untrusted-build@v1"
+template = "untrusted-build"
 name = "build-foo"
 
 [[fs.read.add]]

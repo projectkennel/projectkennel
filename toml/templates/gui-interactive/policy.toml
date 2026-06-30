@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: gui-interactive  (v1)
-# Inherits: interactive@v1
+# Inherits: interactive
 # Threat catalogue: THREATS.md v0.5
 #
 # The confined graphical-app shape: a workstation app kennel whose display server is NOT the
@@ -8,7 +8,7 @@
 # `gui-broker` GUI-service kennel. It holds NO host reach, NO GPU grant, and cannot name the host
 # Wayland socket — it `[[consumes]]` the `org.projectkennel.wayland` capability over the W1 connector
 # mesh, and its first connect socket-activates the broker (W6). Permissive otherwise: it inherits the
-# interactive@v1 workstation toolset (host egress, shells, coreutils, editors, git, python3) and adds
+# interactive workstation toolset (host egress, shells, coreutils, editors, git, python3) and adds
 # the GUI client bundle.
 #
 # A leaf adds only the [workload] — the graphical program to run (e.g. weston-terminal).
@@ -18,12 +18,11 @@
 # ============================================================================
 
 template_name = "gui-interactive"
-template_version = "1"
-template_base = "interactive@v1"
+template_base = "interactive"
 
 # The GUI client binaries (weston-terminal, foot, …) plus the fontconfig read they render text
-# through, on top of the interactive@v1 CLI toolset — all from the gui-desktop fragment.
-include = ["gui-desktop@v1"]
+# through, on top of the interactive CLI toolset — all from the gui-desktop fragment.
+include = ["gui-desktop"]
 
 # The display arrives over the mesh, bound at WAYLAND_DISPLAY — there is no host Wayland leg and no
 # /dev/dri here; the app's display server is the gui-broker's nested compositor.
@@ -41,4 +40,4 @@ reason = "the confined GUI app reaches its display server — a broker-spawned n
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEysDa4qkilFVjlFRl38vbhwUS+d6Ynk1A\nC/vmYhtZKcPfoulwBx/T6bbJxy0/0QtNySHuxmcsG/wGrZYGv4wgs=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHyzuftOucO9GjhezAaUjRj/8bSHnWPIQC\nB8pZ87B3HWulLEUtRCAqDBsupnZYLeDKC/SvmPv0U3iuBdhv/30AM=\n-----END SSH SIGNATURE-----\n"

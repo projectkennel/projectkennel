@@ -5,8 +5,8 @@
 # kennel what a Python workflow needs, instead of hand-listing the interpreter,
 # its cache, and the package index in every leaf.
 #
-#   template_base = "base-confined@v1"
-#   include = ["lang-python@v1"]
+#   template_base = "base-confined"
+#   include = ["lang-python"]
 #
 # Additive-only: every entry is a `[[*.add]]` delta appended to the effective
 # policy the template chain produced. A fragment can only widen; anything that

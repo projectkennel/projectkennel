@@ -19,6 +19,33 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-30 — drop template/fragment *versioning*: identity is the name, integrity is the signature (rides schema v3)
+
+- **Target:** the templates chapter (design §5.10 "Signing, versioned references, and includes" and
+  §5.11 the upgrade flow), the config-schema chapter (`template_base`/`template_version`/`include`
+  reference grammar), and the lockfile/provenance model. In the frozen trees:
+  docs/design/05-templates.md, docs/architecture/02-2-config-schema.md.
+- **Change (as-built to capture in the rewrite) — this OVERRIDES §5.10:** there is **no version axis**
+  on templates or fragments. A reference is a **bare name** (`template_base = "base-confined"`,
+  `include = ["core-shell"]`, `[[spawn.allow]] template = "net-fetch"`); the `@vN` suffix, the
+  `template_version` field, the `meta.toml` `version`, the reference-grammar version validator, the
+  settled `ResolvedArtifact.version`, and the lockfile `version` key are all removed.
+  - **Identity is the name; integrity is the signature.** §5.10 held that version-pinned references
+    were a supply-chain control inseparable from signing. As-built, the **signature alone** is the
+    content commitment: the lockfile pins each `name` → its ed25519 signature and hard-errors on
+    drift (re-pointed/re-signed bytes change the signature and are caught); the dynamic-spawn
+    content-pin (§7.12.8) likewise verifies the recorded *signature*, not a version label. The
+    version string added no enforcement (resolution never cross-checked it, and the whole corpus was
+    `@v1`), so it was theatre by the project's own no-theatre rule.
+  - **Coexisting "versions" are coexisting names.** When a base template needs a breaking change,
+    author a new **named** template (e.g. `base-confined-v2`) and point `template_base` at it
+    deliberately — a reviewed edit, not an automatic bump. The `kennel policy upgrade` command (and
+    its version-ordering module) is therefore **removed**; there is no "newest version" to detect.
+  - Rides the existing **`SETTLED_SCHEMA_VERSION` 3** (the settled `ResolvedArtifact` loses `version`).
+- **Why:** a control must move a real, named threat; an unenforced version string did not. Name +
+  signature is the whole supply-chain control, and it is simpler and honestly enforced.
+- **Source:** the corpus-templates-fragments PR (#142).
+
 ## 2026-06-30 — remove the `[binder]` service section + two invariant-only schema keys (rides schema v3)
 
 - **Target:** the binder chapter (design §7.1, the user-defined service registry), the config-schema

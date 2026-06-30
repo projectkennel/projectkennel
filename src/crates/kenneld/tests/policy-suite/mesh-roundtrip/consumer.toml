@@ -11,7 +11,7 @@
 # ============================================================================
 
 name = "mesh-consumer"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 # The consumer holds NO host reach of its own — it uses a capability provided by another kennel.
 [net]

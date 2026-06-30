@@ -6,7 +6,7 @@
 # kennel that compiles native code; the project tree itself is granted by the
 # leaf, so this fragment adds only the tools.
 #
-#   include = ["toolchain-c@v1"]
+#   include = ["toolchain-c"]
 #
 # Additive-only (§5.10). No network and no extra filesystem write: a build reads
 # the toolchain (already on `fs.read` via base-confined's `/usr/**`) and writes

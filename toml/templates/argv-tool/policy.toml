@@ -1,13 +1,13 @@
 # ============================================================================
 # Spawn template: argv-tool  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # A SPAWN target (§7.12) that delegates *what runs* to the caller. The template
 # fixes the cage — `net.mode = "none"` (no egress leg), no filesystem write grant,
 # a self-reaping TTL, explicit ceilings — and the `[exec].allow` floor names the
 # only programs that may run. `[workload].argv` is a mutable field, so the agent
-# supplies the command line (`facade-spawn run argv-tool@v1 -- /bin/echo hi`); the
+# supplies the command line (`facade-spawn run argv-tool -- /bin/echo hi`); the
 # default `/bin/true` runs when no command is given. `argv[0]` is gated by
 # `[exec].allow` under Landlock execve default-deny regardless of what is written,
 # so the caller chooses the command WITHOUT widening what the sibling can reach.
@@ -21,9 +21,8 @@
 # self-reaping TTL, and explicit memory/pids/CPU ceilings.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "argv-tool"
-template_version = "1"
 
 
 # --- Network: frozen off. No egress leg, whatever the caller runs. -----------
@@ -72,4 +71,4 @@ reason = "the caller chooses the command to run within the [exec].allow floor; t
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQLyDfuvVn+SNeywwRFXqX4g1l/rpTgssvf\nsp8+A0DQlThmETO+YqchYIOCS6nj6WrokjiIxlP6p3xA019QqSvQQ=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEFt8AQxcCecGhDR/HvX91EcZmQmBjk7R4\n0+EnRmx7tAzyAAa7lH/3DuR8fSxU7L7pPFLPOxpIMyHjp/r4TKTAE=\n-----END SSH SIGNATURE-----\n"

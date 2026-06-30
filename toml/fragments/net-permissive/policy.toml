@@ -5,7 +5,7 @@
 # common public package ecosystems and code forges, for a human-driven workflow
 # where pinning every destination up front is impractical.
 #
-#   include = ["net-permissive@v1"]
+#   include = ["net-permissive"]
 #
 # A NOTE ON SCOPE (and a deliberate divergence from the §5.10 sketch). A fragment
 # is additive-only: it can ADD allowed destinations, but it cannot flip the

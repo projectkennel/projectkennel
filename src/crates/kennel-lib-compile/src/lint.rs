@@ -92,11 +92,10 @@ mod tests {
     /// A [`TemplateSource`] backed by the shipped `templates/` dir (read at test time).
     struct TemplatesDir(PathBuf);
     impl TemplateSource for TemplatesDir {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             // Templates are `templates/<name>/policy.toml` and composable fragments are
-            // `fragments/<name>/policy.toml` (a sibling dir); the `@v<ver>` contract is checked
+            // `fragments/<name>/policy.toml` (a sibling dir); references are by name, checked
             // by the chain resolver, so a name lookup across both suffices here.
-            let _ = version;
             std::fs::read(self.0.join(name).join("policy.toml"))
                 .or_else(|_| {
                     std::fs::read(self.0.join("../fragments").join(name).join("policy.toml"))

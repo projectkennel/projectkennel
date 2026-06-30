@@ -33,7 +33,7 @@ pub struct TemplateEntry {
 }
 
 impl TemplateEntry {
-    /// The versioned reference (e.g. "base-confined@v1").
+    /// The versioned reference (e.g. "base-confined").
     pub fn reference(&self) -> String {
         format!("{}@v{}", self.name, self.version)
     }

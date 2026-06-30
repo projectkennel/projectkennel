@@ -1,6 +1,6 @@
 # ============================================================================
 # Leaf policy: openclaw on a single project   (~/.config/kennel/kennels/openclaw-myproj.toml)
-# Derives from: ai-coding-strict@v1
+# Derives from: ai-coding-strict
 # Threat catalogue: THREATS.md v0.4
 #
 # WHAT THIS IS
@@ -29,9 +29,8 @@
 # ============================================================================
 
 # A leaf names its parent by a single versioned reference and names itself. There
-# is no separate `template_version` field — the version rides the reference, and
 # the lockfile pins the exact fragment hash at compile time.
-template_base = "ai-coding-strict@v1"
+template_base = "ai-coding-strict"
 name = "openclaw-myproj"
 
 

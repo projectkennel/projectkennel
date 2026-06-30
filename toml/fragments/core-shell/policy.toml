@@ -5,7 +5,7 @@
 # granting it, so every interactive or scripted kennel needs the shell explicitly; this is
 # that grant, once, instead of in every template.
 #
-#   include = ["core-shell@v1"]
+#   include = ["core-shell"]
 #
 # Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
 # this widens the program menu only; `argv[0]` stays gated by the resolved

@@ -21,8 +21,8 @@
 //! direct run and every spawn succeeded.
 //!
 //! Usage: `facade-spawn-bench <count> <template> <direct-cmd> [direct-args...]`
-//!   e.g. `facade-spawn-bench 20 true-tool@v1 /bin/true`
-//!        `facade-spawn-bench 20 pyhello-tool@v1 /usr/bin/python3 -c "print('hello')"`
+//!   e.g. `facade-spawn-bench 20 true-tool /bin/true`
+//!        `facade-spawn-bench 20 pyhello-tool /usr/bin/python3 -c "print('hello')"`
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};

@@ -8,8 +8,8 @@ workload needs and nothing else.
 
 ```toml
 name = "my-agent"
-template_base = "ai-coding-strict@v1"
-include = ["lang-python@v1", "vcs-git@v1"]   # ← compose what the workload needs
+template_base = "ai-coding-strict"
+include = ["lang-python", "vcs-git"]   # ← compose what the workload needs
 ```
 
 Fragments are **additive-only**: every entry is a `[[*.add]]` delta appended to the

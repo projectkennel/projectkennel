@@ -9,7 +9,7 @@ kennel, so the repo's code cannot execute.
 ## What the user adds
 
 ```toml
-template = "inspect-only@v1"
+template = "inspect-only"
 name = "inspect-repo"
 
 [[fs.read.add]]

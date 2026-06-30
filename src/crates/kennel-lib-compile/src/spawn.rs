@@ -37,7 +37,7 @@ use std::collections::BTreeSet;
 
 use kennel_lib_policy::{PolicyError, SettledPolicy, SpawnGrant, SpawnTemplate};
 
-use crate::resolve::{split_reference, TemplateSource};
+use crate::resolve::{parse_reference, TemplateSource};
 use crate::source::{SourcePolicy, SpawnAllow};
 use crate::source_sig::Trust;
 
@@ -74,8 +74,8 @@ pub fn resolve_grant(
         let Some(reference) = entry.template.as_deref() else {
             continue;
         };
-        let (name, version) = split_reference(reference)?;
-        let bytes = source.fetch_settled(&name, &version).ok_or_else(|| {
+        let name = parse_reference(reference)?;
+        let bytes = source.fetch_settled(&name).ok_or_else(|| {
             PolicyError::Resolution(format!(
                 "[[spawn.allow]] template = \"{reference}\" has no settled artefact in the trust \
                  store — compile and sign it (`kennel policy compile`) so a spawn instantiates the \
@@ -150,7 +150,7 @@ mod tests {
     /// inherits — a self-contained policy would have to declare every required section by hand).
     struct RealTemplates;
     impl TemplateSource for RealTemplates {
-        fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             let root =
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../toml/templates");
             std::fs::read(root.join(name).join("policy.toml")).ok()
@@ -166,7 +166,7 @@ mod tests {
             .map(|f| format!("[[mutable]]\nfield = \"{f}\"\noneof = [\"a\"]\n"))
             .unwrap_or_default();
         let src = format!(
-            "template_base = \"base-confined@v1\"\ntemplate_name = \"net-fetch\"\n\
+            "template_base = \"base-confined\"\ntemplate_name = \"net-fetch\"\n\
              [net]\nmode = \"none\"\n[lifecycle]\nttl = \"5m\"\nttl_action = \"exit\"\n\
              [ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n{manifest}"
         );
@@ -180,10 +180,10 @@ mod tests {
     /// A source serving one named target's **settled** bytes via `fetch_settled`.
     struct OneSettled(Vec<u8>);
     impl TemplateSource for OneSettled {
-        fn fetch(&self, _name: &str, _version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, _name: &str) -> Option<Vec<u8>> {
             None
         }
-        fn fetch_settled(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+        fn fetch_settled(&self, name: &str) -> Option<Vec<u8>> {
             (name == "net-fetch").then(|| self.0.clone())
         }
     }
@@ -192,10 +192,10 @@ mod tests {
     /// settled form — for compiling a depth>1 target that itself names a spawn allow-target.
     struct BothSources(Vec<u8>);
     impl TemplateSource for BothSources {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
-            RealTemplates.fetch(name, version)
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
+            RealTemplates.fetch(name)
         }
-        fn fetch_settled(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+        fn fetch_settled(&self, name: &str) -> Option<Vec<u8>> {
             (name == "net-fetch").then(|| self.0.clone())
         }
     }
@@ -203,7 +203,7 @@ mod tests {
     fn spawner(extra_allow: &str) -> SourcePolicy {
         parse(&format!(
             "name = \"s\"\n[spawn]\nmax_instances = 3\nreason = \"r\"\n\
-             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n{extra_allow}"
+             [[spawn.allow]]\ntemplate = \"net-fetch\"\n{extra_allow}"
         ))
     }
 
@@ -234,7 +234,7 @@ mod tests {
         .expect("grant");
         assert_eq!(grant.max_instances, 3, "max_instances carried verbatim");
         let pinned = grant.allow.first().expect("one target");
-        assert_eq!(pinned.template, "net-fetch@v1");
+        assert_eq!(pinned.template, "net-fetch");
         // Sealed unsigned (dev), so the commitment is empty — kenneld accepts it only when it likewise
         // resolves the target unsigned.
         assert!(pinned.signature.is_empty() && pinned.signing_key_id.is_empty());
@@ -246,11 +246,11 @@ mod tests {
         // the settled form. (It also names a settled allow-target, so its own grant resolves; that is
         // beside the point — what fails is that *this* target may not be spawned.)
         let src =
-            "template_base = \"base-confined@v1\"\ntemplate_name = \"x\"\n[net]\nmode = \"none\"\n\
+            "template_base = \"base-confined\"\ntemplate_name = \"x\"\n[net]\nmode = \"none\"\n\
                    [lifecycle]\nttl = \"5m\"\nttl_action = \"exit\"\n\
                    [ulimits]\nas = \"512M\"\nnproc = \"64\"\ncpu = \"30\"\n\
                    [spawn]\nmax_instances = 1\nreason = \"r\"\n\
-                   [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n";
+                   [[spawn.allow]]\ntemplate = \"net-fetch\"\n";
         let compiled = crate::compile::compile(
             &parse(src),
             &BothSources(settled_target(None)),

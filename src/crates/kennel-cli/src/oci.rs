@@ -258,7 +258,7 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[
         "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then sign:\n\
          #   kennel policy sign {name} --key <key>\n\
          name = \"{name}\"\n\
-         template_base = \"base-confined@v1\"\n\
+         template_base = \"base-confined\"\n\
          \n\
          [rootfs]\n\
          path   = \"{path}\"\n\
@@ -987,7 +987,7 @@ struct FetchOpts<'a> {
 /// `--insecure-policy` declines skopeo's own signature policy — Kennel's trust layer is the digest
 /// pin and the run-policy signature, not skopeo's `/etc/containers/policy.json` (absent from the
 /// kennel view). All writes land in the entry dir (the only `fs.write` the per-build leaf grants);
-/// egress is the vetted registry allowlist of `oci-fetch@v1`. Each tool's stderr is captured to
+/// egress is the vetted registry allowlist of `oci-fetch`. Each tool's stderr is captured to
 /// `.fetch.err` so a failure (offline, denied registry, bad ref) surfaces to the operator.
 const FETCH_SCRIPT: &str = r#"
 ref="$1"; entry="$2"
@@ -1007,7 +1007,7 @@ rm -rf "$layout" "$bundle" "$entry/.digest" "$err"
 "#;
 
 /// Run the confined image fetch+unpack (§7.11.7): `skopeo` pull + `umoci` rootless unpack into the
-/// store entry, under the vendor-signed `oci-fetch@v1` policy plus a per-build leaf that grants only
+/// store entry, under the vendor-signed `oci-fetch` policy plus a per-build leaf that grants only
 /// `fs.write` to this entry (the vetted broad egress lives in the template, never operator-authored).
 /// Populates `rootfs/`, `config.json`, and the pinned `digest`.
 ///
@@ -1040,7 +1040,7 @@ fn confined_fetch(
         },
     );
     let leaf = format!(
-        "name = \"{name}-fetch\"\ntemplate_base = \"oci-fetch@v1\"\n[fs]\nwrite = [\"{fs_write}\"]\n"
+        "name = \"{name}-fetch\"\ntemplate_base = \"oci-fetch\"\n[fs]\nwrite = [\"{fs_write}\"]\n"
     );
     let leaf_path = std::env::temp_dir().join(format!(
         "kennel-oci-fetch-{name}-{}.toml",
@@ -1057,7 +1057,7 @@ fn confined_fetch(
         image.to_owned(),
         view,
     ];
-    eprintln!("kennel: fetching `{image}` confined under oci-fetch@v1 …");
+    eprintln!("kennel: fetching `{image}` confined under oci-fetch …");
     let res = crate::run::launch(
         leaf_path.clone(),
         &inst,
@@ -1081,7 +1081,7 @@ fn confined_fetch(
         let _ = std::fs::remove_file(&errf);
         let detail = detail.trim();
         let hint = if detail.is_empty() {
-            "skopeo/umoci failed inside the kennel (the host needs both, and the registry must be in oci-fetch@v1's allowlist)".to_owned()
+            "skopeo/umoci failed inside the kennel (the host needs both, and the registry must be in oci-fetch's allowlist)".to_owned()
         } else {
             detail.to_owned()
         };
@@ -1095,7 +1095,7 @@ fn confined_fetch(
 
 /// `kennel oci build <name> --image <ref>` — fetch an image into a named store entry, confined.
 ///
-/// Runs the `skopeo`/`umoci` pull+unpack inside a kennel under the vendor-signed `oci-fetch@v1`
+/// Runs the `skopeo`/`umoci` pull+unpack inside a kennel under the vendor-signed `oci-fetch`
 /// policy (§7.11.7), populating `rootfs/` + `config.json` + the pinned `digest`, then derives the
 /// closure-lock from the image's `config.User` and scaffolds the run policy the operator completes
 /// and signs. `--no-fetch` skips the fetch and records `--image` as-is (out-of-band population, e.g.
@@ -1342,7 +1342,7 @@ mod tests {
     /// an appended `[signature]` — the shape `update` rewrites.
     const SIGNED_OCI_POLICY: &str = "\
 name = \"my-app\"
-template_base = \"base-confined@v1\"
+template_base = \"base-confined\"
 
 [rootfs]
 path   = \"/store/my-app/rootfs\"

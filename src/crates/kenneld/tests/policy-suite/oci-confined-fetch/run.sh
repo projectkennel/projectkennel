@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
 # Confined OCI fetch e2e (§7.11.7, W17c). Proves `kennel oci build` runs the image pull + unpack
-# INSIDE a kennel under the vendor `oci-fetch@v1` policy — never on the host — and populates the
+# INSIDE a kennel under the vendor `oci-fetch` policy — never on the host — and populates the
 # store entry, which then boots. The companion `oci-substrate` case proves the overlay/closure-lock
 # substrate; this one proves the *fetch*.
 #
 # What it proves end to end, on the real installed stack:
-#   * `kennel oci build` runs skopeo + a no-chown tar extraction confined under oci-fetch@v1
+#   * `kennel oci build` runs skopeo + a no-chown tar extraction confined under oci-fetch
 #     (constrained egress to the registry allowlist; the per-build leaf adds only the store write);
 #   * the entry is populated: rootfs/ unpacked, config.json (image config) captured, digest pinned;
 #   * the rootless unpack flattens every inode to the operator uid (residual C / §7.11.4c);
@@ -32,7 +32,7 @@ trap cleanup EXIT
 command -v skopeo >/dev/null 2>&1 || { echo "SKIP: skopeo not installed"; exit 77; }
 command -v umoci  >/dev/null 2>&1 || { echo "SKIP: umoci not installed"; exit 77; }
 
-# The confined fetch: skopeo + python3 run inside a kennel under oci-fetch@v1; the per-build leaf
+# The confined fetch: skopeo + python3 run inside a kennel under oci-fetch; the per-build leaf
 # (signed by the suite key) adds fs.write for the store entry. Offline ⇒ SKIP (a fetch needs egress).
 if ! "$KENNEL" oci build "$NAME" --image "docker.io/library/busybox:latest" --key "$KEY" --force \
         >"$SCRATCH/build.log" 2>&1; then

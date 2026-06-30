@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: package-install  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # Installing packages from a specific registry, time-bounded. The threat is the
@@ -17,13 +17,12 @@
 # itself (out of scope); the short TTL bounds persistence.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "package-install"
-template_version = "1"
 
 # Exec floor composed from the fragment catalogue (05-templates.md §5.10):
 # the shells + POSIX userland + capability bundles, instead of hand-listing them.
-include = ["core-shell@v1", "core-coreutils@v1", "core-file-mutation@v1", "core-archive@v1", "toolchain-c@v1"]
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "toolchain-c"]
 
 
 
@@ -66,4 +65,4 @@ ttl_action = "exit"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBEuBhb4WxGRjr0fy4x5gkWgFX65uoMwc6\nOF74+uKX3Z0Cz74j4s/gFLtlKPJsLeWUr7zOQfigo9mjkuxYme7gY=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQO11nyCDBPjQ9AnCJCGWCi3XBct+wN9qhv\nrAiTMBQoWFyY40xm/yh9rRERQbr1aflk/MrFwT8q/JgGg5tnakSAE=\n-----END SSH SIGNATURE-----\n"

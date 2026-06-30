@@ -4,7 +4,7 @@
 # A composable capability bundle (05-templates.md §5.10): The write-side coreutils: create, move, remove, link, change mode. Kept separate from
 # `core-coreutils` so a read-only kennel cannot mutate while a scratch/build kennel adds it.
 #
-#   include = ["core-file-mutation@v1"]
+#   include = ["core-file-mutation"]
 #
 # Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
 # this widens the program menu only; `argv[0]` stays gated by the resolved

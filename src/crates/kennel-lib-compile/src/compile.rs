@@ -244,7 +244,7 @@ fn spawn_manifest_warnings(effective: &SourcePolicy) -> Vec<String> {
 
 /// Resolve and apply included fragments additively, in listed order.
 ///
-/// A fragment is a signed, version-pinned, **additive-only** policy piece: it may add rules
+/// A fragment is a signed, **additive-only** policy piece: it may add rules
 /// but not remove or override. Fragments are applied
 /// after the inheritance chain and before the leaf's own deltas. Two fragments that
 /// add a conflicting `[[net.proxy.allow]]` for the same host (different ports/protocol) are
@@ -260,17 +260,15 @@ fn apply_includes(
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
 ) -> Result<Vec<ChainLink>, PolicyError> {
-    use crate::resolve::split_reference;
+    use crate::resolve::parse_reference;
     use crate::source::net_key;
 
     let mut links = Vec::new();
     let mut seen_net: Vec<crate::source::NetAllow> = Vec::new();
     for reference in includes {
-        let (name, version) = split_reference(reference)?;
-        let bytes = source.fetch(&name, &version).ok_or_else(|| {
-            PolicyError::Resolution(format!(
-                "include `{name}@{version}` not found in the search path"
-            ))
+        let name = parse_reference(reference)?;
+        let bytes = source.fetch(&name).ok_or_else(|| {
+            PolicyError::Resolution(format!("include `{name}` not found in the search path"))
         })?;
         // A fragment is a `name`-only additive bundle (no `template_base` — it is included, never
         // run), so the runnable-leaf identity rule does not apply; its add-only shape and signature
@@ -284,7 +282,7 @@ fn apply_includes(
             )]));
         }
         if let Some(tb) = &fragment.template_base {
-            if !tb.starts_with("base-confined@") {
+            if tb != "base-confined" {
                 return Err(PolicyError::Resolution(format!(
                     "fragment `{name}` derives from `{tb}`; a fragment may only extend base-confined"
                 )));
@@ -313,7 +311,6 @@ fn apply_includes(
         *effective = apply_fragment(effective, &fragment);
         links.push(ChainLink {
             name,
-            version,
             signing_key_id,
             signature: fragment.signature.as_ref().map(|e| e.signature.clone()),
         });
@@ -336,7 +333,6 @@ fn assemble(
         .iter()
         .map(|link| ResolvedArtifact {
             name: link.name.clone(),
-            version: link.version.clone(),
             signing_key_id: link.signing_key_id.clone().unwrap_or_default(),
             // Integrity is the ed25519 signature verified at resolution — a deterministic signature
             // over canonical content is itself the commitment, so no separate content hash (no sha2).
@@ -415,10 +411,10 @@ mod tests {
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             self.0
                 .iter()
-                .find(|(n, v, _)| n == name && v == version)
+                .find(|(n, _, _)| n == name)
                 .map(|(_, _, b)| b.clone())
         }
     }
@@ -480,7 +476,7 @@ mod tests {
             .provenance
             .resolved_artifacts
             .iter()
-            .any(|a| a.name == "base-confined" && a.version == "v1"));
+            .any(|a| a.name == "base-confined"));
         assert!(p
             .framework_invariants_asserted
             .iter()
@@ -522,8 +518,8 @@ mod tests {
 
         // A minimal template deriving the signed ancestor (no catalogue includes — this test is about
         // the signed-ancestor provenance/lockfile flow, not a specific template's content).
-        let entry = parse(b"template_name = \"min\"\ntemplate_base = \"base-confined@v1\"\n")
-            .expect("parse");
+        let entry =
+            parse(b"template_name = \"min\"\ntemplate_base = \"base-confined\"\n").expect("parse");
         let compiled = compile(&entry, &source, &Trust::require(&ks), "v")
             .expect("compile with signed ancestor");
         assert!(
@@ -596,7 +592,7 @@ mod tests {
         let frag = "name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp.example\"\nports = [443]\nreason = \"corp egress proxy\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\ninclude = [\"corp-egress\"]\n",
         )
         .expect("parse leaf");
         let compiled = compile(&leaf, &source, &Trust::dev(), "v").expect("compile");
@@ -625,7 +621,7 @@ mod tests {
         let f2 = "name = \"b\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [8443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("frag-a", f1), ("frag-b", f2)]);
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"frag-a@v1\", \"frag-b@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\ninclude = [\"frag-a\", \"frag-b\"]\n",
         )
         .expect("parse leaf");
         let err = compile(&leaf, &source, &Trust::dev(), "v").expect_err("conflict");
@@ -637,7 +633,7 @@ mod tests {
         let frag = "name = \"corp-deny\"\n[[net.proxy.deny.invariant]]\ncidr = \"203.0.113.0/24\"\nreason = \"corp blocklist\"\n";
         let source = source_with_fragments(&[("corp-deny", frag)]);
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\ninclude = [\"corp-deny\"]\n",
         )
         .expect("parse leaf");
         let compiled = compile(&leaf, &source, &Trust::dev(), "v").expect("compile");
@@ -657,7 +653,7 @@ mod tests {
     #[test]
     fn a_leaf_may_not_declare_an_invariant_deny() {
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
         )
         .expect("parse leaf");
         let err = leaf
@@ -674,7 +670,7 @@ mod tests {
             "name = \"bad\"\n[[net.proxy.allow.remove]]\nname = \"github.com\"\nreason = \"r\"\n";
         let source = source_with_fragments(&[("bad-frag", frag)]);
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"bad-frag@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\ninclude = [\"bad-frag\"]\n",
         )
         .expect("parse leaf");
         assert!(
@@ -689,7 +685,7 @@ mod tests {
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let ks = KeySet::new();
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"ai-coding-strict\"\ninclude = [\"corp-egress\"]\n",
         )
         .expect("parse leaf");
         // An unsigned fragment must not be silently trusted when signatures are required.
@@ -728,7 +724,7 @@ mod tests {
         // Derive the signed ancestor directly and include the signed fragment — this test is about a
         // signed include verifying and lock-pinning under require, not a specific template's content.
         let leaf = parse(
-            b"name = \"p\"\ntemplate_base = \"base-confined@v1\"\ninclude = [\"corp-egress@v1\"]\n",
+            b"name = \"p\"\ntemplate_base = \"base-confined\"\ninclude = [\"corp-egress\"]\n",
         )
         .expect("parse leaf");
         let compiled = compile(&leaf, &source, &Trust::require(&ks), "v")

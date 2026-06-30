@@ -8,7 +8,7 @@ directory, and a short lifetime.
 ## What the user adds
 
 ```toml
-template = "package-install@v1"
+template = "package-install"
 name = "npm-try"
 
 [[fs.write.add]]

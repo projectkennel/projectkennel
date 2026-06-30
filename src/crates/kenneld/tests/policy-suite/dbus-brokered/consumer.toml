@@ -17,7 +17,7 @@
 # ============================================================================
 
 name = "dbus-consumer"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 [dbus.session]
 enabled = true

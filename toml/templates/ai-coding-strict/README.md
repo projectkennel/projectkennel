@@ -12,7 +12,7 @@ The template intentionally omits the two things that vary per use: the project
 path and the LLM API endpoint. A leaf policy is ~10 lines:
 
 ```toml
-template = "ai-coding-strict@v1"
+template = "ai-coding-strict"
 name = "myproj-ai"
 
 [[fs.read.add]]

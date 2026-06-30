@@ -1,4 +1,4 @@
-//! `dbus-broker@v1`: the standing D-Bus mediation service kennel (§7.7).
+//! `dbus-broker`: the standing D-Bus mediation service kennel (§7.7).
 //!
 //! A long-running service — the replacement for the per-consumer `host-dbus` delegate —
 //! that mediates D-Bus for consumer kennels over the connector mesh bus. It runs inside

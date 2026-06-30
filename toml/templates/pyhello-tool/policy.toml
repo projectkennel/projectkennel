@@ -1,6 +1,6 @@
 # ============================================================================
 # Spawn template: pyhello-tool  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # The interpreter-startup SPAWN target (§7.12): `python3 -c "print('hello')"` —
@@ -14,9 +14,8 @@
 # a self-reaping TTL, explicit memory/pids/CPU ceilings, no `[[mutable]]`.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "pyhello-tool"
-template_version = "1"
 
 
 # --- Network: frozen off. No egress leg. ------------------------------------
@@ -61,4 +60,4 @@ cpu = "30"       # CPU-seconds
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGNc4YV/XcHutXLKNapzC/WqUOh1wocK/f\n0NWgh7DTZ0LBjGnjxMIvlpec6FnwksW8+dVGPZCpqV0CoBoUwJdQk=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHoL8j0zANn9tvZTIlCyZshdcnFdxDG6WL\nkJLMh94sFC8jnVdEF1EV4b1kqgoLyTHza0rqRbLJWu1iRAT3BEjg8=\n-----END SSH SIGNATURE-----\n"

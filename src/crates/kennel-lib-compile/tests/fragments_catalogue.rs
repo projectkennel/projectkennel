@@ -84,7 +84,7 @@ struct CatalogueSource {
     roots: Vec<PathBuf>,
 }
 impl TemplateSource for CatalogueSource {
-    fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+    fn fetch(&self, name: &str) -> Option<Vec<u8>> {
         self.roots
             .iter()
             .find_map(|r| std::fs::read(r.join(name).join("policy.toml")).ok())
@@ -116,12 +116,12 @@ fn maintainer_keys() -> KeySet {
 fn settle_with(includes: &[&str], keys: &KeySet) -> String {
     let include_list = includes
         .iter()
-        .map(|i| format!("\"{i}@v1\""))
+        .map(|i| format!("\"{i}\""))
         .collect::<Vec<_>>()
         .join(", ");
     let leaf_src = format!(
         "name = \"frag-test\"\n\
-         template_base = \"base-confined@v1\"\n\
+         template_base = \"base-confined\"\n\
          include = [{include_list}]\n\
          [[exec.allow.add]]\n\
          path = \"/bin/sh\"\n\

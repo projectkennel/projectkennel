@@ -8,8 +8,7 @@
 # ============================================================================
 
 template_name = "exec-deny"
-template_version = "1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 [net]
 mode = "none"

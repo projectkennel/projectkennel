@@ -24,7 +24,6 @@
 # ============================================================================
 
 template_name = "base-bwrap"
-template_version = "1"
 
 
 # --- Capabilities (framework invariants) ------------------------------------
@@ -119,4 +118,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFY1/EYmvtjuT0jQdfoK1cnW9JYOw1M0Ev\nIxe+mCA23zpsSqd0HyQezDSBLtoFqrdPQhlsXF9mCkzvk5fsOnoQ4=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQALSsBUL7Truhy+6bxGpmb2mvlvpBMQOqR\nURkWFiQOllLx810KBmNOnfSpU20kvRFaUNk3wsFXGroGKLTb5+wAc=\n-----END SSH SIGNATURE-----\n"

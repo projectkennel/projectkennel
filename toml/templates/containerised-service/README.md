@@ -13,7 +13,7 @@ single persistent path.
 ## What the user adds
 
 ```toml
-template_base = "containerised-service@v1"
+template_base = "containerised-service"
 name = "dev-postgres"
 
 [exec]

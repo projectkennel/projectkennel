@@ -557,9 +557,9 @@ pub mod spawn {
         #[test]
         fn request_round_trips() {
             let patch = [("net.proxy.allow", "example.com:443"), ("fs.write", "/w")];
-            let bytes = encode_request("net-fetch@v1", &patch);
+            let bytes = encode_request("net-fetch", &patch);
             let (template, got) = decode_request(&bytes).expect("decode");
-            assert_eq!(template, "net-fetch@v1");
+            assert_eq!(template, "net-fetch");
             assert_eq!(
                 got,
                 vec![("net.proxy.allow", "example.com:443"), ("fs.write", "/w")]
@@ -568,15 +568,15 @@ pub mod spawn {
 
         #[test]
         fn an_empty_patch_round_trips() {
-            let bytes = encode_request("pure-compute@v1", &[]);
+            let bytes = encode_request("pure-compute", &[]);
             let (template, got) = decode_request(&bytes).expect("decode");
-            assert_eq!(template, "pure-compute@v1");
+            assert_eq!(template, "pure-compute");
             assert!(got.is_empty());
         }
 
         #[test]
         fn trailing_garbage_is_rejected() {
-            let mut bytes = encode_request("net-fetch@v1", &[]);
+            let mut bytes = encode_request("net-fetch", &[]);
             bytes.push(0xff);
             assert!(decode_request(&bytes).is_none());
         }
@@ -833,7 +833,7 @@ pub mod mesh {
     }
 }
 
-/// The `dbus-broker@v1` control-channel wire protocol: the verb `kenneld` speaks on the
+/// The `dbus-broker` control-channel wire protocol: the verb `kenneld` speaks on the
 /// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
 ///
 /// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its

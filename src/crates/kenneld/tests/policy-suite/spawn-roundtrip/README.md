@@ -5,11 +5,11 @@ path with the kennel's exit code as the verdict.
 
 ## What it proves
 
-A confined requester (this kennel) holds a `[spawn]` grant for the signed `echo-tool@v1` template
+A confined requester (this kennel) holds a `[spawn]` grant for the signed `echo-tool` template
 but **no network and no second capability of its own**. Its workload is `facade-spawn-probe` — the
 in-kennel SPAWN client — which:
 
-1. opens node 0 and transacts `verb::SPAWN` for `echo-tool@v1` (no fds out, `TF_ACCEPT_FDS` set);
+1. opens node 0 and transacts `verb::SPAWN` for `echo-tool` (no fds out, `TF_ACCEPT_FDS` set);
 2. receives the two channel ends `kenneld` mints (`Reply::DataAndFds`: the socketpair local end +
    the stderr pipe read end), decoded by `Connection::transact_with_fds`;
 3. writes a probe to the socketpair and reads it back — the spawned sibling (`echo-tool` = `/bin/cat`)
@@ -23,7 +23,7 @@ daemon; fds flow out of node 0 only.
 
 ## Moving parts
 
-- `policy.toml` — the requester: `[spawn]` allows `echo-tool@v1`, workload = the probe.
+- `policy.toml` — the requester: `[spawn]` allows `echo-tool`, workload = the probe.
 - `templates/echo-tool/` — the spawn target's **source**; `setup.sh` compiles + **signs** it to its
   settled form (`echo-tool.settled.toml`) with the suite key the daemon trusts, since a spawn target
   is the complete signed *settled* policy the daemon load-verifies and instantiates as-is.

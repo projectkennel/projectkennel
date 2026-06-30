@@ -1,7 +1,7 @@
 # ============================================================================
 # Provider policy: gui-broker — the confined-GUI display service, ondemand.
 #
-# Thin leaf over the maintainer-signed gui-broker@v1 template (which carries the shape: the host-
+# Thin leaf over the maintainer-signed gui-broker template (which carries the shape: the host-
 # Wayland leg, /dev/dri, the compositor SET, and the reserved [[provides]] org.projectkennel.wayland).
 # This leaf adds only the local variance: the [workload] picks ONE compositor — `cage` (kiosk, one
 # app full-window). Enabled ondemand: a consumer's first connect socket-activates it (W6).
@@ -11,7 +11,7 @@
 # ============================================================================
 
 name = "gui-broker"
-template_base = "gui-broker@v1"
+template_base = "gui-broker"
 
 [workload]
 argv = [
@@ -24,4 +24,4 @@ pinned = true
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMiM2Cnaj/zt4gB8TajFN7YWDBYP2F0INF\nj81SKHWhOPs3GKKHWgcFJOlk7vE1Vd7Anb0ttogEXk3PingKlyEwc=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQJ15V81S88lbkOTJAG/UYb+w3AYJ0nomyt\n+uJXicPoDZ377Wla1RA+i4graBxydKtw2C8XFr9te3S34+okxa0gE=\n-----END SSH SIGNATURE-----\n"

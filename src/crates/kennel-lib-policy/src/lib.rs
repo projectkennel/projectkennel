@@ -295,7 +295,7 @@ mod tests {
         policy.spawn = Some(settled::SpawnGrant {
             max_instances: 8,
             allow: vec![settled::SpawnTemplate {
-                template: "net-fetch@v1".to_owned(),
+                template: "net-fetch".to_owned(),
                 signing_key_id: "kennel-maint-2026".to_owned(),
                 signature: "Zm9vYmFy".to_owned(),
                 mutable_narrow: vec!["net.proxy.allow".to_owned()],

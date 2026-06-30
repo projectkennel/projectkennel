@@ -7,7 +7,7 @@
 # workloads. Include this fragment in templates that compile C/C++/Rust code
 # against system headers.
 #
-#   include = ["dev-headers@v1"]
+#   include = ["dev-headers"]
 #
 # Additive-only (§5.10): every entry is an [[fs.read.add]] delta. Composing
 # this widens the read view only; the cage (net/fs.write/exec/ceilings) is

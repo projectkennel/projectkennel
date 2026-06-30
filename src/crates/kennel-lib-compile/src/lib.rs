@@ -51,7 +51,6 @@ pub mod ssh;
 pub mod threats;
 pub mod translate;
 pub mod unix;
-pub mod version;
 
 pub use compile::{compile, effective_source, seal_unsigned, Compiled};
 pub use lint::lint_settled;
@@ -65,7 +64,6 @@ pub use source_sig::{
     canonical_source, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
 pub use translate::{translate, Translated};
-pub use version::{is_newer as version_is_newer, parse_reference};
 
 /// Shared test fixtures: the shipped fragments the reference templates `include`. Test
 /// `TemplateSource`s serve these (in addition to `base-confined`) so a retrofitted template's

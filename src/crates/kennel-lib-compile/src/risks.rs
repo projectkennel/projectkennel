@@ -402,7 +402,7 @@ mod tests {
     fn spawn_derives_t3_9_delegated_spawning_exposure() {
         let p = parse(
             "name = \"x\"\n[spawn]\nmax_instances = 4\nreason = \"agent spawns tools\"\n\
-             [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+             [[spawn.allow]]\ntemplate = \"net-fetch\"\n",
         );
         let r = evaluate(&p, &cat());
         let f = r
@@ -413,7 +413,7 @@ mod tests {
         assert_eq!(f.origin, Origin::Derived);
         assert_eq!(f.reason.as_deref(), Some("agent spawns tools"));
         // The carrier names the templates the grant reaches, so the report shows its breadth.
-        assert!(f.carrier.contains("net-fetch@v1"));
+        assert!(f.carrier.contains("net-fetch"));
         assert!(f.title.is_some());
         assert!(!f.residual.is_empty());
     }

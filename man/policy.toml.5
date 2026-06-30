@@ -10,16 +10,16 @@ Paths use \fB~/\fR for the kennel persona home (\fI/home/<user>\fR, never a host
 .SS top\-level
 Identity and inheritance.
 .TP
-\fBtemplate_base\fR \(em name@vN
-Parent template reference; absent only for the root (base\-confined).
+\fBtemplate_base\fR \(em name
+Parent template reference by name; absent only for the root (base\-confined).
 .TP
-\fBtemplate_name / template_version\fR \(em string
-A template's own name and version (templates only).
+\fBtemplate_name\fR \(em string
+A template's own name (templates only).
 .TP
 \fBname\fR \(em string
 The kennel name (leaf policies; matches the filename).
 .TP
-\fBinclude\fR \(em array of name@vN
+\fBinclude\fR \(em array of name
 Signed fragments composed additively.
 .TP
 \fBsignature\fR \(em table

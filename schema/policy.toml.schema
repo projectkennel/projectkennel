@@ -7,11 +7,7 @@
   "additionalProperties": false,
   "properties": {
     "template_base": {
-      "description": "Versioned reference to the parent template (`<name>@v<ver>`). Absent only for the root template.",
-      "type": "string"
-    },
-    "template_version": {
-      "description": "This artefact's own version.",
+      "description": "Reference to the parent template by name. Absent only for the root template.",
       "type": "string"
     },
     "template_name": {
@@ -23,7 +19,7 @@
       "type": "string"
     },
     "include": {
-      "description": "Additional signed fragments composed additively (versioned references).",
+      "description": "Additional signed fragments composed additively, referenced by name.",
       "type": "array",
       "items": {
         "type": "string"
@@ -562,7 +558,7 @@
       "additionalProperties": false,
       "properties": {
         "template": {
-          "description": "The exact, versioned trust-store template name (`net-fetch@v1`).",
+          "description": "The trust-store template name (`net-fetch`).",
           "type": "string"
         },
         "mutable": {

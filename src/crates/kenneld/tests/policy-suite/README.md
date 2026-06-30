@@ -62,7 +62,7 @@ its `policy.toml` (`__DEST_PORT__`, `__REAL_KEY__`, …) before the run.
 
 ## Adding a case
 
-Create `<name>/policy.toml` deriving `base-confined@v1`, set the `[net].mode` and the
+Create `<name>/policy.toml` deriving `base-confined`, set the `[net].mode` and the
 grants the slice needs, and put the proof in `[workload].argv`. Keep it to one concern.
 Validate it compiles with `kennel policy validate <name>/policy.toml --template-dir templates`,
 then it is picked up automatically by the runner.

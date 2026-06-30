@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: gui-broker  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.5
 #
 # The confined-GUI display service kennel shape: a GUI-service kennel that holds the
@@ -26,8 +26,7 @@
 # ============================================================================
 
 template_name = "gui-broker"
-template_version = "1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 
 # --- Service lifecycle -------------------------------------------------------
@@ -96,4 +95,4 @@ reason = "the confined display capability: each consumer is relayed into its own
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKRY2vdX0nZWCmstbdPffFK6pLvjC1/6qj\nDyQTjdVsZk372yUMHmCb/SaezWPg4jaX5ZLScAlWcaoAxQGg+frgI=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQFkx7enNGJ8VGrMiOhm6JLGH+yecD5BaE8\nQ6PM6mQJy46vRDpc2rE4lPc4EJNhbs1Fu3xEDfethUxgRyJw+39w8=\n-----END SSH SIGNATURE-----\n"

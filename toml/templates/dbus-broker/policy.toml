@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: dbus-broker  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.5
 #
 # The standing D-Bus mediation service kennel: a desktop-class service that holds the ONE host
@@ -23,8 +23,7 @@
 # ============================================================================
 
 template_name = "dbus-broker"
-template_version = "1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 
 # --- Service lifecycle -------------------------------------------------------
@@ -77,4 +76,4 @@ reason = "the mediated D-Bus capability consumer kennels reach over the connecto
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQN8euAwA5coivnCelEvZsB0iZEvefwH47o\nSwDUQgldWEnmIKNkU1Ei7tgHXBF7EOhbl+bZWqA+gnf0c2iQY62wI=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOkckTZRRoQHfcsPjcPitsjJIDSeiQbUGt\nrCJKuNRu/ZVXx+JE/qpyW0qQ2BSLW8com6/EDn+UeLjuSxPCpU3gM=\n-----END SSH SIGNATURE-----\n"

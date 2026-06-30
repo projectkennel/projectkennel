@@ -20,7 +20,6 @@
 # ============================================================================
 
 template_name = "base-confined"
-template_version = "1"
 
 
 # --- Capabilities (framework invariants) ------------------------------------
@@ -247,4 +246,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDsPeZbOWN2+fz2sKRAYM0wF767qb47gmL\nJ0QGDrmS8sGoanb9KwJeGGUt0zTWW5Dn1MaO8wjIghm7RjLnwzIA8=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIur22OvGew49DENhnrWf6nVowaEjYmkD1\nRWq+5Jz3MYGILEp0o/pCFoF4jFOkPae6CAbo6Na1kso6u0H7vVUQQ=\n-----END SSH SIGNATURE-----\n"

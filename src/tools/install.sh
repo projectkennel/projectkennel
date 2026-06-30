@@ -214,7 +214,7 @@ install_config() {
 			done
 		done
 	fi
-	# The composable fragments share the template search dir (a leaf's `include = ["gui-desktop@v1",
+	# The composable fragments share the template search dir (a leaf's `include = ["gui-desktop",
 	# …]` resolves them from template_dirs); ship them alongside the templates in the maintainer tree.
 	if [ -d "$pkg_root/fragments" ]; then
 		for fdir in "$pkg_root"/fragments/*/; do
@@ -334,7 +334,7 @@ install_keys() {
 install_templates() {
 	# Ship the signed reference templates into the CLI's default template search
 	# dir (/etc/kennel/templates, per dist/config/config.toml), so a leaf that
-	# derives e.g. base-confined@v1 resolves and verifies out of the box (the
+	# derives e.g. base-confined resolves and verifies out of the box (the
 	# maintainer public key is installed above). Org templates are added alongside.
 	[ -d "$pkg_root/templates" ] || return 0
 	local d n
@@ -348,7 +348,7 @@ install_templates() {
 
 install_fragments() {
 	# Ship the signed composable fragments into the SAME
-	# template search dir, so a leaf's `include = ["lang-python@v1", ...]` resolves and
+	# template search dir, so a leaf's `include = ["lang-python", ...]` resolves and
 	# verifies out of the box. Fragments and templates are both signed includes; sharing
 	# the dir means no extra search-path config, and `kennel policy list` labels each one
 	# `(fragment)`. Org fragments are added alongside.
@@ -498,7 +498,7 @@ $step2
   kennel keygen $u-dev
 
   # 5. scaffold an interactive shell policy from the shipped template, then run it:
-  kennel policy generate my-shell --from interactive@v1
+  kennel policy generate my-shell --from interactive
   kennel run my-shell -- /bin/bash
 
 To make PATH permanent, add the export above to ~/.bashrc (or ~/.profile).

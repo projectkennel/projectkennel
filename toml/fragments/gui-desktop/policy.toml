@@ -6,7 +6,7 @@
 # kennel; the DISPLAY LEG (the mesh `[[consumes]]` and its env) is the GUI app template's job, not
 # this fragment's — this adds the executables (and their resolved `[lib]` closure) and the font read.
 #
-#   include = ["gui-desktop@v1"]
+#   include = ["gui-desktop"]
 #
 # Additive-only: widens exec.allow with the GUI clients and fs.read with /etc/fonts (the font
 # files themselves live under /usr/share, already read by the base; /etc/fonts is bound by the

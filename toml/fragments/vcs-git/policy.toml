@@ -5,7 +5,7 @@
 # per-subcommand helpers, and the system git config read-only. Include it for a
 # kennel that does source control.
 #
-#   include = ["vcs-git@v1"]
+#   include = ["vcs-git"]
 #
 # Additive-only (§5.10). This grants the git *binaries* and the *system* config;
 # it deliberately does NOT grant network egress — git-over-HTTPS to a specific

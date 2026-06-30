@@ -3,7 +3,7 @@
 #
 # A composable capability bundle (05-templates.md §5.10): Tar and the common compressors/archivers — unpack a source tarball, compress an artifact.
 #
-#   include = ["core-archive@v1"]
+#   include = ["core-archive"]
 #
 # Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
 # this widens the program menu only; `argv[0]` stays gated by the resolved

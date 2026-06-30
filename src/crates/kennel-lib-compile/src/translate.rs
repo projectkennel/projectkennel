@@ -1633,7 +1633,7 @@ mod tests {
         // A well-formed grant validates.
         let ok = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"agent spawns tools\"\n\
-              [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+              [[spawn.allow]]\ntemplate = \"net-fetch\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&ok).is_ok());
@@ -1641,24 +1641,23 @@ mod tests {
         assert!(validate_spawn(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
 
         // reason is mandatory (the waiver is loud).
-        let no_reason = parse(
-            b"name = \"x\"\n[spawn]\nmax_instances = 8\n[[spawn.allow]]\ntemplate = \"t@v1\"\n",
-        )
-        .expect("parse");
+        let no_reason =
+            parse(b"name = \"x\"\n[spawn]\nmax_instances = 8\n[[spawn.allow]]\ntemplate = \"t\"\n")
+                .expect("parse");
         assert!(
             format!("{}", validate_spawn(&no_reason).expect_err("no reason")).contains("reason")
         );
 
         // max_instances is mandatory and must be ≥ 1 (the fork-bomb ceiling).
         let no_max =
-            parse(b"name = \"x\"\n[spawn]\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"t@v1\"\n")
+            parse(b"name = \"x\"\n[spawn]\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"t\"\n")
                 .expect("parse");
         assert!(
             format!("{}", validate_spawn(&no_max).expect_err("no max")).contains("max_instances")
         );
         let zero_max = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 0\nreason = \"r\"\n[[spawn.allow]]\n\
-              template = \"t@v1\"\n",
+              template = \"t\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&zero_max).is_err());
@@ -1673,7 +1672,7 @@ mod tests {
         // A malformed template ref is rejected.
         let bad_ref = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"r\"\n[[spawn.allow]]\n\
-              template = \"no-version\"\n",
+              template = \"Bad Name\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&bad_ref).is_err());
@@ -1894,10 +1893,10 @@ mod tests {
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             self.0
                 .iter()
-                .find(|(n, v, _)| n == name && v == version)
+                .find(|(n, _, _)| n == name)
                 .map(|(_, _, b)| b.clone())
         }
     }
@@ -2347,7 +2346,7 @@ mod tests {
         // W10: a [spawn] grant auto-derives the `kennel` shim + the in-cage spawn unit into
         // exec.allow, so the agent can run `kennel caps`/`kennel run` without listing them by hand.
         let src = parse(
-            b"name = \"k\"\n[spawn]\nreason = \"compose tools\"\nmax_instances = 2\n[[spawn.allow]]\ntemplate = \"echo-tool@v1\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n",
+            b"name = \"k\"\n[spawn]\nreason = \"compose tools\"\nmax_instances = 2\n[[spawn.allow]]\ntemplate = \"echo-tool\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n",
         )
         .expect("parse");
         let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
@@ -3053,9 +3052,9 @@ mod tests {
         // An explicit `filter_terminal_escapes = false` is carried to the settled
         // policy (a leaf that turns the filter off, atop the base chain).
         let off = translate_template(concat!(
-            "template_base = \"base-confined@v1\"\n",
+            "template_base = \"base-confined\"\n",
             "template_name = \"tty-off\"\n",
-            "template_version = \"1\"\n",
+            "",
             "[tty]\nfilter_terminal_escapes = false\n",
         ));
         assert!(!off.effective_policy.tty.filter_terminal_escapes);
@@ -3069,9 +3068,9 @@ mod tests {
 
         // An explicit `[trust] manifest = false` opts out, carried to the settled policy.
         let off = translate_template(concat!(
-            "template_base = \"base-confined@v1\"\n",
+            "template_base = \"base-confined\"\n",
             "template_name = \"trust-off\"\n",
-            "template_version = \"1\"\n",
+            "",
             "[trust]\nmanifest = false\n",
         ));
         assert!(!off.effective_policy.trust.manifest);

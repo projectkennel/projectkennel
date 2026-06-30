@@ -4,7 +4,7 @@
 # A composable capability bundle (05-templates.md §5.10): include it to grant a
 # kennel what a Node.js workflow needs — the runtime, npm, and the registry.
 #
-#   include = ["lang-node@v1"]
+#   include = ["lang-node"]
 #
 # Additive-only (§5.10): every entry is a `[[*.add]]` delta. A fragment widens;
 # it never removes or overrides.

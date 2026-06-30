@@ -5,7 +5,7 @@
 # interactive and agent template repeats. Carries NO filesystem-mutating tool — compose
 # `core-file-mutation` for that — so a read-only kennel includes this alone and cannot write.
 #
-#   include = ["core-coreutils@v1"]
+#   include = ["core-coreutils"]
 #
 # Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
 # this widens the program menu only; `argv[0]` stays gated by the resolved

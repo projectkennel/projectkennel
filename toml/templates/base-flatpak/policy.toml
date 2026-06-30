@@ -25,7 +25,6 @@
 # ============================================================================
 
 template_name = "base-flatpak"
-template_version = "1"
 
 
 # --- Capabilities (framework invariants) ------------------------------------
@@ -127,4 +126,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBd0Kx+ADPsTZqV7iCy9yc7I1hNX8xGSYe\n+ulIkTuRtrFD+Hj/+Fm1G4LblotrXoKy/9poz3m1uPiiqscn+C+w0=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDCwCEfQfEtxjoj/6jW1wfdEmr09qEA8/J\n10AEZZiPR0zgof0k2okLD5QGT8cCirA0zwHuKnvBUVKxTI+Ya+/Qk=\n-----END SSH SIGNATURE-----\n"

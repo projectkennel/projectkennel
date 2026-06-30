@@ -56,7 +56,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "policy",
         summary: "author, inspect, sign, and check policies",
-        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
+        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -131,11 +131,6 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         name: "diff",
         summary: "interpreted grant delta between a policy and its baseline (or another policy)",
         usage: "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    },
-    CommandSpec {
-        name: "upgrade",
-        summary: "re-pin a policy's template to a newer version (with review)",
-        usage: "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     },
     CommandSpec {
         name: "inspect",

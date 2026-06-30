@@ -99,11 +99,10 @@ pub static TABLES: &[Table] = &[
         name: "policy",
         title: "A Project Kennel source policy — a template, fragment, or leaf, as authored in TOML (`docs/architecture/02-2-config-schema.md`). Every key is optional unless noted; unknown keys are rejected by the compiler.",
         fields: &[
-            f("template_base", Ty::Str, "Versioned reference to the parent template (`<name>@v<ver>`). Absent only for the root template."),
-            f("template_version", Ty::Str, "This artefact's own version."),
+            f("template_base", Ty::Str, "Reference to the parent template by name. Absent only for the root template."),
             f("template_name", Ty::Str, "The template's own name (present on templates, absent on leaves)."),
             f("name", Ty::Str, "The kennel name (present on leaf policies, absent on templates)."),
-            f("include", Ty::StrArray, "Additional signed fragments composed additively (versioned references)."),
+            f("include", Ty::StrArray, "Additional signed fragments composed additively, referenced by name."),
             f("threat_catalogue_version", Ty::Str, "The THREATS.md catalogue version this artefact was authored against."),
             f("signature", Ty::Obj("signature"), "Detached signature envelope over the artefact's canonical content (required for templates/fragments, optional for leaves)."),
             f("cap", Ty::Obj("cap"), "Capabilities and no_new_privs."),
@@ -244,7 +243,7 @@ pub static TABLES: &[Table] = &[
         name: "spawn_allow",
         title: "One `[[spawn.allow]]` entry — a single signed template a `[spawn]` grant may instantiate. The template's spawn-eligibility (depth-1, lifetime, ceilings) is checked at the spawner's compile (§7.12.8).",
         fields: &[
-            req("template", Ty::Str, "The exact, versioned trust-store template name (`net-fetch@v1`)."),
+            req("template", Ty::Str, "The trust-store template name (`net-fetch`)."),
             f("mutable", Ty::StrArray, "Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields this requester may write (default: the full manifest). Narrows, never widens (§7.12.2) — every entry must name a field the template's manifest declares."),
         ],
     },

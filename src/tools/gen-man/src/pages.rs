@@ -116,7 +116,7 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "policy",
         "author, inspect, sign, and check policies",
-        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
+        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]",
     ),
     (
         "keygen",
@@ -187,11 +187,6 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "diff",
         "interpreted grant delta between a policy and its baseline (or another policy)",
         "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    ),
-    (
-        "upgrade",
-        "re-pin a policy's template to a newer version (with review)",
-        "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     ),
     (
         "inspect",
@@ -415,14 +410,6 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             Command {
                 usage: SYNC_POLICY[10].2, summary: SYNC_POLICY[10].1,
                 options: &[
-                    ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
-                    ("--template-dir D", "Add a directory to the template search path (repeatable)."),
-                    ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[11].2, summary: SYNC_POLICY[11].1,
-                options: &[
                     ("--unix", "Show AF_UNIX socket grants (§7.6)."),
                     (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
                     (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
@@ -497,10 +484,10 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 heading: "top-level",
                 intro: "Identity and inheritance.",
                 fields: &[
-                    Field { name: "template_base", kind: "name@vN", desc: "Parent template reference; absent only for the root (base-confined)." },
-                    Field { name: "template_name / template_version", kind: "string", desc: "A template's own name and version (templates only)." },
+                    Field { name: "template_base", kind: "name", desc: "Parent template reference by name; absent only for the root (base-confined)." },
+                    Field { name: "template_name", kind: "string", desc: "A template's own name (templates only)." },
                     Field { name: "name", kind: "string", desc: "The kennel name (leaf policies; matches the filename)." },
-                    Field { name: "include", kind: "array of name@vN", desc: "Signed fragments composed additively." },
+                    Field { name: "include", kind: "array of name", desc: "Signed fragments composed additively." },
                     Field { name: "signature", kind: "table", desc: "Signature envelope; required for templates/fragments, optional for leaves." },
                 ],
             },

@@ -1,6 +1,6 @@
 # ============================================================================
 # Spawn template: net-fetch  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # A single-leg SPAWN target (§7.12): reach WITHOUT code. `net.mode = "constrained"`
@@ -20,9 +20,8 @@
 # signed shapes below.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "net-fetch"
-template_version = "1"
 
 
 # --- Network: constrained egress via the proxy (frozen — the one leg) --------
@@ -70,4 +69,4 @@ match = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQATyyhFO4vz7wuUvAeZhkZVIxLibisf/S5\neNwtUuxsjr2GM+60WZU8y8CAAps31RjCWvm2t3AD/MIQ1nVfqnyQs=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQB3JoTscOY6UwgKZDb1kV6UcVicQDjsVBe\nQfE/9k4cf6cuzgXdinAOxRfzjt9lR1x2JuUW0GBA9A94T79lZzkQM=\n-----END SSH SIGNATURE-----\n"

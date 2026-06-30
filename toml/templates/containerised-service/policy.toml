@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: containerised-service  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # A long-lived local service for development — a Postgres, a Redis, a message
@@ -32,15 +32,14 @@
 # ============================================================================
 
 template_name = "containerised-service"
-template_version = "1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 
 # --- Execution --------------------------------------------------------------
 # Deny-by-default is inherited (base-confined's exec.allow is empty). Add the
 # service binary in your leaf — that is the one thing this template cannot know:
 #
-#   template_base = "containerised-service@v1"
+#   template_base = "containerised-service"
 #   [exec]
 #   allow = ["/usr/lib/postgresql/17/bin/postgres"]
 #
@@ -98,4 +97,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQC6sBdNpv8zA6C0fSIwv6434ObDRcnQJdN\nFKNFvtSIlWtWaNt0eiPdbSBWkj4ExD/KDMHacozYi0gkc4yNNCZwU=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDf8LEfk4N25uH9hPCr0B6ZEXps5U1yu50\nop8SqxEPlLkqDcID4t9W1uKsSUAin27OPb1aOjUKQhF5hDrvghlw4=\n-----END SSH SIGNATURE-----\n"

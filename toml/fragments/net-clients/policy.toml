@@ -5,7 +5,7 @@
 # DESTINATIONS: this adds curl/wget to `exec.allow`; the leaf or `net-permissive` says where
 # they may reach, and a `[net].mode = "constrained"` cage + the proxy bound that egress.
 #
-#   include = ["net-clients@v1"]
+#   include = ["net-clients"]
 #
 # Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
 # this widens the program menu only; `argv[0]` stays gated by the resolved

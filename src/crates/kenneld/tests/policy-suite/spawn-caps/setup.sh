@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Per-case fixture for spawn-caps: compile + SIGN echo-tool to its settled form with the suite key
-# and install it into the standard user template cascade, so the grant's `echo-tool@v1` resolves when
+# and install it into the standard user template cascade, so the grant's `echo-tool` resolves when
 # `facade-spawn caps` interrogates it. Prints the requester policy on the last stdout line.
 set -euo pipefail
 CASE_DIR="$1"

@@ -1,6 +1,6 @@
 # ============================================================================
 # Spawn template: pure-compute  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # A single-leg SPAWN target (§7.12): an agent holding [spawn] may instantiate
@@ -15,9 +15,8 @@
 # so the delegated-spawn residual (T3.9 R1) does not attach.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "pure-compute"
-template_version = "1"
 
 
 # --- Network: frozen off. No egress leg. ------------------------------------
@@ -56,4 +55,4 @@ cpu = "30"       # CPU-seconds
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDiSD0fR2CtsWTqnuBC46istNqtVEaT7sE\nSqyk+ehBXzUeQjcYRbH322sZPEXUESlGB4gFH25kOLt7tNkn8mdQQ=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIi6bRxrwYCmDub+rOPMYS44qYPMhl57RX\n+UZZ2g1ZtA+7xcUDcLCqlcnELyUVSR6JAdQsin9ejc3DHk9K1I3ww=\n-----END SSH SIGNATURE-----\n"

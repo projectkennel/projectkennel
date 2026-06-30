@@ -1,6 +1,6 @@
 # ============================================================================
 # Spawn template: true-tool  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # The empty-workload SPAWN target (§7.12): `/bin/true` — start, do nothing,
@@ -14,9 +14,8 @@
 # a self-reaping TTL, explicit memory/pids/CPU ceilings, no `[[mutable]]`.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "true-tool"
-template_version = "1"
 
 
 # --- Network: frozen off. No egress leg. ------------------------------------
@@ -60,4 +59,4 @@ cpu = "10"       # CPU-seconds
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQASw3jscmHZORnhsDJHkDcS/ctbbfROgY5\nC9g3Z9FfvgUH2b4+hqYM9QvYVoPh3KsAeSuhq7Y/Qb9LlwAwC85Qk=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQA0BULqZKx4dz53YVAPjypXWmNnBqwfgvF\nMQt1nPn9y0eO767OgJ1meTtGf2yo/lCiK3GAEsZP5Ul0irsbCtEgw=\n-----END SSH SIGNATURE-----\n"

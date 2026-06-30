@@ -48,20 +48,17 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourcePolicy {
-    /// Versioned reference to the parent template (`<name>@v<ver>`). Absent only for the
-    /// root template (`base-confined`).
+    /// Reference to the parent template by name. Absent only for the root template
+    /// (`base-confined`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_base: Option<String>,
-    /// This artefact's own version. A quoted string by convention.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template_version: Option<String>,
     /// The template's own name. Present on templates, absent on leaf policies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_name: Option<String>,
     /// The kennel name. Present on leaf policies, absent on templates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Additional signed fragments composed additively (versioned references).
+    /// Additional signed fragments composed additively, referenced by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
     /// The `THREATS.md` catalogue version this artefact was authored against.
@@ -219,7 +216,7 @@ pub struct SpawnSection {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnAllow {
-    /// The exact, versioned trust-store template name (`net-fetch@v1`).
+    /// The trust-store template name (`net-fetch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     /// Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields
@@ -1509,8 +1506,8 @@ impl SourcePolicy {
 
     fn check_references(&self, errs: &mut Vec<String>) {
         if let Some(base) = &self.template_base {
-            // A `template_base` is a versioned reference: `<name>@v<ver>`. The bare-name form is
-            // rejected — the version must be inline so the lockfile pins an exact parent.
+            // A `template_base` is a bare template name; the lockfile pins the exact parent by
+            // its resolved signature.
             if let Err(msg) = validate_reference(base) {
                 errs.push(format!("`template_base` = \"{base}\": {msg}"));
             }
@@ -1825,13 +1822,9 @@ pub(crate) const fn deny_key(a: &NetDenyRule) -> &str {
     a.cidr.as_str()
 }
 
-/// Validate a full versioned reference `<name>@v<semver-core>`.
+/// Validate a template/fragment reference: a bare `<name>`.
 pub(crate) fn validate_reference(reference: &str) -> Result<(), String> {
-    let Some((name, version)) = reference.split_once('@') else {
-        return Err("missing `@version` (expected `<name>@v<ver>`)".to_owned());
-    };
-    validate_ref_name(name)?;
-    validate_ref_version(version)
+    validate_ref_name(reference)
 }
 
 /// Validate the `<name>` part of a reference: `[a-z0-9][a-z0-9-]{0,63}`.
@@ -1850,26 +1843,6 @@ pub(crate) fn validate_ref_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate the `<version>` part of a reference: `v` + a 1..=3-component numeric core.
-pub(crate) fn validate_ref_version(version: &str) -> Result<(), String> {
-    let Some(core) = version.strip_prefix('v') else {
-        return Err("version must start with `v` (e.g. `v4`, `v2.33.2`)".to_owned());
-    };
-    if core.is_empty() {
-        return Err("version has no numeric core after `v`".to_owned());
-    }
-    let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() > 3 {
-        return Err("version has more than three numeric components".to_owned());
-    }
-    for part in parts {
-        if part.is_empty() || part.parse::<u32>().is_err() {
-            return Err("version components must be non-negative integers".to_owned());
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod dbus_tests {
     use super::*;
@@ -1883,7 +1856,7 @@ mod dbus_tests {
     #[test]
     fn benign_dbus_grants_parse_and_validate() {
         let p = parse_ok(
-            "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+            "name = \"k\"\ntemplate_base = \"base-confined\"\n\
              [dbus.session]\nenabled = true\n\
              [dbus.session.allow]\ntalk = [\"org.freedesktop.Notifications\", \"org.freedesktop.portal.*\"]\n\
              [dbus.audit]\nlevel = \"summary\"\n",
@@ -1903,7 +1876,7 @@ mod dbus_tests {
             "*",
         ] {
             let toml = format!(
-                "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+                "name = \"k\"\ntemplate_base = \"base-confined\"\n\
                  [dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"{entry}\"]\n"
             );
             let err = parse(toml.as_bytes())
@@ -1919,7 +1892,7 @@ mod dbus_tests {
 
     #[test]
     fn refuse_check_covers_call_own_and_the_system_bus() {
-        let toml = "name = \"k\"\ntemplate_base = \"base-confined@v1\"\n\
+        let toml = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
              [dbus.system]\nenabled = true\n\
              [dbus.system.allow]\ncall = [\"org.freedesktop.login1=org.freedesktop.login1.Manager.Reboot\"]\n";
         assert!(parse(toml.as_bytes()).expect("parse").validate().is_err());
@@ -2030,8 +2003,8 @@ mod tests {
             let pol = parse(src.as_bytes()).expect("parse");
             assert_eq!(
                 pol.template_base.as_deref(),
-                Some("base-confined@v1"),
-                "template {name} extends base-confined@v1"
+                Some("base-confined"),
+                "template {name} extends base-confined"
             );
         }
     }
@@ -2145,7 +2118,7 @@ image = \"docker.io/library/postgres:17\"
 
     #[test]
     fn artefact_with_both_identities_is_rejected() {
-        let src = "template_name = \"t\"\nname = \"n\"\ntemplate_base = \"base-confined@v1\"\n";
+        let src = "template_name = \"t\"\nname = \"n\"\ntemplate_base = \"base-confined\"\n";
         let pol = parse(src.as_bytes()).expect("parse");
         assert!(
             pol.validate().is_err(),
@@ -2155,7 +2128,7 @@ image = \"docker.io/library/postgres:17\"
 
     #[test]
     fn net_allow_without_reason_is_rejected() {
-        let src = "name = \"n\"\ntemplate_base = \"base-confined@v1\"\n\
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
                    [[net.proxy.allow]]\nname = \"evil.example\"\nports = [443]\n";
         let pol = parse(src.as_bytes()).expect("parse");
         let err = pol.validate().expect_err("missing reason must fail");
@@ -2171,29 +2144,24 @@ image = \"docker.io/library/postgres:17\"
     }
 
     #[test]
-    fn malformed_versioned_reference_is_rejected() {
-        // `@4` lacks the leading `v`; the name `Bad` has an uppercase letter.
-        let cases = [
-            "base-confined@4",
-            "Bad@v1",
-            "base-confined@v1.2.3.4",
-            "base-confined@v",
-        ];
+    fn malformed_template_reference_is_rejected() {
+        // A reference is a bare name; disallowed characters (@, space, uppercase) are rejected.
+        let cases = ["base-confined@4", "Bad", "base confined", "base-confined@v"];
         for case in cases {
             let src = format!("name = \"n\"\ntemplate_base = \"{case}\"\n");
             let pol = parse(src.as_bytes()).expect("parse");
             assert!(pol.validate().is_err(), "reference {case} must be rejected");
         }
-        // A well-formed reference validates.
-        let src = "name = \"n\"\ntemplate_base = \"base-confined@v2.33.2\"\n";
+        // A well-formed bare-name reference validates.
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n";
         let pol = parse(src.as_bytes()).expect("parse");
         assert!(pol.validate().is_ok(), "well-formed reference accepted");
     }
 
     #[test]
     fn duplicate_include_is_rejected() {
-        let src = "name = \"n\"\ntemplate_base = \"base-confined@v1\"\n\
-                   include = [\"corp-egress@v2\", \"corp-egress@v2\"]\n";
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                   include = [\"corp-egress\", \"corp-egress\"]\n";
         let pol = parse(src.as_bytes()).expect("parse");
         let err = pol.validate().expect_err("duplicate include must fail");
         assert!(

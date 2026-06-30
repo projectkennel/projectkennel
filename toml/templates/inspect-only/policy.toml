@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: inspect-only  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # Reading a directory to decide whether to trust it — grep/cat/less over a freshly
@@ -16,13 +16,12 @@
 # (assumes vetted system tools).
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "inspect-only"
-template_version = "1"
 
 # Exec floor composed from the fragment catalogue (05-templates.md §5.10):
 # the shells + POSIX userland + capability bundles, instead of hand-listing them.
-include = ["core-shell@v1", "core-coreutils@v1"]
+include = ["core-shell", "core-coreutils"]
 
 
 
@@ -56,4 +55,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQC1jMpX/r1Yii1I77DXQvoh7PKF6t/kMP2\neQUCenjbvxcezPyPvhCTDFwZd5kL/MgroQmx36S2wWZ2g7X4Gklgc=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQLBrWsncB3wMQybof+sR5W9yK1OE6AcNan\n4qD/pm8n7skF7n3y51+Lv+/aQqEktzmt1hKI5ckNCN26g31bPjZA4=\n-----END SSH SIGNATURE-----\n"

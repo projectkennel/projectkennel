@@ -1,6 +1,6 @@
 # ============================================================================
 # Template: untrusted-build  (v1)
-# Inherits: base-confined@v1
+# Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
 # Building from source you do not trust (a cloned repo's `make`, a downloaded
@@ -17,13 +17,12 @@
 # Defends: T1.2 (strong), T1.5 (strong). Residual: needs offline mirrors for real deps.
 # ============================================================================
 
-template_base = "base-confined@v1"
+template_base = "base-confined"
 template_name = "untrusted-build"
-template_version = "1"
 
 # Exec floor composed from the fragment catalogue (05-templates.md §5.10):
 # the shells + POSIX userland + capability bundles, instead of hand-listing them.
-include = ["core-shell@v1", "core-coreutils@v1", "core-file-mutation@v1", "core-archive@v1", "toolchain-c@v1"]
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "toolchain-c"]
 
 
 
@@ -66,4 +65,4 @@ ttl_action = "exit"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI2RxiYD7XDoj1IjtWgCZeNJGtg2t6lEdF\nbg9kEUQtxdhDObx+5ZavYcOjYMgjNJf4CN3NLuWZDZzC5e99EbnAc=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOoQpjo36HDiIVk2zkdF5sPZK1DuTJ6rcH\nnpPx45uUkUZMeR/1DCdV74And8pao3SKGWO1ao3piGG3x2ICBaygY=\n-----END SSH SIGNATURE-----\n"

@@ -2,19 +2,18 @@
 //!
 //! # Purpose
 //!
-//! Version pinning constrains *which* artefact a reference names; the lockfile
-//! constrains *what bytes* live under that version. It records, for every reference resolved
-//! while loading a policy, the signing-key id and the artefact's ed25519 signature.
-//! On every later load the resolver recomputes the chain and compares: a `name@version`
-//! that resolved to a *different* signature than was locked is a hard error, not a
-//! warning.
+//! A reference names *which* artefact; the lockfile constrains *what bytes* live under
+//! that name. It records, for every reference resolved while loading a policy, the
+//! signing-key id and the artefact's ed25519 signature. On every later load the resolver
+//! recomputes the chain and compares: a `name` that resolved to a *different* signature
+//! than was locked is a hard error, not a warning.
 //!
 //! # Why the signature is the commitment
 //!
 //! The maintainer's decision is to use ed25519 for everything rather than carry a
 //! second hash (no `sha2` dependency). An ed25519 signature is deterministic
 //! (RFC 8032) and bound to the exact canonical bytes it covers, so the signature
-//! *is* a content commitment: re-tagging a version to different bytes — even
+//! *is* a content commitment: re-pointing a name at different bytes — even
 //! re-signed by another trusted key — changes the recorded signature and is caught.
 //!
 //! # I/O-free
@@ -26,14 +25,12 @@ use crate::resolve::ChainLink;
 use kennel_lib_policy::PolicyError;
 use serde::{Deserialize, Serialize};
 
-/// One locked reference: a `name@version` pinned to its signer and signature.
+/// One locked reference: a `name` pinned to its signer and signature.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LockEntry {
     /// The artefact name.
     pub name: String,
-    /// The artefact version (with leading `v`).
-    pub version: String,
     /// The signing-key id the signature verified against (empty if unsigned).
     #[serde(default)]
     pub signing_key_id: String,
@@ -60,7 +57,6 @@ impl Lockfile {
             .iter()
             .map(|link| LockEntry {
                 name: link.name.clone(),
-                version: link.version.clone(),
                 signing_key_id: link.signing_key_id.clone().unwrap_or_default(),
                 signature: link.signature.clone().unwrap_or_default(),
             })
@@ -81,16 +77,12 @@ impl Lockfile {
     /// signature does not match.
     pub fn verify_against(&self, previous: &Self) -> Result<(), PolicyError> {
         for entry in &self.entries {
-            if let Some(prev) = previous
-                .entries
-                .iter()
-                .find(|p| p.name == entry.name && p.version == entry.version)
-            {
+            if let Some(prev) = previous.entries.iter().find(|p| p.name == entry.name) {
                 if prev.signature != entry.signature {
                     return Err(PolicyError::LockMismatch(format!(
-                        "`{}@{}` resolved to different bytes than the lockfile pins \
-                         (the version was re-tagged or re-signed); review with `kennel upgrade`",
-                        entry.name, entry.version
+                        "`{}` resolved to different bytes than the lockfile pins \
+                         (the template was re-pointed or re-signed); re-pin by recompiling",
+                        entry.name
                     )));
                 }
             }
@@ -126,7 +118,6 @@ mod tests {
     fn link(name: &str, sig: &str) -> ChainLink {
         ChainLink {
             name: name.to_owned(),
-            version: "v1".to_owned(),
             signing_key_id: Some("kennel-maint-2026".to_owned()),
             signature: Some(sig.to_owned()),
         }
