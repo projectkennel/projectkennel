@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use kennel_lib_policy::{
     CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, Provenance, SeccompAction,
-    SeccompPolicy, SettledPolicy, SigningKey, TmpPolicy, TtlAction,
+    NetPolicy, NetRule, ProcPolicy, Protocol, Provenance, SeccompAction, SeccompPolicy,
+    SettledPolicy, SigningKey, TmpPolicy, TtlAction,
 };
 use kennel_privhelper::validate::ReservedScope;
 use kenneld::HelperClient;
@@ -135,9 +135,8 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 tmp: TmpPolicy {
-                    private: true,
+                    writable: true,
                     size_mib: 512,
-                    mode: "0700".to_owned(),
                 },
                 dev: DevPolicy { allow: dev_allow() },
             },
@@ -155,10 +154,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 shell: "/bin/sh".to_owned(),
                 loaders: Vec::new(),
             },
-            proc: ProcPolicy {
-                visibility: ProcVisibility::SelfOnly,
-                hidepid: true,
-            },
+            proc: ProcPolicy { hidepid: true },
             cap: CapPolicy { no_new_privs: true },
             seccomp: SeccompPolicy {
                 deny_action: SeccompAction::Errno,
@@ -194,7 +190,6 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
             }],
         },
         identity: kennel_lib_policy::IdentityRuntime::default(),
-        binder: kennel_lib_policy::BinderRuntime::default(),
         mesh: kennel_lib_policy::MeshRuntime::default(),
         service: None,
         dbus: kennel_lib_policy::DbusRuntime::default(),

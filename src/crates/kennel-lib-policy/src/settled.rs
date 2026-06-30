@@ -39,6 +39,7 @@ pub const RESERVED_PREFIX: &str = "org.projectkennel.";
 /// representable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum NetMode {
     /// No network at all: an own net namespace with no interfaces (not even `lo`).
     None,
@@ -59,6 +60,7 @@ pub enum NetMode {
 /// Transport protocol selector for a network rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum Protocol {
     /// Any protocol.
     Any,
@@ -66,15 +68,6 @@ pub enum Protocol {
     Tcp,
     /// UDP only.
     Udp,
-}
-
-/// Procfs visibility. Only `self` is permitted (a framework invariant).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcVisibility {
-    /// `hidepid` such that the workload sees only its own processes.
-    #[serde(rename = "self")]
-    SelfOnly,
 }
 
 /// The default action for syscalls not explicitly allowed by the seccomp filter.
@@ -92,6 +85,7 @@ pub enum SeccompAction {
 /// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum TtlAction {
     /// Terminate the kennel cleanly. The default for a policy that sets a `ttl` without an
     /// action. (With the cgroup freezer this is an atomic freeze-then-kill — no SIGTERM grace
@@ -294,15 +288,12 @@ pub const MAX_BPF_DENY_PER_FAMILY: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TmpPolicy {
-    /// Whether `/tmp` is a private tmpfs. Confined templates always set this
-    /// true; `false` would bind-mount the host `/tmp` (which templates never do).
-    pub private: bool,
+    /// Whether the workload may **write** to its `/tmp` tmpfs (the Landlock write grant). `/tmp` is
+    /// always a fresh per-kennel tmpfs in the constructed view; `false` withholds the write grant,
+    /// leaving it read-only. (It never binds the host `/tmp`.)
+    pub writable: bool,
     /// Size cap of the tmpfs, in mebibytes.
     pub size_mib: u32,
-    /// Mount mode for the tmpfs root, as octal digits (e.g. `"0700"`). The
-    /// runtime validates it is octal-only before it reaches the mount data
-    /// string (it would otherwise be an option-injection vector).
-    pub mode: String,
 }
 
 /// Device-file policy (§7.4.8): which `/dev` nodes the kennel's constructed
@@ -468,14 +459,15 @@ fn is_default_shell(s: &str) -> bool {
 }
 
 /// Procfs policy.
+///
+/// Procfs is always mounted self-only (the workload sees only its own processes);
+/// that is structural, not a setting.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcPolicy {
-    /// Procfs visibility (must be `self`).
-    pub visibility: ProcVisibility,
-    /// Mount `/proc` with `hidepid=2` (§7.4.7): even within the PID namespace,
-    /// `/proc/<pid>` is accessible only to the process owner. Belt-and-braces
-    /// atop the namespace, which is the strong isolation.
+    /// Mount `/proc` with `hidepid=2`: even within the PID namespace, `/proc/<pid>`
+    /// is accessible only to the process owner. Belt-and-braces atop the namespace,
+    /// which is the strong isolation.
     pub hidepid: bool,
 }
 
@@ -541,6 +533,7 @@ impl Default for TtyPolicy {
 /// via the cgroup `kenneld` already owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum OnChangeAction {
     /// Record an `fs.mutation` audit event and let the workload run on (the live watch is
     /// best-effort; the authoritative verdict is the teardown review).
@@ -722,34 +715,6 @@ pub struct UnixSocket {
     pub env: Option<String>,
 }
 
-/// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4): the user-defined
-/// services this kennel may register and look up.
-///
-/// Like [`UnixRuntime`], a *service* input `kenneld`'s context manager realises, not
-/// part of the kernel-enforcement core: it gates `addService` against `provide` and
-/// `getService` against the local/cross-instance grant. The reserved
-/// `org.projectkennel.*` facades are not represented here (they are enabled by their
-/// own sections). Carried in the signed settled policy; omitted from the canonical
-/// form when empty, so a no-`[binder]` policy signs exactly as before.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderRuntime {
-    /// Services a process in this kennel may register (`addService`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub provide: Vec<BinderProvideRuntime>,
-    /// Services this kennel may look up (`getService`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub consume: Vec<BinderConsumeRuntime>,
-}
-
-impl BinderRuntime {
-    /// Whether there is no binder grant to realise.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.provide.is_empty() && self.consume.is_empty()
-    }
-}
-
 /// The per-kennel D-Bus runtime (§7.7) — a *service* input `kenneld` realises (the
 /// `IDBus` facade/delegate pair), not part of the enforcement core.
 ///
@@ -801,35 +766,13 @@ pub struct DbusBusRuntime {
     pub deny_talk: Vec<String>,
 }
 
-/// One registrable service: a name and the peer kennels allowed to look it up.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderProvideRuntime {
-    /// The service name.
-    pub name: String,
-    /// Peer kennels permitted to resolve it cross-instance (empty = local only).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accept_from: Vec<String>,
-}
-
-/// One consumable service: a name and the providing kennel (cross-instance).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct BinderConsumeRuntime {
-    /// The service name.
-    pub name: String,
-    /// The providing kennel for a cross-instance lookup; absent for a local service.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-}
-
-/// The typed shape of a mesh capability: how its connector is delivered (§7.13.2).
+/// The typed shape of a mesh capability: how its connector is delivered.
 ///
-/// Declared on both `[[provides]]` and `[[consumes]]` (`docs/design/07-13-service-catalog.md`)
-/// and carried verbatim into the settled policy; defined here so the source parser and the
-/// signed runtime share one type.
+/// Declared on both `[[provides]]` and `[[consumes]]` and carried verbatim into the
+/// settled policy; defined here so the source parser and the signed runtime share one type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum Shape {
     /// An `AF_UNIX` socket the workload connects to (the display render leg).
     AfUnix,
@@ -919,6 +862,7 @@ pub struct ConsumeRuntime {
 /// `kenneld` supervises a provider the operator has enabled. The systemd `Restart=` analogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum RestartPolicy {
     /// Restart on any exit — a long-running service expected to stay up.
     Always,
@@ -927,6 +871,83 @@ pub enum RestartPolicy {
     OnFailure,
     /// Run once; any exit, clean or not, leaves it down.
     Never,
+}
+
+// The authored value-set enums: the canonical closed sets the source-policy `String` fields
+// accept. The fields stay `String` (lenient authoring, scalar-chain folding), but the schema
+// enumerates them from these types via `#[schema(values_from = …)]` — so the editor hint is
+// derived from a real type, never a hand-written list.
+
+/// Rootfs upper-layer persistence (`[rootfs].persistence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum Persistence {
+    /// Ephemeral upper, discarded at teardown (default).
+    Discard,
+    /// Managed upper retained under the store entry.
+    Persist,
+}
+
+/// Disposition of a wildcard (`INADDR_ANY`/`IN6ADDR_ANY`) bind (`[net.bind].*_any_policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum WildcardBindPolicy {
+    /// Rewrite a wildcard bind to the kennel's own address.
+    Rewrite,
+    /// Refuse a wildcard bind.
+    Deny,
+}
+
+/// Per-kennel egress audit verbosity (`[net.audit].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum NetAuditLevel {
+    /// One summary line per connection.
+    Summary,
+    /// Full per-event detail.
+    Full,
+}
+
+/// D-Bus call audit verbosity (`[dbus.audit].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum DbusAuditLevel {
+    /// No D-Bus audit events.
+    Off,
+    /// One summary line per call.
+    Summary,
+    /// Full per-call detail.
+    Full,
+}
+
+/// Per-class audit level override (`[audit.<class>].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum AuditClassLevel {
+    /// Suppress the class entirely.
+    Off,
+    /// Only denied/blocked events.
+    DeniesOnly,
+    /// One summary line per event.
+    Summary,
+    /// Full per-event detail.
+    Full,
+}
+
+/// Abstract-namespace `AF_UNIX` socket disposition (`[unix].abstract`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum AbstractSocketPolicy {
+    /// Deny abstract-namespace sockets (default).
+    Deny,
+    /// Allow abstract-namespace sockets.
+    Allow,
 }
 
 /// The `[service]` supervision discipline, resolved into the settled policy
@@ -1029,8 +1050,6 @@ const fn is_false(b: &bool) -> bool {
 pub struct ResolvedArtifact {
     /// Artefact name.
     pub name: String,
-    /// Resolved version (e.g. `v4`, `v2.33.2`).
-    pub version: String,
     /// The `key_id` that signed this artefact.
     pub signing_key_id: String,
     /// The artefact's ed25519 signature (base64) — the content commitment lifted from the lockfile.
@@ -1398,15 +1417,10 @@ pub struct SettledPolicy {
     /// form when empty, so a policy that grants no group signs exactly as before.
     #[serde(default, skip_serializing_if = "IdentityRuntime::is_empty")]
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime (`07-1-binder.md` §7.1.4). A table like
-    /// [`identity`](Self::identity); omitted from the canonical form when empty, so a
-    /// no-`[binder]` policy signs exactly as before.
-    #[serde(default, skip_serializing_if = "BinderRuntime::is_empty")]
-    pub binder: BinderRuntime,
-    /// The cross-kennel capability mesh runtime (`07-13-service-catalog.md` §7.13) — the
-    /// `[[provides]]`/`[[consumes]]` the broker and catalogue read. A table like
-    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a policy with
-    /// no mesh declarations signs exactly as before.
+    /// The cross-kennel capability mesh runtime — the `[[provides]]`/`[[consumes]]` the
+    /// broker and catalogue read. A table like [`identity`](Self::identity); omitted from
+    /// the canonical form when empty, so a policy with no mesh declarations signs exactly
+    /// as before.
     #[serde(default, skip_serializing_if = "MeshRuntime::is_empty")]
     pub mesh: MeshRuntime,
     /// The `[service]` supervision discipline (§7.13.7) — the restart policy `kenneld` applies to an
@@ -1415,7 +1429,7 @@ pub struct SettledPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceRuntime>,
     /// The per-kennel D-Bus runtime (§7.7) — the `IDBus` facade's rule set. A table like
-    /// [`binder`](Self::binder); omitted from the canonical form when empty, so a
+    /// [`mesh`](Self::mesh); omitted from the canonical form when empty, so a
     /// no-`[dbus]` policy signs exactly as before.
     #[serde(default, skip_serializing_if = "DbusRuntime::is_empty")]
     pub dbus: DbusRuntime,
@@ -1483,7 +1497,7 @@ pub struct SpawnGrant {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpawnTemplate {
-    /// The exact `name@version` trust-store reference.
+    /// The trust-store template name.
     pub template: String,
     /// The `key_id` the template's signature verified against at this policy's compile.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1491,7 +1505,7 @@ pub struct SpawnTemplate {
     /// The template's ed25519 signature (Base64) recorded at this policy's compile — the
     /// **content-pin**. A deterministic ed25519 signature over the canonical template *is* its
     /// content commitment (the lockfile idiom — no `sha2`): at `SPAWN`, `kenneld` re-resolves the
-    /// named `name@version` from the *mutable* trust store and fails closed unless the re-verified
+    /// named template from the *mutable* trust store and fails closed unless the re-verified
     /// signature matches this, defeating a re-signed-in-place TOCTOU (§7.12.8). Empty only when the
     /// template resolved unsigned (local-development `AllowUnsigned`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -1559,9 +1573,8 @@ pub fn sample_settled() -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 tmp: TmpPolicy {
-                    private: true,
+                    writable: true,
                     size_mib: 512,
-                    mode: "0700".to_owned(),
                 },
                 dev: DevPolicy {
                     allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
@@ -1578,10 +1591,7 @@ pub fn sample_settled() -> SettledPolicy {
                 shell: default_shell(),
                 loaders: Vec::new(),
             },
-            proc: ProcPolicy {
-                visibility: ProcVisibility::SelfOnly,
-                hidepid: true,
-            },
+            proc: ProcPolicy { hidepid: true },
             cap: CapPolicy { no_new_privs: true },
             seccomp: SeccompPolicy {
                 deny_action: SeccompAction::Errno,
@@ -1602,7 +1612,6 @@ pub fn sample_settled() -> SettledPolicy {
             threat_catalogue_version: "0.1".to_owned(),
             resolved_artifacts: vec![ResolvedArtifact {
                 name: "base-confined".to_owned(),
-                version: "v3".to_owned(),
                 signing_key_id: "kennel-maint-2026-01".to_owned(),
                 signature: "c2ln".to_owned(),
             }],
@@ -1610,7 +1619,6 @@ pub fn sample_settled() -> SettledPolicy {
         ssh: SshRuntime::default(),
         unix: UnixRuntime::default(),
         identity: IdentityRuntime::default(),
-        binder: BinderRuntime::default(),
         mesh: MeshRuntime::default(),
         service: None,
         dbus: DbusRuntime::default(),

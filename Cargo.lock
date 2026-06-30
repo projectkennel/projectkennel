@@ -58,6 +58,11 @@ version = "0.5.0"
 [[package]]
 name = "gen-schema"
 version = "0.5.0"
+dependencies = [
+ "kennel-lib-compile",
+ "kennel-schema",
+ "serde_json",
+]
 
 [[package]]
 name = "hmac-sha512"
@@ -191,6 +196,8 @@ dependencies = [
  "kennel-lib-config",
  "kennel-lib-control",
  "kennel-lib-policy",
+ "kennel-schema",
+ "kennel-schema-derive",
  "serde",
 ]
 
@@ -249,6 +256,8 @@ dependencies = [
  "basic-toml",
  "ed25519-compact",
  "hmac-sha512",
+ "kennel-schema",
+ "kennel-schema-derive",
  "object",
  "serde",
 ]
@@ -302,6 +311,19 @@ dependencies = [
  "kennel-lib-config",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
+]
+
+[[package]]
+name = "kennel-schema"
+version = "0.5.0"
+
+[[package]]
+name = "kennel-schema-derive"
+version = "0.5.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

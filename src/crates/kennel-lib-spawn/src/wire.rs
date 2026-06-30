@@ -387,7 +387,6 @@ fn put_view(w: &mut Writer, v: &ShimView) {
         w.path(d);
     }
     w.u32(v.tmp_size_mib);
-    w.bytes(v.tmp_mode.as_bytes());
     w.bool(v.proc_hidepid);
     w.bool(v.binder);
     w.count(v.mask_paths.len());
@@ -574,7 +573,6 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         dev_allow.push(r.path()?);
     }
     let tmp_size_mib = r.u32()?;
-    let tmp_mode = String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)?;
     let proc_hidepid = r.bool()?;
     let binder = r.bool()?;
     let mut mask_paths = Vec::new();
@@ -620,7 +618,6 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         binds,
         dev_allow,
         tmp_size_mib,
-        tmp_mode,
         proc_hidepid,
         binder,
         mask_paths,
@@ -1056,7 +1053,6 @@ mod tests {
                 ],
                 dev_allow: vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/net/tun")],
                 tmp_size_mib: 512,
-                tmp_mode: "0700".to_owned(),
                 proc_hidepid: true,
                 binder: true,
                 mask_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.json")],

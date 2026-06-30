@@ -1,0 +1,68 @@
+# ============================================================================
+# Template: untrusted-build
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4
+#
+# Building from source you do not trust (a cloned repo's `make`, a downloaded
+# tarball's `./configure && make`). The threats are the build script itself
+# fetching/exfiltrating (T1.2) and compromising the build (T1.5). The defining move:
+# NETWORK OFF. The build gets the toolchain and the source tree, and nothing
+# reaches the network — so a malicious build script has no egress for C2 or
+# exfiltration, and cannot fetch a second-stage payload.
+#
+# Because egress is off, legitimate dependencies must come from a pre-populated
+# vendor directory / offline mirror in the project tree (the user grants it
+# writable). This is the cost of the strong guarantee.
+#
+# Defends: T1.2 (strong), T1.5 (strong). Residual: needs offline mirrors for real deps.
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "untrusted-build"
+
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "toolchain-c"]
+
+
+
+# --- Network: OFF -----------------------------------------------------------
+# No egress at all — not even via the proxy. This is the template's central
+# property; a leaf that needs network should use a different template and accept
+# the weaker guarantee. (The base-confined cloud-metadata/RFC1918 invariant denies
+# are moot here but remain in force.)
+[net]
+mode = "none"
+
+
+# --- Execution: the build toolchain -----------------------------------------
+# No package managers that fetch (they could not reach the network anyway); the
+# compilers, build drivers, and the shell userland a configure/build needs.
+[exec]
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
+allow = [
+    "/usr/bin/bison",
+    "/usr/bin/c++",
+    "/usr/bin/cmake",
+    "/usr/bin/flex",
+    "/usr/bin/m4",
+    "/usr/bin/ninja",
+    "/usr/bin/patch",
+    "/usr/bin/perl",
+    "/usr/bin/pkg-config",
+    "/usr/bin/python3",
+    "/usr/bin/ranlib",
+]
+
+
+# --- Lifecycle --------------------------------------------------------------
+# A build is bounded; stop at the TTL rather than warn (no interactive session).
+[lifecycle]
+ttl = "2h"
+ttl_action = "exit"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQOoQpjo36HDiIVk2zkdF5sPZK1DuTJ6rcH\nnpPx45uUkUZMeR/1DCdV74And8pao3SKGWO1ao3piGG3x2ICBaygY=\n-----END SSH SIGNATURE-----\n"

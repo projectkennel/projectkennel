@@ -1,0 +1,45 @@
+# ============================================================================
+# Fragment: lang-node
+#
+# A composable capability bundle (05-templates.md §5.10): include it to grant a
+# kennel what a Node.js workflow needs — the runtime, npm, and the registry.
+#
+#   include = ["lang-node"]
+#
+# Additive-only (§5.10): every entry is a `[[*.add]]` delta. A fragment widens;
+# it never removes or overrides.
+# ============================================================================
+
+name = "lang-node"
+
+# --- the runtime and package manager ----------------------------------------
+[[exec.allow.add]]
+path = "/usr/bin/node"
+reason = "Node.js runtime"
+
+[[exec.allow.add]]
+path = "/usr/bin/npm"
+reason = "npm package manager"
+
+[[exec.allow.add]]
+path = "/usr/bin/npx"
+reason = "npm package runner"
+
+# --- the npm cache ----------------------------------------------------------
+[[fs.write.add]]
+path = "~/.npm/**"
+reason = "npm's package cache and logs"
+
+# --- the registry -----------------------------------------------------------
+# NB: shared with net-permissive — kept byte-identical there so a leaf may include
+# both without a conflict (identical entries dedup; §5.10).
+[[net.proxy.allow.add]]
+name = "registry.npmjs.org"
+ports = [443]
+reason = "npm registry"
+threats.exposed = ["T1.2", "T1.9"]
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQLha+FbhQBKKBKBzaVNo49TGcEaTM76ZuD\n8DIC07oqk2z51qUt42gPiNKbCB0fPgG2/Ol9/SsmdvokVqhqmn7A4=\n-----END SSH SIGNATURE-----\n"

@@ -37,7 +37,7 @@ printf '{"config":{"User":"1000"}}' > "$STORE/config.json"
 # `/usr/lib/python3.12` writable hole, an operator-commented [env], and a (fake) appended [signature].
 cat > "$STORE/policy.toml" <<EOF
 name = "app"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 [rootfs]
 path   = "$STORE/rootfs"

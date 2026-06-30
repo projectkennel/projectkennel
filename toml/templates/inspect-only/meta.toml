@@ -1,0 +1,6 @@
+name = "inspect-only"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-02"
+description = "Read-only inspection of a directory; no exec beyond text-inspection tools."

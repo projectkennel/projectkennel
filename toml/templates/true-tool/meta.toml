@@ -1,0 +1,7 @@
+# Template identity + signing metadata.
+name = "true-tool"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-21"
+description = "Empty-workload SPAWN target: /bin/true (reaches nothing). The isolation-floor datum for the spinup profile, measured as an ephemeral SPAWN sibling."

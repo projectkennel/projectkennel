@@ -1,0 +1,35 @@
+# ============================================================================
+# Fragment: gui-viewers
+#
+# A composable capability bundle: the GNOME image and document viewers. Include it for a
+# confined desktop that should open pictures and PDFs.
+#
+#   include = ["gui-viewers"]
+#
+# Additive-only: exec.allow grants only; viewer UI data lives under /usr/share (the base read
+# floor). The image viewer changed default across Ubuntu releases (eog → loupe), so both are
+# allowed — whichever is installed runs, the other is inert.
+# ============================================================================
+
+name = "gui-viewers"
+
+[[exec.allow.add]]
+path = "/usr/bin/loupe"
+reason = "Loupe — the GNOME 45+/Ubuntu 24.04 image viewer"
+
+[[exec.allow.add]]
+path = "/usr/bin/eog"
+reason = "Eye of GNOME — the classic image viewer (pre-loupe default, still widely installed)"
+
+[[exec.allow.add]]
+path = "/usr/bin/evince"
+reason = "Evince — the GNOME document (PDF) viewer"
+
+[[exec.allow.add]]
+path = "/usr/bin/papers"
+reason = "Papers — the GNOME document viewer (Evince's successor, the Ubuntu 26.04 default)"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKGs09QlixRRmi+myUIuPuoa8LOQnGwqUQ\n+F8BcImGn3kJ8QD9fMRp56wj9JvTsDSoehZFyFryxzeRRFMvLzzQA=\n-----END SSH SIGNATURE-----\n"

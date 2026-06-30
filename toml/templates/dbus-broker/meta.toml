@@ -1,0 +1,7 @@
+# Template identity + signing metadata.
+name = "dbus-broker"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.5"
+last_reviewed = "2026-06-30"
+description = "The standing D-Bus mediation service kennel."

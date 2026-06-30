@@ -76,7 +76,6 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "lint" => kennel_cli::policy::policy_lint(rest),
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),
-        "upgrade" => kennel_cli::policy::upgrade(rest),
         "inspect" => kennel_cli::policy::policy_inspect(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
@@ -86,15 +85,14 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
 
 #[cfg(test)]
 mod tests {
-    use kennel_cli::policy::{
-        is_source_policy, newest_template_version, policy_kind, rewrite_template_base, TempSettled,
-    };
+    use kennel_cli::policy::{is_source_policy, policy_kind, TempSettled};
     use kennel_cli::{
         is_valid_policy_name, policy_name_from_path, resolve_policy, COMMANDS, POLICY_VERBS,
     };
     use std::path::Path;
 
-    const BASE_CONFINED: &[u8] = include_bytes!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &[u8] =
+        include_bytes!("../../../../toml/templates/base-confined/policy.toml");
 
     #[test]
     fn a_template_is_detected_as_a_source_policy() {
@@ -113,53 +111,6 @@ signature = ""
 signed_fields = []
 "#;
         assert!(!is_source_policy(settled));
-    }
-
-    #[test]
-    fn rewrite_template_base_replaces_only_the_reference() {
-        let src = "name = \"x\"\ntemplate_base = \"demo@v1\"\n[exec]\nallow = []\n";
-        let out = rewrite_template_base(src, "demo@v1", "demo@v2").expect("rewrite");
-        assert!(out.contains("template_base = \"demo@v2\""));
-        assert!(out.contains("[exec]"), "rest of the file is preserved");
-        assert!(!out.contains("@v1"), "the old reference is gone");
-    }
-
-    #[test]
-    fn rewrite_template_base_errors_when_reference_absent() {
-        let err = rewrite_template_base("template_base = \"other@v1\"\n", "demo@v1", "demo@v2")
-            .expect_err("must not silently no-op");
-        assert!(err.contains("could not find"), "got {err}");
-    }
-
-    #[test]
-    fn newest_template_version_picks_the_highest_flat_file() {
-        let dir = std::env::temp_dir().join(format!("kennel-upg-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        for v in ["v1", "v2", "v10", "v2.3"] {
-            std::fs::write(dir.join(format!("demo@{v}.toml")), b"x").expect("write");
-        }
-        std::fs::write(dir.join("other@v99.toml"), b"x").expect("write");
-        let newest = newest_template_version(std::slice::from_ref(&dir), "demo");
-        assert_eq!(newest.as_deref(), Some("v10"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn source_diff_marks_added_and_removed_lines() {
-        let old = "a = 1\nb = 2\n";
-        let new = "a = 1\nc = 3\n";
-        let old_lines: Vec<&str> = old.lines().collect();
-        let new_lines: Vec<&str> = new.lines().collect();
-        let added: Vec<&&str> = new_lines
-            .iter()
-            .filter(|l| !old_lines.contains(l))
-            .collect();
-        let removed: Vec<&&str> = old_lines
-            .iter()
-            .filter(|l| !new_lines.contains(l))
-            .collect();
-        assert_eq!(added, vec![&"c = 3"]);
-        assert_eq!(removed, vec![&"b = 2"]);
     }
 
     #[test]
@@ -199,7 +150,7 @@ signed_fields = []
         assert_eq!(policy_kind(&frag), "fragment");
         let chained = write(
             "c.toml",
-            "name = \"k\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[fs.read.add]]\npath = \"~/p/**\"\nreason = \"r\"\n",
+            "name = \"k\"\ntemplate_base = \"ai-coding-strict\"\n[[fs.read.add]]\npath = \"~/p/**\"\nreason = \"r\"\n",
         );
         assert_eq!(policy_kind(&chained), "leaf");
         let _ = std::fs::remove_dir_all(&dir);

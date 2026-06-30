@@ -20,11 +20,19 @@ hmac-sha512 = { version = "=1.1.12", default-features = false }
 # ELF inspection for the compile-time shared-library closure (DT_NEEDED + PT_INTERP);
 # read-only, the inspected binary is never executed. Same pin as kennel-lib-bpf.
 object = { version = "=0.36.7", default-features = false, features = ["read_core", "elf", "std"] }
+# Schema single-source (behind the `schema` feature, off by default → never in the
+# runtime/TCB build): the `[audit]`/`[signature]` shapes and settled enums this crate owns
+# derive their JSON-Schema node, so the compiler's `gen-schema` reflects the whole graph.
+kennel-schema = { path = "../kennel-schema", optional = true }
+kennel-schema-derive = { path = "../kennel-schema-derive", optional = true }
 
 [features]
 # Exposes the `settled::sample_settled` fixture to dependent crates' tests (a representative
 # SettledPolicy to sign/scan), without shipping it in the default build.
 test-support = []
+# Reflect this crate's authored-schema types (audit/signature shapes, settled enums) into
+# their schema nodes. Tooling/build-time only.
+schema = ["dep:kennel-schema", "dep:kennel-schema-derive"]
 
 [lints]
 workspace = true

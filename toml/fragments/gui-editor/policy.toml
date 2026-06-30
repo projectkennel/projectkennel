@@ -1,0 +1,28 @@
+# ============================================================================
+# Fragment: gui-editor
+#
+# A composable capability bundle: the GNOME text editors. Include it in a confined-GUI
+# kennel that should open a graphical text editor.
+#
+#   include = ["gui-editor"]
+#
+# Additive-only: widens exec.allow with the editor binaries. Their UI data (icons, themes,
+# gsettings schemas) lives under /usr/share, already in the base read floor, so no fs grant
+# is needed. Both the current and the classic default are allowed — whichever this Ubuntu
+# ships is the one that runs; the absent one is inert.
+# ============================================================================
+
+name = "gui-editor"
+
+[[exec.allow.add]]
+path = "/usr/bin/gnome-text-editor"
+reason = "GNOME Text Editor — the default Ubuntu text editor (22.10+)"
+
+[[exec.allow.add]]
+path = "/usr/bin/gedit"
+reason = "gedit — the classic GNOME text editor (pre-22.10 default, still widely installed)"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGwFMinkuNLiKgv1rAMbEgQCCaYcyDuiHf\n8++TVhQV2dMI6B7B/9AObOXBJLICoAvvPr+jm4ujApRbsjozrirg8=\n-----END SSH SIGNATURE-----\n"

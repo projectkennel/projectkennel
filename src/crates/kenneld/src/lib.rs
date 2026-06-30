@@ -293,16 +293,13 @@ pub struct EtcSetup {
     pub home_persist: Vec<String>,
 }
 
-/// What kenneld needs to run a kennel's binder context manager (§7.1): the settled
-/// binder policy the registry gates against and the audit writer it records
-/// `binder.*` decisions through.
+/// What kenneld needs to run a kennel's binder context manager: the node-0 facade
+/// inputs and the audit writer it records `binder.*` decisions through.
 pub struct BinderPrep {
-    /// The user-defined services this kennel may register / look up.
-    pub policy: kennel_lib_policy::BinderRuntime,
     /// The `[[unix.allow]]` grants the af-unix facade resolves and connects (§7.6 via
     /// the binder facade). Empty when the kennel grants no `AF_UNIX` socket.
     pub unix: kennel_lib_policy::UnixRuntime,
-    /// The unified audit writer the registry emits through.
+    /// The unified audit writer the node-0 handler emits through.
     pub writer: std::sync::Arc<kennel_lib_audit::Writer>,
     /// The `kennel-bin-init` binary the privhelper factory `fexecve`s as the kennel's uid-0
     /// PID 1 (`07-2`). When `Some`, `bring_up` constructs the kennel via the factory
@@ -1566,7 +1563,6 @@ fn acquire_binder_node0(
     crate::binder::spawn(
         OwnedFd::from(file),
         ctx,
-        prep.policy.clone(),
         prep.unix.clone(),
         lifecycle,
         net,

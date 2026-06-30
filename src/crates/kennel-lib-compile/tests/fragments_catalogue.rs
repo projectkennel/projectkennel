@@ -72,6 +72,39 @@ const CATALOGUE: &[Expect] = &[
         fragment: "dev-headers",
         grants: &["/usr/include/", "/usr/src/"],
     },
+    Expect {
+        fragment: "gui-session-runtime",
+        grants: &[
+            "/usr/bin/sway",
+            "/usr/bin/dbus-run-session",
+            "/etc/sway",
+            "/etc/fonts",
+        ],
+    },
+    Expect {
+        fragment: "gui-desktop",
+        grants: &["/usr/bin/weston-terminal", "/usr/bin/foot", "/etc/fonts"],
+    },
+    Expect {
+        fragment: "gui-editor",
+        grants: &["/usr/bin/gnome-text-editor", "/usr/bin/gedit"],
+    },
+    Expect {
+        fragment: "gui-accessories",
+        grants: &[
+            "/usr/bin/gnome-calculator",
+            "/usr/bin/gnome-clocks",
+            "/usr/bin/baobab",
+        ],
+    },
+    Expect {
+        fragment: "gui-viewers",
+        grants: &["/usr/bin/loupe", "/usr/bin/evince", "/usr/bin/papers"],
+    },
+    Expect {
+        fragment: "gui-files",
+        grants: &["/usr/bin/nautilus"],
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -84,7 +117,7 @@ struct CatalogueSource {
     roots: Vec<PathBuf>,
 }
 impl TemplateSource for CatalogueSource {
-    fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+    fn fetch(&self, name: &str) -> Option<Vec<u8>> {
         self.roots
             .iter()
             .find_map(|r| std::fs::read(r.join(name).join("policy.toml")).ok())
@@ -116,12 +149,12 @@ fn maintainer_keys() -> KeySet {
 fn settle_with(includes: &[&str], keys: &KeySet) -> String {
     let include_list = includes
         .iter()
-        .map(|i| format!("\"{i}@v1\""))
+        .map(|i| format!("\"{i}\""))
         .collect::<Vec<_>>()
         .join(", ");
     let leaf_src = format!(
         "name = \"frag-test\"\n\
-         template_base = \"base-confined@v1\"\n\
+         template_base = \"base-confined\"\n\
          include = [{include_list}]\n\
          [[exec.allow.add]]\n\
          path = \"/bin/sh\"\n\
@@ -129,7 +162,10 @@ fn settle_with(includes: &[&str], keys: &KeySet) -> String {
     );
     let leaf = parse_source(leaf_src.as_bytes()).expect("parse leaf");
     let source = CatalogueSource {
-        roots: vec![repo_root().join("templates"), repo_root().join("fragments")],
+        roots: vec![
+            repo_root().join("toml").join("templates"),
+            repo_root().join("toml").join("fragments"),
+        ],
     };
     let compiled = compile(&leaf, &source, &Trust::require(keys), "0.0.0")
         .expect("compile leaf with fragment (signature must verify, deltas must apply)");
@@ -143,12 +179,31 @@ fn every_fragment_is_signed_additive_and_composes() {
     // The baseline (no fragments) — its grants are what the fragments must add *to*.
     let baseline = settle_with(&[], &keys);
 
+    // Completeness: every committed fragment directory MUST have a CATALOGUE entry, so a
+    // newly added fragment cannot silently escape the signed/additive/composes checks below.
+    let catalogued: std::collections::HashSet<&str> =
+        CATALOGUE.iter().map(|e| e.fragment).collect();
+    for entry in std::fs::read_dir(repo_root().join("toml").join("fragments"))
+        .expect("read fragments dir")
+        .flatten()
+    {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            assert!(
+                catalogued.contains(name.as_str()),
+                "fragment `{name}` has no CATALOGUE entry — add one so it is \
+                 signature/additive/compose-checked"
+            );
+        }
+    }
+
     for entry in CATALOGUE {
         // (1) signature verifies against the maintainer key, and (2) additive-only —
-        // both are enforced by compile_leaf under Trust::require: an unsigned/forged or
+        // both are enforced by compile under Trust::require: an unsigned/forged or
         // `.remove`-bearing fragment makes this fail.
         let frag_bytes = std::fs::read(
             repo_root()
+                .join("toml")
                 .join("fragments")
                 .join(entry.fragment)
                 .join("policy.toml"),

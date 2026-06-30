@@ -1,0 +1,6 @@
+name = "toolchain-c"
+kind = "fragment"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-19"
+description = "The C/C++ build toolchain: compiler, assembler, linker, archiver, make."

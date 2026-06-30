@@ -19,6 +19,109 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-07-01 — the policy JSON Schema is *derived* from the parser structs, not a hand-kept table
+
+- **Target:** docs/architecture/02-2-config-schema.md §intro (the "It is **generated**, not
+  hand-maintained" paragraph), and any prose describing how `schema/policy.toml.schema` is produced.
+- **Change (as-built; drop the stale claim):** the schema is **no longer emitted from an in-repo data
+  table that mirrors the source structs**, and there is **no cross-check test that "pins that table to
+  the real parser."** `gen-schema` now reflects the `kennel-lib-compile` source structs **directly**
+  via `#[derive(SchemaType)]` (a tiny first-party derive on the already-vendored `syn`/`quote` stack,
+  behind a `schema` feature that is off in the runtime/TCB build) and emits the JSON with `serde_json`.
+  The schema is a **pure export of the parser**, so it cannot describe a field the parser lacks or omit
+  one it has — drift is **structurally impossible, not test-guarded**. The hand table
+  (`gen-schema/src/model.rs`), the hand JSON writer (`json.rs`), and the emitter (`emit.rs`) are
+  **deleted**. The cross-check test collapses to two mechanical checks: regenerating is **idempotent**
+  (committed file equals a fresh regen) and **every in-tree template parses with the real parser**
+  (`kennel-lib-compile/tests/schema_parser_crosscheck.rs`).
+- **Why:** the hand table was a second source of truth for the most load-bearing artifact in the
+  system, kept honest only by a test — and that test's `templates ⊆ model` direction made a forgotten
+  entry in a doc-generation mirror **fail a parser-valid template** (`[[fs.write.add]]`). Deriving from
+  the one source removes the duplicate, the babysitter test, and the inverted authority. No new
+  vendored crate, no TCB-closure change.
+- **Source:** the corpus-templates-fragments PR (#142).
+
+## 2026-06-30 — drop template/fragment *versioning*: identity is the name, integrity is the signature (rides schema v3)
+
+- **Target:** the templates chapter (design §5.10 "Signing, versioned references, and includes" and
+  §5.11 the upgrade flow), the config-schema chapter (`template_base`/`template_version`/`include`
+  reference grammar), and the lockfile/provenance model. In the frozen trees:
+  docs/design/05-templates.md, docs/architecture/02-2-config-schema.md.
+- **Change (as-built to capture in the rewrite) — this OVERRIDES §5.10:** there is **no version axis**
+  on templates or fragments. A reference is a **bare name** (`template_base = "base-confined"`,
+  `include = ["core-shell"]`, `[[spawn.allow]] template = "net-fetch"`); the `@vN` suffix, the
+  `template_version` field, the `meta.toml` `version`, the reference-grammar version validator, the
+  settled `ResolvedArtifact.version`, and the lockfile `version` key are all removed.
+  - **Identity is the name; integrity is the signature.** §5.10 held that version-pinned references
+    were a supply-chain control inseparable from signing. As-built, the **signature alone** is the
+    content commitment: the lockfile pins each `name` → its ed25519 signature and hard-errors on
+    drift (re-pointed/re-signed bytes change the signature and are caught); the dynamic-spawn
+    content-pin (§7.12.8) likewise verifies the recorded *signature*, not a version label. The
+    version string added no enforcement (resolution never cross-checked it, and the whole corpus was
+    `@v1`), so it was theatre by the project's own no-theatre rule.
+  - **Coexisting "versions" are coexisting names.** When a base template needs a breaking change,
+    author a new **named** template (e.g. `base-confined-v2`) and point `template_base` at it
+    deliberately — a reviewed edit, not an automatic bump. The `kennel policy upgrade` command (and
+    its version-ordering module) is therefore **removed**; there is no "newest version" to detect.
+  - Rides the existing **`SETTLED_SCHEMA_VERSION` 3** (the settled `ResolvedArtifact` loses `version`).
+- **Why:** a control must move a real, named threat; an unenforced version string did not. Name +
+  signature is the whole supply-chain control, and it is simpler and honestly enforced.
+- **Source:** the corpus-templates-fragments PR (#142).
+
+## 2026-06-30 — remove the `[binder]` service section + two invariant-only schema keys (rides schema v3)
+
+- **Target:** the binder chapter (design §7.1, the user-defined service registry), the config-schema
+  chapter (the `[binder]`, `[fs.proc]`, and `[unix]` tables), and the procfs/AF_UNIX construction. In
+  the frozen trees: docs/design/07-1-binder.md, docs/architecture/02-2-config-schema.md,
+  docs/architecture/02-4-binder.md.
+- **Change (as-built to capture in the rewrite):**
+  - The **`[binder]` user-defined service section is removed** — `[[binder.provide]]` /
+    `[[binder.consume]]`, the settled `BinderRuntime`, and `kenneld`'s node-0 service `Registry`
+    (the `addService`/`getService` gate, plus the `GET_SERVICE`/`IS_DECLARED`/`LIST_SERVICES`
+    verbs). It was a wired-but-unused mechanism with zero corpus/test usage, superseded by the
+    cross-kennel capability **mesh** (`[[provides]]`/`[[consumes]]` → `MeshRuntime` → the
+    `SVC_CONNECT` broker). Drop any framing of `[binder]` as the way to publish a service. The
+    binder **transport** is untouched: `kenneld` still owns node 0 (the `Manager`/lifecycle), the
+    per-kennel binder *device* is still the universal control plane, and `ADD_SERVICE` survives as
+    the mesh-bus registration verb.
+  - **`fs.proc.visibility` is removed.** Procfs is always self-only (`hidepid` such that the
+    workload sees only its own tree); the field's only legal value was `self`, enforced as a
+    framework invariant. The invariant-only key was theatre — procfs is now structurally self-only
+    with no knob, and the `proc.visibility` framework-invariant marker is dropped. `[fs.proc]` keeps
+    `hidepid`.
+  - **`unix.default` is removed.** Default-deny is structural (the AF_UNIX shim contains only what is
+    bound in); the field's only legal value was `deny` (`allow` was a hard compile error). `[unix]`
+    keeps `abstract` (the real deny/allow escape hatch) and `[[unix.allow]]`.
+  - These ride the existing **`SETTLED_SCHEMA_VERSION` 3** (no new bump — one v3 absorbs the whole
+    schema cleanup); the settled `SettledPolicy` loses its `binder` field and `ProcPolicy.visibility`.
+- **Why:** the schema should carry only fields that express a real choice against a real adversary.
+  `[binder]` was unbuilt-in-practice dead weight (a TCB-shrinking removal of ~250 SLOC across the
+  three TCB crates); `fs.proc.visibility` and `unix.default` were invariant-only keys whose single
+  legal value made them cruft.
+- **Source:** the corpus-templates-fragments PR (#142).
+
+## 2026-06-30 — `[fs.tmp]`: `private` → `writable`, drop the DAC-mode knob (settled schema v3)
+
+- **Target:** the config-schema chapter (the `[fs.tmp]` section) and the filesystem chapter's
+  `/tmp` construction. In the frozen trees: docs/architecture/02-2-config-schema.md and
+  docs/design/07-4-filesystem.md.
+- **Change (as-built to capture in the rewrite):**
+  - `[fs.tmp].private` is renamed **`writable`** — that is what it always was: the Landlock write
+    grant on `/tmp`. `/tmp` is *always* a fresh per-kennel tmpfs in the constructed view; `writable =
+    true` lets the workload use it, absent/false leaves it read-only. Drop the stale claim that
+    `private = false` "bind-mounts the host `/tmp`" — it never did; it only withholds the write grant.
+  - `[fs.tmp].mode` is **removed**. The tmpfs lives in the workload's own mount namespace and is owned
+    by the workload uid, so a per-policy DAC mode gated no real adversary (the host can't reach it
+    across the namespace; the kennel is single-uid). The mount now fixes `0700` internally — owner =
+    the workload, private-and-usable. The octal-mode validation (an option-injection guard for a knob
+    that no longer exists) is gone with it.
+  - The settled `TmpPolicy` loses `mode` and renames `private` → `writable`; this bumps
+    **`SETTLED_SCHEMA_VERSION` 2 → 3** (and `MIN` → 3): a pre-v3 settled carries the old shape and must
+    be recompiled. The spawn plan wire format drops `tmp_mode` accordingly.
+- **Why:** `private`/`mode` were a misleading name and security theatre; the schema should say what
+  the field does (grant write) and not offer a knob that isn't a real choice.
+- **Source:** the schema-fs-tmp-writable PR.
+
 ## 2026-06-30 — one policy type: list fields replace *or* increment at the same key
 
 - **Target:** the templates chapter, design §5.2-5.3 (the composition model) and the config-schema

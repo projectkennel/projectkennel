@@ -34,15 +34,15 @@ struct Templates {
     root: PathBuf,
 }
 impl TemplateSource for Templates {
-    fn fetch(&self, name: &str, _version: &str) -> Option<Vec<u8>> {
+    fn fetch(&self, name: &str) -> Option<Vec<u8>> {
         std::fs::read(self.root.join(name).join("policy.toml")).ok()
     }
 
     /// The settled form a spawn instantiates: compile the source template (folding `base-confined`)
     /// and seal it **unsigned** (dev). Production ships a maintainer-signed `<name>.settled.toml`;
     /// here we synthesise the dev equivalent so the spawner's grant resolution has a settled artefact.
-    fn fetch_settled(&self, name: &str, version: &str) -> Option<Vec<u8>> {
-        let bytes = self.fetch(name, version)?;
+    fn fetch_settled(&self, name: &str) -> Option<Vec<u8>> {
+        let bytes = self.fetch(name)?;
         let entry = parse(&bytes).ok()?;
         let compiled = compile(&entry, self, &Trust::dev(), "0.0.0").ok()?;
         kennel_lib_policy::to_bytes(&kennel_lib_compile::seal_unsigned(&compiled.policy)).ok()
@@ -50,13 +50,19 @@ impl TemplateSource for Templates {
 }
 fn templates() -> Templates {
     Templates {
-        root: repo_root().join("templates"),
+        root: repo_root().join("toml").join("templates"),
     }
 }
 
 fn read_template(name: &str) -> Vec<u8> {
-    std::fs::read(repo_root().join("templates").join(name).join("policy.toml"))
-        .expect("read a spawn template's policy.toml")
+    std::fs::read(
+        repo_root()
+            .join("toml")
+            .join("templates")
+            .join(name)
+            .join("policy.toml"),
+    )
+    .expect("read a spawn template's policy.toml")
 }
 
 /// The maintainer trust store from the committed `keys/*.pub` (as in `fragments_catalogue`).
@@ -85,11 +91,11 @@ fn maintainer_keys() -> KeySet {
 fn spawner_policy() -> String {
     let mut allows = String::new();
     for t in SPAWN_TEMPLATES {
-        let _ = write!(allows, "[[spawn.allow]]\ntemplate = \"{t}@v1\"\n");
+        let _ = write!(allows, "[[spawn.allow]]\ntemplate = \"{t}\"\n");
     }
     format!(
         "name = \"spawn-eligibility-probe\"\n\
-         template_base = \"base-confined@v1\"\n\
+         template_base = \"base-confined\"\n\
          [spawn]\n\
          max_instances = 4\n\
          reason = \"probe: exercise spawn-eligibility of the shipped templates\"\n\

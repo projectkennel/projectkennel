@@ -1,0 +1,35 @@
+# ============================================================================
+# Reference policy: interactive — the permissive, ready-to-run confined human shell.
+#
+# Maintainer-signed and shipped enabled: `kennel run interactive` drops you into a confined
+# `/bin/bash` with a broad workstation toolset — the interactive base (shells, coreutils,
+# file tools, editors, archives, net clients, git, python3) widened with the C toolchain and the
+# development headers — and HOST egress. Deliberately permissive: a credible daily-driver shell,
+# still inside the cage (no_new_privs, dropped caps, deny-setuid, shadowed $HOME, masked /etc,
+# private /tmp, self-only procfs). Derive your own leaf to add a project dir or tighten the toolset.
+# ============================================================================
+
+name = "interactive"
+template_base = "interactive"
+
+# Widen the inherited interactive toolset toward a full dev shell: the C toolchain (cc/make/…)
+# and the development headers, on top of the base's shells/coreutils/editors/net-clients/git/python3.
+# The language-registry fragments (lang-python/lang-node) are NOT included — they carry by-name
+# proxy-egress rules host mode rejects; under host egress python3 (inherited) reaches registries directly.
+include = [
+    "toolchain-c",
+    "dev-headers",
+]
+
+# Host egress (also the interactive default): a human shell needs unmediated network.
+[net]
+mode = "host"
+reason = "an interactive human shell needs direct, unmediated egress (git/ssh/curl) on the host network stack"
+
+[workload]
+argv = ["/bin/bash"]
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQO4+Qm6EihZIVrHHJHc5lYaTh22kJbwk+8\nYVUolVJ+bBxwFC1WisLKlFSZ4fXR916/2Lo8NXG0LCGg+pvSOcygQ=\n-----END SSH SIGNATURE-----\n"

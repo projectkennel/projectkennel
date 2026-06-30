@@ -1,0 +1,63 @@
+# ============================================================================
+# Spawn template: pyhello-tool
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4
+#
+# The interpreter-startup SPAWN target (§7.12): `python3 -c "print('hello')"` —
+# the canonical "hello world" workload whose cost is dominated by the CPython
+# interpreter coming up (import machinery, site init), not by the kennel. It
+# reaches NOTHING (`net.mode = "none"`, no fs write), so its spinup is the
+# construction floor PLUS a real interpreter start — the W10 native-vs-kennel
+# python datum, now measured one layer down as an ephemeral SPAWN sibling.
+#
+# Spawn-eligible by construction (§7.12.8): no `[spawn]` of its own (depth-1),
+# a self-reaping TTL, explicit memory/pids/CPU ceilings, no `[[mutable]]`.
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "pyhello-tool"
+
+
+# --- Network: frozen off. No egress leg. ------------------------------------
+[net]
+mode = "none"
+
+
+# --- Execution: the interpreter (+ its versioned real path) and the framework
+#     shell. The compiler resolves PT_INTERP (ld.so) and grants EXECUTE. ------
+[exec]
+allow = ["/usr/bin/python3", "/usr/bin/python3.12", "/bin/sh"]
+
+
+# --- Filesystem: read the system dirs the interpreter + stdlib resolve from
+#     (CPython's modules live under /usr/lib/python3.12). ---------------------
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+
+# --- Workload: the fixed entrypoint; the agent cannot override it ------------
+[workload]
+argv = ["/usr/bin/python3", "-c", "print('hello')"]
+pinned = true
+
+
+# --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
+[lifecycle]
+ttl = "5m"
+ttl_action = "exit"
+
+
+# --- Resource ceilings: mandatory for a spawn target (§7.12.8). CPython
+#     reserves a large *virtual* address space at startup (arenas, thread
+#     stacks), so `as` is generous — this is a benchmark target, not a fence. -
+[ulimits]
+as = "4G"        # address space (virtual) — headroom for the interpreter
+nproc = "64"     # processes / threads
+cpu = "30"       # CPU-seconds
+
+# No [[mutable]] manifest: pyhello-tool opens nothing.
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHoL8j0zANn9tvZTIlCyZshdcnFdxDG6WL\nkJLMh94sFC8jnVdEF1EV4b1kqgoLyTHza0rqRbLJWu1iRAT3BEjg8=\n-----END SSH SIGNATURE-----\n"

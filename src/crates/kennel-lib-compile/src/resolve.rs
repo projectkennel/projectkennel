@@ -44,10 +44,10 @@
 //! [`compile`](mod@crate::compile), after this stage folds the `template_base` chain.
 
 use crate::source::{
-    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BinderSection, BoundaryAcl,
-    CapSection, DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome,
-    FsProc, FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind,
-    NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
+    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BoundaryAcl, CapSection,
+    DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
+    FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind, NetBpf,
+    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
     SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection, TrustSection,
     TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
@@ -60,20 +60,18 @@ use kennel_lib_policy::PolicyError;
 /// Maximum inheritance-chain depth (number of `template_base` hops).
 pub const MAX_CHAIN_DEPTH: usize = 16;
 
-/// A source of template/fragment artefacts by versioned reference. Keeps
-/// [`resolve`] I/O-free: the CLI implements this over the filesystem search path,
-/// tests over an in-memory map.
+/// A source of template/fragment artefacts by name. Keeps [`resolve`] I/O-free: the
+/// CLI implements this over the filesystem search path, tests over an in-memory map.
 pub trait TemplateSource {
-    /// Return the raw TOML bytes for `<name>@<version>`, or `None` if not found.
-    /// `version` carries its leading `v` (e.g. `"v1"`, `"v2.33.2"`).
-    fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>>;
+    /// Return the raw TOML bytes for `<name>`, or `None` if not found.
+    fn fetch(&self, name: &str) -> Option<Vec<u8>>;
 
-    /// Return the **settled, signed** form of `<name>@<version>` — the complete, chain-folded policy
+    /// Return the **settled, signed** form of `<name>` — the complete, chain-folded policy
     /// a spawn instantiates, beside the source (`<name>/<name>.settled.toml`). Distinct from
     /// [`Self::fetch`] (the source leaf the chain-folder composes): a spawn target is load-verified and
     /// instantiated as-is, never compiled in the daemon. `None` if no settled form is present (the
     /// default; an in-memory test source may not provide one).
-    fn fetch_settled(&self, _name: &str, _version: &str) -> Option<Vec<u8>> {
+    fn fetch_settled(&self, _name: &str) -> Option<Vec<u8>> {
         None
     }
 }
@@ -83,8 +81,6 @@ pub trait TemplateSource {
 pub struct ChainLink {
     /// The artefact's name.
     pub name: String,
-    /// The artefact's version (with leading `v`).
-    pub version: String,
     /// The signing-key id its signature verified against, if it was verified.
     pub signing_key_id: Option<String>,
     /// The artefact's on-disk ed25519 signature (base64), if it carried one. This is
@@ -172,11 +168,10 @@ pub fn resolve_verified(
     let mut seen: Vec<String> = Vec::new();
     let mut current = entry.clone();
     while let Some(reference) = current.template_base.clone() {
-        let (name, version) = split_reference(&reference)?;
-        let key = format!("{name}@{version}");
-        if seen.iter().any(|s| s == &key) {
+        let name = parse_reference(&reference)?;
+        if seen.iter().any(|s| s == &name) {
             return Err(PolicyError::Resolution(format!(
-                "cycle detected at `{key}`"
+                "cycle detected at `{name}`"
             )));
         }
         if parents.len() >= MAX_CHAIN_DEPTH {
@@ -184,9 +179,9 @@ pub fn resolve_verified(
                 "inheritance chain exceeds the maximum depth of {MAX_CHAIN_DEPTH}"
             )));
         }
-        seen.push(key.clone());
-        let bytes = source.fetch(&name, &version).ok_or_else(|| {
-            PolicyError::Resolution(format!("reference `{key}` not found in the search path"))
+        seen.push(name.clone());
+        let bytes = source.fetch(&name).ok_or_else(|| {
+            PolicyError::Resolution(format!("reference `{name}` not found in the search path"))
         })?;
         let parent = source::parse(&bytes)?;
         parent.validate()?;
@@ -194,7 +189,6 @@ pub fn resolve_verified(
         let signature = parent.signature.as_ref().map(|e| e.signature.clone());
         links.push(ChainLink {
             name,
-            version,
             signing_key_id,
             signature,
         });
@@ -236,7 +230,6 @@ pub fn resolve_verified(
     // `compile`/`compile_leaf` via `apply_includes`, which reads exactly this list, so
     // clearing it here silently dropped every `include` declared on a source template.
     acc.template_base = None;
-    entry.template_version.clone_into(&mut acc.template_version);
     entry.template_name.clone_into(&mut acc.template_name);
     entry.name.clone_into(&mut acc.name);
     acc.signature = None;
@@ -259,8 +252,6 @@ pub fn resolve_verified(
 pub(crate) fn apply_fragment(base: &SourcePolicy, fragment: &SourcePolicy) -> SourcePolicy {
     let mut folded = fold(base, fragment);
     base.template_base.clone_into(&mut folded.template_base);
-    base.template_version
-        .clone_into(&mut folded.template_version);
     base.template_name.clone_into(&mut folded.template_name);
     base.name.clone_into(&mut folded.name);
     folded.include.clone_from(&base.include);
@@ -268,16 +259,12 @@ pub(crate) fn apply_fragment(base: &SourcePolicy, fragment: &SourcePolicy) -> So
     folded
 }
 
-/// Split and validate a versioned reference into `(name, version)`.
-pub(crate) fn split_reference(reference: &str) -> Result<(String, String), PolicyError> {
+/// Validate a template reference (a bare name) and return it.
+pub(crate) fn parse_reference(reference: &str) -> Result<String, PolicyError> {
     let bad =
         |d: String| PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"));
-    let (name, version) = reference
-        .split_once('@')
-        .ok_or_else(|| bad("missing `@version` (expected `<name>@v<ver>`)".to_owned()))?;
-    source::validate_ref_name(name).map_err(bad)?;
-    source::validate_ref_version(version).map_err(bad)?;
-    Ok((name.to_owned(), version.to_owned()))
+    source::validate_ref_name(reference).map_err(bad)?;
+    Ok(reference.to_owned())
 }
 
 /// Fold `child` over `parent`, child overriding. Identity fields are settled by the
@@ -285,7 +272,6 @@ pub(crate) fn split_reference(reference: &str) -> Result<(String, String), Polic
 fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
     SourcePolicy {
         template_base: child.template_base.clone(),
-        template_version: or(&child.template_version, &parent.template_version),
         template_name: or(&child.template_name, &parent.template_name),
         name: or(&child.name, &parent.name),
         include: union_strings(&parent.include, &child.include),
@@ -301,7 +287,6 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         unix: merge(&parent.unix, &child.unix, fold_unix),
         ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
         identity: merge(&parent.identity, &child.identity, fold_identity),
-        binder: merge(&parent.binder, &child.binder, fold_binder),
         // `[[provides]]` / `[[consumes]]` fold like a bare list (the SSH set model): a child's
         // non-empty list replaces the inherited one, an absent one inherits.
         provides: if child.provides.is_empty() {
@@ -600,15 +585,13 @@ fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
 
 fn fold_fs_tmp(p: &FsTmp, c: &FsTmp) -> FsTmp {
     FsTmp {
-        private: or(&c.private, &p.private),
+        writable: or(&c.writable, &p.writable),
         size: or(&c.size, &p.size),
-        mode: or(&c.mode, &p.mode),
     }
 }
 
 fn fold_fs_proc(p: &FsProc, c: &FsProc) -> FsProc {
     FsProc {
-        visibility: or(&c.visibility, &p.visibility),
         hidepid: or(&c.hidepid, &p.hidepid),
     }
 }
@@ -742,7 +725,6 @@ fn fold_audit_class(p: &AuditClassSection, c: &AuditClassSection) -> AuditClassS
 
 fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
     UnixSection {
-        default: or(&c.default, &p.default),
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
         // Replace or increment (`[[unix.allow.add]]`), keyed by name/real.
         allow: fold_listfield(&c.allow, &p.allow, unix_key),
@@ -759,22 +741,6 @@ fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
             p.groups.clone()
         } else {
             c.groups.clone()
-        },
-    }
-}
-
-fn fold_binder(p: &BinderSection, c: &BinderSection) -> BinderSection {
-    // Bare-set: a child's non-empty list replaces the parent's (as `unix.allow`).
-    BinderSection {
-        provide: if c.provide.is_empty() {
-            p.provide.clone()
-        } else {
-            c.provide.clone()
-        },
-        consume: if c.consume.is_empty() {
-            p.consume.clone()
-        } else {
-            c.consume.clone()
         },
     }
 }
@@ -850,7 +816,7 @@ mod tests {
         )
         .expect("parent");
         let child = parse(
-            b"name = \"k\"\ntemplate_base = \"p@v1\"\n[dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"org.freedesktop.portal.*\"]\n",
+            b"name = \"k\"\ntemplate_base = \"p\"\n[dbus.session]\nenabled = true\n[dbus.session.allow]\ntalk = [\"org.freedesktop.portal.*\"]\n",
         )
         .expect("child");
         let folded = fold_dbus(
@@ -864,10 +830,12 @@ mod tests {
         assert!(allow.talk.contains(&"org.freedesktop.portal.*".to_owned()));
     }
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
-        include_str!("../../../../templates/ai-coding-strict/policy.toml");
-    const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
+        include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
+    const UNTRUSTED_BUILD: &str =
+        include_str!("../../../../toml/templates/untrusted-build/policy.toml");
 
     #[test]
     fn fold_ulimits_is_per_key_child_overrides() {
@@ -897,10 +865,10 @@ mod tests {
     }
 
     impl TemplateSource for MapSource {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             self.0
                 .iter()
-                .find(|(n, v, _)| n == name && v == version)
+                .find(|(n, _, _)| n == name)
                 .map(|(_, _, b)| b.clone())
         }
     }
@@ -963,10 +931,7 @@ mod tests {
         // Provenance records the folded parent.
         assert_eq!(resolved.chain.len(), 1);
         let root = resolved.chain.first().expect("root link");
-        assert_eq!(
-            (root.name.as_str(), root.version.as_str()),
-            ("base-confined", "v1")
-        );
+        assert_eq!(root.name.as_str(), "base-confined");
     }
 
     #[test]
@@ -1006,7 +971,7 @@ mod tests {
     fn bare_list_sets_and_absent_inherits() {
         // parent sets exec.deny=[a,b] and exec.allow=[x]; child sets exec.deny=[c] only.
         let parent = "template_name = \"p\"\n[exec]\nallow = [\"/x\"]\ndeny = [\"/a\", \"/b\"]\n";
-        let child = "template_name = \"c\"\ntemplate_base = \"p@v1\"\n[exec]\ndeny = [\"/c\"]\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[exec]\ndeny = [\"/c\"]\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         let exec = resolved.effective.exec.as_ref().expect("exec");
@@ -1022,7 +987,7 @@ mod tests {
     #[test]
     fn invariant_denies_union_across_the_chain() {
         let parent = "template_name = \"p\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"rfc1918\"\n";
-        let child = "template_name = \"c\"\ntemplate_base = \"p@v1\"\n[[net.proxy.deny.invariant]]\ncidr = \"192.168.0.0/16\"\nreason = \"rfc1918\"\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[[net.proxy.deny.invariant]]\ncidr = \"192.168.0.0/16\"\nreason = \"rfc1918\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         let nd = resolved
@@ -1048,7 +1013,7 @@ mod tests {
 
     #[test]
     fn missing_reference_is_an_error() {
-        let entry = "name = \"n\"\ntemplate_base = \"absent@v1\"\n";
+        let entry = "name = \"n\"\ntemplate_base = \"absent\"\n";
         let err = resolve(&parse(entry.as_bytes()).expect("parse"), &MapSource::new())
             .expect_err("missing base must fail");
         assert!(matches!(err, PolicyError::Resolution(_)), "got {err}");
@@ -1056,8 +1021,8 @@ mod tests {
 
     #[test]
     fn cycle_is_detected() {
-        let a = "template_name = \"a\"\ntemplate_base = \"b@v1\"\n";
-        let b = "template_name = \"b\"\ntemplate_base = \"a@v1\"\n";
+        let a = "template_name = \"a\"\ntemplate_base = \"b\"\n";
+        let b = "template_name = \"b\"\ntemplate_base = \"a\"\n";
         let src = MapSource::new()
             .with("a", "v1", a.as_bytes())
             .with("b", "v1", b.as_bytes());
@@ -1081,11 +1046,11 @@ mod tests {
                 format!("template_name = \"t{i}\"\n")
             } else {
                 let next = i.saturating_add(1);
-                format!("template_name = \"t{i}\"\ntemplate_base = \"t{next}@v1\"\n")
+                format!("template_name = \"t{i}\"\ntemplate_base = \"t{next}\"\n")
             };
             src = src.with(&format!("t{i}"), "v1", body.as_bytes());
         }
-        let entry = "template_name = \"t0\"\ntemplate_base = \"t1@v1\"\n";
+        let entry = "template_name = \"t0\"\ntemplate_base = \"t1\"\n";
         let err = resolve(&parse(entry.as_bytes()).expect("parse"), &src)
             .expect_err("over-deep chain must fail");
         assert!(
@@ -1099,22 +1064,14 @@ mod tests {
 
     #[test]
     fn malformed_template_base_reference_is_rejected() {
-        // `@4` lacks the leading `v`. The entry's own validate is the first gate,
-        // so this surfaces as a SourceValidation error before resolution walks it.
-        let entry = "name = \"n\"\ntemplate_base = \"base-confined@4\"\n";
-        let err = resolve(&parse(entry.as_bytes()).expect("parse"), &base_source())
+        // A `template_base` is a bare name; an invalid name (disallowed chars) is rejected by
+        // the entry's own validate before resolution walks it.
+        let entry = "name = \"n\"\ntemplate_base = \"Bad Name\"\n";
+        let err = parse(entry.as_bytes())
+            .expect("parse")
+            .validate()
             .expect_err("malformed ref must fail");
-        assert!(
-            matches!(
-                err,
-                PolicyError::SourceValidation(_) | PolicyError::Resolution(_)
-            ),
-            "got {err}"
-        );
-        assert!(
-            err.to_string().contains("version must start"),
-            "explains why: {err}"
-        );
+        assert!(matches!(err, PolicyError::SourceValidation(_)), "got {err}");
     }
 
     // ---- provides_origin: the reserved-namespace gate's signature provenance ----
@@ -1132,7 +1089,7 @@ mod tests {
         // The most-derived artefact authored the provides — the template-authoring path.
         let parent = "template_name = \"p\"\n";
         let child = format!(
-            "name = \"c\"\ntemplate_base = \"p@v1\"\n{}",
+            "name = \"c\"\ntemplate_base = \"p\"\n{}",
             provides_block("org.projectkennel.wayland")
         );
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
@@ -1147,7 +1104,7 @@ mod tests {
             "template_name = \"p\"\n{}",
             provides_block("doe.john.cache")
         );
-        let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n";
+        let child = "name = \"c\"\ntemplate_base = \"p\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         assert_eq!(r.provides_origin, ProvidesOrigin::Ancestor { tier: None });
@@ -1178,7 +1135,7 @@ mod tests {
             .expect("ser")
             .into_bytes();
         let src = MapSource::new().with("p", "v1", &signed);
-        let child = parse(b"name = \"c\"\ntemplate_base = \"p@v1\"\n").expect("parse child");
+        let child = parse(b"name = \"c\"\ntemplate_base = \"p\"\n").expect("parse child");
         let r = resolve_verified(
             &child,
             &src,
@@ -1197,7 +1154,7 @@ mod tests {
     fn service_folds_scalar_wins_per_field() {
         // Parent sets restart + max_attempts; child overrides only backoff — the others inherit.
         let parent = "template_name = \"p\"\n[service]\nrestart = \"always\"\nmax_attempts = 9\n";
-        let child = "name = \"c\"\ntemplate_base = \"p@v1\"\n[service]\nbackoff = \"2s\"\n";
+        let child = "name = \"c\"\ntemplate_base = \"p\"\n[service]\nbackoff = \"2s\"\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         let svc = r.effective.service.expect("service");
@@ -1211,17 +1168,5 @@ mod tests {
         let entry = parse(b"template_name = \"p\"\n").expect("parse");
         let r = resolve(&entry, &MapSource::new()).expect("resolve");
         assert_eq!(r.provides_origin, ProvidesOrigin::Absent);
-    }
-
-    #[test]
-    fn bare_name_template_base_is_rejected() {
-        // A `template_base` must carry an inline `@v<ver>`; the bare-name form is no longer
-        // accepted — per-artefact validation rejects it outright.
-        let entry = "name = \"n\"\ntemplate_base = \"base-confined\"\n";
-        let err = parse(entry.as_bytes())
-            .expect("parse")
-            .validate()
-            .expect_err("bare-name base must fail validation");
-        assert!(matches!(err, PolicyError::SourceValidation(_)), "got {err}");
     }
 }

@@ -118,10 +118,10 @@ done
 # 4. Generate one CONTROL-kennel policy per workload: a confined kennel that may exec the payload
 #    directly AND holds a [spawn] grant for the payload's template, whose workload is the bench driver.
 WORK="$(mktemp -d)"
-gen_control() {  # $1=name $2=template@v1 $3=exec-extra-csv $4=argv-tail-csv
+gen_control() {  # $1=name $2=template $3=exec-extra-csv $4=argv-tail-csv
     cat > "$WORK/$1.toml" <<EOF
 name = "$1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 [net]
 mode = "none"
 [fs]
@@ -145,8 +145,8 @@ reason = "spinup bench: $N direct + $N spawn of $2"
 template = "$2"
 EOF
 }
-gen_control spinup-true    true-tool@v1    '"/bin/true", "/usr/bin/true"' '"/bin/true"'
-gen_control spinup-pyhello pyhello-tool@v1 '"/usr/bin/python3", "/usr/bin/python3.12"' \
+gen_control spinup-true    true-tool    '"/bin/true", "/usr/bin/true"' '"/bin/true"'
+gen_control spinup-pyhello pyhello-tool '"/usr/bin/python3", "/usr/bin/python3.12"' \
     '"/usr/bin/python3", "-c", "print('"'"'hello'"'"')"'
 
 # 5. Turn on the timestamped spawn-path trace (restored on exit) and (re)start the service.

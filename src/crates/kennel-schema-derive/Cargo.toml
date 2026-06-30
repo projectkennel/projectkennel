@@ -1,0 +1,28 @@
+# `#[derive(SchemaType)]` — reflects a policy struct/enum into a `kennel-schema` node.
+#
+# A first-party proc-macro built on the macro stack serde already vendors
+# (`syn`/`quote`/`proc-macro2`, §5.5-audited). Build-time only — like `serde_derive`,
+# it runs at compile time and links into no binary. Enabled only by the struct crates'
+# `schema` feature (off in the runtime/TCB build), so it adds nothing to vet and nothing
+# to the TCB closure.
+[package]
+name = "kennel-schema-derive"
+version.workspace = true
+publish.workspace = true
+description = "Derive macro turning a policy struct/enum into its kennel-schema node (build-time only)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "=1.0.106"
+quote = "=1.0.45"
+syn = "=2.0.117"
+
+[lints]
+workspace = true

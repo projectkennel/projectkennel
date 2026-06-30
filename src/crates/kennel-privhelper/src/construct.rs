@@ -725,8 +725,8 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         // as the OPERATOR, so without this the persona cannot write it (mktemp, build scratch, even
         // `touch` all EACCES despite the Landlock /tmp grant; the grant is necessary, not
         // sufficient, against DAC). Chown the tmpfs root only — it is empty here — so the mode
-        // (0700 by default) stands and /tmp is the persona's *private* tmp, not world-writable.
-        // (A view always mounts /tmp; with `fs.tmp.private = false` there is simply no Landlock
+        // (0700) stands and /tmp is the persona's own tmp, owned by the workload user.
+        // (A view always mounts /tmp; with `fs.tmp.writable = false` there is simply no Landlock
         // grant, so this chown is inert there.)
         kennel_lib_syscall::unistd::chown_to(std::path::Path::new("/tmp"), op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of

@@ -1,0 +1,64 @@
+# ============================================================================
+# Spawn template: scratch-fs
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4
+#
+# A single-leg SPAWN target (§7.12): data shuffling WITHOUT reach. `net.mode =
+# "none"` (no egress leg) and no persistence; the one leg is a writable scratch
+# area. An agent holding [spawn] instantiates this to move/transform data on the
+# filesystem, with no way to reach the network.
+#
+# Spawn-eligible (§7.12.8): no [spawn] of its own (depth-1), a self-reaping TTL,
+# explicit memory/pids/CPU ceilings.
+#
+# The mutable surface (§7.12.3) is `fs.write` under a ONEOF constraint: the agent
+# selects its working directory from a fixed, signed set. (The free-form
+# "predicate-bound workspace path" the roadmap envisions — a `relpath` constraint
+# resolved RESOLVE_IN_ROOT under a workspace root — lands once the applicator wires
+# the predicate `under` root; until then this closed set is the fully-enforced
+# form.) The residual is closed-set selection — zero agent free text (T3.9 R1 does
+# not attach).
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "scratch-fs"
+
+
+# --- Network: frozen off. No egress leg. ------------------------------------
+[net]
+mode = "none"
+
+
+# --- Execution: the constructed-view scratch entrypoint ----------------------
+[exec]
+allow = ["/usr/libexec/kennel/mcp-scratch", "/bin/sh"]
+
+
+# --- Workload: the fixed entrypoint; the agent cannot override it ------------
+[workload]
+argv = ["/usr/libexec/kennel/mcp-scratch"]
+pinned = true
+
+
+# --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
+[lifecycle]
+ttl = "10m"
+ttl_action = "exit"
+
+
+# --- Resource ceilings: mandatory for a spawn target (§7.12.8) --------------
+[ulimits]
+as = "512M"
+nproc = "64"
+cpu = "30"
+
+
+# --- Mutable surface: the agent picks its working directory (closed set) ------
+[[mutable]]
+field = "fs.write"
+oneof = ["~/scratch/work-a", "~/scratch/work-b"]
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHvd6pxs4JKKj8HtxbHocof82+buRy/jWU\naRM2z6m0chtj6kIvLyfCvQljaIwKKMbklTIuZfCYXwgmQwy6OgfQI=\n-----END SSH SIGNATURE-----\n"

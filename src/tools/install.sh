@@ -6,7 +6,7 @@
 # the maintainer trust-store key, and the signed reference templates. Two halves:
 #
 #   1. System install (root): all binaries under <libexec> (default
-#      /usr/libexec/kennel, the documented non-PATH helper location, 07-paths.md),
+#      /usr/libexec/kennel, the documented non-PATH helper location),
 #      the privhelper factory file-capped (cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin)
 #      with its capability-split sub-helpers, the vendor deployment config under
 #      /usr/lib/kennel, the systemd *user* units, the AppArmor profile, and the
@@ -23,7 +23,7 @@
 # The installer does NOT fabricate the security-sensitive admin inputs
 # (/etc/kennel/subkennel allocations or the trust-store public keys); it creates
 # the directory skeleton and tells the admin what to populate. See
-# CODING-STANDARDS.md §5 and docs/architecture/07-paths.md.
+# CODING-STANDARDS.md §5.
 #
 # Usage (from an unpacked release tarball):
 #   sudo ./install.sh [--prefix DIR] [--mandir DIR] [--dry-run]
@@ -190,12 +190,17 @@ install_config() {
 	# installed, so a --prefix relocation stays coherent without hand-editing.
 	run install -d -m 0755 "$vendor_dir"
 	# Vendor cascade layers for keys/templates/policies so the lowest-priority
-	# search dir always exists (kennel-lib-config 3-layer cascade; 07-paths). No
-	# reference policies are shipped — policies are user/org content.
-	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" "$vendor_dir/policies"
+	# search dir always exists (kennel-lib-config 3-layer cascade). This is the
+	# MAINTAINER tree: ALL maintainer-signed content — templates, composable fragments, the
+	# reference policy SOURCES (runnable + service providers) and the trust-store public key(s) —
+	# ships here, never to /etc/kennel (which is the admin tier). install_reference_policies then
+	# compiles the sources to settled artefacts on THIS host (the arch-specific loader pin forbids
+	# shipping a settled policy) and places those under /etc/kennel.
+	run install -d -m 0755 "$vendor_dir/keys" "$vendor_dir/templates" \
+		"$vendor_dir/policies" "$vendor_dir/policies/providers"
 	# Ship the reference templates (base-confined — the security foundation policies inherit — and
 	# the spawn targets agents instantiate) into the vendor template cascade, so the daemon and the
-	# CLI resolve them at the standard path (07-paths), never the source tree. Source `policy.toml`
+	# CLI resolve them at the standard path, never the source tree. Source `policy.toml`
 	# + meta; a spawn target's signed `<name>.settled.toml` is produced by `kennel policy compile`
 	# (the maintainer signs the reference set; the operator their own).
 	if [ -d "$pkg_root/templates" ]; then
@@ -209,6 +214,33 @@ install_config() {
 			done
 		done
 	fi
+	# The composable fragments share the template search dir (a leaf's `include = ["gui-desktop",
+	# …]` resolves them from template_dirs); ship them alongside the templates in the maintainer tree.
+	if [ -d "$pkg_root/fragments" ]; then
+		for fdir in "$pkg_root"/fragments/*/; do
+			[ -f "${fdir}policy.toml" ] || continue
+			fname="$(basename "$fdir")"
+			run install -d -m 0755 "$vendor_dir/templates/$fname"
+			run install -m 0644 "${fdir}policy.toml" "$vendor_dir/templates/$fname/policy.toml"
+		done
+	fi
+	# The reference policy SOURCES — runnable leaves (policies/<name>) and service providers
+	# (policies/providers/<name>) — maintainer-signed, into the vendor policies tree. They are
+	# compiled to settled, host-signed artefacts at install (install_reference_policies).
+	if [ -d "$pkg_root/policies" ]; then
+		for pdir in "$pkg_root"/policies/*/; do
+			[ -f "${pdir}policy.toml" ] || continue
+			pname="$(basename "$pdir")"
+			run install -d -m 0755 "$vendor_dir/policies/$pname"
+			run install -m 0644 "${pdir}policy.toml" "$vendor_dir/policies/$pname/policy.toml"
+		done
+		for pdir in "$pkg_root"/policies/providers/*/; do
+			[ -f "${pdir}policy.toml" ] || continue
+			pname="$(basename "$pdir")"
+			run install -d -m 0755 "$vendor_dir/policies/providers/$pname"
+			run install -m 0644 "${pdir}policy.toml" "$vendor_dir/policies/providers/$pname/policy.toml"
+		done
+	fi
 	run install -m 0644 "$pkg_root/dist/config/system.toml" "$vendor_dir/system.toml"
 	# The bastion's hardened sshd_config template (W18): surfaced root-owned in the vendor layer so
 	# its lockdown is legible and admin-tunable (override at /etc/kennel/kennel-sshd.conf), not baked
@@ -219,8 +251,8 @@ install_config() {
 	# falls back to its embedded copy if absent; this lets an org ship an extended one).
 	run install -d -m 0755 "$vendor_dir/threats"
 	run install -m 0644 "$pkg_root/dist/threats/catalogue.toml" "$vendor_dir/threats/catalogue.toml"
-	# The vendor-default catalogues (§2.6 / §7.4): the trust-trigger set the CLI pins/watches
-	# (T2.8) and the essential /etc subtrees the daemon binds read-only into every view (W14).
+	# The vendor-default catalogues: the trust-trigger set the CLI pins/watches
+	# (T2.8) and the essential /etc subtrees the daemon binds read-only into every view.
 	# Both are additive cascades; /etc/kennel overrides this vendor layer.
 	run install -m 0644 "$pkg_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
 	run install -m 0644 "$pkg_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
@@ -272,7 +304,7 @@ install_apparmor() {
 }
 
 install_etc_skeleton() {
-	# Root-owned configuration root. `keys/` is the trust store (07-paths.md §/etc):
+	# Root-owned configuration root. `keys/` is the trust store:
 	# the daemon's signing-key store (system.toml's trust_dir default) and the CLI's
 	# authoring search dir. Admin-owned; org keys and per-user allocations go here.
 	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/templates /etc/kennel/policies
@@ -286,8 +318,8 @@ install_keys() {
 	# Ship the project's own public key(s) into the VENDOR trust dir
 	# (/usr/lib/kennel/keys), so the signed reference templates verify out of the box.
 	# The daemon searches the vendor dir first, and a key there is vendor-provenance —
-	# the authority for the built-in org.projectkennel.* reserved namespace
-	# (07-13-service-catalog.md §7.13.5). The maintainer key belongs here, not in the
+	# the authority for the built-in org.projectkennel.* reserved namespace.
+	# The maintainer key belongs here, not in the
 	# admin /etc/kennel/keys (which holds org/customer keys an admin adds): an admin or
 	# user key cannot claim the project's own namespace. Private seeds are never in the
 	# repo (MAINTAINERS.md); only `*.pub` is shipped.
@@ -302,7 +334,7 @@ install_keys() {
 install_templates() {
 	# Ship the signed reference templates into the CLI's default template search
 	# dir (/etc/kennel/templates, per dist/config/config.toml), so a leaf that
-	# derives e.g. base-confined@v1 resolves and verifies out of the box (the
+	# derives e.g. base-confined resolves and verifies out of the box (the
 	# maintainer public key is installed above). Org templates are added alongside.
 	[ -d "$pkg_root/templates" ] || return 0
 	local d n
@@ -315,8 +347,8 @@ install_templates() {
 }
 
 install_fragments() {
-	# Ship the signed composable fragments (05-templates.md §5.10) into the SAME
-	# template search dir, so a leaf's `include = ["lang-python@v1", ...]` resolves and
+	# Ship the signed composable fragments into the SAME
+	# template search dir, so a leaf's `include = ["lang-python", ...]` resolves and
 	# verifies out of the box. Fragments and templates are both signed includes; sharing
 	# the dir means no extra search-path config, and `kennel policy list` labels each one
 	# `(fragment)`. Org fragments are added alongside.
@@ -466,7 +498,7 @@ $step2
   kennel keygen $u-dev
 
   # 5. scaffold an interactive shell policy from the shipped template, then run it:
-  kennel policy generate my-shell --from interactive@v1
+  kennel policy generate my-shell --from interactive
   kennel run my-shell -- /bin/bash
 
 To make PATH permanent, add the export above to ~/.bashrc (or ~/.profile).

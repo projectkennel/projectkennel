@@ -39,15 +39,16 @@
 
 use crate::source::{PathField, SourcePolicy};
 use kennel_lib_policy::settled::{
-    AuditRuntime, BinderConsumeRuntime, BinderProvideRuntime, BinderRuntime, CapPolicy,
-    ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
-    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode,
-    NetPolicy, NetRule, ProcPolicy, ProcVisibility, Protocol, ProvideRuntime, ProxyListen,
-    RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime, SshGrant,
-    SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
+    AuditRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
+    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
+    MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, Protocol, ProvideRuntime,
+    ProxyListen, RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime,
+    SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
+    WorkloadRuntime,
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
+use serde::de::IntoDeserializer;
 use std::collections::BTreeSet;
 
 /// The product of translation: the settled effective policy plus the per-instance
@@ -62,8 +63,6 @@ pub struct Translated {
     pub unix: UnixRuntime,
     /// The workload's in-kennel identity — the supplementary groups it retains.
     pub identity: IdentityRuntime,
-    /// The per-kennel binder IPC runtime — user-defined provide/consume grants.
-    pub binder: BinderRuntime,
     /// The cross-kennel capability mesh runtime — `[[provides]]`/`[[consumes]]`.
     pub mesh: MeshRuntime,
     /// The `[service]` supervision discipline — the restart policy, present only when
@@ -105,7 +104,7 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let net = translate_net(effective, &mut deferred)?;
     let fs = translate_fs(effective, &mut deferred)?;
     let exec = translate_exec(effective, &mut deferred)?;
-    let proc = translate_proc(effective)?;
+    let proc = translate_proc(effective);
     let cap = CapPolicy {
         no_new_privs: effective
             .cap
@@ -149,7 +148,6 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
     let ssh = translate_ssh(effective);
     let unix = translate_unix(effective, &mut deferred);
     let identity = translate_identity(effective)?;
-    let binder = translate_binder(effective);
     let mesh = translate_mesh(effective);
     let service = translate_service(effective)?;
     let dbus = translate_dbus(effective);
@@ -174,7 +172,6 @@ pub fn translate(effective: &SourcePolicy) -> Result<Translated, PolicyError> {
         ssh,
         unix,
         identity,
-        binder,
         mesh,
         service,
         dbus,
@@ -278,38 +275,6 @@ fn is_sha256_hex(s: &str) -> bool {
     s.len() == 64
         && s.bytes()
             .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
-}
-
-/// Flatten the resolved `[binder]` section into the settled [`BinderRuntime`]: one
-/// runtime entry per `[[binder.provide]]`/`[[binder.consume]]`. Already
-/// compile-time-validated (`crate::binder`), so each entry has a non-reserved `name`.
-/// An absent or empty `[binder]` yields an empty runtime (omitted from the canonical
-/// form), so a no-`[binder]` policy signs exactly as before.
-fn translate_binder(src: &SourcePolicy) -> BinderRuntime {
-    let Some(binder) = &src.binder else {
-        return BinderRuntime::default();
-    };
-    let provide = binder
-        .provide
-        .iter()
-        .filter_map(|p| {
-            p.name.as_ref().map(|name| BinderProvideRuntime {
-                name: name.clone(),
-                accept_from: p.accept_from.clone(),
-            })
-        })
-        .collect();
-    let consume = binder
-        .consume
-        .iter()
-        .filter_map(|c| {
-            c.name.as_ref().map(|name| BinderConsumeRuntime {
-                name: name.clone(),
-                from: c.from.clone(),
-            })
-        })
-        .collect();
-    BinderRuntime { provide, consume }
 }
 
 /// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]: one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
@@ -567,11 +532,16 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
     }
     // Persistence is binary; empty (unset) means the default `discard`.
     let persistence = rootfs.persistence.as_deref().unwrap_or("discard");
-    if !matches!(persistence, "discard" | "persist") {
-        return Err(translation(format!(
-            "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
-        )));
-    }
+    // Validate through `Persistence`'s deserializer — the single source the schema also enumerates.
+    let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+        persistence.into_deserializer();
+    <kennel_lib_policy::settled::Persistence as serde::Deserialize>::deserialize(de).map_err(
+        |_| {
+            translation(format!(
+                "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
+            ))
+        },
+    )?;
     // `persist` + whole-tree-immutable is a contradiction (an upper that can never be written).
     let whole_tree_ro = rootfs
         .readonly
@@ -1260,17 +1230,15 @@ fn translate_fs(
 
     let tmp = match &fs.tmp {
         Some(t) => TmpPolicy {
-            private: t.private.unwrap_or(false),
+            writable: t.writable.unwrap_or(false),
             size_mib: match &t.size {
                 Some(s) => parse_size_mib(s)?,
                 None => DEFAULT_TMP_MIB,
             },
-            mode: t.mode.clone().unwrap_or_else(|| "0700".to_owned()),
         },
         None => TmpPolicy {
-            private: false,
+            writable: false,
             size_mib: DEFAULT_TMP_MIB,
-            mode: "0700".to_owned(),
         },
     };
 
@@ -1443,24 +1411,14 @@ fn translate_exec(
 
 // ---- proc / lifecycle ----------------------------------------------------------
 
-fn translate_proc(src: &SourcePolicy) -> Result<ProcPolicy, PolicyError> {
-    // Procfs visibility/hidepid come from [fs.proc] (procfs is part of the constructed
-    // view, beside [fs.home]/[fs.tmp]/[fs.dev]); only "self" is valid.
+fn translate_proc(src: &SourcePolicy) -> ProcPolicy {
+    // hidepid comes from [fs.proc] (procfs is part of the constructed view, beside
+    // [fs.home]/[fs.tmp]/[fs.dev]). Procfs is always self-only; that is structural.
     let fs_proc = src.fs.as_ref().and_then(|f| f.proc.as_ref());
-    let visibility = fs_proc.and_then(|p| p.visibility.as_deref());
-    match visibility {
-        Some("self") | None => {}
-        Some(other) => {
-            return Err(translation(format!(
-                "fs.proc.visibility `{other}` is not `self`"
-            )))
-        }
-    }
     let hidepid = fs_proc.and_then(|p| p.hidepid);
-    Ok(ProcPolicy {
-        visibility: ProcVisibility::SelfOnly,
+    ProcPolicy {
         hidepid: hidepid.unwrap_or(false),
-    })
+    }
 }
 
 fn translate_lifecycle(src: &SourcePolicy) -> Result<LifecyclePolicy, PolicyError> {
@@ -1681,7 +1639,7 @@ mod tests {
         // A well-formed grant validates.
         let ok = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"agent spawns tools\"\n\
-              [[spawn.allow]]\ntemplate = \"net-fetch@v1\"\n",
+              [[spawn.allow]]\ntemplate = \"net-fetch\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&ok).is_ok());
@@ -1689,24 +1647,23 @@ mod tests {
         assert!(validate_spawn(&parse(b"name = \"x\"\n").expect("parse")).is_ok());
 
         // reason is mandatory (the waiver is loud).
-        let no_reason = parse(
-            b"name = \"x\"\n[spawn]\nmax_instances = 8\n[[spawn.allow]]\ntemplate = \"t@v1\"\n",
-        )
-        .expect("parse");
+        let no_reason =
+            parse(b"name = \"x\"\n[spawn]\nmax_instances = 8\n[[spawn.allow]]\ntemplate = \"t\"\n")
+                .expect("parse");
         assert!(
             format!("{}", validate_spawn(&no_reason).expect_err("no reason")).contains("reason")
         );
 
         // max_instances is mandatory and must be ≥ 1 (the fork-bomb ceiling).
         let no_max =
-            parse(b"name = \"x\"\n[spawn]\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"t@v1\"\n")
+            parse(b"name = \"x\"\n[spawn]\nreason = \"r\"\n[[spawn.allow]]\ntemplate = \"t\"\n")
                 .expect("parse");
         assert!(
             format!("{}", validate_spawn(&no_max).expect_err("no max")).contains("max_instances")
         );
         let zero_max = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 0\nreason = \"r\"\n[[spawn.allow]]\n\
-              template = \"t@v1\"\n",
+              template = \"t\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&zero_max).is_err());
@@ -1721,7 +1678,7 @@ mod tests {
         // A malformed template ref is rejected.
         let bad_ref = parse(
             b"name = \"x\"\n[spawn]\nmax_instances = 8\nreason = \"r\"\n[[spawn.allow]]\n\
-              template = \"no-version\"\n",
+              template = \"Bad Name\"\n",
         )
         .expect("parse");
         assert!(validate_spawn(&bad_ref).is_err());
@@ -1933,17 +1890,19 @@ mod tests {
         assert!(translate_dbus(&SourcePolicy::default()).is_empty());
     }
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
-        include_str!("../../../../templates/ai-coding-strict/policy.toml");
-    const UNTRUSTED_BUILD: &str = include_str!("../../../../templates/untrusted-build/policy.toml");
+        include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
+    const UNTRUSTED_BUILD: &str =
+        include_str!("../../../../toml/templates/untrusted-build/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
-        fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
             self.0
                 .iter()
-                .find(|(n, v, _)| n == name && v == version)
+                .find(|(n, _, _)| n == name)
                 .map(|(_, _, b)| b.clone())
         }
     }
@@ -2393,7 +2352,7 @@ mod tests {
         // W10: a [spawn] grant auto-derives the `kennel` shim + the in-cage spawn unit into
         // exec.allow, so the agent can run `kennel caps`/`kennel run` without listing them by hand.
         let src = parse(
-            b"name = \"k\"\n[spawn]\nreason = \"compose tools\"\nmax_instances = 2\n[[spawn.allow]]\ntemplate = \"echo-tool@v1\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n",
+            b"name = \"k\"\n[spawn]\nreason = \"compose tools\"\nmax_instances = 2\n[[spawn.allow]]\ntemplate = \"echo-tool\"\n[exec]\nallow = [\"/bin/sh\"]\nshell = \"/bin/sh\"\n",
         )
         .expect("parse");
         let ep = translate_exec(&src, &mut BTreeSet::new()).expect("translate");
@@ -2559,7 +2518,6 @@ mod tests {
         use crate::source::{SourcePolicy, UnixAllow, UnixSection};
         let src = SourcePolicy {
             unix: Some(UnixSection {
-                default: Some("deny".to_owned()),
                 abstract_ns: Some("deny".to_owned()),
                 allow: vec![UnixAllow {
                     name: Some("tool-daemon".to_owned()),
@@ -2777,14 +2735,13 @@ mod tests {
 
         assert!(ep.fs.home_shadow);
         assert_eq!(ep.fs.tmp.size_mib, 512);
-        assert_eq!(ep.fs.tmp.mode, "0700");
+        assert!(ep.fs.tmp.writable);
         assert!(ep.fs.dev.allow.iter().any(|d| d == "/dev/null"));
 
         assert!(ep.exec.deny_setuid && ep.exec.deny_writable);
         assert!(ep.exec.allow.iter().any(|a| a.contains("git")));
 
         assert!(ep.cap.no_new_privs);
-        assert_eq!(ep.proc.visibility, ProcVisibility::SelfOnly);
         assert!(ep.proc.hidepid);
 
         // 8h TTL, warn.
@@ -2812,7 +2769,6 @@ mod tests {
             ssh: t.ssh,
             unix: t.unix,
             identity: t.identity,
-            binder: t.binder,
             mesh: t.mesh,
             service: t.service,
             dbus: t.dbus,
@@ -3102,9 +3058,9 @@ mod tests {
         // An explicit `filter_terminal_escapes = false` is carried to the settled
         // policy (a leaf that turns the filter off, atop the base chain).
         let off = translate_template(concat!(
-            "template_base = \"base-confined@v1\"\n",
+            "template_base = \"base-confined\"\n",
             "template_name = \"tty-off\"\n",
-            "template_version = \"1\"\n",
+            "",
             "[tty]\nfilter_terminal_escapes = false\n",
         ));
         assert!(!off.effective_policy.tty.filter_terminal_escapes);
@@ -3118,9 +3074,9 @@ mod tests {
 
         // An explicit `[trust] manifest = false` opts out, carried to the settled policy.
         let off = translate_template(concat!(
-            "template_base = \"base-confined@v1\"\n",
+            "template_base = \"base-confined\"\n",
             "template_name = \"trust-off\"\n",
-            "template_version = \"1\"\n",
+            "",
             "[trust]\nmanifest = false\n",
         ));
         assert!(!off.effective_policy.trust.manifest);

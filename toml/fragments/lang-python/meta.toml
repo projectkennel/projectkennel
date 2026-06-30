@@ -1,0 +1,6 @@
+name = "lang-python"
+kind = "fragment"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-19"
+description = "Python interpreter, pip cache, and the PyPI package index."

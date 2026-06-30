@@ -12,13 +12,12 @@
 //! [`parse_audit_defaults`] at spawn time, and the daemon must not link the
 //! policy compiler (CODING-STANDARDS.md §3/§5: keep the TCB minimal).
 
+use serde::de::IntoDeserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::error::PolicyError;
 use crate::settled::{AuditFileConfig, AuditRuntime, AuditSinkKind};
 
-/// Accepted per-class audit levels.
-const AUDIT_LEVELS: [&str; 4] = ["off", "denies-only", "summary", "full"];
 /// Accepted syslog facilities.
 const SYSLOG_FACILITIES: [&str; 20] = [
     "kern", "user", "mail", "daemon", "auth", "syslog", "lpr", "news", "uucp", "cron", "authpriv",
@@ -30,6 +29,7 @@ const SYSLOG_FACILITIES: [&str; 20] = [
 /// sink names are validated at translate time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct AuditSection {
     /// Active sinks (`file`, `journald`, `syslog`, `stdout`). Default `["file"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -66,6 +66,7 @@ pub struct AuditSection {
 /// `[audit.file]`: file-sink tuning.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct AuditFileSection {
     /// Override the per-kennel directory (placeholders allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -84,6 +85,7 @@ pub struct AuditFileSection {
 /// `[audit.syslog]`: syslog-sink tuning.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct AuditSyslogSection {
     /// Syslog facility (`user`, `daemon`, `auth`, …). Default `user`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,15 +95,21 @@ pub struct AuditSyslogSection {
 /// A `[audit.<class>]` level sub-table.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct AuditClassSection {
     /// One of `off`, `denies-only`, `summary`, `full`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "crate::settled::AuditClassLevel")
+    )]
     pub level: Option<String>,
 }
 
 /// An empty `[audit.*]` table (journald, stdout: no fields).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct AuditEmptySection {}
 
 /// Build a translation [`PolicyError`].
@@ -144,14 +152,20 @@ pub fn translate_audit_section(
         }
     }
 
+    // Validate the level through `AuditClassLevel`'s own deserializer — the single source of the
+    // accepted set (the enum the schema also enumerates) — keeping the string for the settled form.
     let level = |class: &Option<AuditClassSection>| -> Result<Option<String>, PolicyError> {
-        match class.as_ref().and_then(|c| c.level.as_ref()) {
-            None => Ok(None),
-            Some(l) if AUDIT_LEVELS.contains(&l.as_str()) => Ok(Some(l.clone())),
-            Some(l) => Err(translation(format!(
+        let Some(l) = class.as_ref().and_then(|c| c.level.as_ref()) else {
+            return Ok(None);
+        };
+        let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            l.as_str().into_deserializer();
+        crate::settled::AuditClassLevel::deserialize(de).map_err(|_| {
+            translation(format!(
                 "unknown audit level `{l}` (expected off/denies-only/summary/full)"
-            ))),
-        }
+            ))
+        })?;
+        Ok(Some(l.clone()))
     };
 
     let syslog_facility = match audit.syslog.as_ref().and_then(|s| s.facility.as_ref()) {

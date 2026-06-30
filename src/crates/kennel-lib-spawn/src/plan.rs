@@ -410,15 +410,13 @@ pub struct ShimView {
     pub binds: Vec<BindMount>,
     /// Device nodes the constructed `/dev` exposes (absolute, under `/dev`).
     pub dev_allow: Vec<PathBuf>,
-    /// Private-`/tmp` tmpfs size cap, in mebibytes.
+    /// The workload's `/tmp` tmpfs size cap, in mebibytes.
     pub tmp_size_mib: u32,
-    /// Private-`/tmp` tmpfs mode (octal digits, validated at translation).
-    pub tmp_mode: String,
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
     /// Mount a per-kennel binderfs instance in the view and expose the standard
-    /// `binder` device + `/dev/binder` symlink (`07-1`/`02-4`). Set when the settled
-    /// `[binder]` policy is non-empty; kenneld takes node 0 via `/proc` at spawn.
+    /// `binder` device + `/dev/binder` symlink. Always set: the binder bus is the
+    /// universal control plane, and kenneld takes node 0 via `/proc` at spawn.
     pub binder: bool,
     /// In-view absolute paths to **mask** with an empty over-mount: the workspace trust
     /// manifests (`<writable-bind>/.trust-manifest.json`, §7.4 / T2.8). The host inode is
@@ -510,12 +508,6 @@ fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
 /// Matches on a component boundary (`/etcfoo` / `/procfoo` do not match).
 fn is_special_mount(path: &Path) -> bool {
     path.starts_with("/etc") || path.starts_with("/proc")
-}
-
-/// Whether `mode` is a safe tmpfs `mode=` value: 3 or 4 octal digits and nothing
-/// else, so it cannot inject extra comma-separated mount options (§10.3).
-fn is_octal_mode(mode: &str) -> bool {
-    matches!(mode.len(), 3 | 4) && mode.bytes().all(|b| matches!(b, b'0'..=b'7'))
 }
 
 /// Whether `path` is a device node safe to bind into the constructed `/dev`:
@@ -845,8 +837,8 @@ impl Plan {
     /// # Errors
     ///
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
-    /// valid IPv4 or IPv6 address, if `fs.tmp.mode` is not octal digits, or if an
-    /// `fs.dev.allow` entry is not a device path under `/dev`.
+    /// valid IPv4 or IPv6 address, or if an `fs.dev.allow` entry is not a device path
+    /// under `/dev`.
     // allow: one cohesive policy→plan translation (namespaces, fs view, exec gate,
     // landlock, seccomp, BPF); splitting it would only scatter the shared locals.
     #[allow(clippy::too_many_lines)]
@@ -984,16 +976,8 @@ impl Plan {
             }
         }
 
-        // Validate the tmpfs mode and device allowlist before they reach mount
-        // syscalls: the mode flows into a comma-separated mount data string, so a
-        // non-octal value is an option-injection vector (§10.3); a device path
-        // outside `/dev` or carrying `..` would escape the constructed `/dev`.
-        if !is_octal_mode(&ep.fs.tmp.mode) {
-            return Err(SpawnError::InvalidPolicy(format!(
-                "fs.tmp.mode must be 3-4 octal digits, got `{}`",
-                ep.fs.tmp.mode
-            )));
-        }
+        // Validate the device allowlist before it reaches the mount syscalls: a device
+        // path outside `/dev` or carrying `..` would escape the constructed `/dev`.
         let mut dev_allow: Vec<PathBuf> = Vec::new();
         for d in &ep.fs.dev.allow {
             // A device grant may use a `/**`/`/*` glob (e.g. `/dev/pts/**` for the ptys);
@@ -1031,11 +1015,11 @@ impl Plan {
             landlock_fs.push((shim_root.clone(), write_access()));
         }
 
-        // The workload's own scratch space: the private `/tmp` is a fresh, ephemeral
-        // tmpfs each spawn, so grant it read+write+list. Without this the mounted
-        // `/tmp` is present but unusable (no Landlock grant) — `mktemp`, build scratch,
-        // and even `ls /tmp` would be denied.
-        if ep.fs.tmp.private {
+        // The workload's own scratch space: `/tmp` is a fresh, ephemeral tmpfs each
+        // spawn; `writable` grants it read+write+list. Without the grant the mounted
+        // `/tmp` is present but unusable — `mktemp`, build scratch, and even `ls /tmp`
+        // would be denied.
+        if ep.fs.tmp.writable {
             landlock_fs.push((PathBuf::from("/tmp"), write_access()));
             // POSIX shared memory: a private `/dev/shm` tmpfs alongside `/tmp` (`07-4`). `shm_open(3)`
             // users — wlroots/Wayland compositors, Chromium, anything allocating a shared buffer —
@@ -1106,7 +1090,6 @@ impl Plan {
             binds,
             dev_allow,
             tmp_size_mib: ep.fs.tmp.size_mib,
-            tmp_mode: ep.fs.tmp.mode.clone(),
             proc_hidepid: ep.proc.hidepid,
             binder: true,
             mask_paths,

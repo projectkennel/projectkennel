@@ -1,0 +1,113 @@
+# ============================================================================
+# Template: ai-coding-strict
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4
+#
+# Strict confinement for an AI coding agent on a single project tree. Adds, on
+# top of base-confined: the interpreters/tools an agent needs, the common package
+# registries + git hosts, and an
+# 8-hour TTL. The PROJECT PATH and the LLM API endpoint are deliberately NOT here
+# — the user's leaf policy adds them (see README.md / TEMPLATE-ai-coding-strict.md
+# at the repo root for the full annotated reference and a sample leaf policy).
+#
+# Defends: T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7. Residuals: T1.8 (exfil via the LLM API
+# the user grants), T2.2 (semantic regressions in produced code).
+#
+# Rules below EXTEND base-confined's effective policy: list-valued sections
+# (exec.allow, net.proxy.allow, unix.allow) are additive; the inherited deny lists and
+# invariants are unchanged. See templates/README.md for enforcement status.
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "ai-coding-strict"
+
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "net-clients", "toolchain-c", "vcs-git"]
+
+
+
+# --- Execution: the agent's toolchain (extends base-confined's allowlist) ----
+[exec]
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
+allow = [
+    "/usr/bin/cmake",
+    "/usr/bin/node",
+    "/usr/bin/npm",
+    "/usr/bin/npx",
+    "/usr/bin/patch",
+    "/usr/bin/pip",
+    "/usr/bin/pip3",
+    "/usr/bin/pnpm",
+    "/usr/bin/python3",
+    "/usr/bin/ssh",
+    "/usr/bin/ssh-add",
+    "/usr/bin/yarn",
+]
+
+
+# NOTE: there is no credential "scrubbing" of the project tree. That was a
+# `[fs.scrub]` section the runtime never implemented (it would compile-warn and do
+# nothing), so it is removed rather than shipped as false assurance. Don't grant a
+# tree you don't want the agent to read; secrets in a granted tree are readable.
+
+# --- Network: the common registries + git hosts ------------------------------
+# These extend base-confined's allowlist (which is empty). The LLM API is added
+# by the user's leaf policy (so the same template serves Claude, Codex, Gemini,
+# …). T1.9 (supply-chain compromise in a fetched dependency) is the residual on
+# every registry grant.
+[[net.proxy.allow]]
+name = "registry.npmjs.org"
+ports = [443]
+protocol = "tcp"
+reason = "npm package registry"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "pypi.org"
+ports = [443]
+protocol = "tcp"
+reason = "Python package index"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "files.pythonhosted.org"
+ports = [443]
+protocol = "tcp"
+reason = "Python package files (pypi redirect target)"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "crates.io"
+ports = [443]
+protocol = "tcp"
+reason = "Rust crate registry"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "static.crates.io"
+ports = [443]
+protocol = "tcp"
+reason = "Rust crate downloads"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "github.com"
+ports = [22, 443]
+protocol = "tcp"
+reason = "git over SSH and HTTPS"
+threats.exposed = ["T1.9"]
+[[net.proxy.allow]]
+name = "objects.githubusercontent.com"
+ports = [443]
+protocol = "tcp"
+reason = "git LFS / large-file storage"
+threats.exposed = ["T1.9"]
+
+
+# --- Lifecycle --------------------------------------------------------------
+# A coding session may run a full workday; warn at the TTL rather than kill.
+[lifecycle]
+ttl = "8h"
+ttl_action = "warn"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCb2q245dDxf7en7sFpw3mI5hRVx0j8PzZ\nVd3kAvRGxrlvVzhe8EimdBnk73m08M0bXXsbW7c9PBA4ZxJpqiSQw=\n-----END SSH SIGNATURE-----\n"

@@ -581,22 +581,22 @@ mod tests {
         let tdir = dir.join("net-fetch");
         std::fs::create_dir_all(&tdir).expect("mkdir");
         std::fs::write(tdir.join("net-fetch.settled.toml"), b"BYTES").expect("write");
-        let got = resolve_template(std::slice::from_ref(&dir), "net-fetch@v1");
+        let got = resolve_template(std::slice::from_ref(&dir), "net-fetch");
         assert_eq!(got.as_deref(), Some(b"BYTES".as_slice()));
-        assert!(resolve_template(std::slice::from_ref(&dir), "absent@v1").is_none());
+        assert!(resolve_template(std::slice::from_ref(&dir), "absent").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn build_patch_enforces_the_requester_narrowing() {
         // No narrowing → every field passes to instantiate (which enforces the manifest).
-        let open = pin("net-fetch@v1", &[]);
+        let open = pin("net-fetch", &[]);
         assert_eq!(
             build_patch(&open, &[("fs.write", "/w")]).expect("ok").len(),
             1
         );
         // Narrowed → a field outside the narrowing is rejected before instantiate.
-        let narrow = pin("net-fetch@v1", &["net.proxy.allow"]);
+        let narrow = pin("net-fetch", &["net.proxy.allow"]);
         assert!(build_patch(&narrow, &[("net.proxy.allow", "h:443")]).is_ok());
         let err = build_patch(&narrow, &[("fs.write", "/w")]).expect_err("narrowed out");
         assert!(err.contains("narrowed manifest"));

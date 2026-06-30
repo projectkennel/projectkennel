@@ -17,8 +17,7 @@
 # ============================================================================
 
 template_name = "full-vertical"
-template_version = "1"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 # Constrained egress: own net-ns + the facade-socks5 broker (default-deny allowlist).
 # The workload proves the in-ns loopback is up and the SOCKS endpoint is listening.

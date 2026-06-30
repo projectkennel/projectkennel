@@ -24,11 +24,21 @@ kennel-lib-config = { path = "../kennel-lib-config" }
 # Source and settled policies are TOML (no JSON); serde derives the schema types.
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 basic-toml = "=0.1.10"
+# Schema single-source (behind the `schema` feature, off by default → never in the
+# runtime/TCB build): the source structs derive their JSON-Schema node, so `gen-schema`
+# emits `schema/policy.toml.schema` directly from these parser structs — no hand mirror.
+kennel-schema = { path = "../kennel-schema", optional = true }
+kennel-schema-derive = { path = "../kennel-schema-derive", optional = true }
+
+[features]
+# Reflect the source structs into their schema nodes. Tooling/build-time only; pulls the
+# same reflection into the policy crate it shares schema types with.
+schema = ["dep:kennel-schema", "dep:kennel-schema-derive", "kennel-lib-policy/schema"]
 
 [dev-dependencies]
-# The policy-schema generator's data model, for the schema↔parser cross-check test
-# (tests/schema_parser_crosscheck.rs): proves the emitted JSON Schema agrees with this
-# parser by construction. Dev-only — never linked into any shipped binary.
+# The policy-schema generator, for the schema↔parser cross-check test
+# (tests/schema_parser_crosscheck.rs): regenerates the schema from these structs and
+# asserts it matches the committed artefact. Dev-only — never linked into any shipped binary.
 gen-schema = { path = "../../tools/gen-schema" }
 
 [lints]

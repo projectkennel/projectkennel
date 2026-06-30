@@ -1,0 +1,40 @@
+# ============================================================================
+# Fragment: vcs-git
+#
+# A composable capability bundle (05-templates.md §5.10): git plus its
+# per-subcommand helpers, and the system git config read-only. Include it for a
+# kennel that does source control.
+#
+#   include = ["vcs-git"]
+#
+# Additive-only (§5.10). This grants the git *binaries* and the *system* config;
+# it deliberately does NOT grant network egress — git-over-HTTPS to a specific
+# forge is a destination the leaf states (or `net-permissive` adds), and
+# git-over-SSH goes through the per-kennel SSH bastion (`[ssh]`, §7.10), never a
+# real key in the kennel.
+# ============================================================================
+
+name = "vcs-git"
+
+[[exec.allow.add]]
+path = "/usr/bin/git"
+reason = "git version-control client"
+
+# git dispatches most subcommands (git-remote-https, git-merge, git-rebase, …) to
+# helper binaries under git-core; without this the dispatch is "command not found".
+[[exec.allow.add]]
+path = "/usr/lib/git-core/**"
+reason = "git's per-subcommand helper binaries, re-exec'd by `git`"
+
+# The system git config (alias/safe.directory/credential defaults). Read-only —
+# the workload sees it but cannot rewrite the host's git behaviour. The user's
+# ~/.gitconfig is NOT bound: the constructed $HOME is synthesised, so per-user git
+# identity is set by the leaf (e.g. `[env].set` GIT_AUTHOR_*) if the workflow needs it.
+[[fs.read.add]]
+path = "/etc/gitconfig"
+reason = "system-wide git configuration (read-only)"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIIT29V27ppp1d79gSItYj0RNIUYC7ThmR\nkwqwXLDJ4KWu38odtHx+M8fb6mkW4ZxVGAMgdtxqcDRTHrLEXwjAo=\n-----END SSH SIGNATURE-----\n"

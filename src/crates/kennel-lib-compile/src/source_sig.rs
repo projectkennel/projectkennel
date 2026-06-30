@@ -333,7 +333,8 @@ mod tests {
     use super::*;
     use crate::source::parse;
 
-    const BASE_CONFINED: &str = include_str!("../../../../templates/base-confined/policy.toml");
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
 
     fn keypair() -> (SigningKey, KeySet) {
         let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");

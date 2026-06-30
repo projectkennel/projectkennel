@@ -7,14 +7,9 @@
 /// Node-0 transaction verbs (the `code` field). `IServiceManager`-style semantics;
 /// the numeric codes are Project Kennel's own (not Android-wire-compatible).
 pub mod verb {
-    /// Register a service the caller provides.
+    /// Register a service the caller provides — on a mesh bus, the cross-kennel service
+    /// registration (codes 2–4 are retired `[binder]`-registry verbs).
     pub const ADD_SERVICE: u32 = 1;
-    /// Resolve a service name.
-    pub const GET_SERVICE: u32 = 2;
-    /// Whether a service is declared for the caller.
-    pub const IS_DECLARED: u32 = 3;
-    /// The service names the caller is granted to look up.
-    pub const LIST_SERVICES: u32 = 4;
     /// Connect a granted `AF_UNIX` socket and return the connected fd (the af-unix
     /// facade; sent with `transact_fd`, the reply carries the socket fd).
     pub const CONNECT_AFUNIX: u32 = 5;
@@ -562,9 +557,9 @@ pub mod spawn {
         #[test]
         fn request_round_trips() {
             let patch = [("net.proxy.allow", "example.com:443"), ("fs.write", "/w")];
-            let bytes = encode_request("net-fetch@v1", &patch);
+            let bytes = encode_request("net-fetch", &patch);
             let (template, got) = decode_request(&bytes).expect("decode");
-            assert_eq!(template, "net-fetch@v1");
+            assert_eq!(template, "net-fetch");
             assert_eq!(
                 got,
                 vec![("net.proxy.allow", "example.com:443"), ("fs.write", "/w")]
@@ -573,15 +568,15 @@ pub mod spawn {
 
         #[test]
         fn an_empty_patch_round_trips() {
-            let bytes = encode_request("pure-compute@v1", &[]);
+            let bytes = encode_request("pure-compute", &[]);
             let (template, got) = decode_request(&bytes).expect("decode");
-            assert_eq!(template, "pure-compute@v1");
+            assert_eq!(template, "pure-compute");
             assert!(got.is_empty());
         }
 
         #[test]
         fn trailing_garbage_is_rejected() {
-            let mut bytes = encode_request("net-fetch@v1", &[]);
+            let mut bytes = encode_request("net-fetch", &[]);
             bytes.push(0xff);
             assert!(decode_request(&bytes).is_none());
         }
@@ -838,7 +833,7 @@ pub mod mesh {
     }
 }
 
-/// The `dbus-broker@v1` control-channel wire protocol: the verb `kenneld` speaks on the
+/// The `dbus-broker` control-channel wire protocol: the verb `kenneld` speaks on the
 /// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
 ///
 /// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its

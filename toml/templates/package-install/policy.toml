@@ -1,0 +1,68 @@
+# ============================================================================
+# Template: package-install
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4
+#
+# Installing packages from a specific registry, time-bounded. The threat is the
+# post-install / setup script (T1.2): it runs as the user with whatever the package
+# manager runs. This template gives it a single registry, a scratch directory,
+# the package manager + interpreters (NO curl/wget), and a SHORT TTL — the TTL is
+# the primary defence against capability creep over time (T1.10).
+#
+# The user's leaf policy adds the scratch path to install into, and may add a
+# second registry. Default egress is the npm registry; for a pip/cargo install
+# the leaf adds pypi.org / crates.io.
+#
+# Defends: T1.2 (partial), T1.9 (partial). Residuals: a compromise of the registry
+# itself (out of scope); the short TTL bounds persistence.
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "package-install"
+
+# Exec floor composed from the fragment catalogue (05-templates.md §5.10):
+# the shells + POSIX userland + capability bundles, instead of hand-listing them.
+include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive", "toolchain-c"]
+
+
+
+# --- Execution: the package managers + what they invoke ---------------------
+# Deliberately NO curl/wget (a post-install script's exfil/C2 reach is cut to the
+# allowlisted registry only) and no editors/shells beyond what install needs.
+# Native-module builds need a compiler, so the toolchain is present.
+[exec]
+# Only the binaries no fragment provides stay inline here; the shell, the POSIX
+# userland, and the toolchains come from the `include` above.
+allow = [
+    "/usr/bin/cmake",
+    "/usr/bin/node",
+    "/usr/bin/npm",
+    "/usr/bin/npx",
+    "/usr/bin/pip",
+    "/usr/bin/pip3",
+    "/usr/bin/pnpm",
+    "/usr/bin/python3",
+    "/usr/bin/yarn",
+]
+
+
+# --- Network: one registry by default ---------------------------------------
+[[net.proxy.allow]]
+name = "registry.npmjs.org"
+ports = [443]
+protocol = "tcp"
+reason = "npm package registry (default; leaf adds pypi.org / crates.io as needed)"
+threats.exposed = ["T1.9"]
+
+
+# --- Lifecycle: short by default; the TTL is the point ----------------------
+# A trial install should be ephemeral. Kill at the TTL (not warn) so a package
+# that tries to linger as a background process cannot (T1.10).
+[lifecycle]
+ttl = "1h"
+ttl_action = "exit"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQO11nyCDBPjQ9AnCJCGWCi3XBct+wN9qhv\nrAiTMBQoWFyY40xm/yh9rRERQbr1aflk/MrFwT8q/JgGg5tnakSAE=\n-----END SSH SIGNATURE-----\n"

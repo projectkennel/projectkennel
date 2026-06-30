@@ -2,11 +2,11 @@
 # Suite case: spawn-argv — caller-supplied command line via SPAWN (§7.12).
 #
 # Proves the `workload.argv` mutable field end to end: a confined requester holds
-# a [spawn] grant for the signed `argv-tool@v1` template, whose `[workload].argv`
+# a [spawn] grant for the signed `argv-tool` template, whose `[workload].argv`
 # is mutable (freeform) and whose `[exec].allow` floor is the only gate on what may
 # run. Its workload runs the unified `kennel` surface (W10) with a `--` command line:
 #
-#     kennel run argv-tool@v1 -- /bin/echo <marker>
+#     kennel run argv-tool -- /bin/echo <marker>
 #
 # kenneld validates the grant, re-verifies argv-tool's content-pin, re-runs
 # spawn-eligibility, applies the patch (workload.argv = [/bin/echo, <marker>] —
@@ -23,7 +23,7 @@
 # ============================================================================
 
 name = "spawn-argv"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 # The requester reaches nothing itself — the whole point of delegated spawn.
 [net]
@@ -38,11 +38,11 @@ read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
 [exec]
 allow = ["/bin/sh"]
 
-# The workload spawns argv-tool@v1 with a caller-supplied command and checks the echo.
+# The workload spawns argv-tool with a caller-supplied command and checks the echo.
 [workload]
 argv = [
   "/bin/sh", "-c",
-  'out="$(/usr/bin/kennel run argv-tool@v1 -- /bin/echo argv-mutable-works)"; printf "%s\n" "$out"; case "$out" in *argv-mutable-works*) echo "OK: caller-supplied argv ran in the sibling";; *) echo "FAIL: marker not echoed back (argv did not drive the sibling)"; exit 1;; esac',
+  'out="$(/usr/bin/kennel run argv-tool -- /bin/echo argv-mutable-works)"; printf "%s\n" "$out"; case "$out" in *argv-mutable-works*) echo "OK: caller-supplied argv ran in the sibling";; *) echo "FAIL: marker not echoed back (argv did not drive the sibling)"; exit 1;; esac',
 ]
 pinned = true
 
@@ -52,4 +52,4 @@ max_instances = 4
 reason = "spawn-argv e2e: instantiate argv-tool and prove a caller-supplied command line runs in the sibling"
 
 [[spawn.allow]]
-template = "argv-tool@v1"
+template = "argv-tool"

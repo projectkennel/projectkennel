@@ -1,0 +1,24 @@
+# ============================================================================
+# Fragment: gui-files
+#
+# A composable capability bundle: the GNOME file manager. Include it for a confined desktop
+# that should browse files graphically.
+#
+#   include = ["gui-files"]
+#
+# Additive-only: exec.allow grant only; Nautilus's UI data lives under /usr/share (the base
+# read floor). Local browsing of the kennel's own view works with the exec grant alone;
+# trash, network shares, and removable mounts need the GVfs daemons (more session services),
+# which a richer session runtime would add.
+# ============================================================================
+
+name = "gui-files"
+
+[[exec.allow.add]]
+path = "/usr/bin/nautilus"
+reason = "GNOME Files (Nautilus) — the default Ubuntu file manager"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQPQtWys+nCc+4a1s9gdkVG/agxf2p51U3m\nPk35VSD1NnLS3ojk0ALlIm0UqTrBd2w3bV+aPcVUq2hqdUyeqg7QM=\n-----END SSH SIGNATURE-----\n"

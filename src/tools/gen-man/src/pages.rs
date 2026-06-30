@@ -116,7 +116,7 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
     (
         "policy",
         "author, inspect, sign, and check policies",
-        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|upgrade> [...]",
+        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]",
     ),
     (
         "keygen",
@@ -187,11 +187,6 @@ pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
         "diff",
         "interpreted grant delta between a policy and its baseline (or another policy)",
         "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    ),
-    (
-        "upgrade",
-        "re-pin a policy's template to a newer version (with review)",
-        "policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
     ),
     (
         "inspect",
@@ -415,14 +410,6 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             Command {
                 usage: SYNC_POLICY[10].2, summary: SYNC_POLICY[10].1,
                 options: &[
-                    ("--yes", "Migrate without the interactive confirmation (for scripts/CI)."),
-                    ("--template-dir D", "Add a directory to the template search path (repeatable)."),
-                    ("--trust-dir D", "Trust store the new version's signature verifies against (forwarded to the recompile)."),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[11].2, summary: SYNC_POLICY[11].1,
-                options: &[
                     ("--unix", "Show AF_UNIX socket grants (§7.6)."),
                     (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
                     (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
@@ -485,9 +472,8 @@ there and split across the user and system journals.",
         description: "\
 A Project Kennel policy is a TOML file: a leaf policy, a template it inherits from, \
 or a fragment it includes. The parser rejects unknown keys, duplicate keys, type \
-mismatches, and out-of-range path forms. This page is a field summary; the full \
-schema reference, inheritance and signing model, and the [net.*] / [binder] tables \
-are in docs/architecture/02-2-config-schema.md.
+mismatches, and out-of-range path forms. This page is a field summary; the \
+machine-generated schema/policy.toml.schema is the exhaustive field reference.
 
 Paths use \\fB~/\\fR for the kennel persona home (\\fI/home/<user>\\fR, never a host \
 path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and \
@@ -498,10 +484,10 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 heading: "top-level",
                 intro: "Identity and inheritance.",
                 fields: &[
-                    Field { name: "template_base", kind: "name@vN", desc: "Parent template reference; absent only for the root (base-confined)." },
-                    Field { name: "template_name / template_version", kind: "string", desc: "A template's own name and version (templates only)." },
+                    Field { name: "template_base", kind: "name", desc: "Parent template reference by name; absent only for the root (base-confined)." },
+                    Field { name: "template_name", kind: "string", desc: "A template's own name (templates only)." },
                     Field { name: "name", kind: "string", desc: "The kennel name (leaf policies; matches the filename)." },
-                    Field { name: "include", kind: "array of name@vN", desc: "Signed fragments composed additively." },
+                    Field { name: "include", kind: "array of name", desc: "Signed fragments composed additively." },
                     Field { name: "signature", kind: "table", desc: "Signature envelope; required for templates/fragments, optional for leaves." },
                 ],
             },
@@ -529,8 +515,8 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 fields: &[
                     Field { name: "fs.home.persist", kind: "array", desc: "Home-relative paths that persist writably across runs (else reconstructed each spawn)." },
                     Field { name: "fs.home.readonly", kind: "bool", desc: "Make the constructed $HOME read-only." },
-                    Field { name: "fs.tmp.private / .size / .mode", kind: "bool / string / string", desc: "Private /tmp tmpfs, its size cap (\"512M\"), and mode (\"0700\")." },
-                    Field { name: "fs.proc.visibility / .hidepid", kind: "string / bool", desc: "Procfs visibility (\"self\") and hidepid=2." },
+                    Field { name: "fs.tmp.writable / .size", kind: "bool / string", desc: "Whether the workload may write its /tmp tmpfs (the Landlock grant), and its size cap (\"512M\")." },
+                    Field { name: "fs.proc.hidepid", kind: "bool", desc: "Mount /proc with hidepid=2 (procfs is always self-only)." },
                     Field { name: "fs.dev.allow", kind: "array of paths", desc: "Trivial pseudo-device baseline (/dev/null, /dev/urandom, ...)." },
                     Field { name: "[[fs.dev.passthrough]]", kind: "array of tables", desc: "Real host devices: path, group, reason (required), threats (exposed tag required)." },
                 ],
@@ -565,7 +551,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 heading: "[unix]",
                 intro: "AF_UNIX socket shim.",
                 fields: &[
-                    Field { name: "default / abstract", kind: "string", desc: "Default floor and abstract-namespace toggle (both default deny)." },
+                    Field { name: "abstract", kind: "string", desc: "Abstract-namespace toggle (default deny; the socket floor is structural default-deny)." },
                     Field { name: "[[unix.allow]]", kind: "array of tables", desc: "name, real, shim, env, reason, threats." },
                 ],
             },

@@ -300,7 +300,6 @@ pub fn loaded_from_settled(
         net: substituted.effective_policy.net,
         ssh: substituted.ssh,
         unix: substituted.unix,
-        binder: substituted.binder,
         consumes: substituted.mesh.consumes,
         provides: substituted.mesh.provides,
         dbus: substituted.dbus,

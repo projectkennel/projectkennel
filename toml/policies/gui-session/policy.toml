@@ -1,0 +1,22 @@
+# ============================================================================
+# Reference policy: gui-session — a ready-to-run confined desktop session.
+#
+# Thin runnable alias over the gui-session template. The template carries the whole shape AND the
+# fixed, pinned [workload] (`dbus-run-session sway` — a private session bus wrapping the nested sway
+# compositor), because the session is only correct when launched that way. So this leaf adds nothing
+# but the name: `kennel run gui-session` opens a confined desktop whose multi-window session renders
+# into one window on the host via the gui-broker mesh. The pin refuses a CLI `-- override` (which
+# would launch a bare command with no bus and the wrong display); `--force` is the deliberate escape.
+#
+# sway populates the session from ~/.config/sway/config (the kennel's $HOME is a fresh tmpfs, so the
+# operator drops one in via [fs.home].persist, or sway starts bare and apps are launched from a
+# keybind). The included gui-* fragments allow the standard desktop apps it opens.
+# ============================================================================
+
+name = "gui-session"
+template_base = "gui-session"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKjYi9KxqC8wEJ8Z8H1QKXD3RX30paX66g\nvNFD8qy3SZJ7N2I9Mf2znJnLuMZkrbwhbmL/qQKT7pqTb06QRsvA0=\n-----END SSH SIGNATURE-----\n"

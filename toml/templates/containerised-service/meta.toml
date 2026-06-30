@@ -1,0 +1,6 @@
+name = "containerised-service"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-07"
+description = "A long-lived local dev service (Postgres, Redis, a broker) confined directly by the kennel — no container runtime; the kennel is the container."

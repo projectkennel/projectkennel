@@ -7,7 +7,6 @@
 //! Path/name resolvers, the template/trust-dir cascade, and key loading stay in the crate root
 //! (shared across modules); `review::check_exclusive_ownership` gates `compile`.
 
-use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -33,9 +32,9 @@ pub struct FsTemplateSource {
 }
 
 impl TemplateSource for FsTemplateSource {
-    fn fetch(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+    fn fetch(&self, name: &str) -> Option<Vec<u8>> {
         for dir in &self.dirs {
-            let flat = dir.join(format!("{name}@{version}.toml"));
+            let flat = dir.join(format!("{name}.toml"));
             if let Ok(bytes) = std::fs::read(&flat) {
                 return Some(bytes);
             }
@@ -47,10 +46,10 @@ impl TemplateSource for FsTemplateSource {
         None
     }
 
-    fn fetch_settled(&self, name: &str, version: &str) -> Option<Vec<u8>> {
+    fn fetch_settled(&self, name: &str) -> Option<Vec<u8>> {
         for dir in &self.dirs {
             // The installed flat layout, then the in-tree `<name>/<name>.settled.toml` beside source.
-            let flat = dir.join(format!("{name}@{version}.settled.toml"));
+            let flat = dir.join(format!("{name}.settled.toml"));
             if let Ok(bytes) = std::fs::read(&flat) {
                 return Some(bytes);
             }
@@ -618,19 +617,17 @@ fn resolve_effective(
         .map_err(|e| format!("resolving {}: {e}", path.display()))
 }
 
-/// Resolve a template reference (`<name>@v<n>`) as a standalone effective policy —
+/// Resolve a template reference (a bare `<name>`) as a standalone effective policy —
 /// the baseline a leaf's own deltas are measured against.
 fn resolve_template_baseline(
     reference: &str,
     template_dirs: &[PathBuf],
     tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
-    let (name, version) = kennel_lib_compile::parse_reference(reference)
-        .map_err(|e| format!("`template_base`: {e}"))?;
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
-    let bytes = source.fetch(&name, &version).ok_or_else(|| {
+    let bytes = source.fetch(reference).ok_or_else(|| {
         format!("cannot read `{reference}` to diff against (pass --template-dir)")
     })?;
     let trust = tc.allow_unsigned();
@@ -1174,7 +1171,7 @@ fn is_under_system_dir(path: &Path) -> bool {
 /// `kennel policy generate <name> [--from <template>]` — scaffold a new leaf policy.
 ///
 /// Writes `~/.config/kennel/policies/<name>/policy.toml`: a minimal leaf that inherits
-/// `--from` (default `base-confined@v1`), with a commented `[workload]` stub to fill in.
+/// `--from` (default `base-confined`), with a commented `[workload]` stub to fill in.
 /// Refuses to overwrite an existing policy. Prints next steps (`policy show`/`compile`).
 ///
 /// # Errors
@@ -1184,7 +1181,7 @@ fn is_under_system_dir(path: &Path) -> bool {
 /// already exists, or the scaffold directory or file cannot be written.
 pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     let mut name: Option<String> = None;
-    let mut from = "base-confined@v1".to_owned();
+    let mut from = "base-confined".to_owned();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
     while let Some(arg) = p.next().map_err(|e| e.to_string())? {
         match arg {
@@ -1208,7 +1205,7 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     // `--from` must be a `<template>@v<ver>` reference (the leaf's template_base).
     if !from.contains('@') {
         return Err(format!(
-            "--from `{from}` must be a versioned reference, e.g. `base-confined@v1`"
+            "--from `{from}` must be a versioned reference, e.g. `base-confined`"
         ));
     }
     let dir = user_policies_dir().join(&name);
@@ -1294,7 +1291,7 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
     let mut total = 0usize;
     let mut linted = 0usize;
     for name in &seen {
-        let Some(bytes) = source.fetch(name, "v1") else {
+        let Some(bytes) = source.fetch(name) else {
             continue;
         };
         let mut compiled = match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
@@ -1391,217 +1388,6 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
 
     eprintln!("signed {} with key `{key_id}`", out.display());
     Ok(ExitCode::SUCCESS)
-}
-
-/// `kennel policy upgrade <name>` — re-point a leaf to the newest template version.
-///
-/// Finds the newest available version, shows the source diff, asks for consent, and on
-/// yes rewrites `template_base` and recompiles so `kennel.lock` re-pins. This is the
-/// sanctioned way to change a locked entry (`05-templates.md` §5.11): the lock is
-/// otherwise immutable, a mismatch being a hard error. The semantic threat-impact delta
-/// is `kennel diff`'s job (roadmap); this shows the source diff and never migrates
-/// without consent.
-///
-/// # Errors
-///
-/// Returns a message if the arguments are invalid, no name is given, the policy cannot
-/// be resolved, read, or parsed, it has no `template_base`, the reference is malformed,
-/// the template is not found in the search path, the source is not UTF-8, the rewrite
-/// or write fails, or the subsequent recompile fails.
-pub fn upgrade(args: &[String]) -> Result<ExitCode, String> {
-    let mut name: Option<&str> = None;
-    let mut assume_yes = false;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    // The user-supplied --template-dir values, forwarded verbatim to the recompile
-    // so it resolves the new template version from the same search path we did.
-    let mut user_template_args: Vec<String> = Vec::new();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--yes" | "-y" => assume_yes = true,
-            "--template-dir" => {
-                let dir = it.next().ok_or("--template-dir needs a value")?;
-                template_dirs.push(dir.into());
-                user_template_args.push("--template-dir".to_owned());
-                user_template_args.push(dir.clone());
-            }
-            "--trust-dir" => {
-                // Not used by the diff (source-only), but forwarded to the recompile
-                // so the new template version's signature verifies against it.
-                let dir = it.next().ok_or("--trust-dir needs a value")?;
-                user_template_args.push("--trust-dir".to_owned());
-                user_template_args.push(dir.clone());
-            }
-            flag if flag.starts_with('-') => return Err(format!("unknown flag `{flag}`")),
-            value => {
-                if name.is_some() {
-                    return Err("only one <name> may be given".to_owned());
-                }
-                name = Some(value);
-            }
-        }
-    }
-    let name = name.ok_or(
-        "usage: kennel policy upgrade <name> [--yes] [--template-dir D]... [--trust-dir D]...",
-    )?;
-    add_default_template_dirs(&mut template_dirs);
-
-    // The leaf policy source (never the settled artefact — we rewrite the source).
-    let (policy_path, _) = resolve_policy(name, false)?;
-    let bytes = std::fs::read(&policy_path)
-        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
-    let source = kennel_lib_compile::source::parse(&bytes)
-        .map_err(|e| format!("parsing {}: {e}", policy_path.display()))?;
-    let reference = source
-        .template_base
-        .ok_or_else(|| format!("`{name}` has no `template_base` to upgrade"))?;
-    let (tmpl, current) = kennel_lib_compile::parse_reference(&reference)
-        .map_err(|e| format!("`template_base`: {e}"))?;
-
-    // Find the newest version of `tmpl` available in the search path.
-    let src = FsTemplateSource {
-        dirs: template_dirs,
-    };
-    let Some(newest) = newest_template_version(&src.dirs, &tmpl) else {
-        return Err(format!(
-            "template `{tmpl}` not found in the search path (pass --template-dir)"
-        ));
-    };
-    if !kennel_lib_compile::version_is_newer(&newest, &current) {
-        println!("`{name}` is already on the latest `{tmpl}` ({current}).");
-        return Ok(ExitCode::SUCCESS);
-    }
-
-    // Show the source diff between the pinned and the new template version.
-    println!("{tmpl} {current} \u{2192} {newest}\n");
-    let old_src = src.fetch(&tmpl, &current);
-    let new_src = src
-        .fetch(&tmpl, &newest)
-        .ok_or_else(|| format!("cannot read `{tmpl}@{newest}` to diff"))?;
-    print_source_diff(old_src.as_deref(), &new_src);
-    println!(
-        "\nThis re-points `{name}` to `{tmpl}@{newest}` and recompiles so kennel.lock re-pins.\n\
-         Review the diff above (the semantic threat-impact view is `kennel diff`, roadmap)."
-    );
-
-    if !assume_yes {
-        if !io::stdin().is_terminal() {
-            return Err(
-                "refusing to migrate without a terminal to confirm at; pass --yes to proceed"
-                    .to_owned(),
-            );
-        }
-        print!("Migrate? [y/N] ");
-        io::Write::flush(&mut io::stdout()).map_err(|e| format!("stdout: {e}"))?;
-        let mut answer = String::new();
-        io::stdin()
-            .read_line(&mut answer)
-            .map_err(|e| format!("stdin: {e}"))?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            println!("Not migrated. `{name}` stays on `{tmpl}@{current}`.");
-            return Ok(ExitCode::SUCCESS);
-        }
-    }
-
-    // Rewrite the single `template_base` line and recompile to re-pin the lock.
-    let updated = rewrite_template_base(
-        &String::from_utf8(bytes).map_err(|_| "policy is not UTF-8".to_owned())?,
-        &reference,
-        &format!("{tmpl}@{newest}"),
-    )?;
-    std::fs::write(&policy_path, updated.as_bytes())
-        .map_err(|e| format!("writing {}: {e}", policy_path.display()))?;
-    println!("Re-pointed `{name}` to `{tmpl}@{newest}`. Recompiling to re-pin the lock\u{2026}");
-    // Recompile via the existing path (re-pins kennel.lock; signs with the default key),
-    // forwarding the same --template-dir search path we resolved the new version from.
-    let mut compile_args = vec![policy_path.to_string_lossy().into_owned()];
-    compile_args.extend(user_template_args);
-    compile(&compile_args)
-}
-
-/// Scan the template search dirs for the newest available version of `name`.
-///
-/// Recognises the flat `name@vX.toml` layout and the nested `name/policy.toml`
-/// (whose `template_version` supplies the version). Returns the newest `vX`.
-#[must_use]
-pub fn newest_template_version(dirs: &[PathBuf], name: &str) -> Option<String> {
-    let mut newest: Option<String> = None;
-    let mut consider = |candidate: String| {
-        if newest
-            .as_deref()
-            .is_none_or(|cur| kennel_lib_compile::version_is_newer(&candidate, cur))
-        {
-            newest = Some(candidate);
-        }
-    };
-    for dir in dirs {
-        // Flat: <name>@vX.toml
-        let prefix = format!("{name}@");
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for entry in rd.flatten() {
-                let fname = entry.file_name();
-                let Some(fname) = fname.to_str() else {
-                    continue;
-                };
-                if let Some(rest) = fname.strip_prefix(&prefix) {
-                    if let Some(ver) = rest.strip_suffix(".toml") {
-                        if ver.starts_with('v') {
-                            consider(ver.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        // Nested: <name>/policy.toml carrying template_version = "N".
-        let nested = dir.join(name).join("policy.toml");
-        if let Ok(b) = std::fs::read(&nested) {
-            if let Ok(p) = kennel_lib_compile::source::parse(&b) {
-                if let Some(v) = p.template_version {
-                    consider(format!("v{v}"));
-                }
-            }
-        }
-    }
-    newest
-}
-
-/// Replace exactly the `template_base = "<old>"` value with `<new>`.
-///
-/// Preserves the rest of the file. Errors if the old reference is not found verbatim
-/// (so we never silently write a no-op or corrupt an unexpected layout).
-///
-/// # Errors
-///
-/// Returns a message if `text` does not contain the verbatim `"<old>"` reference.
-pub fn rewrite_template_base(text: &str, old: &str, new: &str) -> Result<String, String> {
-    let needle = format!("\"{old}\"");
-    if !text.contains(&needle) {
-        return Err(format!(
-            "could not find `template_base = \"{old}\"` to rewrite (edit the policy by hand)"
-        ));
-    }
-    Ok(text.replacen(&needle, &format!("\"{new}\""), 1))
-}
-
-/// Print a minimal line-oriented diff of two template sources (added/removed lines),
-/// honest about content without claiming a semantic threat-impact analysis.
-fn print_source_diff(old: Option<&[u8]>, new: &[u8]) {
-    let old_text = old.and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
-    let new_text = std::str::from_utf8(new).unwrap_or("");
-    let old_lines: Vec<&str> = old_text.lines().collect();
-    let new_lines: Vec<&str> = new_text.lines().collect();
-    // Lines in new but not old (added), and in old but not new (removed). A set
-    // difference, not an LCS diff — enough to review a template bump at a glance.
-    for line in &new_lines {
-        if !old_lines.contains(line) && !line.trim().is_empty() {
-            println!("  + {line}");
-        }
-    }
-    for line in &old_lines {
-        if !new_lines.contains(line) && !line.trim().is_empty() {
-            println!("  - {line}");
-        }
-    }
 }
 
 // ---- `kennel policy inspect` ---------------------------------------------------

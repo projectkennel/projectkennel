@@ -28,11 +28,11 @@ const DEVICE: &str = "/dev/binderfs/binder";
 const PROBE: &[u8] = b"kennel-spawn-roundtrip\n";
 
 fn main() -> ExitCode {
-    // `argv[1]` is the template to spawn (default `echo-tool@v1`); the requester's `[spawn]` grant
+    // `argv[1]` is the template to spawn (default `echo-tool`); the requester's `[spawn]` grant
     // must allow it, or `kenneld` denies the SPAWN.
     let template = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "echo-tool@v1".to_owned());
+        .unwrap_or_else(|| "echo-tool".to_owned());
     match round_trip(&template) {
         Ok(()) => {
             println!("facade-spawn-probe: SPAWN round-trip OK ({template})");

@@ -1,0 +1,130 @@
+# ============================================================================
+# Template: oci-fetch — the vetted confinement for `kennel oci build`.
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.4  (T3.8 — substrate trust)
+#
+# `kennel oci build` runs `skopeo` (pull) + a no-chown tar extraction INSIDE a
+# kennel under this policy to populate an operator-owned store entry (§7.11.7).
+# The broad egress an image pull needs lives HERE and nowhere else — the egress
+# high-water mark of the OCI flow — so the operator never authors or signs the
+# broad-egress step (the run policy `kennel oci run` uses grants no such egress).
+#
+# This is the Kennel-shipped, maintainer-signed VENDOR default. It is overridable
+# at the system (`/etc/kennel/templates/oci-fetch/`) and user
+# (`~/.config/kennel/templates/oci-fetch/`) layers via the template cascade — add a
+# private registry there, signed by a key trusted at that level. `kennel oci build`
+# generates a per-build leaf that adds `fs.write` for the specific store entry (a
+# local write, not egress); this template carries the registry allowlist so the
+# vetted egress is never operator-authored.
+#
+# See docs/design/07-11-oci-substrate.md §7.11.7 and templates/README.md.
+# ============================================================================
+
+template_base = "base-confined"
+template_name = "oci-fetch"
+
+# --- Execution --------------------------------------------------------------
+# `skopeo` pulls into an OCI layout; `umoci unpack --rootless` applies the layers into a
+# bundle rootfs (rootless: no chown — the single-uid flatten closure-lock repairs, §7.11.4c);
+# `sh` sequences them. Dynamically linked; the compiler resolves each binary's PT_INTERP loader.
+# deny_writable (inherited) keeps them read-only — they live in /usr (inherited fs.read), never a
+# writable path.
+[exec]
+allow = [
+    "/bin/sh", "/usr/bin/sh",                 # the kennel's default shell (exec.shell invariant)
+    "/usr/bin/skopeo", "/usr/local/bin/skopeo",
+    "/usr/bin/umoci", "/usr/local/bin/umoci",
+    # coreutils the fetch script sequences (rm/mv/cat); /bin and /usr/bin variants for merged-usr.
+    "/bin/rm", "/usr/bin/rm",
+    "/bin/mv", "/usr/bin/mv",
+    "/bin/cat", "/usr/bin/cat",
+]
+
+# --- Network: the registry allowlist (the vetted broad-egress step) ----------
+# `constrained` mode is inherited; egress reaches ONLY these registry endpoints
+# through the per-kennel proxy. Image pulls fan out across a registry's auth host,
+# its v2 API host, and its blob CDN — all three must resolve for a pull to work, so
+# the common public registries are listed host-by-host. A private/internal registry
+# is a system- or user-level override of this template, signed at that level.
+#
+# Docker Hub (docker.io):
+[[net.proxy.allow]]
+name = "docker.io"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — image pull (registry alias)"
+[[net.proxy.allow]]
+name = "index.docker.io"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — registry index"
+[[net.proxy.allow]]
+name = "registry-1.docker.io"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — v2 registry API"
+[[net.proxy.allow]]
+name = "auth.docker.io"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — token auth"
+[[net.proxy.allow]]
+name = "production.cloudfront.docker.com"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — blob CDN (AWS CloudFront)"
+[[net.proxy.allow]]
+name = "production.cloudflare.docker.com"
+ports = [443]
+protocol = "tcp"
+reason = "Docker Hub — blob CDN (Cloudflare, legacy)"
+# GitHub Container Registry (ghcr.io):
+[[net.proxy.allow]]
+name = "ghcr.io"
+ports = [443]
+protocol = "tcp"
+reason = "GitHub Container Registry — image pull"
+[[net.proxy.allow]]
+name = "pkg-containers.githubusercontent.com"
+ports = [443]
+protocol = "tcp"
+reason = "GitHub Container Registry — blob storage"
+# Quay (quay.io):
+[[net.proxy.allow]]
+name = "quay.io"
+ports = [443]
+protocol = "tcp"
+reason = "Quay — image pull"
+[[net.proxy.allow]]
+name = "cdn.quay.io"
+ports = [443]
+protocol = "tcp"
+reason = "Quay — blob CDN"
+# Kubernetes registry:
+[[net.proxy.allow]]
+name = "registry.k8s.io"
+ports = [443]
+protocol = "tcp"
+reason = "Kubernetes registry — image pull"
+# AWS ECR Public:
+[[net.proxy.allow]]
+name = "public.ecr.aws"
+ports = [443]
+protocol = "tcp"
+reason = "AWS ECR Public — image pull"
+# Google Container Registry:
+[[net.proxy.allow]]
+name = "gcr.io"
+ports = [443]
+protocol = "tcp"
+reason = "Google Container Registry — image pull"
+
+# --- Environment ------------------------------------------------------------
+# The fetch tools need only the synthesised baseline (HOME/PATH/USER from the
+# spawn; $HOME is the writable tmpfs skopeo/umoci use for their cache). No image
+# Env is involved here — this confines the *fetch*, not a booted image.
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQNocolrY4lgqKwgMC3OLLH7wuG/pBQfZyG\n9VInirdDJTwxrdLBD3YM6szj5ejF/JsF6PK6L7oZFOLgirRXgCiwo=\n-----END SSH SIGNATURE-----\n"

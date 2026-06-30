@@ -51,11 +51,10 @@ pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
-    AuditFileConfig, AuditRuntime, AuditSinkKind, BinderConsumeRuntime, BinderProvideRuntime,
-    BinderRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
-    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
-    MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction, ProcPolicy, ProcVisibility,
-    Protocol, Provenance, ProvideRuntime, ProxyListen, ResolvedArtifact, RestartPolicy,
+    AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, ConsumeRuntime, DbusBusRuntime,
+    DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime,
+    LifecyclePolicy, MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, OnChangeAction,
+    ProcPolicy, Protocol, Provenance, ProvideRuntime, ProxyListen, ResolvedArtifact, RestartPolicy,
     SeccompAction, SeccompPolicy, ServiceRuntime, SettledPolicy, Shape, SignedSettledPolicy,
     SpawnGrant, SpawnTemplate, SshGrant, SshRuntime, TmpPolicy, TrustPolicy, TtlAction, TtyPolicy,
     UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
@@ -65,13 +64,15 @@ pub use spawn::spawn_eligible;
 
 /// The newest `settled_schema_version` this build accepts.
 ///
-/// Bumped to 2 with the SSHSIG signature format: a v1 artefact carries the old
-/// bare-Ed25519 signature this build no longer reads.
-pub const SETTLED_SCHEMA_VERSION: u32 = 2;
+/// Bumped to 2 with the SSHSIG signature format; to 3 for a schema cleanup: `[fs.tmp]` lost its
+/// DAC-mode knob and renamed `private` → `writable`, the `[binder]` user-service section and its
+/// settled runtime were removed, and the invariant-only `fs.proc.visibility` / `unix.default`
+/// keys were dropped — all changing the settled shape.
+pub const SETTLED_SCHEMA_VERSION: u32 = 3;
 
-/// The oldest `settled_schema_version` this build still verifies. A v1 settled policy
-/// predates the SSHSIG signature format and must be recompiled to be re-signed.
-pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 2;
+/// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
+/// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.
+pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// Verify a settled-policy document and return its body.
 ///
@@ -294,7 +295,7 @@ mod tests {
         policy.spawn = Some(settled::SpawnGrant {
             max_instances: 8,
             allow: vec![settled::SpawnTemplate {
-                template: "net-fetch@v1".to_owned(),
+                template: "net-fetch".to_owned(),
                 signing_key_id: "kennel-maint-2026".to_owned(),
                 signature: "Zm9vYmFy".to_owned(),
                 mutable_narrow: vec!["net.proxy.allow".to_owned()],
@@ -422,9 +423,8 @@ mod tests {
         let key = signing_key();
         let mut policy = sample_policy();
         policy.effective_policy.fs.tmp = TmpPolicy {
-            private: true,
+            writable: true,
             size_mib: 256,
-            mode: "0750".to_owned(),
         };
         policy.effective_policy.fs.dev = DevPolicy {
             allow: vec![

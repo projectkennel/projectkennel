@@ -1,0 +1,23 @@
+# The policy-schema IR + reflection trait — the single source's *target*.
+#
+# Dependency-free (std only). The `SchemaType` trait is implemented by the
+# `kennel-lib-compile` / `kennel-lib-policy` source structs (via the
+# `kennel-schema-derive` proc-macro, behind their `schema` feature), so the JSON
+# Schema is *derived* from the parser structs rather than hand-mirrored. Linked
+# only by the `gen-schema` tool and the struct crates' `schema` feature — never in
+# the runtime/TCB build, which does not enable that feature.
+[package]
+name = "kennel-schema"
+version.workspace = true
+publish.workspace = true
+description = "Policy-schema IR + the SchemaType reflection trait (dependency-free; the derive target for the single-source JSON Schema)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

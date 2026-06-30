@@ -1,0 +1,32 @@
+# ============================================================================
+# Fragment: gui-desktop
+#
+# A composable capability bundle: the common Wayland GUI client BINARIES
+# (terminals) plus the fontconfig read they render text through. Include it for a confined-GUI app
+# kennel; the DISPLAY LEG (the mesh `[[consumes]]` and its env) is the GUI app template's job, not
+# this fragment's — this adds the executables (and their resolved `[lib]` closure) and the font read.
+#
+#   include = ["gui-desktop"]
+#
+# Additive-only: widens exec.allow with the GUI clients and fs.read with /etc/fonts (the font
+# files themselves live under /usr/share, already read by the base; this fs.read bind-mounts
+# /etc/fonts into the view). No network, no extra writable path.
+# ============================================================================
+
+name = "gui-desktop"
+
+[[exec.allow.add]]
+path = "/usr/bin/weston-terminal"
+reason = "the reference Wayland terminal emulator (wl_shm, no GPU required)"
+
+[[exec.allow.add]]
+path = "/usr/bin/foot"
+reason = "a lightweight Wayland terminal emulator"
+
+[[fs.read.add]]
+path = "/etc/fonts"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI1+R4gYhbnx5VT+jfApzAEn/JE8mDmW1V\nXJK+bTeQs1I4MEdSrdeXmFDCZAsWJSkSbh6J0kKQIpJMmBBW/UsQc=\n-----END SSH SIGNATURE-----\n"

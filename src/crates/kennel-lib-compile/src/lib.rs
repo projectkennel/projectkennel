@@ -35,7 +35,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod binder;
 pub mod compile;
 pub mod dev;
 pub mod diff;
@@ -52,7 +51,6 @@ pub mod ssh;
 pub mod threats;
 pub mod translate;
 pub mod unix;
-pub mod version;
 
 pub use compile::{compile, effective_source, seal_unsigned, Compiled};
 pub use lint::lint_settled;
@@ -66,7 +64,6 @@ pub use source_sig::{
     canonical_source, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
 pub use translate::{translate, Translated};
-pub use version::{is_newer as version_is_newer, parse_reference};
 
 /// Shared test fixtures: the shipped fragments the reference templates `include`. Test
 /// `TemplateSource`s serve these (in addition to `base-confined`) so a retrofitted template's
@@ -76,30 +73,30 @@ pub use version::{is_newer as version_is_newer, parse_reference};
 pub(crate) const TEST_FRAGMENTS: &[(&str, &str)] = &[
     (
         "core-shell",
-        include_str!("../../../../fragments/core-shell/policy.toml"),
+        include_str!("../../../../toml/fragments/core-shell/policy.toml"),
     ),
     (
         "core-coreutils",
-        include_str!("../../../../fragments/core-coreutils/policy.toml"),
+        include_str!("../../../../toml/fragments/core-coreutils/policy.toml"),
     ),
     (
         "core-file-mutation",
-        include_str!("../../../../fragments/core-file-mutation/policy.toml"),
+        include_str!("../../../../toml/fragments/core-file-mutation/policy.toml"),
     ),
     (
         "core-archive",
-        include_str!("../../../../fragments/core-archive/policy.toml"),
+        include_str!("../../../../toml/fragments/core-archive/policy.toml"),
     ),
     (
         "net-clients",
-        include_str!("../../../../fragments/net-clients/policy.toml"),
+        include_str!("../../../../toml/fragments/net-clients/policy.toml"),
     ),
     (
         "toolchain-c",
-        include_str!("../../../../fragments/toolchain-c/policy.toml"),
+        include_str!("../../../../toml/fragments/toolchain-c/policy.toml"),
     ),
     (
         "vcs-git",
-        include_str!("../../../../fragments/vcs-git/policy.toml"),
+        include_str!("../../../../toml/fragments/vcs-git/policy.toml"),
     ),
 ];

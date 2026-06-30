@@ -1,0 +1,41 @@
+# ============================================================================
+# Fragment: gui-accessories
+#
+# A composable capability bundle: the small GNOME desktop utilities — calculator, clocks,
+# the character picker, the font viewer. Include it for a confined desktop that wants the
+# everyday accessories.
+#
+#   include = ["gui-accessories"]
+#
+# Additive-only: exec.allow grants only. UI data lives under /usr/share (the base read floor),
+# so no fs grant is needed. These are user-facing utilities with no host/system reach; the
+# system tools (disks, system-monitor, settings) are deliberately NOT here — they want host
+# access a confined desktop withholds and are inert without it.
+# ============================================================================
+
+name = "gui-accessories"
+
+[[exec.allow.add]]
+path = "/usr/bin/gnome-calculator"
+reason = "GNOME Calculator"
+
+[[exec.allow.add]]
+path = "/usr/bin/gnome-clocks"
+reason = "GNOME Clocks — world clocks, alarms, timer, stopwatch"
+
+[[exec.allow.add]]
+path = "/usr/bin/gnome-characters"
+reason = "GNOME Characters — the Unicode and emoji picker"
+
+[[exec.allow.add]]
+path = "/usr/bin/gnome-font-viewer"
+reason = "GNOME Fonts — font preview and inspection"
+
+[[exec.allow.add]]
+path = "/usr/bin/baobab"
+reason = "GNOME Disk Usage Analyzer — visualises space within the kennel's own view"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMl6L28PEpL6Gc52xgWqCsCnHM8x6yTOEs\npcjcfNw0XbYul5Mg1cKCVO83x3ND63Fk+AVFkuR6E7AWn1BP4Diwc=\n-----END SSH SIGNATURE-----\n"

@@ -103,7 +103,7 @@ if [ "$DO_INSTALL" = 1 ]; then
     # binaries (launcher, init, facades) must be static to run inside an arbitrary OCI image root.
     HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
     cargo build --release --offline --frozen --locked \
-        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus \
+        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus -p kennel-compose \
         || { echo "build failed" >&2; exit 1; }
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" \
@@ -125,7 +125,7 @@ if [ "$DO_INSTALL" = 1 ]; then
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
 
-# 2. The admin inputs install.sh deliberately does not fabricate (07-paths §5):
+# 2. The admin inputs install.sh deliberately does not fabricate:
 #    the subkennel allocation for this user, and a signing key the daemon trusts.
 echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
 sudo touch /etc/kennel/subkennel
@@ -205,7 +205,7 @@ if [ "${#CASES[@]}" -eq 0 ]; then
     for d in "$SUITE_DIR"/*/; do CASES+=("$(basename "$d")"); done
 fi
 
-# Point the CLI's vendor catalogues (§2.6: the trust-trigger set) at the repo's defaults, so a
+# Point the CLI's vendor catalogues (the trust-trigger set) at the repo's defaults, so a
 # `--no-install` run still resolves them. The daemon's etc-binds catalogue (W14) is read by the
 # installed kenneld.service from /usr/lib/kennel, where install.sh places it — the service does
 # not inherit this env, so that one rides the install, not this override.

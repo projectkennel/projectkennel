@@ -1,0 +1,6 @@
+name = "ai-coding-strict"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-02"
+description = "Strict confinement for an AI coding agent on a single project tree."

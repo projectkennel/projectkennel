@@ -1,0 +1,19 @@
+# ============================================================================
+# Reference policy: gui-interactive — a ready-to-run confined graphical terminal.
+#
+# Thin leaf over gui-interactive (which carries the shape: [[consumes]] org.projectkennel.wayland,
+# the GUI client bundle, fonts, and the inherited interactive workstation toolset). This leaf adds
+# only the [workload]: `weston-terminal`. `kennel run gui-interactive` opens a confined terminal whose
+# display server is a broker-spawned nested compositor — no host reach, no GPU grant.
+# ============================================================================
+
+name = "gui-interactive"
+template_base = "gui-interactive"
+
+[workload]
+argv = ["/usr/bin/weston-terminal"]
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQMy3zFK8tS9gVdO5LPWF72yy/8mk+oS8yV\nvi9rPDZbJF13o/58MvALT3S5KAOGo+anwmK6W0k65yuc1hnjc1Gw0=\n-----END SSH SIGNATURE-----\n"

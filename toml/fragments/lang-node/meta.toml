@@ -1,0 +1,6 @@
+name = "lang-node"
+kind = "fragment"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-06-19"
+description = "Node.js runtime, npm/npx, the npm cache, and the npm registry."

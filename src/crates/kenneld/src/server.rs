@@ -56,9 +56,6 @@ pub struct Loaded {
     /// The per-kennel `AF_UNIX` socket shims (§7.6): the host sockets `kenneld` binds
     /// into the kennel's view. Empty for a kennel with no `[unix]` policy.
     pub unix: kennel_lib_policy::UnixRuntime,
-    /// The per-kennel binder IPC runtime (§7.1.4): the user-defined services the
-    /// context manager gates against. Empty for a kennel with no `[binder]` policy.
-    pub binder: kennel_lib_policy::BinderRuntime,
     /// The cross-kennel capability mesh consumes (§7.13.1): the `[[consumes]]` this kennel signed.
     /// The `SVC_CONNECT` broker matches a consume request against these (request-don't-author). Empty
     /// for a kennel with no `[[consumes]]`.
@@ -1922,7 +1919,6 @@ pub fn run_kennel<P, L>(
             ))
         });
         spec.binder = Some(crate::BinderPrep {
-            policy: loaded.binder,
             unix: facade_unix,
             writer,
             init_bin: shared.identity.init_bin.clone(),
@@ -2719,7 +2715,6 @@ mod tests {
                 net,
                 ssh: kennel_lib_policy::SshRuntime::default(),
                 unix: kennel_lib_policy::UnixRuntime::default(),
-                binder: kennel_lib_policy::BinderRuntime::default(),
                 consumes: Vec::new(),
                 provides: Vec::new(),
                 dbus: kennel_lib_policy::DbusRuntime::default(),

@@ -2,10 +2,10 @@
 # Suite case: spawn-caps — interrogate the [spawn] grant (§7.12).
 #
 # Proves the grant-introspection path through the unified `kennel` surface (W10): a confined
-# requester holds a [spawn] grant for echo-tool@v1 but spawns nothing. Its workload runs
+# requester holds a [spawn] grant for echo-tool but spawns nothing. Its workload runs
 # `kennel caps` (the shim → the in-cage spawn unit), which transacts verb::SPAWN_QUERY on node 0;
 # kenneld renders the grant (the allowed template + its mutable fields + the max_instances/live
-# ceiling) as text. The workload asserts the listing names echo-tool@v1 and the ceiling — so an
+# ceiling) as text. The workload asserts the listing names echo-tool and the ceiling — so an
 # agent can discover what it may ask SPAWN for instead of probing by trial.
 #
 # setup.sh compiles + suite-signs echo-tool into the standard user template cascade
@@ -13,7 +13,7 @@
 # ============================================================================
 
 name = "spawn-caps"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 [net]
 mode = "none"
@@ -29,7 +29,7 @@ allow = ["/bin/sh"]
 [workload]
 argv = [
   "/bin/sh", "-c",
-  'caps="$(/usr/bin/kennel caps)"; printf "%s\n" "$caps"; case "$caps" in *"echo-tool@v1"*) ;; *) echo "FAIL: echo-tool@v1 not listed"; exit 1;; esac; case "$caps" in *"max_instances 4"*) ;; *) echo "FAIL: max_instances 4 not shown"; exit 1;; esac; echo "OK: grant interrogated"',
+  'caps="$(/usr/bin/kennel caps)"; printf "%s\n" "$caps"; case "$caps" in *"echo-tool"*) ;; *) echo "FAIL: echo-tool not listed"; exit 1;; esac; case "$caps" in *"max_instances 4"*) ;; *) echo "FAIL: max_instances 4 not shown"; exit 1;; esac; echo "OK: grant interrogated"',
 ]
 pinned = true
 
@@ -38,4 +38,4 @@ max_instances = 4
 reason = "spawn-caps e2e: interrogate the grant (no spawn)"
 
 [[spawn.allow]]
-template = "echo-tool@v1"
+template = "echo-tool"

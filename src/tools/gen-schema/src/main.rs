@@ -1,9 +1,9 @@
 //! `gen-schema --out <path>` — write the policy JSON Schema.
 //!
-//! Mirrors `gen-man`: a tiny std-only generator run from CI. CI emits to the in-tree
-//! `schema/policy.toml.schema` and `git diff --exit-code`s the result, so a parser
-//! change that is not reflected in [`gen_schema::model`] (and re-generated) fails the
-//! build. Usage: `gen-schema --out schema/policy.toml.schema`.
+//! A tiny generator run from CI. CI emits to the in-tree `schema/policy.toml.schema` and
+//! `git diff --exit-code`s the result, so a source-struct change that is not regenerated
+//! fails the build. The schema is derived from the parser structs (no hand model), so it
+//! cannot drift. Usage: `gen-schema --out schema/policy.toml.schema`.
 
 use std::process::ExitCode;
 

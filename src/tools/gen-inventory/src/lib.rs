@@ -218,9 +218,15 @@ fn parse_deps(toml: &str) -> (Vec<String>, Vec<String>) {
         if !in_deps || t.is_empty() || t.starts_with('#') {
             continue;
         }
-        let Some((name, _)) = t.split_once('=') else {
+        let Some((name, rest)) = t.split_once('=') else {
             continue;
         };
+        // An `optional = true` dependency is feature-gated — absent from the default build and
+        // so from the runtime/TCB closure — so it is not a hard edge (e.g. the `schema`-feature
+        // reflection deps are never linked into kenneld). It is not counted here.
+        if rest.replace(' ', "").contains("optional=true") {
+            continue;
+        }
         let name = name.trim().trim_matches('"').to_owned();
         if name.is_empty() {
             continue;

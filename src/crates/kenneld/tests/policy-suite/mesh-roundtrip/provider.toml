@@ -10,7 +10,7 @@
 # ============================================================================
 
 name = "mesh-provider"
-template_base = "base-confined@v1"
+template_base = "base-confined"
 
 # A service that vends a capability — it reaches nothing itself.
 [net]

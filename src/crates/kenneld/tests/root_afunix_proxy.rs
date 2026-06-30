@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kennel_lib_binder::binderfs;
-use kennel_lib_policy::{AuditRuntime, BinderRuntime, UnixRuntime, UnixSocket};
+use kennel_lib_policy::{AuditRuntime, UnixRuntime, UnixSocket};
 use kenneld::binder;
 
 const ROLE_ENV: &str = "KENNEL_BINDER_ROLE";
@@ -74,7 +74,6 @@ fn run_manager() {
     let manager = binder::spawn(
         fd,
         7,
-        BinderRuntime::default(),
         unix,
         binder::Lifecycle::default(),
         kenneld::inet::NetRuntime::denied(),

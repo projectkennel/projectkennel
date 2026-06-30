@@ -151,8 +151,8 @@ fn run_compose(args: &Args) -> ExitCode {
         .collect();
 
     let selected_base = if base_candidates.is_empty() {
-        eprintln!("kennel-compose: no base templates found — using base-confined@v1 (default)");
-        "base-confined@v1".to_owned()
+        eprintln!("kennel-compose: no base templates found — using base-confined (default)");
+        "base-confined".to_owned()
     } else {
         eprintln!("Available templates:\n");
         for (i, t) in base_candidates.iter().enumerate() {
@@ -179,7 +179,7 @@ fn run_compose(args: &Args) -> ExitCode {
             base_candidates
                 .first()
                 .map(|t| t.reference())
-                .unwrap_or_else(|| "base-confined@v1".to_owned())
+                .unwrap_or_else(|| "base-confined".to_owned())
         } else if let Ok(n) = choice.parse::<usize>() {
             if n >= 1 && n <= base_candidates.len() {
                 base_candidates[n - 1].reference()
@@ -255,7 +255,7 @@ fn run_compose(args: &Args) -> ExitCode {
 fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> SourcePolicy {
     let mut leaf = SourcePolicy {
         name: Some(name.to_owned()),
-        template_base: Some("base-confined@v1".to_owned()),
+        template_base: Some("base-confined".to_owned()),
         ..SourcePolicy::default()
     };
 
@@ -280,7 +280,7 @@ fn build_leaf_interactive(
     let mut leaf = build_leaf_from_probe(name, probe_result);
 
     // Override template base interactively.
-    let base = ask_line("Base template [base-confined@v1]: ")?;
+    let base = ask_line("Base template [base-confined]: ")?;
     if !base.is_empty() {
         leaf.template_base = Some(base);
     }

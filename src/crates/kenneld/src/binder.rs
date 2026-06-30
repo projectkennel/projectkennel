@@ -1,21 +1,15 @@
-//! kenneld as the per-kennel binder context manager (`07-1-binder.md` §7.1 / `02-4`).
+//! kenneld as the per-kennel binder context manager.
 //!
-//! kenneld owns node 0 of each kennel's binderfs instance and serves the service
-//! registry on a per-kennel thread (like [`crate::bpf_audit`]'s drain). It gates
-//! every `addService`/`getService` against the settled [`BinderRuntime`] and the
-//! reserved-namespace rules, records the registered services, and emits a
-//! `binder.*` audit event per call through the unified [`Writer`].
+//! kenneld owns node 0 of each kennel's binderfs instance and serves it on a
+//! per-kennel thread (like [`crate::bpf_audit`]'s drain): the lifecycle/config verbs
+//! `kennel-bin-init` speaks, the af-unix/INet/D-Bus facades, the dynamic-spawn verbs,
+//! and the service-connector broker (`SVC_CONNECT`) for the cross-kennel mesh. Each
+//! call emits a `binder.*` audit event through the unified [`Writer`].
 //!
 //! This module is the *policy* layer; the binder transport (the looper, the wire
 //! codec, the ioctls) is [`kennel_lib_binder`]. The transaction payload convention on
-//! node 0 (the verb codes and the status/byte replies) is internal-stable
-//! (`02-4-binder.md` §Node 0): `kenneld` and the in-kennel client agree because
-//! they ship from one release.
-//!
-//! M1a scope: the registry decision point with status replies, proven by a root
-//! e2e. Returning a node *handle* from `getService` (so a client can then transact
-//! to a registered service) is the next increment (it needs `flat_binder_object`
-//! handle passing); the reserved `org.projectkennel.*` facades land with M2.
+//! node 0 (the verb codes and the status/byte replies) is internal-stable: `kenneld`
+//! and the in-kennel client agree because they ship from one release.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -26,7 +20,7 @@ use std::thread::JoinHandle;
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::ctxmgr::{ContextManager, DeathHandler, Handler, Reply};
-use kennel_lib_policy::{BinderRuntime, UnixRuntime};
+use kennel_lib_policy::UnixRuntime;
 
 use crate::dbus::DbusRelay;
 
@@ -59,89 +53,6 @@ pub(crate) const MESH_DBUS_DEVICE: &str = "/dev/binderfs-mesh/binder";
 // The node-0 verb codes and reply status bytes are the shared wire convention
 // (`kennel_lib_binder::service`), used by both kenneld here and the in-kennel clients.
 pub use kennel_lib_binder::service::{lifecycle, status, ttl, verb};
-
-/// The per-kennel service registry, gated by the settled `[binder]` policy.
-///
-/// Pure decision logic (no I/O); the serve loop calls it and turns the outcome into
-/// a reply and an audit event.
-pub struct Registry {
-    policy: BinderRuntime,
-    registered: std::collections::BTreeSet<String>,
-}
-
-impl Registry {
-    /// A registry for a kennel whose settled binder policy is `policy`.
-    #[must_use]
-    pub const fn new(policy: BinderRuntime) -> Self {
-        Self {
-            policy,
-            registered: std::collections::BTreeSet::new(),
-        }
-    }
-
-    /// Whether `name` is in the reserved kenneld-owned namespace.
-    fn is_reserved(name: &str) -> bool {
-        name.starts_with(kennel_lib_policy::settled::RESERVED_PREFIX)
-    }
-
-    /// Whether policy lets this kennel *provide* (register) `name`.
-    fn may_provide(&self, name: &str) -> bool {
-        self.policy.provide.iter().any(|p| p.name == name)
-    }
-
-    /// Whether policy lets this kennel *look up* `name`: a service it provides is
-    /// locally resolvable, and a declared `consume` is permitted (one kennel is one
-    /// trust domain; `consume` additionally gates cross-instance — `07-1` §7.1.6).
-    fn may_consume(&self, name: &str) -> bool {
-        self.may_provide(name) || self.policy.consume.iter().any(|c| c.name == name)
-    }
-
-    /// Handle an `addService`: register `name` if policy permits it.
-    pub fn add_service(&mut self, name: &str) -> u8 {
-        if Self::is_reserved(name) {
-            return status::REFUSED_RESERVED;
-        }
-        if self.may_provide(name) {
-            self.registered.insert(name.to_owned());
-            status::OK
-        } else {
-            status::DENIED
-        }
-    }
-
-    /// Handle a `getService`: resolve `name` if policy permits and it is registered.
-    #[must_use]
-    pub fn get_service(&self, name: &str) -> u8 {
-        if Self::is_reserved(name) {
-            // Reserved facades resolve locally to kenneld; none are built in M1a, so
-            // the lookup is permitted but finds nothing.
-            return status::NOT_FOUND;
-        }
-        if !self.may_consume(name) {
-            return status::DENIED;
-        }
-        if self.registered.contains(name) {
-            status::OK
-        } else {
-            status::NOT_FOUND
-        }
-    }
-
-    /// Whether `name` is declared (provide ∪ consume) for this kennel.
-    #[must_use]
-    pub fn is_declared(&self, name: &str) -> bool {
-        self.may_consume(name)
-    }
-
-    /// The declared service names the caller may look up, sorted and de-duplicated.
-    #[must_use]
-    pub fn list_services(&self) -> Vec<String> {
-        let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        names.extend(self.policy.provide.iter().map(|p| p.name.clone()));
-        names.extend(self.policy.consume.iter().map(|c| c.name.clone()));
-        names.into_iter().collect()
-    }
-}
 
 /// The lifecycle/config state `kenneld` serves to a kennel's `kennel-bin-init` (`07-2`).
 ///
@@ -212,7 +123,6 @@ impl Manager {
 pub fn spawn(
     device_fd: OwnedFd,
     ctx: u16,
-    policy: BinderRuntime,
     unix: UnixRuntime,
     lifecycle: Lifecycle,
     net: crate::inet::NetRuntime,
@@ -232,10 +142,7 @@ pub fn spawn(
     // before the pool serves, so a REGISTER_MIRROR can never race an unattached pusher.
     inbound.attach_pusher(Arc::clone(&cm));
 
-    // The handler runs concurrently on every looper, so its state is shared: the registry behind
-    // a Mutex (taken only for the O(1) registry verbs, never across the blocking facade dial), and
-    // the rest by Arc.
-    let registry = Arc::new(Mutex::new(Registry::new(policy)));
+    // The handler runs concurrently on every looper, so its shared state is held by Arc.
     let unix = Arc::new(unix);
     let net = Arc::new(net);
     let lifecycle = Arc::new(lifecycle);
@@ -245,7 +152,6 @@ pub fn spawn(
     let inbound_for_death = Arc::clone(&inbound);
     let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
         handle(
-            &registry,
             &unix,
             &net,
             &inbound,
@@ -275,16 +181,10 @@ pub fn spawn(
     })
 }
 
-/// Decode one node-0 transaction, apply the policy decision, emit an audit event, and
-/// produce the reply (status bytes for the registry verbs, or a connected fd for the
-/// af-unix facade).
-// The registry lock is held for exactly the O(1) registry-verb match and released before the
-// audit emit; that scope is intentional (each arm calls a registry method), so the nursery
-// "tighten the guard further" lint does not apply.
-#[allow(clippy::significant_drop_tightening)]
+/// Decode one node-0 transaction, dispatch it, emit an audit event, and produce the
+/// reply (a status byte, or a connected fd for the af-unix facade).
 #[allow(clippy::too_many_arguments)] // the handler's shared state; each piece is one concern
 fn handle(
-    registry: &Mutex<Registry>,
     unix: &UnixRuntime,
     net: &crate::inet::NetRuntime,
     inbound: &crate::inbound::InboundRuntime,
@@ -300,7 +200,7 @@ fn handle(
     writer: &Writer,
 ) -> Reply {
     // Lifecycle/config verbs (the high range) are spoken only by kennel-bin-init and gated
-    // on its kernel-stamped identity — handled before the registry/af-unix dispatch.
+    // on its kernel-stamped identity — handled before the facade dispatch.
     if incoming.code >= lifecycle::GET_SANDBOX_PLAN {
         return lifecycle_handle(lifecycle, catalogue, activator, incoming, ctx, writer);
     }
@@ -356,51 +256,20 @@ fn handle(
     ) {
         return dbus_handle(dbus, incoming, ctx, writer);
     }
-    let name = decode_name(&incoming.data);
-    // The registry verbs are O(1) in-memory; take the lock only for them.
-    let (action, outcome, reply) = {
-        let mut registry = registry
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match (incoming.code, name) {
-            (verb::ADD_SERVICE, Some(name)) => {
-                let s = registry.add_service(&name);
-                ("binder.register", outcome_for(s), one(s))
-            }
-            (verb::GET_SERVICE, Some(name)) => {
-                let s = registry.get_service(&name);
-                ("binder.lookup", outcome_for(s), one(s))
-            }
-            (verb::IS_DECLARED, Some(name)) => {
-                let declared = registry.is_declared(&name);
-                (
-                    "binder.is-declared",
-                    Outcome::Info,
-                    vec![status::OK, u8::from(declared)],
-                )
-            }
-            (verb::LIST_SERVICES, _) => {
-                let body = registry.list_services().join("\n").into_bytes();
-                let mut reply = vec![status::OK];
-                reply.extend_from_slice(&body);
-                ("binder.list", Outcome::Info, reply)
-            }
-            _ => (
-                "binder.bad-request",
-                Outcome::Error,
-                one(status::BAD_REQUEST),
-            ),
-        }
-    };
-
+    // Any other verb is unrecognised on node 0.
     let service = decode_name(&incoming.data).unwrap_or_default();
     writer.emit(
-        &Event::new(action, Resource::Binder, outcome, Source::Kenneld)
-            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-            .field("service", Value::untrusted(service))
-            .field("ctx", Value::Uint(u64::from(ctx))),
+        &Event::new(
+            "binder.bad-request",
+            Resource::Binder,
+            Outcome::Error,
+            Source::Kenneld,
+        )
+        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+        .field("service", Value::untrusted(service))
+        .field("ctx", Value::Uint(u64::from(ctx))),
     );
-    Reply::Data(reply)
+    Reply::Data(one(status::BAD_REQUEST))
 }
 
 /// Act on a fired TTL (§9.7). `kennel-bin-init` is blocked in the `NOTIFY_TTL_EXPIRED` call,
@@ -1132,75 +1001,6 @@ fn decode_name(data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kennel_lib_policy::{BinderConsumeRuntime, BinderProvideRuntime};
-
-    fn registry(provide: &[&str], consume: &[&str]) -> Registry {
-        Registry::new(BinderRuntime {
-            provide: provide
-                .iter()
-                .map(|n| BinderProvideRuntime {
-                    name: (*n).to_owned(),
-                    accept_from: Vec::new(),
-                })
-                .collect(),
-            consume: consume
-                .iter()
-                .map(|n| BinderConsumeRuntime {
-                    name: (*n).to_owned(),
-                    from: None,
-                })
-                .collect(),
-        })
-    }
-
-    #[test]
-    fn add_service_registers_a_provided_name() {
-        let mut r = registry(&["svc"], &[]);
-        assert_eq!(r.add_service("svc"), status::OK);
-        // Now resolvable locally.
-        assert_eq!(r.get_service("svc"), status::OK);
-    }
-
-    #[test]
-    fn add_service_denies_an_undeclared_name() {
-        let mut r = registry(&["svc"], &[]);
-        assert_eq!(r.add_service("other"), status::DENIED);
-    }
-
-    #[test]
-    fn add_service_refuses_a_reserved_name() {
-        let mut r = registry(&["org.projectkennel.IAfUnix/default"], &[]);
-        assert_eq!(
-            r.add_service("org.projectkennel.IAfUnix/default"),
-            status::REFUSED_RESERVED
-        );
-    }
-
-    #[test]
-    fn get_service_denies_an_undeclared_name() {
-        let r = registry(&[], &[]);
-        assert_eq!(r.get_service("svc"), status::DENIED);
-    }
-
-    #[test]
-    fn get_service_of_a_declared_but_unregistered_name_is_not_found() {
-        let r = registry(&[], &["peer-svc"]);
-        assert_eq!(r.get_service("peer-svc"), status::NOT_FOUND);
-    }
-
-    #[test]
-    fn is_declared_covers_provide_and_consume() {
-        let r = registry(&["p"], &["c"]);
-        assert!(r.is_declared("p"));
-        assert!(r.is_declared("c"));
-        assert!(!r.is_declared("x"));
-    }
-
-    #[test]
-    fn list_services_is_the_sorted_declared_union() {
-        let r = registry(&["b"], &["a", "b"]);
-        assert_eq!(r.list_services(), vec!["a".to_owned(), "b".to_owned()]);
-    }
 
     #[test]
     fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
