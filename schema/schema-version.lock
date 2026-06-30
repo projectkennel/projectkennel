@@ -1,5 +1,11 @@
 # Append-only: one "<SETTLED_SCHEMA_VERSION> <sha256 of the schema shape>" line per version.
 # Maintained by src/tools/tests/schema-version-pin.sh — never edit a past version's line.
+#
+# v3 re-baselined when the schema became DERIVED from the parser structs (#142): the prior
+# fingerprints captured the hand-mirror's incomplete shape (it omitted the `[[*.add]]` delta
+# forms the parser always accepted). No authorable field was added/removed/retyped and the
+# settled format is unchanged, so the version stays v3 — this is a corrected fingerprint of the
+# same format, not a new one.
 1 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
 2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
-3 01842375eaea720f8ab806b7e738a1bd6303ec467f0024bbf1eba798a44fe217
+3 4bfb9a987f9ddf4f4e44f521ef7167855c4b6a305e68c6d23a8330b0c6e726e4
