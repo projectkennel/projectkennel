@@ -1,19 +1,18 @@
-//! Compile-time **local** validation of the `[[provides]]` / `[[consumes]]` mesh surface
-//! (`docs/design/07-13-service-catalog.md` §7.13.3).
+//! Compile-time **local** validation of the `[[provides]]` / `[[consumes]]` mesh surface.
 //!
 //! Only what is checkable from the one policy in hand plus its signature provenance:
 //! well-formedness, the reserved-namespace gate, and a duplicate `name` within *this* policy.
 //! Cross-kennel resolution — does a consume's `name` resolve to a provider of the matching shape
 //! — is a **runtime** act (the broker against the live catalogue) and is never attempted here:
-//! the compiler only ever holds one policy (§7.13.3).
+//! the compiler only ever holds one policy.
 //!
-//! The reserved-namespace gate is **tier-aware and authoritative here** (§7.13.5): a reserved name
+//! The reserved-namespace gate is **tier-aware and authoritative here**: a reserved name
 //! may be claimed only through a template chain that verified at the tier the name requires —
 //! `org.projectkennel.*` at vendor (maintainer) tier, a host `[[reserved]]` prefix at host tier — and
 //! *any key at that tier is equivalent*. The [`ReservedAuthority`] the caller computes from the
 //! signature provenance ([`crate::resolve::ProvidesOrigin`]) carries the declaring tier; this is the
 //! sole authorizer. The daemon does **not** re-check provenance at runtime — it trusts the settled
-//! signature it verifies (a trusted-key signature is the whole boundary, §7.13.4); a holder of a
+//! signature it verifies (a trusted-key signature is the whole boundary); a holder of a
 //! trusted key could re-sign a forged settled regardless, so a runtime tier-check would only be
 //! theatre against the trust root.
 //!
@@ -29,7 +28,7 @@ use kennel_lib_config::ReservedNamespace;
 use kennel_lib_policy::settled::RESERVED_PREFIX;
 use kennel_lib_policy::PolicyError;
 
-/// The tier-aware reserved-namespace authority, resolved at compile (§7.13.5).
+/// The tier-aware reserved-namespace authority, resolved at compile.
 ///
 /// A reserved capability `name` may be provided only through a template chain that verified at the
 /// tier the name requires — `org.projectkennel.*` at [`Tier::Vendor`], a host `[[reserved]]` prefix
@@ -70,12 +69,12 @@ impl ReservedAuthority<'_> {
 }
 
 /// The per-capability directory component for a provide rendezvous: `<name>`, or `<name>.<key>` when
-/// a private key is set (§7.13.4b).
+/// a private key is set.
 fn provide_dir_component(name: &str, key: Option<&str>) -> String {
     key.map_or_else(|| name.to_owned(), |k| format!("{name}.{k}"))
 }
 
-/// The default in-view `endpoint` for an `af-unix` provide that omits one (§7.13.4b): a `sock` socket
+/// The default in-view `endpoint` for an `af-unix` provide that omits one: a `sock` socket
 /// in a per-capability `/run` subdirectory `kenneld` binds its rendezvous directory at.
 #[must_use]
 pub fn default_af_unix_endpoint(name: &str, key: Option<&str>) -> String {
@@ -97,7 +96,7 @@ fn af_unix_endpoint_under_run(endpoint: &str) -> bool {
 
 /// Validate the `[[provides]]` / `[[consumes]]` entries of a resolved source policy.
 ///
-/// `authority` is the tier-aware reserved-namespace gate (§7.13.5): a reserved name may be claimed
+/// `authority` is the tier-aware reserved-namespace gate: a reserved name may be claimed
 /// only through a template chain that verified at the tier the name requires. Returns every problem
 /// found, not just the first. On success returns an empty warning list.
 ///
@@ -120,7 +119,7 @@ pub fn validate(
                 if !authority.permits(name) {
                     errs.push(format!(
                         "[[provides]] `{name}` is a reserved capability name: it may be claimed only \
-                         through a template signed at the tier the name requires (§7.13.5) — \
+                         through a template signed at the tier the name requires — \
                          `{RESERVED_PREFIX}*` needs a vendor (maintainer) template, a host \
                          `[[reserved]]` name a host template; an unreserved name is free to any \
                          signed template"
@@ -140,8 +139,7 @@ pub fn validate(
                 who(p.name.as_deref())
             ));
         }
-        // An `af-unix` endpoint is optional — `kenneld` defaults it to `/run/<name>[.key]/sock`
-        // (§7.13.4b). When supplied, it must be a safe rendezvous bind target: absolute, under `/run`,
+        // An `af-unix` endpoint is optional — `kenneld` defaults it to `/run/<name>[.key]/sock`. When supplied, it must be a safe rendezvous bind target: absolute, under `/run`,
         // with a subdirectory, since construction binds `dirname(endpoint)` into the view. Other
         // shapes author a required `endpoint` (a bus name, a node).
         match p.shape {
@@ -154,7 +152,7 @@ pub fn validate(
                     errs.push(format!(
                         "[[provides]] `{}` endpoint `{e}` must be an absolute path under `/run` with \
                          a subdirectory (e.g. `/run/<dir>/<sock>`) — `kenneld` binds \
-                         `dirname(endpoint)` at construction (§7.13.4b); omit it for the \
+                         `dirname(endpoint)` at construction; omit it for the \
                          `/run/<name>[.key]/sock` default",
                         who(p.name.as_deref())
                     ));
@@ -219,7 +217,7 @@ mod tests {
     }
 
     fn provide(name: &str) -> ProvidesEntry {
-        // A well-formed af-unix provide omits `endpoint` (§7.13.4b): kenneld defaults it.
+        // A well-formed af-unix provide omits `endpoint`: kenneld defaults it.
         ProvidesEntry {
             name: Some(name.to_owned()),
             shape: Some(Shape::AfUnix),
@@ -386,7 +384,7 @@ mod tests {
 
     #[test]
     fn an_omitted_af_unix_endpoint_is_valid_and_defaults() {
-        // af-unix may omit `endpoint`; kenneld defaults it to /run/<name>[.key]/sock (§7.13.4b).
+        // af-unix may omit `endpoint`; kenneld defaults it to /run/<name>[.key]/sock.
         let p = policy_with(vec![provide("build-cache")], vec![]);
         assert!(validate(&p, &refused()).expect("valid").is_empty());
         assert_eq!(

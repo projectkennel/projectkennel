@@ -23,7 +23,6 @@ reason = "transfer a URL"
 path = "/usr/bin/wget"
 reason = "retrieve files over HTTP(S)/FTP"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

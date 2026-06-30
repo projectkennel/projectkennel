@@ -231,7 +231,7 @@ fn authored_carriers(p: &SourcePolicy) -> Vec<(String, Option<String>, Option<&T
         }
     }
 
-    // [[provides]] / [[consumes]] — the cross-kennel capability mesh (§7.13).
+    // [[provides]] / [[consumes]] — the cross-kennel capability mesh.
     for prov in &p.provides {
         out.push((
             label("[[provides]]", prov.name.as_deref()),
@@ -289,7 +289,7 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
 
     // `[rootfs]` boots an operator-declared OCI image as the kennel root; the substrate-trust
     // residual (the image's runtime closure is unvetted by construction) is derived from the
-    // grant the way T1.6 is derived from `mode = host` (design §7.11.9).
+    // grant the way T1.6 is derived from `mode = host` (design).
     if let Some(rootfs) = &p.rootfs {
         out.push((
             "T3.8".to_owned(),
@@ -297,7 +297,7 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
             rootfs.reason.clone(),
         ));
         // `persistence = "persist"` adds a distinct exposure: the managed overlay upper
-        // accumulates divergence outside the integrity ladder (§7.11.4a), surfaced against the
+        // accumulates divergence outside the integrity ladder, surfaced against the
         // same `[rootfs]` reason.
         if rootfs.persistence.as_deref() == Some("persist") {
             out.push((
@@ -308,7 +308,7 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
             ));
         }
         // Each closure-lock `writable` carve-out re-opens a hole in the executable-closure
-        // boundary (§7.11.4c) — a loud, separately-derived exposure.
+        // boundary — a loud, separately-derived exposure.
         for hole in rootfs.writable.as_deref().unwrap_or_default() {
             out.push((
                 "T3.8".to_owned(),
@@ -322,7 +322,7 @@ fn derived_exposures(p: &SourcePolicy) -> Vec<(String, String, Option<String>)> 
 
     // `[spawn]` delegates instantiation to the workload — it may spawn ephemeral sibling kennels
     // from the operator-signed templates it names. The delegated-spawning residual (T3.9) is derived
-    // from the grant the way T1.6 is derived from `mode = host` (design §7.12.9). The carrier names
+    // from the grant the way T1.6 is derived from `mode = host` (design). The carrier names
     // the templates the grant reaches, so the report shows the delegation's actual breadth.
     if let Some(spawn) = &p.spawn {
         let templates: Vec<&str> = spawn

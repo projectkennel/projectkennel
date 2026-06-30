@@ -1,4 +1,4 @@
-//! Compile-time validation of `[[fs.dev.passthrough]]` (`docs/design/07-4-filesystem.md` §7.4.8).
+//! Compile-time validation of `[[fs.dev.passthrough]]`.
 //!
 //! # Purpose
 //!
@@ -10,7 +10,7 @@
 //! node and grants Landlock the same way for both, so the *only* place to reject an
 //! undocumented or malformed passthrough is here, at compile time.
 //!
-//! # What this checks (§7.4.8)
+//! # What this checks
 //!
 //! - **Every entry has a `path`, absolute under `/dev`, with no `..`.** It is bound
 //!   from the host into the constructed `/dev`; anything outside `/dev` or with a
@@ -19,7 +19,7 @@
 //!   confinement; the policy must record it (`threats.exposed`), exactly as
 //!   `[ssh] allow_headless` must.
 //!
-//! The required-`reason` check lives in `SourcePolicy::validate`/`LeafPolicy::validate`
+//! The required-`reason` check lives in `SourcePolicy::validate`
 //! (with the other resource sections). Validation runs on the *resolved* policy.
 
 use crate::source::{DevPassthrough, SourcePolicy};
@@ -86,7 +86,7 @@ mod tests {
             fs: Some(FsSection {
                 dev: Some(FsDev {
                     allow: None,
-                    passthrough,
+                    passthrough: passthrough.into(),
                 }),
                 ..FsSection::default()
             }),

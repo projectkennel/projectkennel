@@ -6,9 +6,11 @@
 //!   cargo run -p kennel-lib-policy --example validate-policy -- leaf   <file.toml>
 //!   cargo run -p kennel-lib-policy --example validate-policy -- source <file.toml>
 //!
-//! `leaf`   parses via `parse_leaf` + `LeafPolicy::validate` (a user's policy: needs `name` +
+//! `leaf`   parses via `parse_source` + `SourcePolicy::validate` (a user's policy: needs `name` +
 //!          `template_base`, every delta carries a reason).
-//! `source` parses via `parse_source` (a template/fragment: the `[section]` array form).
+//! `source` parses via `parse_source` (a template/fragment). A leaf and a template are the one
+//!          `SourcePolicy` type now — list fields replace (bare sequence) or increment
+//!          (`[[….add]]`) at the same key — so both kinds share the parser.
 //! Exit 0 on success, 1 on any parse/validate error (printed to stderr).
 
 use std::process::ExitCode;
@@ -27,7 +29,7 @@ fn main() -> ExitCode {
         }
     };
     let result: Result<(), String> = match kind.as_str() {
-        "leaf" => kennel_lib_compile::parse_leaf(&bytes)
+        "leaf" => kennel_lib_compile::parse_source(&bytes)
             .map_err(|e| e.to_string())
             .and_then(|leaf| leaf.validate().map_err(|e| e.to_string())),
         "source" => kennel_lib_compile::parse_source(&bytes)

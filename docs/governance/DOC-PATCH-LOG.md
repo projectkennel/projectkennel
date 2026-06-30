@@ -19,6 +19,35 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-06-30 — one policy type: list fields replace *or* increment at the same key
+
+- **Target:** the templates chapter, design §5.2-5.3 (the composition model) and the config-schema
+  chapter, architecture §the policy schema / the leaf-policy delta form. In the frozen trees:
+  docs/design/05-templates.md and docs/architecture/02-2-config-schema.md.
+- **Change (as-built to capture in the rewrite):** there is **one** source-policy type. The
+  separate `LeafPolicy` (the delta-only `[[*.add]]` / `[[*.remove]]` form) and `SourcePolicy` (the
+  bare-list "set" form) are unified — drop any framing that a leaf is a distinct type, or that the
+  delta operators are a leaf-only increment applied after the chain fold. The as-built rule:
+  - **Every list field replaces *or* increments at the same key.** A bare sequence
+    (`fs.read = ["…"]`, `[[unix.allow]]`) *replaces* the inherited list (the SSH `Ciphers = …` set
+    form); an `{ add, remove }` table (`[[fs.read.add]]` / `[[unix.allow.remove]]`) *increments* it
+    (the `+=` / `-=` form). The deserializer picks by TOML shape. This holds for every list a leaf
+    could previously delta: `fs.read`/`write`/`deny`, `exec.allow`, `unix.allow`, `net.proxy.allow`,
+    `net.proxy.deny.policy`, `net.bpf.*.allow`/`deny`, `ssh.destinations`, `fs.dev.passthrough`.
+  - **A *template* can now increment**, not only replace — which is the point: the shipped corpus is
+    the teachable shape, so the increment form must be available wherever a list lives, not only in a leaf.
+  - The chain fold applies the increments (`resolve`), so the **effective** policy always carries
+    concrete `Set` lists; there is no separate post-fold delta pass.
+  - Identity, not type, tells the three roles apart: a **template** has `template_name`; a runnable
+    **leaf** has `name` + `template_base`; a composable **fragment** has `name`, no `template_base`,
+    and is additive-only. A leaf may not declare `[[net.proxy.deny.invariant]]` (template/fragment only).
+  - Mechanism: `kennel-lib-compile::source::{PathField, ListField, Delta}` (untagged set-or-delta);
+    `resolve::fold` applies set-then-increment; `apply_fragment` folds an additive include. Removed:
+    the `leaf` module (`LeafPolicy`, `compile_leaf`, `parse_leaf`, `sign_leaf`, `canonical_leaf`).
+- **Why:** the two-type split forced a template to *replace* a list it wanted to extend (it could not
+  `.add`), so the shipped reference corpus could not demonstrate the increment shape it teaches.
+- **Source:** the unify-source-leaf-policy PR.
+
 ## 2026-06-30 — reserved-namespace authority is compile-only and tier-based
 
 - **Target:** the service-catalogue chapter, design §7.13.4 / §7.13.5 (the reserved-namespace gate)

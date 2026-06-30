@@ -93,9 +93,6 @@ path = ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 ttl = "12h"
 ttl_action = "warn"
 
-
-
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

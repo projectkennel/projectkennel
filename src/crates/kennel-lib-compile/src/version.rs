@@ -1,4 +1,4 @@
-//! Template version ordering (`docs/design/05-templates.md` §5.2, §5.11).
+//! Template version ordering.
 //!
 //! A version is `v` followed by a semver core: `v4`, `v4.2`, `v2.33.2` (the leading
 //! `v` is required; `source::validate_ref_version` enforces the grammar). Ordering

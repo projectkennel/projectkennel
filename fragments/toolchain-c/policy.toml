@@ -54,7 +54,6 @@ reason = "GNU make"
 path = "/usr/lib/gcc/**"
 reason = "gcc's per-version backend binaries (cc1, cc1plus, collect2), re-exec'd by the driver"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

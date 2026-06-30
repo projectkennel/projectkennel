@@ -24,8 +24,6 @@ reason = "C/C++ system headers (absent from the curated base)"
 path = "/usr/src/**"
 reason = "kernel headers and source trees (absent from the curated base)"
 
-
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

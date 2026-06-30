@@ -49,7 +49,6 @@ reason = "zip extractor"
 path = "/usr/bin/zstd"
 reason = "zstandard (de)compress"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

@@ -13,8 +13,8 @@
 // it rather than inventing our own search paths.
 //
 // Each template/fragment is a subdirectory containing `policy.toml`. We parse
-// it with `kennel_lib_compile::parse_source()` or `parse_leaf()` — the same
-// parsers every other tool uses. The `meta.toml` (name, version, description)
+// it with `kennel_lib_compile::parse_source()` — the one parser every other tool
+// uses (a template and a leaf are the same type). The `meta.toml` (name, version, description)
 // is parsed minimally for display purposes only.
 
 use std::path::{Path, PathBuf};

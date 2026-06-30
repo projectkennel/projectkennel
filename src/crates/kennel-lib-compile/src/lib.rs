@@ -2,14 +2,14 @@
 //!
 //! # Purpose
 //!
-//! Turn a **source** policy — a template, or a leaf with `+=`/`-=` deltas — into
-//! the signed **settled** artefact the runtime enforces. The stages: parse and
-//! validate the [`source`](mod@source) schema, walk and fold the template chain
-//! ([`resolve`](mod@resolve)), apply [`leaf`] deltas, then
-//! [`translate`](mod@translate)-and-substitute to the settled form and sign.
-//! [`compile`](mod@compile) and [`compile_leaf`] orchestrate them; [`lint`] and
-//! [`risks`] are the inspection tools; [`lock`] pins each resolved reference;
-//! [`source_sig`] signs/verifies templates and fragments.
+//! Turn a **source** policy — a template or a leaf, whose list fields either *replace* (a bare
+//! sequence) or *increment* (`[[…​.add]]` / `[[…​.remove]]`) at the same key — into the signed
+//! **settled** artefact the runtime enforces. The stages: parse and validate the
+//! [`source`](mod@source) schema, walk and fold the template chain ([`resolve`](mod@resolve), which
+//! applies the deltas), then [`translate`](mod@translate)-and-substitute to the settled form and
+//! sign. [`compile`](mod@compile) orchestrates them; [`lint`] and [`risks`] are the inspection
+//! tools; [`lock`] pins each resolved reference; [`source_sig`] signs/verifies templates and
+//! fragments.
 //!
 //! # Relationship to `kennel-lib-policy`
 //!
@@ -40,7 +40,6 @@ pub mod compile;
 pub mod dev;
 pub mod diff;
 pub mod identity;
-pub mod leaf;
 pub mod lint;
 pub mod lock;
 pub mod mesh;
@@ -55,18 +54,16 @@ pub mod translate;
 pub mod unix;
 pub mod version;
 
-pub use compile::{compile, compile_leaf, effective_source, seal_unsigned, Compiled};
-pub use leaf::{parse as parse_leaf, LeafPolicy};
+pub use compile::{compile, effective_source, seal_unsigned, Compiled};
 pub use lint::lint_settled;
 pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use source::{
-    parse as parse_source, BpfRule, NetAllow, NetBpf, NetBpfAcl, NetDenyRule, NetProxy,
-    NetProxyDeny, NetSection, SourcePolicy,
+    parse as parse_source, BpfRule, Delta, ListField, NetAllow, NetBpf, NetBpfAcl, NetDenyRule,
+    NetProxy, NetProxyDeny, NetSection, PathDelta, PathEntry, PathField, SourcePolicy,
 };
 pub use source_sig::{
-    canonical_leaf, canonical_source, sign_leaf, sign_source, verify_self, verify_source, Signable,
-    SignatureMode, Trust,
+    canonical_source, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,
 };
 pub use translate::{translate, Translated};
 pub use version::{is_newer as version_is_newer, parse_reference};

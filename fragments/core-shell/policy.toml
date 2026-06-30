@@ -41,7 +41,6 @@ reason = "the Debian Almquist shell (`/bin/sh` on Debian/Ubuntu)"
 path = "/usr/bin/env"
 reason = "the `#!/usr/bin/env <interp>` shebang interpreter (the kernel's execve target for env-shebang scripts)"
 
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

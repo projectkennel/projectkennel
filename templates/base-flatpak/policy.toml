@@ -127,10 +127,6 @@ deny = [
     "personality",
 ]
 
-
-
-
-
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"

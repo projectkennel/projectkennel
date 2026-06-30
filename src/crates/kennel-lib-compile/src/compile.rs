@@ -2,7 +2,7 @@
 //!
 //! # Purpose
 //!
-//! Ties the compile stages together (`02-2-config-schema.md` §The settled policy):
+//! Ties the compile stages together:
 //! [`crate::resolve::resolve`] walks and folds the inheritance chain,
 //! [`crate::translate::translate`] flattens the result into the runtime
 //! `EffectivePolicy`, and [`compile`] assembles the [`SettledPolicy`] — name,
@@ -24,9 +24,8 @@
 //!
 //! I/O-free: the caller supplies the [`TemplateSource`] and writes the output.
 
-use crate::leaf::LeafPolicy;
 use crate::lock::Lockfile;
-use crate::resolve::{resolve_verified, ChainLink, ProvidesOrigin, TemplateSource};
+use crate::resolve::{apply_fragment, resolve_verified, ChainLink, ProvidesOrigin, TemplateSource};
 use crate::source::SourcePolicy;
 use crate::source_sig::Trust;
 use crate::translate::{translate, Translated};
@@ -64,7 +63,7 @@ pub struct Compiled {
     pub policy: SettledPolicy,
     /// The freshly-resolved lockfile (one entry per resolved reference).
     pub lock: Lockfile,
-    /// Non-fatal warnings raised during compilation — footgun grants the policy is
+    /// Non-fatal warnings raised during compilation, footgun grants the policy is
     /// allowed to keep but should be loud about (e.g. shimming a real ssh-agent
     /// socket via `[[unix.allow]]`). The caller surfaces these (the `kennel compile`
     /// CLI prints them to stderr); they are not part of the signed artefact.
@@ -75,7 +74,7 @@ pub struct Compiled {
 ///
 /// `entry` is the most-derived source artefact (a leaf or a template); `source`
 /// supplies its ancestors; `compiler_version` is recorded in provenance. All
-/// placeholders (including `<tag>`/`<gid>`) are deferred to spawn — the compiler
+/// placeholders (including `<tag>`/`<gid>`) are deferred to spawn; the compiler
 /// never needs the installation's tag/gid.
 ///
 /// # Errors
@@ -135,10 +134,10 @@ pub fn compile(
     )
 }
 
-/// The tier-aware reserved-namespace authority for this resolved policy (§7.13.5).
+/// The tier-aware reserved-namespace authority for this resolved policy.
 ///
 /// The reserved namespace is tier-trust material: `org.projectkennel.*` is claimable only through a
-/// vendor-tier (maintainer) template, a host `[[reserved]]` name only through a host-tier one — and
+/// vendor-tier (maintainer) template, a host `[[reserved]]` name only through a host-tier one; and
 /// **any** key at the required tier is equivalent. This is the *sole* authorizer: there is no runtime
 /// re-check (the daemon trusts the settled signature it verifies). The declaring tier is the verified
 /// tier of the ancestor template that supplied the provides (ancestor-origin), or the output `--key`'s
@@ -164,82 +163,6 @@ fn reserved_authority<'a>(
     }
 }
 
-/// Resolve, apply a leaf's deltas, translate, and assemble a settled policy.
-///
-/// A leaf policy is the delta form (`[[fs.read.add]]`, …); its chain is resolved
-/// from `template_base`, the deltas are applied to the folded effective policy
-/// (`+=`/`-=`), and the result is translated and assembled as for a template.
-///
-/// # Errors
-///
-/// Propagates [`PolicyError`] from validation, resolution, translation, or the
-/// framework-invariant re-assertion.
-pub fn compile_leaf(
-    leaf: &LeafPolicy,
-    source: &dyn TemplateSource,
-    trust: &Trust<'_>,
-    compiler_version: &str,
-) -> Result<Compiled, PolicyError> {
-    leaf.validate()?;
-    let base = leaf
-        .template_base
-        .clone()
-        .ok_or_else(|| PolicyError::Resolution("leaf policy has no `template_base`".to_owned()))?;
-    let name = leaf
-        .name
-        .clone()
-        .ok_or_else(|| PolicyError::Translation("leaf policy has no `name`".to_owned()))?;
-
-    // Resolve the parent chain via a stub that carries only the leaf's base.
-    let stub = SourcePolicy {
-        template_base: Some(base),
-        template_name: Some("<leaf>".to_owned()),
-        ..SourcePolicy::default()
-    };
-    let resolved = resolve_verified(&stub, source, trust)?;
-    let provides_origin = resolved.provides_origin;
-    let mut effective = resolved.effective;
-
-    // Resolution order (02-2 §Includes): chain → includes (chain's + leaf's, in
-    // listed order) → the leaf's own deltas.
-    let mut chain = resolved.chain;
-    let mut include_refs = effective.include.clone();
-    include_refs.extend(leaf.include.iter().cloned());
-    let include_links = apply_includes(&mut effective, &include_refs, source, trust)?;
-    chain.extend(include_links);
-
-    leaf.apply(&mut effective);
-
-    let tcv = leaf
-        .threat_catalogue_version
-        .clone()
-        .or_else(|| effective.threat_catalogue_version.clone())
-        .unwrap_or_default();
-    crate::ssh::validate(&effective)?;
-    let mut warnings = crate::unix::validate(&effective)?;
-    warnings.extend(crate::binder::validate(&effective)?);
-    warnings.extend(crate::mesh::validate(
-        &effective,
-        &reserved_authority(provides_origin, trust),
-    )?);
-    crate::dev::validate(&effective)?;
-    crate::identity::validate(&effective)?;
-    let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
-    let translated = translate(&effective)?;
-    warnings.extend(translated.effective_policy.exec.deny_warnings());
-    warnings.extend(unenforced_section_warnings(&effective));
-    warnings.extend(spawn_manifest_warnings(&effective));
-    assemble(
-        name,
-        &translated,
-        &chain,
-        &tcv,
-        compiler_version,
-        warnings,
-        spawn_grant,
-    )
-}
-
 /// Resolve a policy's folded **effective source**, stopping *before* translation
 /// so the threat tags survive.
 ///
@@ -247,56 +170,34 @@ pub fn compile_leaf(
 /// `+=`/`-=` deltas applied.
 ///
 /// This is the honest input for the [risk](crate::risks) and [diff](crate::diff)
-/// engines: threat tags live only in source, never the settled artefact. It
-/// accepts either policy form — a template/source document or a delta-leaf —
-/// mirroring [`compile`]/[`compile_leaf`] exactly up to the translate step, so
-/// the engines see the same folded grants the compiler enforces.
+/// engines: threat tags live only in source, never the settled artefact. A template and a leaf are
+/// the one [`SourcePolicy`] type: the chain fold ([`resolve`](mod@crate::resolve)) applies the entry's
+/// own increments, then the includes are folded on, so this mirrors [`compile`] exactly up to the
+/// translate step and the engines see the same folded grants the compiler enforces.
 ///
 /// # Errors
 ///
 /// Propagates [`PolicyError`] from parsing, signature verification, chain
-/// resolution, include composition, or leaf validation.
+/// resolution, or include composition.
 pub fn effective_source(
     bytes: &[u8],
     source: &dyn TemplateSource,
     trust: &Trust<'_>,
 ) -> Result<SourcePolicy, PolicyError> {
-    match crate::source::parse(bytes) {
-        Ok(entry) => {
-            let mut effective = resolve_verified(&entry, source, trust)?.effective;
-            let include_refs = effective.include.clone();
-            apply_includes(&mut effective, &include_refs, source, trust)?;
-            Ok(effective)
-        }
-        // Not a source document — try the delta-leaf form (mirrors `build_settled`).
-        Err(source_err) => {
-            let leaf = crate::leaf::parse(bytes).map_err(|_| source_err)?;
-            leaf.validate()?;
-            let base = leaf.template_base.clone().ok_or_else(|| {
-                PolicyError::Resolution("leaf policy has no `template_base`".to_owned())
-            })?;
-            let stub = SourcePolicy {
-                template_base: Some(base),
-                template_name: Some("<leaf>".to_owned()),
-                ..SourcePolicy::default()
-            };
-            let mut effective = resolve_verified(&stub, source, trust)?.effective;
-            let mut include_refs = effective.include.clone();
-            include_refs.extend(leaf.include.iter().cloned());
-            apply_includes(&mut effective, &include_refs, source, trust)?;
-            leaf.apply(&mut effective);
-            Ok(effective)
-        }
-    }
+    let entry = crate::source::parse(bytes)?;
+    let mut effective = resolve_verified(&entry, source, trust)?.effective;
+    let include_refs = effective.include.clone();
+    apply_includes(&mut effective, &include_refs, source, trust)?;
+    Ok(effective)
 }
 
 /// Warn about policy sections that parse but whose effect comes from elsewhere, so an author
 /// does not believe the section itself imposes a control. Unbuilt *features* (`[container]`,
-/// `[dbus]`, `[x11]`, `[fs.scrub]`, `[[fs.home.sanitise]]`) are no longer accepted at all — they
-/// are rejected at parse by `deny_unknown_fields`, not warned — to keep assumptions off unbuilt
+/// `[dbus]`, `[x11]`, `[fs.scrub]`, `[[fs.home.sanitise]]`) are no longer accepted at all; they
+/// are rejected at parse by `deny_unknown_fields`, not warned, to keep assumptions off unbuilt
 /// code. What remains here are the *informational* sections whose scoping is real but enforced by
 /// another mechanism (the PID namespace + seccomp), not by the section. One message per present
-/// section (warn, don't refuse — `footgun-warn-dont-forbid`).
+/// section (warn, don't refuse: `footgun-warn-dont-forbid`).
 fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
     let u = effective.unsafe_section.as_ref();
     [
@@ -322,9 +223,9 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
     .collect()
 }
 
-/// Warn loudly about each `freeform` variant in a spawn-target template's `[[mutable]]` manifest
-/// (§7.12.3). Freeform is the open footgun — any value the agent supplies is accepted — so it is
-/// warned at compile (warn, never forbid — `footgun-warn-dont-forbid`); the mandatory `reason` is
+/// Warn loudly about each `freeform` variant in a spawn-target template's `[[mutable]]` manifest.
+/// Freeform is the open footgun (any value the agent supplies is accepted), so it is
+/// warned at compile (warn, never forbid: `footgun-warn-dont-forbid`); the mandatory `reason` is
 /// surfaced so the operator sees what they signed off.
 fn spawn_manifest_warnings(effective: &SourcePolicy) -> Vec<String> {
     effective
@@ -345,11 +246,11 @@ fn spawn_manifest_warnings(effective: &SourcePolicy) -> Vec<String> {
 
 /// Resolve and apply included fragments additively, in listed order.
 ///
-/// A fragment is a signed, version-pinned, **additive-only** policy piece (`02-2`
-/// §Includes): it may add rules but not remove or override. Fragments are applied
+/// A fragment is a signed, version-pinned, **additive-only** policy piece: it may add rules
+/// but not remove or override. Fragments are applied
 /// after the inheritance chain and before the leaf's own deltas. Two fragments that
 /// add a conflicting `[[net.proxy.allow]]` for the same host (different ports/protocol) are
-/// an [`PolicyError::IncludeConflict`] — resolution is not last-wins. Returns the
+/// an [`PolicyError::IncludeConflict`]; resolution is not last-wins. Returns the
 /// resolved fragments as chain links for the lockfile.
 ///
 /// Scope: fragment-declared **invariants** (`[[net.proxy.deny.invariant]]` inside a
@@ -362,6 +263,7 @@ fn apply_includes(
     trust: &Trust<'_>,
 ) -> Result<Vec<ChainLink>, PolicyError> {
     use crate::resolve::split_reference;
+    use crate::source::net_key;
 
     let mut links = Vec::new();
     let mut seen_net: Vec<crate::source::NetAllow> = Vec::new();
@@ -372,11 +274,15 @@ fn apply_includes(
                 "include `{name}@{version}` not found in the search path"
             ))
         })?;
-        let fragment = crate::leaf::parse(&bytes)?;
+        // A fragment is a `name`-only additive bundle (no `template_base` — it is included, never
+        // run), so the runnable-leaf identity rule does not apply; its add-only shape and signature
+        // are what gate it.
+        let fragment = crate::source::parse(&bytes)?;
 
         if !fragment.is_additive_only() {
             return Err(PolicyError::SourceValidation(vec![format!(
-                "fragment `{name}` uses a `.remove` delta; includes are additive-only"
+                "fragment `{name}` carries a non-additive contribution (a `Set`-replace, a `.remove` \
+                 delta, or an override-prone section); includes are additive-only"
             )]));
         }
         if let Some(tb) = &fragment.template_base {
@@ -392,8 +298,8 @@ fn apply_includes(
 
         // Conflict check: a host added by two fragments with differing rules.
         for entry in fragment.net_allow_adds() {
-            let key = crate::leaf::net_key(entry);
-            if let Some(prev) = seen_net.iter().find(|e| crate::leaf::net_key(e) == key) {
+            let key = net_key(entry);
+            if let Some(prev) = seen_net.iter().find(|e| net_key(e) == key) {
                 if prev != entry {
                     return Err(PolicyError::IncludeConflict(format!(
                         "two includes add conflicting rules for `{key}`; reconcile them in the leaf"
@@ -404,20 +310,9 @@ fn apply_includes(
             }
         }
 
-        fragment.apply(effective);
-        // Union the fragment's invariant denies into the effective policy (additive;
-        // invariants are non-removable, so a fragment can only add to them).
-        let invariants = fragment.invariant_denies();
-        if !invariants.is_empty() {
-            let net = effective.net.get_or_insert_with(Default::default);
-            let proxy = net.proxy.get_or_insert_with(Default::default);
-            let deny = proxy.deny.get_or_insert_with(Default::default);
-            for rule in invariants {
-                if !deny.invariant.iter().any(|e| e.cidr == rule.cidr) {
-                    deny.invariant.push(rule.clone());
-                }
-            }
-        }
+        // Fold the additive fragment onto the effective policy: its add-only increments apply and
+        // its `[[net.proxy.deny.invariant]]` floors union, exactly as a chain step folds.
+        *effective = apply_fragment(effective, &fragment);
         links.push(ChainLink {
             name,
             version,
@@ -702,11 +597,11 @@ mod tests {
     fn includes_apply_additively_and_are_lock_pinned() {
         let frag = "name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp.example\"\nports = [443]\nreason = \"corp egress proxy\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect("compile");
+        let compiled = compile(&leaf, &source, &Trust::dev(), "v").expect("compile");
         let names = &compiled.policy.effective_policy.net.allow_names;
         assert!(
             names.iter().any(|n| n.name == "proxy.corp.example"),
@@ -731,11 +626,11 @@ mod tests {
         let f1 = "name = \"a\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n";
         let f2 = "name = \"b\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [8443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("frag-a", f1), ("frag-b", f2)]);
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"frag-a@v1\", \"frag-b@v1\"]\n",
         )
         .expect("parse leaf");
-        let err = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect_err("conflict");
+        let err = compile(&leaf, &source, &Trust::dev(), "v").expect_err("conflict");
         assert!(matches!(err, PolicyError::IncludeConflict(_)), "got {err}");
     }
 
@@ -743,11 +638,11 @@ mod tests {
     fn a_fragment_can_contribute_an_invariant_deny() {
         let frag = "name = \"corp-deny\"\n[[net.proxy.deny.invariant]]\ncidr = \"203.0.113.0/24\"\nreason = \"corp blocklist\"\n";
         let source = source_with_fragments(&[("corp-deny", frag)]);
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-deny@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::dev(), "v").expect("compile");
+        let compiled = compile(&leaf, &source, &Trust::dev(), "v").expect("compile");
         let denies = &compiled.policy.effective_policy.net.deny_invariant;
         assert!(
             denies
@@ -763,7 +658,7 @@ mod tests {
 
     #[test]
     fn a_leaf_may_not_declare_an_invariant_deny() {
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\n[[net.proxy.deny.invariant]]\ncidr = \"10.0.0.0/8\"\nreason = \"r\"\n",
         )
         .expect("parse leaf");
@@ -780,12 +675,12 @@ mod tests {
         let frag =
             "name = \"bad\"\n[[net.proxy.allow.remove]]\nname = \"github.com\"\nreason = \"r\"\n";
         let source = source_with_fragments(&[("bad-frag", frag)]);
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"bad-frag@v1\"]\n",
         )
         .expect("parse leaf");
         assert!(
-            compile_leaf(&leaf, &source, &Trust::dev(), "v").is_err(),
+            compile(&leaf, &source, &Trust::dev(), "v").is_err(),
             "an additive-only fragment cannot remove"
         );
     }
@@ -795,17 +690,17 @@ mod tests {
         let frag = "name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"x.corp\"\nports = [443]\nreason = \"r\"\n";
         let source = source_with_fragments(&[("corp-egress", frag)]);
         let ks = KeySet::new();
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"ai-coding-strict@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
         // An unsigned fragment must not be silently trusted when signatures are required.
-        assert!(compile_leaf(&leaf, &source, &Trust::require(&ks), "v").is_err());
+        assert!(compile(&leaf, &source, &Trust::require(&ks), "v").is_err());
     }
 
     #[test]
     fn signed_include_verifies_and_is_lock_pinned_under_require_signed() {
-        use crate::source_sig::{sign_leaf, sign_source};
+        use crate::source_sig::sign_source;
         let key = SigningKey::from_seed("kennel-maint-2026", &[3u8; 32]).expect("key");
         let mut ks = KeySet::new();
         ks.insert(key.key_id(), &key.public_key_bytes())
@@ -817,11 +712,11 @@ mod tests {
                 .expect("ser")
                 .into_bytes()
         };
-        let frag = crate::leaf::parse(
+        let frag = parse(
             b"name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
         )
         .expect("parse fragment");
-        let signed_frag = basic_toml::to_string(&sign_leaf(&frag, &key).expect("sign"))
+        let signed_frag = basic_toml::to_string(&sign_source(&frag, &key).expect("sign"))
             .expect("ser")
             .into_bytes();
         let source = MapSource(vec![
@@ -834,11 +729,11 @@ mod tests {
         ]);
         // Derive the signed ancestor directly and include the signed fragment — this test is about a
         // signed include verifying and lock-pinning under require, not a specific template's content.
-        let leaf = crate::leaf::parse(
+        let leaf = parse(
             b"name = \"p\"\ntemplate_base = \"base-confined@v1\"\ninclude = [\"corp-egress@v1\"]\n",
         )
         .expect("parse leaf");
-        let compiled = compile_leaf(&leaf, &source, &Trust::require(&ks), "v")
+        let compiled = compile(&leaf, &source, &Trust::require(&ks), "v")
             .expect("signed chain + signed fragment verifies under require");
         assert!(compiled
             .policy
