@@ -1,6 +1,6 @@
 # Project Kennel — backlog / parking lot
 
-Status: **standing** · Last touched: 2026-06-25
+Status: **standing** · Last touched: 2026-07-01
 
 > The parking lot for work that is **not on any release roadmap** and should not be carried from one to
 > the next. Three kinds live here: items **declined on principle** (mostly risk, little reward — re-open
@@ -160,3 +160,20 @@ documentation sweep.
   the removed-from-schema `fs.scrub` / `fs.home.sanitise` design (§7.4.5 — revive only on a concrete need);
   and the **rendezvous-ownership incumbency tiebreak** (§7.13.4b — a `Ready` owner keeps the slot over an
   equal newcomer across `daemon-reload`; the default stable-resolution order is correct without it).
+- **Runtime-validate the four schema-enum'd policy fields.** Six policy fields carry closed value-sets;
+  two — `[rootfs].persistence` and the per-class `[audit.<class>].level` — validate through their enums'
+  `Deserialize` (`Persistence` / `AuditClassLevel`), so an invalid value errors at compile. The other
+  four — `[net.bind].inaddr_any_policy` / `in6addr_any_policy`, `[net.audit].level`, `[dbus.audit].level`
+  — get schema enum *hints* from real types (`WildcardBindPolicy` / `NetAuditLevel` / `DbusAuditLevel`,
+  #142) but are still passed through **unchecked** at compile/translate (a pre-existing gap, not a #142
+  regression). Route them through the same enum `Deserialize` so an invalid value is rejected at compile
+  rather than carried into the settled artefact. It is a **behaviour change** — it starts rejecting
+  values that slip through today — which is why it was not folded into #142. Promote when a
+  validation-hardening pass is taken on.
+- **`gen-man` — derive the man pages from the CLI, retire the hand-kept data table.** `gen-man` emits the
+  groff man pages from an in-repo data table that **mirrors** the CLI dispatch, kept honest by a sync
+  test — the exact hand-mirror-plus-babysitter-test pattern #142 removed from `gen-schema` (a second
+  source of truth a forgotten entry can silently desync). Lower stakes than the schema (man pages do not
+  gate template validation), so not urgent — but the same drift class and the same fix: reflect the man
+  pages from the CLI definition so the table cannot diverge. Promote alongside any `gen-schema`-style
+  tooling pass or the next time the CLI surface churns.
