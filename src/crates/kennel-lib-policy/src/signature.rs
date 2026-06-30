@@ -71,6 +71,7 @@ impl std::error::Error for SignatureError {}
 /// The `[signature]` envelope carried by a signed artefact.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SignatureEnvelope {
     /// Signature algorithm. Must be `"sshsig"` ([`SSHSIG_ALGORITHM`]).
     pub algorithm: String,

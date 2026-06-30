@@ -48,6 +48,7 @@ use kennel_lib_policy::settled::{
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
+use serde::de::IntoDeserializer;
 use std::collections::BTreeSet;
 
 /// The product of translation: the settled effective policy plus the per-instance
@@ -531,11 +532,16 @@ fn validate_rootfs(src: &SourcePolicy) -> Result<(), PolicyError> {
     }
     // Persistence is binary; empty (unset) means the default `discard`.
     let persistence = rootfs.persistence.as_deref().unwrap_or("discard");
-    if !matches!(persistence, "discard" | "persist") {
-        return Err(translation(format!(
-            "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
-        )));
-    }
+    // Validate through `Persistence`'s deserializer — the single source the schema also enumerates.
+    let de: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+        persistence.into_deserializer();
+    <kennel_lib_policy::settled::Persistence as serde::Deserialize>::deserialize(de).map_err(
+        |_| {
+            translation(format!(
+                "[rootfs].persistence must be `discard` or `persist`, got `{persistence}`"
+            ))
+        },
+    )?;
     // `persist` + whole-tree-immutable is a contradiction (an upper that can never be written).
     let whole_tree_ro = rootfs
         .readonly

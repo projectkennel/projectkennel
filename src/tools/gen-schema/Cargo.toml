@@ -2,26 +2,26 @@
 name = "gen-schema"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel policy-schema generator (not shipped). Emits a JSON Schema (draft-07) for the authored policy TOML from an in-repo data table mirroring the kennel-lib-compile source structs, so `schema/policy.toml.schema` — which host editors read for completion + validation — stays in sync with the parser by construction. Std-only: no third-party dependencies."
+description = "Project Kennel policy-schema generator (not shipped). Emits the JSON Schema (draft-07) for the authored policy TOML directly from the `kennel-lib-compile` source structs via `#[derive(SchemaType)]` — a pure export of the parser, with no hand-kept mirror to drift. Editors read the emitted `schema/policy.toml.schema` for completion + validation."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# Std-only by design (CODING-STANDARDS §5.1 / the project's no-third-party-deps
-# default). The schema data lives in `model.rs` as plain Rust, type-checked at
-# compile time, and a tiny hand-rolled JSON writer (`json.rs`) emits it — so there
-# is no schemars/serde_json to vendor onto the compiler crate. The schema↔parser
-# agreement is enforced by a cross-check test in kennel-lib-compile (dev-dep), the
-# drift guard that makes "generate the schema from a table" trustworthy.
+# Tooling only (not shipped, in no TCB closure). It reflects the parser structs through
+# their `schema` feature and renders the result with the already-vendored `serde_json` —
+# so the schema is *derived* from the one source (the structs), not transcribed by hand.
 [dependencies]
+kennel-lib-compile = { path = "../../crates/kennel-lib-compile", features = ["schema"] }
+kennel-schema = { path = "../../crates/kennel-schema" }
+serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
 
-# A library half so kennel-lib-compile can dev-depend on the schema model for its
-# schema↔parser cross-check test (dev-only; never linked into any shipped binary).
+# A library half so kennel-lib-compile can dev-depend on it for the schema↔parser
+# cross-check test (dev-only; never linked into any shipped binary).
 [lib]
 name = "gen_schema"
 path = "src/lib.rs"

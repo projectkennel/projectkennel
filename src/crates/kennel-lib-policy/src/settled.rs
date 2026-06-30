@@ -39,6 +39,7 @@ pub const RESERVED_PREFIX: &str = "org.projectkennel.";
 /// representable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum NetMode {
     /// No network at all: an own net namespace with no interfaces (not even `lo`).
     None,
@@ -59,6 +60,7 @@ pub enum NetMode {
 /// Transport protocol selector for a network rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum Protocol {
     /// Any protocol.
     Any,
@@ -83,6 +85,7 @@ pub enum SeccompAction {
 /// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum TtlAction {
     /// Terminate the kennel cleanly. The default for a policy that sets a `ttl` without an
     /// action. (With the cgroup freezer this is an atomic freeze-then-kill — no SIGTERM grace
@@ -530,6 +533,7 @@ impl Default for TtyPolicy {
 /// via the cgroup `kenneld` already owns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum OnChangeAction {
     /// Record an `fs.mutation` audit event and let the workload run on (the live watch is
     /// best-effort; the authoritative verdict is the teardown review).
@@ -768,6 +772,7 @@ pub struct DbusBusRuntime {
 /// settled policy; defined here so the source parser and the signed runtime share one type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum Shape {
     /// An `AF_UNIX` socket the workload connects to (the display render leg).
     AfUnix,
@@ -857,6 +862,7 @@ pub struct ConsumeRuntime {
 /// `kenneld` supervises a provider the operator has enabled. The systemd `Restart=` analogue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub enum RestartPolicy {
     /// Restart on any exit — a long-running service expected to stay up.
     Always,
@@ -865,6 +871,83 @@ pub enum RestartPolicy {
     OnFailure,
     /// Run once; any exit, clean or not, leaves it down.
     Never,
+}
+
+// The authored value-set enums: the canonical closed sets the source-policy `String` fields
+// accept. The fields stay `String` (lenient authoring, scalar-chain folding), but the schema
+// enumerates them from these types via `#[schema(values_from = …)]` — so the editor hint is
+// derived from a real type, never a hand-written list.
+
+/// Rootfs upper-layer persistence (`[rootfs].persistence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum Persistence {
+    /// Ephemeral upper, discarded at teardown (default).
+    Discard,
+    /// Managed upper retained under the store entry.
+    Persist,
+}
+
+/// Disposition of a wildcard (`INADDR_ANY`/`IN6ADDR_ANY`) bind (`[net.bind].*_any_policy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum WildcardBindPolicy {
+    /// Rewrite a wildcard bind to the kennel's own address.
+    Rewrite,
+    /// Refuse a wildcard bind.
+    Deny,
+}
+
+/// Per-kennel egress audit verbosity (`[net.audit].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum NetAuditLevel {
+    /// One summary line per connection.
+    Summary,
+    /// Full per-event detail.
+    Full,
+}
+
+/// D-Bus call audit verbosity (`[dbus.audit].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum DbusAuditLevel {
+    /// No D-Bus audit events.
+    Off,
+    /// One summary line per call.
+    Summary,
+    /// Full per-call detail.
+    Full,
+}
+
+/// Per-class audit level override (`[audit.<class>].level`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum AuditClassLevel {
+    /// Suppress the class entirely.
+    Off,
+    /// Only denied/blocked events.
+    DeniesOnly,
+    /// One summary line per event.
+    Summary,
+    /// Full per-event detail.
+    Full,
+}
+
+/// Abstract-namespace `AF_UNIX` socket disposition (`[unix].abstract`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum AbstractSocketPolicy {
+    /// Deny abstract-namespace sockets (default).
+    Deny,
+    /// Allow abstract-namespace sockets.
+    Allow,
 }
 
 /// The `[service]` supervision discipline, resolved into the settled policy

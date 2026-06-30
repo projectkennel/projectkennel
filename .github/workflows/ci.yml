@@ -251,9 +251,10 @@ jobs:
       - name: Toolchain
         run: rustup show && cargo --version
       # Regenerate the committed policy schema; a non-empty diff means
-      # schema/policy.toml.schema is stale relative to gen_schema::model. The
-      # schema↔parser agreement itself is enforced by the cross-check test
-      # (kennel-lib-compile/tests/schema_parser_crosscheck.rs) in the rust-test job.
+      # schema/policy.toml.schema is stale relative to the source structs it derives from.
+      # The schema is a pure export of the parser (no hand model), so agreement is by
+      # construction; kennel-lib-compile/tests/schema_parser_crosscheck.rs guards that
+      # regeneration is idempotent and that every in-tree template parses.
       - name: Regenerate the policy schema
         run: cargo run --offline --locked -p gen-schema -- --out schema/policy.toml.schema
       - name: No drift (schema/ matches the generator)

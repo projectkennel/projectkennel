@@ -47,6 +47,8 @@ use std::collections::BTreeMap;
 /// A parsed source policy: a template or a leaf, before resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+#[cfg_attr(feature = "schema", schema(rename = "policy"))]
 pub struct SourcePolicy {
     /// Reference to the parent template by name. Absent only for the root template
     /// (`base-confined`).
@@ -164,6 +166,7 @@ pub struct SourcePolicy {
 /// `[rootfs]`: an OCI image unpacked as the kennel's root filesystem.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct RootfsSection {
     /// The unpacked image rootfs (the store entry's `rootfs/`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -178,6 +181,10 @@ pub struct RootfsSection {
     /// Rootfs persistence: `"discard"` (default) | `"persist"`. `"persist"` is a
     /// loud value the risk engine derives an exposure from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::Persistence")
+    )]
     pub persistence: Option<String>,
     /// Closure-lock: rootfs paths Landlock denies writes to, the executable-closure
     /// boundary the DAC-flatten erased, build-derived for a non-root image. `["/"]` is
@@ -198,6 +205,7 @@ pub struct RootfsSection {
 /// (frozen, signed) templates; the agent only writes manifest fields.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SpawnSection {
     /// Concurrent-instance ceiling across this grant's spawns, the fork-bomb bound.
     /// Mandatory: an unbounded grant is a fork bomb (validated at compile).
@@ -215,6 +223,7 @@ pub struct SpawnSection {
 /// One `[[spawn.allow]]` entry, a single signed template this grant may instantiate.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SpawnAllow {
     /// The trust-store template name (`net-fetch`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -233,6 +242,8 @@ pub struct SpawnAllow {
 /// `predicate` (`type` + `under`: the loud traversal-free runtime-relative escape hatch).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+#[cfg_attr(feature = "schema", schema(rename = "mutable"))]
 pub struct MutableField {
     /// The dotted leaf-field path this entry opens (`net.proxy.allow`, `rootfs.writable`, `fs.write`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,6 +280,7 @@ pub struct MutableField {
 /// Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct Threats {
     /// Threat IDs this entry weakens defence against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -284,6 +296,7 @@ pub struct Threats {
 /// `fs.read`, `fs.write`, `fs.deny`, and `exec.allow`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct PathEntry {
     /// The path to add or remove.
     pub path: String,
@@ -298,6 +311,7 @@ pub struct PathEntry {
 /// The `{ add, remove }` increment over a path list (`[[fs.read.add]]` / `[[fs.read.remove]]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct PathDelta {
     /// Entries to add (`+=`), appended if not already present.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -411,6 +425,49 @@ impl<T> Default for ListField<T> {
     }
 }
 
+// The two untagged compose enums describe their `Set | Delta` shape by hand — a derive
+// can't see an untagged union's arms — so the schema covers both the bare-list replace form
+// and the `[[fs.read.add]]` / `[[net.proxy.allow.add]]` increment forms.
+#[cfg(feature = "schema")]
+impl kennel_schema::SchemaType for PathField {
+    fn schema_node(defs: &mut kennel_schema::Defs) -> kennel_schema::Node {
+        kennel_schema::Node::OneOf(vec![
+            kennel_schema::Node::Array(Box::new(kennel_schema::Node::Str)),
+            <PathDelta as kennel_schema::SchemaType>::schema_node(defs),
+        ])
+    }
+}
+
+#[cfg(feature = "schema")]
+impl<T: kennel_schema::SchemaType> kennel_schema::SchemaType for ListField<T> {
+    fn schema_node(defs: &mut kennel_schema::Defs) -> kennel_schema::Node {
+        let mut item = || {
+            kennel_schema::Node::Array(Box::new(<T as kennel_schema::SchemaType>::schema_node(
+                defs,
+            )))
+        };
+        let set = item();
+        let delta = kennel_schema::Node::Object(kennel_schema::Obj {
+            title: "Increment ({ add, remove }) over the inherited typed list.".to_owned(),
+            props: vec![
+                kennel_schema::Prop {
+                    key: "add".to_owned(),
+                    required: false,
+                    desc: "Entries to append.".to_owned(),
+                    node: item(),
+                },
+                kennel_schema::Prop {
+                    key: "remove".to_owned(),
+                    required: false,
+                    desc: "Entries to drop by key.".to_owned(),
+                    node: item(),
+                },
+            ],
+        });
+        kennel_schema::Node::OneOf(vec![set, delta])
+    }
+}
+
 impl<T> ListField<T> {
     /// The resolved list when this is the `Set` (replace) form: what every field is once the chain
     /// is folded. An unfolded `Delta` resolves to an empty slice.
@@ -486,6 +543,7 @@ impl From<Vec<String>> for PathField {
 /// `[cap]`: capabilities and `no_new_privs`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct CapSection {
     /// `PR_SET_NO_NEW_PRIVS`. A framework invariant once resolved (must be true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,6 +560,7 @@ pub struct CapSection {
 /// before all tables: the `basic-toml` canonical-form requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ExecSection {
     /// Allowlisted binary paths (the execve allowlist). Execution is deny-by-default:
     /// an empty/absent allow denies ALL execve; a bare `**`/`/**` is the explicit
@@ -576,6 +635,7 @@ impl Serialize for ExecSection {
 /// before all tables: the `basic-toml` canonical-form requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct FsSection {
     /// Paths granted read (and directory traversal / execute). Replace (`read = ["…"]`) or
     /// increment (`[[fs.read.add]]`) at the same key.
@@ -654,6 +714,7 @@ impl Serialize for FsSection {
 /// `[fs.home]`: the mandatory constructed-`$HOME` shim.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct FsHome {
     /// Whether `$HOME` is shadowed by a constructed view (must be true once resolved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -682,6 +743,7 @@ pub struct FsHome {
 /// owned by the workload user inside its own mount namespace, so it carries no DAC-mode knob.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct FsTmp {
     /// Whether the workload may **write** to its `/tmp` tmpfs (the Landlock write grant). Absent ⇒
     /// `/tmp` is a read-only fresh tmpfs.
@@ -695,6 +757,7 @@ pub struct FsTmp {
 /// `[fs.proc]`: procfs hidepid. Visibility is always self-only (structural).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct FsProc {
     /// Mount `/proc` with `hidepid=2`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -704,6 +767,7 @@ pub struct FsProc {
 /// `[fs.dev]`: the constructed `/dev` allowlist.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct FsDev {
     /// The trivial pseudo-device baseline bound into the kennel's `/dev` (`/dev/null`,
     /// `/dev/urandom`, `/dev/tty`, …): bare paths, no documentation needed.
@@ -723,6 +787,7 @@ pub struct FsDev {
 /// kennel's constructed `/dev`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DevPassthrough {
     /// The device node, an absolute path under `/dev` (e.g. `/dev/ttyUSB0`,
     /// `/dev/net/tun`). Bound from the host, preserving its owner/group/mode.
@@ -746,12 +811,17 @@ pub struct DevPassthrough {
 /// `[net]` and its sub-tables.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetSection {
     /// Egress mode: `"none"` (own empty net-ns, no interfaces), `"constrained"` (own net-ns,
     /// SOCKS proxy, default-deny, the default), `"unconstrained"` (own net-ns, SOCKS proxy,
     /// default-allow minus invariant + `net.deny` carve-outs), or `"host"` (host net-ns,
     /// direct egress, `net.allow` enforced by BPF/Landlock, no proxy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::NetMode")
+    )]
     pub mode: Option<String>,
     /// Required (non-empty) only when `mode = "host"`: the documented justification for
     /// sharing the host network stack, which reinstates the host-recon residual (T1.6).
@@ -799,6 +869,7 @@ pub struct NetSection {
 /// compile error (names cannot be enforced by the kernel ACL; use `[net.bpf]`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetProxy {
     /// `[[net.proxy.allow]]`: by-name (or by-CIDR) egress allow entries. Replace
     /// (`[[net.proxy.allow]]`) or increment (`[[net.proxy.allow.add]]`) at the same key.
@@ -817,6 +888,7 @@ pub struct NetProxy {
 /// link-local), `policy` is the author's optional subtraction (RFC1918, a known-bad range).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetProxyDeny {
     /// `[[net.proxy.deny.invariant]]`: cloud-metadata / link-local, non-removable (T1.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -831,6 +903,7 @@ pub struct NetProxyDeny {
 /// directional connect/bind allow-deny gates the cgroup BPF and Landlock enforce.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetBpf {
     /// Permitted socket families (defence in depth; e.g. `["AF_INET", "AF_INET6", "AF_UNIX"]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -849,6 +922,7 @@ pub struct NetBpf {
 /// One direction of the `[net.bpf]` kernel ACL: CIDR+port allow/deny, deny-first.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetBpfAcl {
     /// `[[net.bpf.connect.allow]]` / `[[net.bpf.bind.allow]]`: CIDR+port allow rules. Replace
     /// or increment (`[[net.bpf.connect.allow.add]]`) at the same key.
@@ -864,6 +938,7 @@ pub struct NetBpfAcl {
 /// the kernel ACL cannot resolve names, so a by-name rule is structurally inexpressible here.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct BpfRule {
     /// The CIDR (`"10.0.0.0/8"`, a bare address, or `"*"` = `0.0.0.0/0` + `::/0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -873,6 +948,10 @@ pub struct BpfRule {
     pub ports: Vec<u16>,
     /// Transport protocol (`"tcp"`, `"udp"`, `"any"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::Protocol")
+    )]
     pub protocol: Option<String>,
     /// Why this rule exists (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -885,6 +964,7 @@ pub struct BpfRule {
 /// One `[[net.allow]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetAllow {
     /// The destination host (or dot-prefixed suffix). Mutually informative with `cidr`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -897,6 +977,10 @@ pub struct NetAllow {
     pub ports: Vec<u16>,
     /// Transport protocol (`"tcp"`, `"udp"`, `"any"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::Protocol")
+    )]
     pub protocol: Option<String>,
     /// Why this destination is permitted (required).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -914,6 +998,7 @@ pub struct NetAllow {
 /// `tls.*` on a `[[net.allow]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetTls {
     /// Whether TLS is required to the destination.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -924,6 +1009,7 @@ pub struct NetTls {
 /// required `reason`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetDenyRule {
     /// The denied CIDR (e.g. `"169.254.169.254/32"`).
     pub cidr: String,
@@ -938,12 +1024,21 @@ pub struct NetDenyRule {
 /// `[net.bind]`: bind-address handling.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetBind {
     /// What to do with a wildcard IPv4 bind (`"rewrite"` / `"deny"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::WildcardBindPolicy")
+    )]
     pub inaddr_any_policy: Option<String>,
     /// What to do with a wildcard IPv6 bind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::WildcardBindPolicy")
+    )]
     pub in6addr_any_policy: Option<String>,
     /// Whether binding the host IPv4 loopback is permitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -965,6 +1060,7 @@ pub struct NetBind {
 /// `[net.ipv6]`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetIpv6 {
     /// Force `IPV6_V6ONLY=1` so a dual-stack socket cannot escape the v4 rewrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -974,21 +1070,31 @@ pub struct NetIpv6 {
 /// `[net.audit]`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetAudit {
     /// Where the per-kennel egress JSONL log is written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
     /// Audit verbosity (`"summary"`, `"full"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::NetAuditLevel")
+    )]
     pub level: Option<String>,
 }
 
 /// `[unix]`: `AF_UNIX` policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct UnixSection {
     /// Abstract-namespace socket disposition (`"deny"` / `"allow"`).
     #[serde(rename = "abstract", default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::AbstractSocketPolicy")
+    )]
     pub abstract_ns: Option<String>,
     /// `[[unix.allow]]`: granted sockets, including per-kennel service instances. Replace
     /// (`[[unix.allow]]`) or increment (`[[unix.allow.add]]`) at the same key.
@@ -999,6 +1105,7 @@ pub struct UnixSection {
 /// One `[[unix.allow]]` entry.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct UnixAllow {
     /// A logical name (e.g. `"ssh-agent"`) for a per-kennel service instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1030,6 +1137,7 @@ pub use kennel_lib_policy::settled::Shape;
 /// so a malformed entry yields one problem per missing field rather than a parse abort.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ProvidesEntry {
     /// The capability's public identifier, what the catalogue advertises. A reserved
     /// `org.projectkennel.*` name may be claimed only by a maintainer-signed template.
@@ -1055,6 +1163,7 @@ pub struct ProvidesEntry {
 /// One `[[consumes]]` entry, a capability this kennel reaches over the mesh.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ConsumesEntry {
     /// The capability's public identifier, resolved against the catalogue at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1114,6 +1223,7 @@ const fn default_required() -> bool {
 /// seal's `setgroups` and is named in the synthetic `/etc/group` so `id` shows names.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct IdentitySection {
     /// The workload's masked user name, `$USER`/`$LOGNAME` and the synthetic
     /// `/etc/passwd` account, and the base of `$HOME` (`/home/<user>`). Defaults to
@@ -1141,6 +1251,7 @@ pub struct IdentitySection {
 /// allowlist, never by the runtime artefact. A kennel never holds a real key.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SshSection {
     /// Whether a granted key may be driven by a non-interactive (CI) kennel with no
     /// per-use touch/confirmation. Loud and threat-tagged; default `false`. When
@@ -1165,6 +1276,7 @@ pub struct SshSection {
 /// One `[[ssh.destinations]]` entry: a destination the kennel may reach over the bastion.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SshDestination {
     /// The SSH destination, in the form the host-side `ssh` is invoked with
     /// (`git@github.com`, `root@localhost`, a `~/.ssh/config` host alias). It is the
@@ -1190,6 +1302,7 @@ pub struct SshDestination {
 /// `[workload]`: the command the kennel runs, optionally pinned.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct WorkloadSection {
     /// The command + args (`argv[0]` is the program). Absent ⇒ supplied at `kennel run`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1215,6 +1328,7 @@ pub struct WorkloadSection {
 /// (`footgun-warn-dont-forbid`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct UnsafeSection {
     /// `[unsafe.ptrace]`: ptrace across the kennel boundary (scoping from PID-ns + seccomp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1228,6 +1342,7 @@ pub struct UnsafeSection {
 /// `[unsafe.ptrace]` and `[unsafe.signal]` sub-sections.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct BoundaryAcl {
     /// Permitted targets (`"self"`, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1240,6 +1355,7 @@ pub struct BoundaryAcl {
 /// `[env]`: environment curation.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct EnvSection {
     /// Variables passed through from the caller's environment (globs allowed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1257,6 +1373,7 @@ pub struct EnvSection {
 /// produces the settled allow list + default action).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct SeccompSection {
     /// The baseline profile name (`"default"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1273,6 +1390,7 @@ pub struct SeccompSection {
 /// resolver converts it to seconds for the settled policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct LifecycleSection {
     /// Time-to-live in human form (`"8h"`, `"1h"`, `"30m"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1281,6 +1399,10 @@ pub struct LifecycleSection {
     /// kennel; `"warn"` emits an audit event and leaves it running; `"renew"` is an
     /// audited `warn` today (the interactive renewal prompt is still owed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::TtlAction")
+    )]
     pub ttl_action: Option<String>,
 }
 
@@ -1292,6 +1414,7 @@ pub struct LifecycleSection {
 /// no supervision runtime at all (`kenneld` applies its own default at enable time).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct ServiceSection {
     /// Restart discipline: `always` / `on-failure` (default) / `never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1308,6 +1431,7 @@ pub struct ServiceSection {
 /// `[tty]`: terminal hardening for an interactive (PTY) workload.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct TtySection {
     /// Filter the dangerous escape sequences a workload could write toward the
     /// operator's real terminal: OSC 52 (clipboard), OSC 9/777 (notifications),
@@ -1321,6 +1445,7 @@ pub struct TtySection {
 /// `[trust]`: the masked workspace manifest (T2.8).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct TrustSection {
     /// Maintain a `.trust-manifest.json` at the root of every writable/persistent
     /// workspace (the CLI generates it pre-flight; the view masks it invisible to the
@@ -1342,6 +1467,7 @@ pub struct TrustSection {
 /// default by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DbusSection {
     /// `[dbus.session]`: the user session bus (the common case: notifications, portals).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1357,6 +1483,7 @@ pub struct DbusSection {
 /// `[dbus.session]` / `[dbus.system]`: one bus's enable flag and rule set.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DbusBus {
     /// Whether this bus is reachable at all. Absent/`false` ⇒ no connection to this bus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1373,6 +1500,7 @@ pub struct DbusBus {
 /// destination / interface / member granularity.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DbusRules {
     /// Destinations the kennel may call methods on and receive replies/signals from
     /// (`org.freedesktop.Notifications`, `org.freedesktop.portal.*`).
@@ -1392,9 +1520,14 @@ pub struct DbusRules {
 /// `[dbus.audit]`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DbusAudit {
     /// Verbosity (`"off"`, `"summary"`, `"full"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::DbusAuditLevel")
+    )]
     pub level: Option<String>,
 }
 

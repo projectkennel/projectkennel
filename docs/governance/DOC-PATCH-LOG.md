@@ -19,6 +19,28 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-07-01 — the policy JSON Schema is *derived* from the parser structs, not a hand-kept table
+
+- **Target:** docs/architecture/02-2-config-schema.md §intro (the "It is **generated**, not
+  hand-maintained" paragraph), and any prose describing how `schema/policy.toml.schema` is produced.
+- **Change (as-built; drop the stale claim):** the schema is **no longer emitted from an in-repo data
+  table that mirrors the source structs**, and there is **no cross-check test that "pins that table to
+  the real parser."** `gen-schema` now reflects the `kennel-lib-compile` source structs **directly**
+  via `#[derive(SchemaType)]` (a tiny first-party derive on the already-vendored `syn`/`quote` stack,
+  behind a `schema` feature that is off in the runtime/TCB build) and emits the JSON with `serde_json`.
+  The schema is a **pure export of the parser**, so it cannot describe a field the parser lacks or omit
+  one it has — drift is **structurally impossible, not test-guarded**. The hand table
+  (`gen-schema/src/model.rs`), the hand JSON writer (`json.rs`), and the emitter (`emit.rs`) are
+  **deleted**. The cross-check test collapses to two mechanical checks: regenerating is **idempotent**
+  (committed file equals a fresh regen) and **every in-tree template parses with the real parser**
+  (`kennel-lib-compile/tests/schema_parser_crosscheck.rs`).
+- **Why:** the hand table was a second source of truth for the most load-bearing artifact in the
+  system, kept honest only by a test — and that test's `templates ⊆ model` direction made a forgotten
+  entry in a doc-generation mirror **fail a parser-valid template** (`[[fs.write.add]]`). Deriving from
+  the one source removes the duplicate, the babysitter test, and the inverted authority. No new
+  vendored crate, no TCB-closure change.
+- **Source:** the corpus-templates-fragments PR (#142).
+
 ## 2026-06-30 — drop template/fragment *versioning*: identity is the name, integrity is the signature (rides schema v3)
 
 - **Target:** the templates chapter (design §5.10 "Signing, versioned references, and includes" and

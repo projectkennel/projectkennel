@@ -48,6 +48,10 @@ members = [
     "src/crates/kennel-lib-spawn",
     "src/crates/kennel-lib-syscall",
     "src/crates/kennel-lib-term",
+    # Schema single-source: the IR + reflection trait, and the derive that reflects the
+    # source structs into it. Build-time/tooling only — never in the runtime/TCB build.
+    "src/crates/kennel-schema",
+    "src/crates/kennel-schema-derive",
     "src/crates/kennel-lib-text",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",

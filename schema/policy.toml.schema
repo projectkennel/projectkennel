@@ -1,468 +1,403 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://projectkennel.org/schema/policy.toml.schema.json",
-  "title": "Project Kennel policy",
-  "description": "A Project Kennel source policy — a template, fragment, or leaf, as authored in TOML (`docs/architecture/02-2-config-schema.md`). Every key is optional unless noted; unknown keys are rejected by the compiler.",
-  "type": "object",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
-  "properties": {
-    "template_base": {
-      "description": "Reference to the parent template by name. Absent only for the root template.",
-      "type": "string"
-    },
-    "template_name": {
-      "description": "The template's own name (present on templates, absent on leaves).",
-      "type": "string"
-    },
-    "name": {
-      "description": "The kennel name (present on leaf policies, absent on templates).",
-      "type": "string"
-    },
-    "include": {
-      "description": "Additional signed fragments composed additively, referenced by name.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    },
-    "threat_catalogue_version": {
-      "description": "The THREATS.md catalogue version this artefact was authored against.",
-      "type": "string"
-    },
-    "signature": {
-      "description": "Detached signature envelope over the artefact's canonical content (required for templates/fragments, optional for leaves).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/signature"
-        }
-      ]
-    },
-    "cap": {
-      "description": "Capabilities and no_new_privs.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/cap"
-        }
-      ]
-    },
-    "exec": {
-      "description": "What may be execve()'d.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/exec"
-        }
-      ]
-    },
-    "fs": {
-      "description": "Filesystem grants and the constructed view.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/fs"
-        }
-      ]
-    },
-    "net": {
-      "description": "Network egress/bind policy.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/net"
-        }
-      ]
-    },
-    "unix": {
-      "description": "AF_UNIX socket policy.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/unix"
-        }
-      ]
-    },
-    "ssh": {
-      "description": "Per-kennel SSH egress (the re-origination bastion).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/ssh"
-        }
-      ]
-    },
-    "identity": {
-      "description": "The workload's masked identity and supplementary groups.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/identity"
-        }
-      ]
-    },
-    "provides": {
-      "description": "`[[provides]]` — capabilities this kennel offers to other kennels over the mesh.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/provides_entry"
-      }
-    },
-    "consumes": {
-      "description": "`[[consumes]]` — capabilities this kennel reaches over the mesh.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/consumes_entry"
-      }
-    },
-    "service": {
-      "description": "`[service]` — supervision discipline for a service kennel (restart policy).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/service"
-        }
-      ]
-    },
-    "unsafe": {
-      "description": "Advisory footgun sub-sections (scoping enforced by the PID namespace + seccomp).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/unsafe"
-        }
-      ]
-    },
-    "env": {
-      "description": "Environment curation.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/env"
-        }
-      ]
-    },
-    "seccomp": {
-      "description": "The seccomp filter.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/seccomp"
-        }
-      ]
-    },
-    "lifecycle": {
-      "description": "TTL and TTL action.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/lifecycle"
-        }
-      ]
-    },
-    "audit": {
-      "description": "Audit sinks and per-class levels.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/audit"
-        }
-      ]
-    },
-    "ulimits": {
-      "description": "setrlimit(2) resource limits as `name = \"soft\"` or `name = \"soft:hard\"`.",
-      "type": "object",
-      "additionalProperties": {
-        "type": "string"
-      }
-    },
-    "workload": {
-      "description": "The command the kennel runs, optionally pinned.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/workload"
-        }
-      ]
-    },
-    "tty": {
-      "description": "Terminal hardening for an interactive (PTY) workload.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/tty"
-        }
-      ]
-    },
-    "trust": {
-      "description": "The masked workspace trust manifest (T2.8).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/trust"
-        }
-      ]
-    },
-    "dbus": {
-      "description": "D-Bus mediation via the IDBus facade (§7.7).",
-      "allOf": [
-        {
-          "$ref": "#/definitions/dbus"
-        }
-      ]
-    },
-    "rootfs": {
-      "description": "`[rootfs]` — boot an unpacked OCI image as the kennel root (OCI run model only; §7.11). A loud substrate-trust grant: rejected by `kennel run`, required by `kennel oci run`.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/rootfs"
-        }
-      ]
-    },
-    "spawn": {
-      "description": "`[spawn]` — delegated-instantiation grant (§7.12.2): the operator-signed templates this workload may instantiate as ephemeral sibling kennels. A loud capability (T3.9); `reason` + `max_instances` are mandatory and each named template's spawn-eligibility is checked at compile.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/spawn"
-        }
-      ]
-    },
-    "mutable": {
-      "description": "`[[mutable]]` — mutable-field manifest (§7.12.3) on a spawn-target template: which leaf fields a spawn may write, each with its bound (pool/oneof/predicate). Everything outside the manifest is frozen and inherited verbatim.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/mutable"
-      }
-    }
-  },
   "definitions": {
-    "signature": {
-      "description": "Detached signature envelope over the artefact's canonical content.",
-      "type": "object",
+    "audit": {
       "additionalProperties": false,
+      "description": "`[audit]`: sink selection, per-class levels, and per-sink tuning",
       "properties": {
-        "algorithm": {
-          "description": "The signature algorithm (e.g. `ed25519`).",
-          "type": "string"
+        "dbus": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_class"
+            }
+          ],
+          "description": "`[audit.dbus]` level."
         },
-        "key_id": {
-          "description": "Identifier of the signing key.",
-          "type": "string"
+        "exec": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_class"
+            }
+          ],
+          "description": "`[audit.exec]` level."
         },
-        "signature": {
-          "description": "The signature value (base64/hex).",
-          "type": "string"
+        "file": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_file"
+            }
+          ],
+          "description": "`[audit.file]` tuning."
         },
-        "signed_fields": {
-          "description": "The canonical field list the signature covers.",
-          "type": "array",
+        "filesystem": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_class"
+            }
+          ],
+          "description": "`[audit.filesystem]` level."
+        },
+        "journald": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_empty"
+            }
+          ],
+          "description": "`[audit.journald]` — no fields; present to allow the empty table."
+        },
+        "network": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_class"
+            }
+          ],
+          "description": "`[audit.network]` level."
+        },
+        "sinks": {
+          "description": "Active sinks (`file`, `journald`, `syslog`, `stdout`). Default `[\"file\"]`.",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
+        },
+        "stdout": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_empty"
+            }
+          ],
+          "description": "`[audit.stdout]` — no fields; present to allow the empty table."
+        },
+        "syslog": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_syslog"
+            }
+          ],
+          "description": "`[audit.syslog]` tuning."
+        },
+        "unix": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/audit_class"
+            }
+          ],
+          "description": "`[audit.unix]` level."
         }
       },
-      "required": [
-        "algorithm",
-        "key_id",
-        "signature"
-      ]
+      "type": "object"
+    },
+    "audit_class": {
+      "additionalProperties": false,
+      "description": "A `[audit.<class>]` level sub-table.",
+      "properties": {
+        "level": {
+          "description": "One of `off`, `denies-only`, `summary`, `full`.",
+          "enum": [
+            "off",
+            "denies-only",
+            "summary",
+            "full"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "audit_empty": {
+      "additionalProperties": false,
+      "description": "An empty `[audit.*]` table (journald, stdout: no fields).",
+      "properties": {},
+      "type": "object"
+    },
+    "audit_file": {
+      "additionalProperties": false,
+      "description": "`[audit.file]`: file-sink tuning.",
+      "properties": {
+        "compress_after_seconds": {
+          "description": "Gzip a rotated file this many seconds after rotation.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dir": {
+          "description": "Override the per-kennel directory (placeholders allowed).",
+          "type": "string"
+        },
+        "retain_count": {
+          "description": "Keep at most this many rotated files per class.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rotate_at_bytes": {
+          "description": "Rotate at this size (e.g. `\"64M\"`, `\"1G\"`; bare = bytes).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "audit_syslog": {
+      "additionalProperties": false,
+      "description": "`[audit.syslog]`: syslog-sink tuning.",
+      "properties": {
+        "facility": {
+          "description": "Syslog facility (`user`, `daemon`, `auth`, …). Default `user`.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "boundary_acl": {
+      "additionalProperties": false,
+      "description": "A cross-boundary allowlist (`allow_targets`/`allow_from`), shared by the",
+      "properties": {
+        "allow_from": {
+          "description": "Permitted sources.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "allow_targets": {
+          "description": "Permitted targets (`\"self\"`, …).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "bpf_rule": {
+      "additionalProperties": false,
+      "description": "One `[net.bpf]` rule: a CIDR (or `\"*\"` = any host) + ports + protocol. **No name field**:",
+      "properties": {
+        "cidr": {
+          "description": "The CIDR (`\"10.0.0.0/8\"`, a bare address, or `\"*\"` = `0.0.0.0/0` + `::/0`).",
+          "type": "string"
+        },
+        "ports": {
+          "description": "Permitted ports (empty = any port).",
+          "items": {
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "protocol": {
+          "description": "Transport protocol (`\"tcp\"`, `\"udp\"`, `\"any\"`).",
+          "enum": [
+            "any",
+            "tcp",
+            "udp"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this rule exists (required).",
+          "type": "string"
+        },
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "type": "object"
     },
     "cap": {
-      "description": "`[cap]` — capabilities and no_new_privs.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "`[cap]`: capabilities and `no_new_privs`.",
       "properties": {
-        "no_new_privs": {
-          "description": "PR_SET_NO_NEW_PRIVS (a framework invariant once resolved: must be true).",
-          "type": "boolean"
-        },
         "bounding_set": {
           "description": "The capability bounding set to retain (empty drops them all).",
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
+        },
+        "no_new_privs": {
+          "description": "`PR_SET_NO_NEW_PRIVS`. A framework invariant once resolved (must be true).",
+          "type": "boolean"
         }
-      }
+      },
+      "type": "object"
     },
-    "exec": {
-      "description": "`[exec]` — the execve allowlist (deny-by-default).",
-      "type": "object",
+    "consumes_entry": {
       "additionalProperties": false,
+      "description": "One `[[consumes]]` entry, a capability this kennel reaches over the mesh.",
       "properties": {
-        "allow": {
-          "description": "Allowlisted binary paths. Empty/absent denies all execve; a bare `**` is the permissive opt-out (warned).",
-          "type": "array",
+        "at": {
+          "description": "Where the brokered connector is delivered, in this kennel's own view.",
+          "type": "string"
+        },
+        "env": {
+          "description": "Environment variable(s) synthesised into this kennel to name the connector.",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
-        "deny": {
-          "description": "Denylisted absolute paths or globs.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "key": {
+          "description": "An optional private match token; must match the provider's.",
+          "type": "string"
         },
-        "deny_setuid": {
-          "description": "Refuse setuid binaries at execve (framework invariant).",
+        "name": {
+          "description": "The capability's public identifier, resolved against the catalogue at runtime.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this capability is consumed (required).",
+          "type": "string"
+        },
+        "required": {
+          "description": "Whether the capability's absence fails kennel construction. Hard dependency by",
           "type": "boolean"
         },
-        "deny_setgid": {
-          "description": "Refuse setgid binaries (framework invariant).",
-          "type": "boolean"
+        "shape": {
+          "description": "The transport it expects; the broker refuses a mismatched shape.",
+          "enum": [
+            "af-unix",
+            "dbus-name",
+            "binder-connector"
+          ],
+          "type": "string"
         },
-        "deny_setcap": {
-          "description": "Refuse file-capability binaries (framework invariant).",
-          "type": "boolean"
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "type": "object"
+    },
+    "dbus": {
+      "additionalProperties": false,
+      "description": "`[dbus]`: D-Bus mediation.",
+      "properties": {
+        "audit": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_audit"
+            }
+          ],
+          "description": "`[dbus.audit]`: per-kennel D-Bus call audit verbosity."
         },
-        "deny_writable": {
-          "description": "Refuse execution of files in writable paths (framework invariant).",
-          "type": "boolean"
+        "session": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_bus"
+            }
+          ],
+          "description": "`[dbus.session]`: the user session bus (the common case: notifications, portals)."
         },
-        "path": {
-          "description": "PATH search roots recorded for the workload's environment.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "shell": {
-          "description": "The kennel's login shell (default `/bin/sh`; must be in `allow` when an allowlist is enforced).",
+        "system": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_bus"
+            }
+          ],
+          "description": "`[dbus.system]`: the system bus (rarely needed; mostly refuse-listed services)."
+        }
+      },
+      "type": "object"
+    },
+    "dbus_audit": {
+      "additionalProperties": false,
+      "description": "`[dbus.audit]`.",
+      "properties": {
+        "level": {
+          "description": "Verbosity (`\"off\"`, `\"summary\"`, `\"full\"`).",
+          "enum": [
+            "off",
+            "summary",
+            "full"
+          ],
           "type": "string"
         }
-      }
+      },
+      "type": "object"
     },
-    "fs": {
-      "description": "`[fs]` and its sub-tables.",
-      "type": "object",
+    "dbus_bus": {
       "additionalProperties": false,
-      "properties": {
-        "read": {
-          "description": "Paths granted read (and directory traversal / execute).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "write": {
-          "description": "Paths granted write.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "exclusive": {
-          "description": "Writable paths bound exclusively: kenneld over-mounts an opaque sentinel on the host path during the run (T2.8). Each must also appear in `write`.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny": {
-          "description": "Categorical denies (belt-and-braces over the constructed view).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "home": {
-          "description": "The constructed $HOME view.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/fs_home"
-            }
-          ]
-        },
-        "tmp": {
-          "description": "The workload's /tmp tmpfs.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/fs_tmp"
-            }
-          ]
-        },
-        "proc": {
-          "description": "procfs hidepid.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/fs_proc"
-            }
-          ]
-        },
-        "dev": {
-          "description": "The minimal /dev.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/fs_dev"
-            }
-          ]
-        }
-      }
-    },
-    "fs_home": {
-      "description": "`[fs.home]` — the constructed-$HOME shim.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "shadow": {
-          "description": "Whether $HOME is shadowed by a constructed view (must be true once resolved).",
-          "type": "boolean"
-        },
-        "persist": {
-          "description": "Home-relative paths that persist across runs (opt-in, per path; visible in the diff).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "readonly": {
-          "description": "Make the constructed $HOME read-only (default: writable but ephemeral tmpfs).",
-          "type": "boolean"
-        }
-      }
-    },
-    "fs_tmp": {
-      "description": "`[fs.tmp]` — the workload's /tmp tmpfs.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "writable": {
-          "description": "Whether the workload may write to its /tmp tmpfs (the Landlock write grant). Absent means /tmp is a read-only fresh tmpfs.",
-          "type": "boolean"
-        },
-        "size": {
-          "description": "Size cap in human form (`512M`, `1G`).",
-          "type": "string"
-        }
-      }
-    },
-    "fs_proc": {
-      "description": "`[fs.proc]` — procfs hidepid (visibility is always self-only).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "hidepid": {
-          "description": "Mount /proc with hidepid=2.",
-          "type": "boolean"
-        }
-      }
-    },
-    "fs_dev": {
-      "description": "`[fs.dev]` — the constructed /dev allowlist.",
-      "type": "object",
-      "additionalProperties": false,
+      "description": "`[dbus.session]` / `[dbus.system]`: one bus's enable flag and rule set.",
       "properties": {
         "allow": {
-          "description": "Pseudo-device baseline bound into the kennel's /dev (`/dev/null`, `/dev/urandom`, …).",
-          "type": "array",
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_rules"
+            }
+          ],
+          "description": "`[dbus.<bus>.allow]`: what the kennel may reach (an allowlist; default-deny)."
+        },
+        "deny": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/dbus_rules"
+            }
+          ],
+          "description": "`[dbus.<bus>.deny]`: belt-and-braces explicit denies over the allowlist."
+        },
+        "enabled": {
+          "description": "Whether this bus is reachable at all. Absent/`false` ⇒ no connection to this bus.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "dbus_rules": {
+      "additionalProperties": false,
+      "description": "`[dbus.<bus>.allow]` / `[dbus.<bus>.deny]`: the four rule classes at",
+      "properties": {
+        "broadcast": {
+          "description": "Signals the kennel may receive (a subset of senders it may `talk` to).",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
-        "passthrough": {
-          "description": "`[[fs.dev.passthrough]]` — specific real host devices exposed to the kennel (each loud: reason + threat tag required).",
-          "type": "array",
+        "call": {
+          "description": "Finer than `talk`: specific `destination=interface.member` calls.",
           "items": {
-            "$ref": "#/definitions/dev_passthrough"
-          }
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "own": {
+          "description": "Names the kennel may own (be addressable as). Almost always empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "talk": {
+          "description": "Destinations the kennel may call methods on and receive replies/signals from",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
-      }
+      },
+      "type": "object"
     },
     "dev_passthrough": {
-      "description": "One `[[fs.dev.passthrough]]` entry — a host device made available in the kennel's /dev.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "One `[[fs.dev.passthrough]]` entry: a specific host device made available in the",
       "properties": {
-        "path": {
-          "description": "The device node, an absolute path under /dev (e.g. `/dev/ttyUSB0`).",
+        "group": {
+          "description": "The owning group that gates access (e.g. `dialout`, `modem`, `dip`). Access is",
           "type": "string"
         },
-        "group": {
-          "description": "The owning group that gates access (DAC; the user must already be a member).",
+        "path": {
+          "description": "The device node, an absolute path under `/dev` (e.g. `/dev/ttyUSB0`,",
           "type": "string"
         },
         "reason": {
@@ -470,487 +405,521 @@
           "type": "string"
         },
         "threats": {
-          "description": "Threat tags — must carry an `exposed` tag.",
           "allOf": [
             {
               "$ref": "#/definitions/threats"
             }
+          ],
+          "description": "Threat tags, required to carry an `exposed` tag (passthrough widens the"
+        }
+      },
+      "type": "object"
+    },
+    "env": {
+      "additionalProperties": false,
+      "description": "`[env]`: environment curation.",
+      "properties": {
+        "deny": {
+          "description": "Variables denied even if passed (globs allowed).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pass": {
+          "description": "Variables passed through from the caller's environment (globs allowed).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "set": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Variables forced to a specific value. Declared last: as a TOML table it must",
+          "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "exec": {
+      "additionalProperties": false,
+      "description": "`[exec]`: what may be `execve`'d.",
+      "properties": {
+        "allow": {
+          "description": "Allowlisted binary paths (the execve allowlist). Execution is deny-by-default:",
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/definitions/path_delta"
+            }
+          ]
+        },
+        "deny": {
+          "description": "Denylisted absolute paths or globs.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deny_setcap": {
+          "description": "Refuse file-capability binaries (framework invariant).",
+          "type": "boolean"
+        },
+        "deny_setgid": {
+          "description": "Refuse setgid binaries (framework invariant).",
+          "type": "boolean"
+        },
+        "deny_setuid": {
+          "description": "Refuse setuid binaries at execve (framework invariant once resolved).",
+          "type": "boolean"
+        },
+        "deny_writable": {
+          "description": "Refuse execution of files in writable paths (framework invariant).",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "`PATH` search roots the resolver records for the workload's environment.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shell": {
+          "description": "The kennel's login shell: the synthetic-`passwd` `pw_shell` and",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "fs": {
+      "additionalProperties": false,
+      "description": "`[fs]` and its sub-tables.",
+      "properties": {
+        "deny": {
+          "description": "Categorical denies (belt-and-braces over the constructed view). Replace or increment",
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/definitions/path_delta"
+            }
+          ]
+        },
+        "dev": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/fs_dev"
+            }
+          ],
+          "description": "`[fs.dev]`: the minimal `/dev`."
+        },
+        "exclusive": {
+          "description": "Writable paths bound **exclusively** (T2.8): while the kennel runs, `kenneld`",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "home": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/fs_home"
+            }
+          ],
+          "description": "`[fs.home]`: the constructed `$HOME` view."
+        },
+        "proc": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/fs_proc"
+            }
+          ],
+          "description": "`[fs.proc]`: procfs hidepid."
+        },
+        "read": {
+          "description": "Paths granted read (and directory traversal / execute). Replace (`read = [\"…\"]`) or",
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/definitions/path_delta"
+            }
+          ]
+        },
+        "tmp": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/fs_tmp"
+            }
+          ],
+          "description": "`[fs.tmp]`: the private `/tmp` tmpfs."
+        },
+        "write": {
+          "description": "Paths granted write. Replace or increment at the same key.",
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/definitions/path_delta"
+            }
           ]
         }
-      }
+      },
+      "type": "object"
     },
-    "rootfs": {
-      "description": "`[rootfs]` — an OCI image unpacked as the kennel's root filesystem (OCI run model; design §7.11). Substrate-trust waiver T3.8. **Mutually exclusive with `[workload]`**: an OCI policy has a mandatory `[rootfs]` and never a `[workload]` (the compiler refuses both). There is no per-binary pin in the OCI model — `[workload].sha256` does not apply; execution integrity rests on the image **digest** (the runner checks `[rootfs].image` against the recorded digest) plus the operator's unconfined `kennel oci run … -- <cmd>` invocation, not a daemon-enforced cryptographic pin of the entrypoint binary.",
-      "type": "object",
+    "fs_dev": {
       "additionalProperties": false,
+      "description": "`[fs.dev]`: the constructed `/dev` allowlist.",
       "properties": {
-        "path": {
-          "description": "The unpacked image rootfs (the store entry's `rootfs/`). Its presence marks the policy OCI-model.",
-          "type": "string"
+        "allow": {
+          "description": "The trivial pseudo-device baseline bound into the kennel's `/dev` (`/dev/null`,",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
-        "image": {
-          "description": "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the store entry's recorded digest.",
-          "type": "string"
-        },
-        "reason": {
-          "description": "Why this substrate is trusted (required; the substrate-trust waiver is loud).",
-          "type": "string"
-        },
-        "persistence": {
-          "description": "Rootfs persistence (§7.11.4a): `discard` (default; ephemeral upper, gone at teardown) | `persist` (managed upper under the store entry — a loud value the risk engine derives an exposure from).",
-          "type": "string",
-          "enum": [
-            "discard",
-            "persist"
+        "passthrough": {
+          "description": "`[[fs.dev.passthrough]]`: specific *real host devices* exposed to the kennel",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/dev_passthrough"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/dev_passthrough"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/dev_passthrough"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
           ]
+        }
+      },
+      "type": "object"
+    },
+    "fs_home": {
+      "additionalProperties": false,
+      "description": "`[fs.home]`: the mandatory constructed-`$HOME` shim.",
+      "properties": {
+        "persist": {
+          "description": "Home-relative paths that **persist** across runs. By default the",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "readonly": {
-          "description": "Closure-lock (§7.11.4c): rootfs paths Landlock denies writes to (the executable-closure boundary the DAC-flatten erased; the FHS closure is build-derived for a non-root image). `[\"/\"]` is whole-tree-immutable. Longest-prefix wins with `writable`.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "description": "Make the constructed `$HOME` **read-only** (default: writable). The home root",
+          "type": "boolean"
+        },
+        "shadow": {
+          "description": "Whether `$HOME` is shadowed by a constructed view (must be true once resolved).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "fs_proc": {
+      "additionalProperties": false,
+      "description": "`[fs.proc]`: procfs hidepid. Visibility is always self-only (structural).",
+      "properties": {
+        "hidepid": {
+          "description": "Mount `/proc` with `hidepid=2`.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "fs_tmp": {
+      "additionalProperties": false,
+      "description": "`[fs.tmp]`: the workload's own `/tmp` tmpfs.",
+      "properties": {
+        "size": {
+          "description": "Size cap in human form (`\"512M\"`, `\"1G\"`).",
+          "type": "string"
         },
         "writable": {
-          "description": "Closure-lock holes (§7.11.4c): rootfs paths to keep writable, carved back out of `readonly` (longest-prefix wins). Loud — each carve-out derives its own risk line.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "description": "Whether the workload may **write** to its `/tmp` tmpfs (the Landlock write grant). Absent ⇒",
+          "type": "boolean"
         }
       },
-      "required": [
-        "path",
-        "image",
-        "reason"
-      ]
+      "type": "object"
     },
-    "spawn": {
-      "description": "`[spawn]` — the delegated-instantiation grant (§7.12.2). Names which operator-signed templates this workload may instantiate as ephemeral sibling kennels; it never names capabilities — those live in the frozen, signed templates, and a spawn only writes manifest fields (§7.12.3). A loud capability (T3.9), derived into `kennel policy risks` the way `mode = host` derives T1.6.",
-      "type": "object",
+    "identity": {
       "additionalProperties": false,
+      "description": "`[identity]`: the workload's identity inside the kennel.",
       "properties": {
-        "max_instances": {
-          "description": "Concurrent-instance ceiling across this grant's spawns — the fork-bomb bound (§7.12.7). Mandatory (must be ≥ 1).",
-          "type": "integer",
-          "minimum": 0
-        },
-        "reason": {
-          "description": "Why this delegation is extended (required; the spawn waiver is loud).",
+        "group": {
+          "description": "The workload's masked **primary** group name (synthetic `/etc/passwd` `pw_gid`",
           "type": "string"
         },
-        "allow": {
-          "description": "`[[spawn.allow]]` — the signed templates this grant may instantiate, each optionally narrowed to a subset of its manifest.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/spawn_allow"
-          }
-        }
-      },
-      "required": [
-        "max_instances",
-        "reason"
-      ]
-    },
-    "spawn_allow": {
-      "description": "One `[[spawn.allow]]` entry — a single signed template a `[spawn]` grant may instantiate. The template's spawn-eligibility (depth-1, lifetime, ceilings) is checked at the spawner's compile (§7.12.8).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "template": {
-          "description": "The trust-store template name (`net-fetch`).",
-          "type": "string"
-        },
-        "mutable": {
-          "description": "Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields this requester may write (default: the full manifest). Narrows, never widens (§7.12.2) — every entry must name a field the template's manifest declares.",
-          "type": "array",
+        "groups": {
+          "description": "Supplementary group names to retain (e.g. `[\"dialout\", \"plugdev\"]`). The user",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
+        },
+        "user": {
+          "description": "The workload's masked user name, `$USER`/`$LOGNAME` and the synthetic",
+          "type": "string"
         }
       },
-      "required": [
-        "template"
-      ]
+      "type": "object"
+    },
+    "lifecycle": {
+      "additionalProperties": false,
+      "description": "`[lifecycle]`: TTL and TTL action. `ttl` is the human form (`\"8h\"`); the",
+      "properties": {
+        "ttl": {
+          "description": "Time-to-live in human form (`\"8h\"`, `\"1h\"`, `\"30m\"`).",
+          "type": "string"
+        },
+        "ttl_action": {
+          "description": "What to do at TTL expiry: `\"exit\"` (alias `\"stop\"`, the default) ends the",
+          "enum": [
+            "exit",
+            "warn",
+            "renew"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "mutable": {
-      "description": "One `[[mutable]]` manifest entry (§7.12.3) on a spawn-target template — names a leaf field a spawn may write, plus the **bound** that write must satisfy. Exactly one bound kind per entry: pool (`from` + `max`), `oneof`, or predicate (`type` + `under`). \"Mutable\" is writable *within* the bound, never free.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "One `[[mutable]]` manifest entry: a leaf field a spawn of this template may write.",
       "properties": {
         "field": {
-          "description": "The dotted leaf-field path this entry opens (`net.allow`, `rootfs.writable`, `fs.workspace`).",
-          "type": "string"
-        },
-        "from": {
-          "description": "Pool bound: the fixed set a spawn may append values from (with `max`).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "max": {
-          "description": "Pool bound: the maximum number of appended entries (with `from`).",
-          "type": "integer",
-          "minimum": 0
-        },
-        "oneof": {
-          "description": "Oneof bound: the enumerated member list a spawn selects from.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "match": {
-          "description": "Pattern bound: the pre-baked net-destination shapes an open value must match (`*.suffix:port` subdomain wildcard, `prefix.*:port` final-label/IPv4-/24 wildcard, or exact `host:port`). The agent supplies a destination not enumerated at sign time; admitted only if it fits one signed shape.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "type": {
-          "description": "Predicate bound: the value type (currently `relpath`), with `under`.",
-          "type": "string"
-        },
-        "under": {
-          "description": "Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free), with `type`.",
+          "description": "The dotted leaf-field path this entry opens (`net.proxy.allow`, `rootfs.writable`, `fs.write`).",
           "type": "string"
         },
         "freeform": {
-          "description": "Freeform bound: no shape at all — any value accepted. The loud last-resort footgun; requires `reason` and is warned at compile. Prefer a closed (oneof/pool) or shaped (pattern) constraint.",
+          "description": "Freeform bound: no shape at all, the loud last-resort footgun. Any value is accepted; a",
           "type": "boolean"
+        },
+        "from": {
+          "description": "Pool bound: the fixed set a spawn may append values from.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "match": {
+          "description": "Pattern bound: the pre-baked net-destination shapes an open value must match",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max": {
+          "description": "Pool bound: the maximum number of appended entries.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oneof": {
+          "description": "Oneof bound: the enumerated member list a spawn selects from.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "reason": {
           "description": "The justification a `freeform` variant requires (the loud rule).",
           "type": "string"
+        },
+        "type": {
+          "description": "Predicate bound: the value type (currently `relpath`).",
+          "type": "string"
+        },
+        "under": {
+          "description": "Predicate bound: the root the value resolves under (`RESOLVE_IN_ROOT`, traversal-free).",
+          "type": "string"
         }
       },
-      "required": [
-        "field"
-      ]
+      "type": "object"
     },
     "net": {
-      "description": "`[net]` and its sub-tables.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "`[net]` and its sub-tables.",
       "properties": {
+        "audit": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_audit"
+            }
+          ],
+          "description": "`[net.audit]`: per-kennel egress audit log."
+        },
+        "bind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_bind"
+            }
+          ],
+          "description": "`[net.bind]`: bind-address rewriting policy (the wildcard-rewrite knobs; the bind"
+        },
+        "bpf": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_bpf"
+            }
+          ],
+          "description": "`[net.bpf]`: the kernel/syscall ACL (the cgroup `connect4/6` + `bind4/6` BPF and the"
+        },
+        "ipv6": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_ipv6"
+            }
+          ],
+          "description": "`[net.ipv6]`: IPv6-specific options."
+        },
         "mode": {
-          "description": "Egress mode (default `constrained`). `host` shares the host network stack and reinstates the host-recon residual.",
-          "type": "string",
+          "description": "Egress mode: `\"none\"` (own empty net-ns, no interfaces), `\"constrained\"` (own net-ns,",
           "enum": [
             "none",
             "constrained",
             "unconstrained",
             "host"
-          ]
-        },
-        "reason": {
-          "description": "Required only when `mode = host`: the documented justification for sharing the host network stack.",
-          "type": "string"
-        },
-        "proxy_listen_v4_address": {
-          "description": "IPv4 proxy listen address as `offset:port` within the kennel's subnet (presence enables the family).",
-          "type": "string"
-        },
-        "proxy_listen_v6_address": {
-          "description": "IPv6 proxy listen address as `offset:port`.",
+          ],
           "type": "string"
         },
         "proxy": {
-          "description": "The user-space egress policy the per-kennel proxy enforces (constrained/unconstrained).",
           "allOf": [
             {
               "$ref": "#/definitions/net_proxy"
             }
-          ]
+          ],
+          "description": "`[net.proxy]`: the user-space egress policy the per-kennel proxy enforces"
         },
-        "bpf": {
-          "description": "The kernel/syscall ACL (cgroup connect/bind BPF + Landlock): CIDR + ports, no names.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_bpf"
-            }
-          ]
-        },
-        "bind": {
-          "description": "Bind-address rewriting policy.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_bind"
-            }
-          ]
-        },
-        "ipv6": {
-          "description": "IPv6-specific options.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_ipv6"
-            }
-          ]
-        },
-        "audit": {
-          "description": "Per-kennel egress audit log.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_audit"
-            }
-          ]
-        }
-      }
-    },
-    "net_proxy": {
-      "description": "`[net.proxy]` — the user-space egress policy (proxied modes only; a rule under `mode=host` is a compile error).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allow": {
-          "description": "`[[net.proxy.allow]]` — by-name (or by-CIDR) egress allow entries.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/net_allow"
-          }
-        },
-        "deny": {
-          "description": "The deny table: the non-removable invariant floor and the optional author policy denylist.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_proxy_deny"
-            }
-          ]
-        }
-      }
-    },
-    "net_proxy_deny": {
-      "description": "`[net.proxy.deny]` — the framework floor plus the optional author denylist.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "invariant": {
-          "description": "`[[net.proxy.deny.invariant]]` — cloud-metadata / link-local, non-removable (T1.6).",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/net_deny_rule"
-          }
-        },
-        "policy": {
-          "description": "`[[net.proxy.deny.policy]]` — the author's optional denylist.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/net_deny_rule"
-          }
-        }
-      }
-    },
-    "net_bpf": {
-      "description": "`[net.bpf]` — the kernel/syscall ACL (socket-family shaping + directional connect/bind gates).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "families": {
-          "description": "Permitted socket families (e.g. `AF_INET`, `AF_INET6`, `AF_UNIX`).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny_families": {
-          "description": "Denied socket families (`AF_NETLINK`, `AF_PACKET`, …).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "connect": {
-          "description": "`[net.bpf.connect]` — the outbound CONNECT ACL (deny-first).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_bpf_acl"
-            }
-          ]
-        },
-        "bind": {
-          "description": "`[net.bpf.bind]` — the inbound BIND ACL (deny-first).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/net_bpf_acl"
-            }
-          ]
-        }
-      }
-    },
-    "net_bpf_acl": {
-      "description": "One direction of the `[net.bpf]` kernel ACL: CIDR+port allow/deny, deny-first.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allow": {
-          "description": "CIDR+port allow rules.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/bpf_rule"
-          }
-        },
-        "deny": {
-          "description": "CIDR+port deny rules (deny-first).",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/bpf_rule"
-          }
-        }
-      }
-    },
-    "bpf_rule": {
-      "description": "One `[net.bpf]` rule: a CIDR (or `*`) + ports + protocol. No name field — the kernel ACL cannot resolve names.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cidr": {
-          "description": "The CIDR (`10.0.0.0/8`, a bare address, or `*` = any host).",
+        "proxy_listen_v4_address": {
+          "description": "IPv4 proxy listen address as `\"offset:port\"` within the kennel's subnet. A",
           "type": "string"
         },
-        "ports": {
-          "description": "Permitted ports (empty = any port).",
-          "type": "array",
-          "items": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 65535
-          }
-        },
-        "protocol": {
-          "description": "Transport protocol.",
-          "type": "string",
-          "enum": [
-            "tcp",
-            "udp",
-            "any"
-          ]
+        "proxy_listen_v6_address": {
+          "description": "IPv6 proxy listen address as `\"offset:port\"`.",
+          "type": "string"
         },
         "reason": {
-          "description": "Why this rule exists (required).",
+          "description": "Required (non-empty) only when `mode = \"host\"`: the documented justification for",
           "type": "string"
-        },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
         }
-      }
+      },
+      "type": "object"
     },
     "net_allow": {
-      "description": "One `[[net.proxy.allow]]` entry.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "One `[[net.allow]]` entry.",
       "properties": {
-        "name": {
-          "description": "The destination host (or dot-prefixed suffix).",
-          "type": "string"
-        },
         "cidr": {
           "description": "A CIDR destination, when the rule is by-address rather than by-name.",
           "type": "string"
         },
+        "name": {
+          "description": "The destination host (or dot-prefixed suffix). Mutually informative with `cidr`.",
+          "type": "string"
+        },
         "ports": {
           "description": "Permitted ports.",
-          "type": "array",
           "items": {
-            "type": "integer",
+            "maximum": 65535,
             "minimum": 0,
-            "maximum": 65535
-          }
+            "type": "integer"
+          },
+          "type": "array"
         },
         "protocol": {
-          "description": "Transport protocol.",
-          "type": "string",
+          "description": "Transport protocol (`\"tcp\"`, `\"udp\"`, `\"any\"`).",
           "enum": [
+            "any",
             "tcp",
-            "udp",
-            "any"
-          ]
+            "udp"
+          ],
+          "type": "string"
         },
         "reason": {
           "description": "Why this destination is permitted (required).",
           "type": "string"
         },
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        },
         "tls": {
-          "description": "TLS requirements for the destination.",
           "allOf": [
             {
               "$ref": "#/definitions/net_tls"
             }
-          ]
-        },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
-        }
-      }
-    },
-    "net_tls": {
-      "description": "`tls.*` on a `[[net.proxy.allow]]` entry.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "required": {
-          "description": "Whether TLS is required to the destination.",
-          "type": "boolean"
-        }
-      }
-    },
-    "net_deny_rule": {
-      "description": "One `[[net.proxy.deny.invariant]]` / `[[net.proxy.deny.policy]]` entry.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cidr": {
-          "description": "The denied CIDR (e.g. `169.254.169.254/32`).",
-          "type": "string"
-        },
-        "reason": {
-          "description": "Why the deny exists (required).",
-          "type": "string"
-        },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
+          ],
+          "description": "`tls.required` and friends."
         }
       },
-      "required": [
-        "cidr"
-      ]
+      "type": "object"
+    },
+    "net_audit": {
+      "additionalProperties": false,
+      "description": "`[net.audit]`.",
+      "properties": {
+        "level": {
+          "description": "Audit verbosity (`\"summary\"`, `\"full\"`).",
+          "enum": [
+            "summary",
+            "full"
+          ],
+          "type": "string"
+        },
+        "log_path": {
+          "description": "Where the per-kennel egress JSONL log is written.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "net_bind": {
-      "description": "`[net.bind]` — bind-address handling (the wildcard-rewrite knobs; the allow/deny gate is `[net.bpf.bind]`).",
-      "type": "object",
       "additionalProperties": false,
+      "description": "`[net.bind]`: bind-address handling.",
       "properties": {
-        "inaddr_any_policy": {
-          "description": "What to do with a wildcard IPv4 bind.",
-          "type": "string",
-          "enum": [
-            "rewrite",
-            "deny"
-          ]
-        },
-        "in6addr_any_policy": {
-          "description": "What to do with a wildcard IPv6 bind.",
-          "type": "string",
-          "enum": [
-            "rewrite",
-            "deny"
-          ]
-        },
         "allow_host_loopback_v4": {
           "description": "Whether binding the host IPv4 loopback is permitted.",
           "type": "boolean"
@@ -959,756 +928,1021 @@
           "description": "Whether binding the host IPv6 loopback is permitted.",
           "type": "boolean"
         },
+        "allowed_ports": {
+          "description": "Explicit allowlist of bindable ports. When non-empty, the workload may",
+          "items": {
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "in6addr_any_policy": {
+          "description": "What to do with a wildcard IPv6 bind.",
+          "enum": [
+            "rewrite",
+            "deny"
+          ],
+          "type": "string"
+        },
+        "inaddr_any_policy": {
+          "description": "What to do with a wildcard IPv4 bind (`\"rewrite\"` / `\"deny\"`).",
+          "enum": [
+            "rewrite",
+            "deny"
+          ],
+          "type": "string"
+        },
         "min_port": {
           "description": "Lowest bindable port.",
-          "type": "integer",
+          "maximum": 65535,
           "minimum": 0,
-          "maximum": 65535
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "net_bpf": {
+      "additionalProperties": false,
+      "description": "`[net.bpf]`: the kernel/syscall ACL: socket-family shaping + the",
+      "properties": {
+        "bind": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_bpf_acl"
+            }
+          ],
+          "description": "`[net.bpf.bind]`: the inbound BIND ACL (cidr + ports, deny-first)."
         },
-        "allowed_ports": {
-          "description": "Explicit allowlist of bindable ports (empty = any at or above min_port).",
-          "type": "array",
+        "connect": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_bpf_acl"
+            }
+          ],
+          "description": "`[net.bpf.connect]`: the outbound CONNECT ACL (cidr + ports, deny-first)."
+        },
+        "deny_families": {
+          "description": "Denied socket families (`inet_sock_create` returns EPERM): `AF_NETLINK`, `AF_PACKET`, …",
           "items": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 65535
-          }
-        }
-      }
-    },
-    "net_ipv6": {
-      "description": "`[net.ipv6]`.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "force_v6only": {
-          "description": "Force IPV6_V6ONLY=1 so a dual-stack socket cannot escape the v4 rewrite.",
-          "type": "boolean"
-        }
-      }
-    },
-    "net_audit": {
-      "description": "`[net.audit]` — per-kennel egress audit log.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "log_path": {
-          "description": "Where the per-kennel egress JSONL log is written.",
-          "type": "string"
+            "type": "string"
+          },
+          "type": "array"
         },
-        "level": {
-          "description": "Audit verbosity.",
-          "type": "string",
-          "enum": [
-            "summary",
-            "full"
-          ]
+        "families": {
+          "description": "Permitted socket families (defence in depth; e.g. `[\"AF_INET\", \"AF_INET6\", \"AF_UNIX\"]`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
-      }
+      },
+      "type": "object"
     },
-    "unix": {
-      "description": "`[unix]` — AF_UNIX policy.",
-      "type": "object",
+    "net_bpf_acl": {
       "additionalProperties": false,
+      "description": "One direction of the `[net.bpf]` kernel ACL: CIDR+port allow/deny, deny-first.",
       "properties": {
-        "abstract": {
-          "description": "Abstract-namespace socket disposition.",
-          "type": "string",
-          "enum": [
-            "deny",
-            "allow"
-          ]
-        },
         "allow": {
-          "description": "`[[unix.allow]]` — granted sockets, including per-kennel service instances.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/unix_allow"
-          }
+          "description": "`[[net.bpf.connect.allow]]` / `[[net.bpf.bind.allow]]`: CIDR+port allow rules. Replace",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/bpf_rule"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/bpf_rule"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/bpf_rule"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "deny": {
+          "description": "`[[net.bpf.connect.deny]]` / `[[net.bpf.bind.deny]]`: CIDR+port deny rules (deny-first).",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/bpf_rule"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/bpf_rule"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/bpf_rule"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
         }
-      }
+      },
+      "type": "object"
     },
-    "unix_allow": {
-      "description": "One `[[unix.allow]]` entry.",
-      "type": "object",
+    "net_deny_rule": {
       "additionalProperties": false,
+      "description": "One `[[net.proxy.deny.invariant]]` / `[[net.proxy.deny.policy]]` entry: a CIDR plus its",
       "properties": {
-        "name": {
-          "description": "A logical name (e.g. `ssh-agent`) for a per-kennel service instance.",
-          "type": "string"
-        },
-        "real": {
-          "description": "The real host socket path.",
-          "type": "string"
-        },
-        "shim": {
-          "description": "The shim path the socket is bound at inside the kennel.",
-          "type": "string"
-        },
-        "env": {
-          "description": "An environment variable to set to the shim path (e.g. `SSH_AUTH_SOCK`).",
+        "cidr": {
+          "description": "The denied CIDR (e.g. `\"169.254.169.254/32\"`).",
           "type": "string"
         },
         "reason": {
-          "description": "Why this socket is granted (required).",
+          "description": "Why the deny exists (required).",
           "type": "string"
         },
         "threats": {
-          "description": "Threat tags.",
           "allOf": [
             {
               "$ref": "#/definitions/threats"
             }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "required": [
+        "cidr"
+      ],
+      "type": "object"
+    },
+    "net_ipv6": {
+      "additionalProperties": false,
+      "description": "`[net.ipv6]`.",
+      "properties": {
+        "force_v6only": {
+          "description": "Force `IPV6_V6ONLY=1` so a dual-stack socket cannot escape the v4 rewrite.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "net_proxy": {
+      "additionalProperties": false,
+      "description": "`[net.proxy]`: the user-space egress policy kenneld's proxy enforces.",
+      "properties": {
+        "allow": {
+          "description": "`[[net.proxy.allow]]`: by-name (or by-CIDR) egress allow entries. Replace",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/net_allow"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/net_allow"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/net_allow"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
+        "deny": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_proxy_deny"
+            }
+          ],
+          "description": "`[net.proxy.deny]`: the deny table: the non-removable `invariant` floor and the"
+        }
+      },
+      "type": "object"
+    },
+    "net_proxy_deny": {
+      "additionalProperties": false,
+      "description": "`[net.proxy.deny]`: the proxy denies: the framework floor + the optional author list.",
+      "properties": {
+        "invariant": {
+          "description": "`[[net.proxy.deny.invariant]]`: cloud-metadata / link-local, non-removable (T1.6).",
+          "items": {
+            "$ref": "#/definitions/net_deny_rule"
+          },
+          "type": "array"
+        },
+        "policy": {
+          "description": "`[[net.proxy.deny.policy]]`: the author's optional denylist (NOT mandatory). Replace",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/net_deny_rule"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/net_deny_rule"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/net_deny_rule"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
           ]
         }
-      }
+      },
+      "type": "object"
     },
-    "provides_entry": {
-      "description": "One `[[provides]]` entry — a capability this kennel offers over the mesh (§7.13.1).",
-      "type": "object",
+    "net_tls": {
       "additionalProperties": false,
+      "description": "`tls.*` on a `[[net.allow]]` entry.",
       "properties": {
-        "name": {
-          "description": "The capability's public identifier; a reserved `org.projectkennel.*` name is claimable only by a maintainer-signed template (§7.13.5).",
+        "required": {
+          "description": "Whether TLS is required to the destination.",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "path_delta": {
+      "additionalProperties": false,
+      "description": "The `{ add, remove }` increment over a path list (`[[fs.read.add]]` / `[[fs.read.remove]]`).",
+      "properties": {
+        "add": {
+          "description": "Entries to add (`+=`), appended if not already present.",
+          "items": {
+            "$ref": "#/definitions/path_entry"
+          },
+          "type": "array"
+        },
+        "remove": {
+          "description": "Entries to remove (`-=`), dropped by matching `path`.",
+          "items": {
+            "$ref": "#/definitions/path_entry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "path_entry": {
+      "additionalProperties": false,
+      "description": "One entry in the `{ add, remove }` increment of a path-list field.",
+      "properties": {
+        "path": {
+          "description": "The path to add or remove.",
           "type": "string"
         },
-        "shape": {
-          "description": "The typed transport (§7.13.2).",
-          "type": "string",
-          "enum": [
-            "af-unix",
-            "dbus-name",
-            "binder-connector"
-          ]
+        "reason": {
+          "description": "Why (required on every delta entry; validated at compile).",
+          "type": "string"
         },
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "provides_entry": {
+      "additionalProperties": false,
+      "description": "One `[[provides]]` entry, a capability this kennel offers over the mesh.",
+      "properties": {
         "endpoint": {
           "description": "Where the capability is exposed, in the provider's own view.",
           "type": "string"
         },
         "key": {
-          "description": "Optional private match token, never advertised in the catalogue.",
+          "description": "An optional private match token, never advertised in the catalogue.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The capability's public identifier, what the catalogue advertises. A reserved",
           "type": "string"
         },
         "reason": {
           "description": "Why this capability is offered (required).",
           "type": "string"
         },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
-        }
-      }
-    },
-    "consumes_entry": {
-      "description": "One `[[consumes]]` entry — a capability this kennel reaches over the mesh (§7.13.1).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "description": "The capability's public identifier, resolved against the catalogue at runtime.",
-          "type": "string"
-        },
         "shape": {
-          "description": "The transport it expects; the broker refuses a mismatched shape (§7.13.4).",
-          "type": "string",
+          "description": "The typed transport.",
           "enum": [
             "af-unix",
             "dbus-name",
             "binder-connector"
-          ]
-        },
-        "at": {
-          "description": "Where the brokered connector is delivered, in this kennel's own view.",
+          ],
           "type": "string"
         },
-        "env": {
-          "description": "Environment variable(s) synthesised into this kennel to name the connector.",
-          "type": "array",
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "type": "object"
+    },
+    "rootfs": {
+      "additionalProperties": false,
+      "description": "`[rootfs]`: an OCI image unpacked as the kennel's root filesystem.",
+      "properties": {
+        "image": {
+          "description": "The `image@sha256:…` the build pulled from; the runner refuses unless it equals the",
+          "type": "string"
+        },
+        "path": {
+          "description": "The unpacked image rootfs (the store entry's `rootfs/`).",
+          "type": "string"
+        },
+        "persistence": {
+          "description": "Rootfs persistence: `\"discard\"` (default) | `\"persist\"`. `\"persist\"` is a",
+          "enum": [
+            "discard",
+            "persist"
+          ],
+          "type": "string"
+        },
+        "readonly": {
+          "description": "Closure-lock: rootfs paths Landlock denies writes to, the executable-closure",
           "items": {
             "type": "string"
-          }
-        },
-        "key": {
-          "description": "Optional private match token; must match the provider's.",
-          "type": "string"
-        },
-        "required": {
-          "description": "Whether the capability's absence fails kennel construction (default true).",
-          "type": "boolean"
+          },
+          "type": "array"
         },
         "reason": {
-          "description": "Why this capability is consumed (required).",
+          "description": "Why this substrate is trusted (required; the substrate-trust waiver is loud).",
           "type": "string"
         },
-        "threats": {
-          "description": "Threat tags.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/threats"
-            }
-          ]
-        }
-      }
-    },
-    "identity": {
-      "description": "`[identity]` — the workload's masked identity and supplementary groups.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "user": {
-          "description": "The masked user name ($USER/$LOGNAME and synthetic passwd account). Default `kennel`.",
-          "type": "string"
-        },
-        "group": {
-          "description": "The masked primary group name. Default `kennel`.",
-          "type": "string"
-        },
-        "groups": {
-          "description": "Supplementary group names to retain (the user must be a member of each).",
-          "type": "array",
+        "writable": {
+          "description": "Closure-lock holes: rootfs paths kept writable, carved back out of `readonly`",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         }
-      }
+      },
+      "type": "object"
+    },
+    "seccomp": {
+      "additionalProperties": false,
+      "description": "`[seccomp]`: the seccomp filter (source carries a deny list; the resolver",
+      "properties": {
+        "allow": {
+          "description": "Syscalls explicitly allowed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "deny": {
+          "description": "Syscalls denied on top of the profile.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "description": "The baseline profile name (`\"default\"`).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "service": {
+      "additionalProperties": false,
+      "description": "`[service]`: the supervision discipline for a service kennel.",
+      "properties": {
+        "backoff": {
+          "description": "Initial delay before a restart in human form (`\"500ms\"`, `\"2s\"`, default `\"500ms\"`); doubles",
+          "type": "string"
+        },
+        "max_attempts": {
+          "description": "Restarts within the crash-loop window before declared-but-failed (default `5`; must be ≥ 1).",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "restart": {
+          "description": "Restart discipline: `always` / `on-failure` (default) / `never`.",
+          "enum": [
+            "always",
+            "on-failure",
+            "never"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "signature": {
+      "additionalProperties": false,
+      "description": "The `[signature]` envelope carried by a signed artefact.",
+      "properties": {
+        "algorithm": {
+          "description": "Signature algorithm. Must be `\"sshsig\"` ([`SSHSIG_ALGORITHM`]).",
+          "type": "string"
+        },
+        "key_id": {
+          "description": "Identifies the signing key in the trust store. The SSHSIG also embeds the",
+          "type": "string"
+        },
+        "signature": {
+          "description": "The armored SSHSIG (`-----BEGIN SSH SIGNATURE-----` …) over the canonical",
+          "type": "string"
+        },
+        "signed_fields": {
+          "description": "The top-level fields the signature covers (every field except",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "algorithm",
+        "key_id",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "spawn": {
+      "additionalProperties": false,
+      "description": "`[spawn]`: the delegated-instantiation grant.",
+      "properties": {
+        "allow": {
+          "description": "The templates this grant may instantiate (`[[spawn.allow]]`), each optionally narrowed to a",
+          "items": {
+            "$ref": "#/definitions/spawn_allow"
+          },
+          "type": "array"
+        },
+        "max_instances": {
+          "description": "Concurrent-instance ceiling across this grant's spawns, the fork-bomb bound.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Why this delegation is extended (required; the spawn waiver is loud, validated at compile).",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "spawn_allow": {
+      "additionalProperties": false,
+      "description": "One `[[spawn.allow]]` entry, a single signed template this grant may instantiate.",
+      "properties": {
+        "mutable": {
+          "description": "Optional per-requester narrowing: the subset of the template's `[[mutable]]` manifest fields",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "template": {
+          "description": "The trust-store template name (`net-fetch`).",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "ssh": {
-      "description": "`[ssh]` — per-kennel SSH egress (the re-origination bastion; a kennel never holds a real key).",
-      "type": "object",
       "additionalProperties": false,
+      "description": "`[ssh]`: per-kennel SSH egress (source-only).",
       "properties": {
         "allow_headless": {
-          "description": "Whether a granted key may be driven by a non-interactive (CI) kennel with no per-use touch. Loud; default false.",
+          "description": "Whether a granted key may be driven by a non-interactive (CI) kennel with no",
           "type": "boolean"
         },
+        "destinations": {
+          "description": "`[[ssh.destinations]]`: the SSH egress allowlist. Each entry is one destination",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/ssh_destination"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/ssh_destination"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/ssh_destination"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        },
         "threats": {
-          "description": "Threat tags for the section — must carry an `exposed` tag when `allow_headless = true`.",
           "allOf": [
             {
               "$ref": "#/definitions/threats"
             }
-          ]
-        },
-        "destinations": {
-          "description": "`[[ssh.destinations]]` — the SSH egress allowlist.",
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/ssh_destination"
-          }
+          ],
+          "description": "Threat tags for the section, required to carry an `exposed` tag whenever"
         }
-      }
+      },
+      "type": "object"
     },
     "ssh_destination": {
-      "description": "One `[[ssh.destinations]]` entry — a destination the kennel may reach over the bastion.",
-      "type": "object",
       "additionalProperties": false,
+      "description": "One `[[ssh.destinations]]` entry: a destination the kennel may reach over the bastion.",
       "properties": {
         "dest": {
-          "description": "The SSH destination as the host-side `ssh` is invoked with it (`git@github.com`, a config alias).",
+          "description": "The SSH destination, in the form the host-side `ssh` is invoked with",
           "type": "string"
         },
         "options": {
-          "description": "Host-side `ssh` invocation options, passed verbatim as argv tokens before `<dest>` (run as the operator).",
-          "type": "array",
+          "description": "Host-side `ssh` invocation options for this destination, passed verbatim as argv",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "reason": {
           "description": "Why this destination is granted (required).",
           "type": "string"
         },
         "threats": {
-          "description": "Threat tags.",
           "allOf": [
             {
               "$ref": "#/definitions/threats"
             }
-          ]
+          ],
+          "description": "Threat tags."
         }
-      }
+      },
+      "type": "object"
     },
-    "workload": {
-      "description": "`[workload]` — the command the kennel runs, optionally pinned.",
-      "type": "object",
+    "threats": {
       "additionalProperties": false,
+      "description": "Threat-tag metadata attached to a grant (`threats.exposed` / `threats.mitigated`).",
       "properties": {
-        "argv": {
-          "description": "The command + args (argv[0] is the program). Absent ⇒ supplied at `kennel run`.",
-          "type": "array",
+        "exposed": {
+          "description": "Threat IDs this entry weakens defence against.",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
+        },
+        "mitigated": {
+          "description": "Threat IDs this entry actively mitigates.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "trust": {
+      "additionalProperties": false,
+      "description": "`[trust]`: the masked workspace manifest (T2.8).",
+      "properties": {
+        "manifest": {
+          "description": "Maintain a `.trust-manifest.json` at the root of every writable/persistent",
+          "type": "boolean"
+        },
+        "on_change": {
+          "description": "What `kenneld` does when a watched trigger is mutated during the run:",
+          "enum": [
+            "warn",
+            "freeze",
+            "kill"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "tty": {
+      "additionalProperties": false,
+      "description": "`[tty]`: terminal hardening for an interactive (PTY) workload.",
+      "properties": {
+        "filter_terminal_escapes": {
+          "description": "Filter the dangerous escape sequences a workload could write toward the",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "unix": {
+      "additionalProperties": false,
+      "description": "`[unix]`: `AF_UNIX` policy.",
+      "properties": {
+        "abstract": {
+          "description": "Abstract-namespace socket disposition (`\"deny\"` / `\"allow\"`).",
+          "enum": [
+            "deny",
+            "allow"
+          ],
+          "type": "string"
+        },
+        "allow": {
+          "description": "`[[unix.allow]]`: granted sockets, including per-kennel service instances. Replace",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/unix_allow"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/unix_allow"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/unix_allow"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "unix_allow": {
+      "additionalProperties": false,
+      "description": "One `[[unix.allow]]` entry.",
+      "properties": {
+        "env": {
+          "description": "An environment variable to set to the shim path (e.g. `SSH_AUTH_SOCK`).",
+          "type": "string"
+        },
+        "name": {
+          "description": "A logical name (e.g. `\"ssh-agent\"`) for a per-kennel service instance.",
+          "type": "string"
+        },
+        "real": {
+          "description": "The real host socket path.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this socket is granted (required).",
+          "type": "string"
+        },
+        "shim": {
+          "description": "The shim path the socket is bound at inside the kennel.",
+          "type": "string"
+        },
+        "threats": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/threats"
+            }
+          ],
+          "description": "Threat tags."
+        }
+      },
+      "type": "object"
+    },
+    "unsafe": {
+      "additionalProperties": false,
+      "description": "`[unsafe]`: the advisory footgun umbrella.",
+      "properties": {
+        "ptrace": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/boundary_acl"
+            }
+          ],
+          "description": "`[unsafe.ptrace]`: ptrace across the kennel boundary (scoping from PID-ns + seccomp)."
+        },
+        "signal": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/boundary_acl"
+            }
+          ],
+          "description": "`[unsafe.signal]`: signalling across the kennel boundary (scoping from PID-ns)."
+        }
+      },
+      "type": "object"
+    },
+    "workload": {
+      "additionalProperties": false,
+      "description": "`[workload]`: the command the kennel runs, optionally pinned.",
+      "properties": {
+        "argv": {
+          "description": "The command + args (`argv[0]` is the program). Absent ⇒ supplied at `kennel run`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "cwd": {
           "description": "Working directory inside the view (may carry a `~`/`<home>` placeholder).",
           "type": "string"
         },
         "pinned": {
-          "description": "Refuse a CLI `--` override of argv unless `--force`.",
+          "description": "Refuse a CLI `--` override of `argv` unless `--force` (pin exactly what runs).",
           "type": "boolean"
         },
         "sha256": {
-          "description": "Accepted lowercase-hex SHA-256 digests of the workload binary, verified before exec.",
-          "type": "array",
+          "description": "Accepted lowercase-hex SHA-256 digests of the workload binary; the spawn verifies",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         }
-      }
+      },
+      "type": "object"
+    }
+  },
+  "description": "A parsed source policy: a template or a leaf, before resolution.",
+  "properties": {
+    "audit": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/audit"
+        }
+      ],
+      "description": "Audit section (`[audit]` and `[audit.*]`): sinks and per-class levels."
     },
-    "unsafe": {
-      "description": "`[unsafe]` — advisory footgun umbrella (scoping enforced by the PID namespace + seccomp, not by these tables).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "ptrace": {
-          "description": "`[unsafe.ptrace]` — ptrace across the kennel boundary.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/boundary_acl"
-            }
-          ]
-        },
-        "signal": {
-          "description": "`[unsafe.signal]` — signalling across the kennel boundary.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/boundary_acl"
-            }
-          ]
+    "cap": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/cap"
         }
-      }
+      ],
+      "description": "Capability section (`[cap]`)."
     },
-    "boundary_acl": {
-      "description": "A cross-boundary allowlist, shared by `[unsafe.ptrace]` and `[unsafe.signal]`.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "allow_targets": {
-          "description": "Permitted targets (`self`, …).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "allow_from": {
-          "description": "Permitted sources.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "env": {
-      "description": "`[env]` — environment curation (the environment is synthesised, not inherited).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "pass": {
-          "description": "Variables passed through from the caller's environment (globs allowed; discouraged, per-variable).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "deny": {
-          "description": "Variables denied even if passed (globs allowed).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "set": {
-          "description": "Variables forced to a specific value (`KEY = \"value\"`).",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "seccomp": {
-      "description": "`[seccomp]` — the seccomp filter.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "profile": {
-          "description": "The baseline profile name (`default`).",
-          "type": "string"
-        },
-        "deny": {
-          "description": "Syscalls denied on top of the profile.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "allow": {
-          "description": "Syscalls explicitly allowed.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
-    },
-    "lifecycle": {
-      "description": "`[lifecycle]` — TTL and TTL action.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "ttl": {
-          "description": "Time-to-live in human form (`8h`, `30m`).",
-          "type": "string"
-        },
-        "ttl_action": {
-          "description": "What to do at TTL expiry (default `exit`; `stop` is an alias).",
-          "type": "string",
-          "enum": [
-            "exit",
-            "stop",
-            "warn",
-            "renew"
-          ]
-        }
-      }
-    },
-    "service": {
-      "description": "`[service]` — the supervision discipline for a service kennel (§7.13.7).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "restart": {
-          "description": "Restart discipline (default `on-failure`).",
-          "type": "string",
-          "enum": [
-            "always",
-            "on-failure",
-            "never"
-          ]
-        },
-        "backoff": {
-          "description": "Initial restart delay (`500ms`, `2s`; default `500ms`); doubles each attempt.",
-          "type": "string"
-        },
-        "max_attempts": {
-          "description": "Restarts within the crash-loop window before declared-but-failed (default 5; must be ≥ 1).",
-          "type": "integer",
-          "minimum": 0
-        }
-      }
-    },
-    "tty": {
-      "description": "`[tty]` — terminal hardening for an interactive (PTY) workload.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "filter_terminal_escapes": {
-          "description": "Filter dangerous escape sequences (OSC 52 clipboard, notifications, opaque bands) from the workload's PTY output. Default true.",
-          "type": "boolean"
-        }
-      }
-    },
-    "trust": {
-      "description": "`[trust]` — the masked workspace manifest (T2.8).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "manifest": {
-          "description": "Maintain a masked `.trust-manifest.json` at every writable workspace root. Default true.",
-          "type": "boolean"
-        },
-        "on_change": {
-          "description": "What kenneld does when a watched trigger is mutated during the run (default `warn`).",
-          "type": "string",
-          "enum": [
-            "warn",
-            "freeze",
-            "kill"
-          ]
-        }
-      }
+    "consumes": {
+      "description": "`[[consumes]]`: capabilities this kennel reaches over the mesh.",
+      "items": {
+        "$ref": "#/definitions/consumes_entry"
+      },
+      "type": "array"
     },
     "dbus": {
-      "description": "`[dbus]` — D-Bus mediation (§7.7). Absent ⇒ no bus access (no facade node).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "session": {
-          "description": "`[dbus.session]` — the user session bus (notifications, portals).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/dbus_bus"
-            }
-          ]
-        },
-        "system": {
-          "description": "`[dbus.system]` — the system bus (rarely needed).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/dbus_bus"
-            }
-          ]
-        },
-        "audit": {
-          "description": "`[dbus.audit]` — per-kennel D-Bus call audit verbosity.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/dbus_audit"
-            }
-          ]
+      "allOf": [
+        {
+          "$ref": "#/definitions/dbus"
         }
-      }
+      ],
+      "description": "D-Bus mediation (`[dbus]`): the per-method allowlist the `IDBus` facade"
     },
-    "dbus_bus": {
-      "description": "One bus's enable flag and rule set (`[dbus.session]` / `[dbus.system]`).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": {
-          "description": "Whether this bus is reachable at all (default false ⇒ no facade node).",
-          "type": "boolean"
-        },
-        "allow": {
-          "description": "`[dbus.<bus>.allow]` — what the kennel may reach (allowlist; default-deny).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/dbus_rules"
-            }
-          ]
-        },
-        "deny": {
-          "description": "`[dbus.<bus>.deny]` — belt-and-braces explicit denies.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/dbus_rules"
-            }
-          ]
+    "env": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/env"
         }
-      }
+      ],
+      "description": "Environment section (`[env]`)."
     },
-    "dbus_rules": {
-      "description": "The four D-Bus rule classes at destination/interface/member granularity.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "talk": {
-          "description": "Destinations the kennel may call methods on and receive replies/signals from.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "call": {
-          "description": "Finer than `talk`: specific `destination=interface.member` calls.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "broadcast": {
-          "description": "Signals the kennel may receive (a subset of `talk` senders).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "own": {
-          "description": "Names the kennel may own (be addressable as). Almost always empty.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+    "exec": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/exec"
         }
-      }
+      ],
+      "description": "Execution section (`[exec]`)."
     },
-    "dbus_audit": {
-      "description": "`[dbus.audit]` — D-Bus call audit verbosity.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "level": {
-          "description": "Audit verbosity (default `summary`).",
-          "type": "string",
-          "enum": [
-            "off",
-            "summary",
-            "full"
-          ]
+    "fs": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/fs"
         }
-      }
+      ],
+      "description": "Filesystem section (`[fs]` and `[fs.*]`)."
     },
-    "audit": {
-      "description": "`[audit]` — audit sinks and per-class levels.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "sinks": {
-          "description": "Enabled sinks (`file`, `stdout`, `syslog`, `journald`).",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "file": {
-          "description": "`[audit.file]` — the rotating file sink.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_file"
-            }
-          ]
-        },
-        "syslog": {
-          "description": "`[audit.syslog]` — the syslog sink.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_syslog"
-            }
-          ]
-        },
-        "journald": {
-          "description": "`[audit.journald]` — the journald sink (no fields).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_empty"
-            }
-          ]
-        },
-        "stdout": {
-          "description": "`[audit.stdout]` — the stdout sink (no fields).",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_empty"
-            }
-          ]
-        },
-        "network": {
-          "description": "`[audit.network]` — level override for the network class.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_class"
-            }
-          ]
-        },
-        "filesystem": {
-          "description": "`[audit.filesystem]` — level override for the filesystem class.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_class"
-            }
-          ]
-        },
-        "exec": {
-          "description": "`[audit.exec]` — level override for the exec class.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_class"
-            }
-          ]
-        },
-        "unix": {
-          "description": "`[audit.unix]` — level override for the unix class.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_class"
-            }
-          ]
-        },
-        "dbus": {
-          "description": "`[audit.dbus]` — level override for the dbus class.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/audit_class"
-            }
-          ]
+    "identity": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/identity"
         }
-      }
+      ],
+      "description": "Identity section (`[identity]`): the supplementary groups carried in."
     },
-    "audit_file": {
-      "description": "`[audit.file]` — the rotating file sink.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "dir": {
-          "description": "Directory the JSONL log is written to.",
-          "type": "string"
-        },
-        "rotate_at_bytes": {
-          "description": "Rotate the log once it reaches this size (human form, `10M`).",
-          "type": "string"
-        },
-        "compress_after_seconds": {
-          "description": "Compress a rotated segment after this many seconds.",
-          "type": "integer",
-          "minimum": 0
-        },
-        "retain_count": {
-          "description": "How many rotated segments to retain.",
-          "type": "integer",
-          "minimum": 0
+    "include": {
+      "description": "Additional signed fragments composed additively, referenced by name.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "lifecycle": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/lifecycle"
         }
-      }
+      ],
+      "description": "Lifecycle section (`[lifecycle]`)."
     },
-    "audit_syslog": {
-      "description": "`[audit.syslog]` — the syslog sink.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "facility": {
-          "description": "The syslog facility.",
-          "type": "string"
+    "mutable": {
+      "description": "Mutable-field manifest (`[[mutable]]`): present on a *spawn-target template*, it",
+      "items": {
+        "$ref": "#/definitions/mutable"
+      },
+      "type": "array"
+    },
+    "name": {
+      "description": "The kennel name. Present on leaf policies, absent on templates.",
+      "type": "string"
+    },
+    "net": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/net"
         }
-      }
+      ],
+      "description": "Network section (`[net]` and `[net.*]`)."
     },
-    "audit_empty": {
-      "description": "An empty audit sink table (journald, stdout: no fields).",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {}
+    "provides": {
+      "description": "`[[provides]]`: capabilities this kennel offers to other kennels over the mesh.",
+      "items": {
+        "$ref": "#/definitions/provides_entry"
+      },
+      "type": "array"
     },
-    "audit_class": {
-      "description": "A per-class audit level override.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "level": {
-          "description": "The class level.",
-          "type": "string",
-          "enum": [
-            "off",
-            "denies-only",
-            "summary",
-            "full"
-          ]
+    "rootfs": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/rootfs"
         }
-      }
+      ],
+      "description": "OCI substrate (`[rootfs]`): an unpacked image used as the kennel root. Its"
     },
-    "threats": {
-      "description": "Threat-tag metadata attached to a grant.",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "exposed": {
-          "description": "Threat IDs this entry weakens defence against.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "mitigated": {
-          "description": "Threat IDs this entry actively mitigates.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+    "seccomp": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/seccomp"
         }
-      }
+      ],
+      "description": "Seccomp section (`[seccomp]`)."
+    },
+    "service": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/service"
+        }
+      ],
+      "description": "`[service]`: the supervision discipline for a service kennel: the restart policy"
+    },
+    "signature": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/signature"
+        }
+      ],
+      "description": "The signature envelope over the artefact's canonical content. Required for"
+    },
+    "spawn": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/spawn"
+        }
+      ],
+      "description": "Dynamic-spawn grant (`[spawn]`): the templates this workload may instantiate as"
+    },
+    "ssh": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ssh"
+        }
+      ],
+      "description": "SSH egress section (`[ssh]`)."
+    },
+    "template_base": {
+      "description": "Reference to the parent template by name. Absent only for the root template",
+      "type": "string"
+    },
+    "template_name": {
+      "description": "The template's own name. Present on templates, absent on leaf policies.",
+      "type": "string"
+    },
+    "threat_catalogue_version": {
+      "description": "The `THREATS.md` catalogue version this artefact was authored against.",
+      "type": "string"
+    },
+    "trust": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/trust"
+        }
+      ],
+      "description": "Workspace trust marker (`[trust]`): the masked `.trust-manifest.json` at"
+    },
+    "tty": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/tty"
+        }
+      ],
+      "description": "Terminal hardening (`[tty]`): the escape-sequence filter on the"
+    },
+    "ulimits": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Resource limits (`[ulimits]`): a table of `name = \"value\"` pairs applied via",
+      "type": "object"
+    },
+    "unix": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/unix"
+        }
+      ],
+      "description": "`AF_UNIX` section (`[unix]`)."
+    },
+    "unsafe": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/unsafe"
+        }
+      ],
+      "description": "`[unsafe]`: advisory footgun sub-sections whose scoping is real but enforced"
+    },
+    "workload": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/workload"
+        }
+      ],
+      "description": "The workload to run (`[workload]`). Optional: when absent, the command is given"
     }
-  }
+  },
+  "title": "Project Kennel policy",
+  "type": "object"
 }
