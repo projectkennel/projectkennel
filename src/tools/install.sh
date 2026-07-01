@@ -340,7 +340,7 @@ install_reference_policies() {
 	# `<name>.settled.toml` land under /etc/kennel/policies, which the policy search cascade resolves.
 	# A missing ssh-keygen or a single failing compile is non-fatal (warn + skip).
 	[ -d "$pkg_root/policies" ] || return 0
-	local kbin="$libexec/kennel" host_id="kennel-host" key_dir="/etc/kennel/keys"
+	local kbin="$pathbin_dir/kennel" host_id="kennel-host" key_dir="/etc/kennel/keys"
 	if [ "$dry_run" -eq 1 ]; then
 		echo "DRY-RUN: mint host key '$host_id' in $key_dir (if absent), then compile each policies/* +"
 		echo "         policies/providers/* source --key it into /etc/kennel/policies/<n>/<n>.settled.toml"
@@ -396,7 +396,7 @@ provision_subkennel_users() {
 	# ULA gid, and skip-if-already-present — and prints the file line on stdout. We
 	# append after EACH user so the next invocation sees it and never reuses a tag.
 	[ -n "$provision_group" ] || return 0
-	local sub=/etc/kennel/subkennel kbin="$libexec/kennel"
+	local sub=/etc/kennel/subkennel kbin="$pathbin_dir/kennel"
 	if [ ! -x "$kbin" ]; then
 		echo "install.sh: $kbin not found; cannot auto-provision subkennel" >&2
 		return 0
@@ -443,8 +443,6 @@ print_next_steps() {
 	# Run the post-install checks ourselves and report PASS/ATTN, rather than telling
 	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
 	# tailored to the invoking (sudo) user so it can be pasted verbatim.
-	local kennel_bin="$libexec/kennel"
-
 	echo
 	echo "Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir)."
 	echo
@@ -512,8 +510,8 @@ print_next_steps() {
 
 Per-user bring-up — run these as the user who will run kennels (NOT root):
 $uid_line
-  # 1. reach the helper binaries (kennel lives under libexec, off PATH by design):
-  export PATH="\$PATH:$libexec"
+  # 1. kennel is already on PATH (/usr/bin); the helpers it execs live under libexec and
+  #    need no PATH entry. Nothing to export — the commands below work as-is.
 
 $step2
 
@@ -527,8 +525,6 @@ $step2
   # 5. scaffold an interactive shell policy from the shipped template, then run it:
   kennel policy generate my-shell --from interactive
   kennel run my-shell -- /bin/bash
-
-To make PATH permanent, add the export above to ~/.bashrc (or ~/.profile).
 
 Admin notes (root):
   * Add org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
