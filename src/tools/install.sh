@@ -331,36 +331,63 @@ install_keys() {
 	fi
 }
 
-install_templates() {
-	# Ship the signed reference templates into the CLI's default template search
-	# dir (/etc/kennel/templates, per dist/config/config.toml), so a leaf that
-	# derives e.g. base-confined resolves and verifies out of the box (the
-	# maintainer public key is installed above). Org templates are added alongside.
-	[ -d "$pkg_root/templates" ] || return 0
-	local d n
-	for d in "$pkg_root"/templates/*/; do
-		[ -f "${d}policy.toml" ] || continue
-		n="$(basename "$d")"
-		run install -d -m 0755 "/etc/kennel/templates/$n"
-		run install -m 0644 "${d}policy.toml" "/etc/kennel/templates/$n/policy.toml"
+install_reference_policies() {
+	# The reference policy SOURCES (policies/<n>, policies/providers/<n>) are maintainer-signed and
+	# ship to the vendor tree (install_config). Their SETTLED form is HOST-specific — the
+	# executable-closure loader pin embeds THIS host's library closure, so a settled policy cannot be
+	# shipped — so we compile each source HERE and sign it with a HOST key the daemon trusts. The host
+	# key is minted once into the admin trust dir (/etc/kennel/keys) and reused on every reinstall; the
+	# `<name>.settled.toml` land under /etc/kennel/policies, which the policy search cascade resolves.
+	# A missing ssh-keygen or a single failing compile is non-fatal (warn + skip).
+	[ -d "$pkg_root/policies" ] || return 0
+	local kbin="$libexec/kennel" host_id="kennel-host" key_dir="/etc/kennel/keys"
+	if [ "$dry_run" -eq 1 ]; then
+		echo "DRY-RUN: mint host key '$host_id' in $key_dir (if absent), then compile each policies/* +"
+		echo "         policies/providers/* source --key it into /etc/kennel/policies/<n>/<n>.settled.toml"
+		return 0
+	fi
+	[ -x "$kbin" ] || { echo "install.sh: $kbin not found; skipping reference-policy compile" >&2; return 0; }
+	if ! command -v ssh-keygen >/dev/null 2>&1; then
+		echo "install.sh: ssh-keygen absent — cannot mint a host signing key; skipping reference-policy compile" >&2
+		return 0
+	fi
+	# Reuse an existing host key, else mint one. keygen writes the private key + its .pub into key_dir;
+	# the daemon trusts the .pub (trust_dir = /etc/kennel/keys), so host-signed policies verify. The
+	# private key stays root-only in the root-owned key dir.
+	if [ ! -f "$key_dir/$host_id" ]; then
+		echo "install.sh: minting host policy-signing key '$host_id' in $key_dir"
+		"$kbin" keygen "$host_id" --dir "$key_dir" >/dev/null \
+			|| { echo "install.sh: host keygen failed; skipping reference-policy compile" >&2; return 0; }
+	else
+		echo "install.sh: reusing host policy-signing key '$host_id'"
+	fi
+	# Compile every leaf + provider source → host-signed settled artefact, verifying the maintainer-
+	# signed templates/fragments it derives from against the vendor trust + template dirs.
+	local src rel name out count=0
+	for src in "$pkg_root"/policies/*/policy.toml "$pkg_root"/policies/providers/*/policy.toml; do
+		[ -f "$src" ] || continue
+		rel="${src#"$pkg_root"/policies/}"; rel="${rel%/policy.toml}"   # "gui-session" or "providers/gui-broker"
+		name="$(basename "$rel")"
+		out="/etc/kennel/policies/$rel/$name.settled.toml"
+		install -d -m 0755 "$(dirname "$out")"
+		if "$kbin" policy compile "$src" --key "$key_dir/$host_id" --key-id "$host_id" \
+				--trust-dir "$vendor_dir/keys" --template-dir "$vendor_dir/templates" \
+				--no-lock --output "$out" >/dev/null 2>&1; then
+			echo "  + $rel → $out"; count=$((count + 1))
+		else
+			echo "  ! $rel: compile failed (skipped)" >&2
+		fi
 	done
+	echo "install.sh: compiled $count reference policies into /etc/kennel/policies"
 }
 
-install_fragments() {
-	# Ship the signed composable fragments into the SAME
-	# template search dir, so a leaf's `include = ["lang-python", ...]` resolves and
-	# verifies out of the box. Fragments and templates are both signed includes; sharing
-	# the dir means no extra search-path config, and `kennel policy list` labels each one
-	# `(fragment)`. Org fragments are added alongside.
-	[ -d "$pkg_root/fragments" ] || return 0
-	local d n
-	for d in "$pkg_root"/fragments/*/; do
-		[ -f "${d}policy.toml" ] || continue
-		n="$(basename "$d")"
-		run install -d -m 0755 "/etc/kennel/templates/$n"
-		run install -m 0644 "${d}policy.toml" "/etc/kennel/templates/$n/policy.toml"
-	done
-}
+# The signed reference templates and fragments are MAINTAINER content: they ship to the vendor
+# tree ONLY (/usr/lib/kennel/templates, via install_config) — NEVER to /etc/kennel, which is the
+# admin tier. The CLI/daemon template search cascade already includes the vendor dir
+# (`<user-config>/templates` + `/etc/kennel/templates` + `/usr/lib/kennel/templates`,
+# kennel-lib-config::default_search_dirs), so a leaf deriving `base-confined` or `include`-ing
+# `lang-python` resolves out of the box from the vendor copy. `/etc/kennel/templates` is created
+# empty by install_etc_skeleton for an admin's own org templates.
 
 provision_subkennel_users() {
 	# For every member of $provision_group, append a /etc/kennel/subkennel allocation
@@ -520,7 +547,6 @@ install_man
 install_apparmor
 install_etc_skeleton
 install_keys
-install_templates
-install_fragments
+install_reference_policies
 provision_subkennel_users
 [ "$dry_run" -eq 1 ] || print_next_steps
