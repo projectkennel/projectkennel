@@ -59,7 +59,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::os::fd::{BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 /// Maximum encoded length of a name in a [`RelayRequest::Resolve`] (DNS limit).
 pub const MAX_NAME: usize = 253;
@@ -312,8 +312,8 @@ impl RelayRequest {
     /// [`RelayError::BadResource`] on an unknown enum byte;
     /// [`RelayError::NameTooLong`] / [`RelayError::NonUtf8Name`] on a bad name.
     pub fn decode(buf: &[u8]) -> Result<Self, RelayError> {
-        let op = Op::from_byte(*buf.first().ok_or(RelayError::BadLength)?)
-            .ok_or(RelayError::BadTag)?;
+        let op =
+            Op::from_byte(*buf.first().ok_or(RelayError::BadLength)?).ok_or(RelayError::BadTag)?;
         match op {
             Op::Resolve => {
                 let len_bytes = buf.get(1..3).ok_or(RelayError::BadLength)?;
@@ -350,9 +350,8 @@ impl RelayRequest {
                 if buf.len() != 6 {
                     return Err(RelayError::BadLength);
                 }
-                let resource =
-                    RelayResource::from_byte(*buf.get(1).ok_or(RelayError::BadLength)?)
-                        .ok_or(RelayError::BadResource)?;
+                let resource = RelayResource::from_byte(*buf.get(1).ok_or(RelayError::BadLength)?)
+                    .ok_or(RelayError::BadResource)?;
                 let pid = i32::from_ne_bytes(
                     buf.get(2..6)
                         .ok_or(RelayError::BadLength)?
@@ -548,6 +547,140 @@ pub fn recv_response(sock: BorrowedFd<'_>) -> io::Result<(RelayResponse, Vec<Own
         ));
     }
     Ok((resp, fds))
+}
+
+/// The operations the unconfined parent performs on the sealed monitor's behalf.
+///
+/// A trait so the serve loop is testable with a fake; the production
+/// implementation is [`HostOps`].
+pub trait RelayOps {
+    /// Resolve `name` to its addresses (the parent runs the OS resolver).
+    ///
+    /// # Errors
+    ///
+    /// A [`RefusalCode`] the parent relays verbatim; the monitor re-checks and
+    /// pins every returned address under policy, so a wrong answer cannot widen
+    /// egress.
+    fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, RefusalCode>;
+}
+
+/// The parent's serve loop: one request at a time over `sock` until the monitor
+/// closes it.
+///
+/// The parent treats every frame as hostile: a frame that does not decode is
+/// answered [`RefusalCode::Internal`] and the loop continues (a spamming monitor
+/// only hurts itself). `SpawnDelegate` and `FdRelay` are protocol-defined but not
+/// yet served here (the unsealed monitor still performs them directly); they are
+/// refused until the seal relocates them.
+///
+/// # Errors
+///
+/// An OS error only on a hard socket failure; a clean peer close returns `Ok`.
+pub fn serve(sock: BorrowedFd<'_>, ops: &dyn RelayOps) -> io::Result<()> {
+    let mut buf = [0u8; MAX_FRAME];
+    loop {
+        let (n, _fds) = kennel_lib_syscall::scm::recv_with_fds(sock, &mut buf)?;
+        if n == 0 {
+            return Ok(()); // the monitor closed the relay: exit.
+        }
+        let decoded = buf
+            .get(..n)
+            .ok_or(RelayError::BadLength)
+            .and_then(RelayRequest::decode);
+        let reply = match decoded {
+            Ok(RelayRequest::Resolve { name }) => match ops.resolve(&name) {
+                Ok(addrs) => RelayResponse::Resolved { addrs },
+                Err(code) => RelayResponse::Refused { code },
+            },
+            // Not yet served over the relay: refused until the seal relocates them.
+            Ok(RelayRequest::SpawnDelegate { .. } | RelayRequest::FdRelay { .. }) => {
+                RelayResponse::Refused {
+                    code: RefusalCode::Internal,
+                }
+            }
+            Err(_) => RelayResponse::Refused {
+                code: RefusalCode::Internal,
+            },
+        };
+        // Best effort: if the reply cannot be sent the monitor is gone; next recv exits.
+        send_response(sock, &reply, &[])?;
+    }
+}
+
+/// The sealed monitor's handle to the relay: one serialized transaction at a
+/// time over the socketpair end held across the fork.
+pub struct RelayClient {
+    sock: std::sync::Mutex<OwnedFd>,
+}
+
+impl RelayClient {
+    /// Wrap the monitor's end of the relay socket.
+    #[must_use]
+    pub const fn new(sock: OwnedFd) -> Self {
+        Self {
+            sock: std::sync::Mutex::new(sock),
+        }
+    }
+
+    /// Resolve `name` via the parent.
+    ///
+    /// # Errors
+    ///
+    /// [`ResolveError::NotFound`] if the name has no address;
+    /// [`ResolveError::Backend`] on a relay/transport failure or a refusal.
+    pub fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, crate::inet::dns::ResolveError> {
+        use crate::inet::dns::ResolveError;
+        let req = RelayRequest::Resolve {
+            name: name.to_owned(),
+        };
+        let outcome = {
+            let guard = self
+                .sock
+                .lock()
+                .map_err(|_| ResolveError::Backend("relay lock poisoned".to_owned()))?;
+            send_request(guard.as_fd(), &req).and_then(|()| recv_response(guard.as_fd()))
+        };
+        match outcome {
+            Ok((RelayResponse::Resolved { addrs }, _)) if !addrs.is_empty() => Ok(addrs),
+            Ok((
+                RelayResponse::Resolved { .. }
+                | RelayResponse::Refused {
+                    code: RefusalCode::NotFound,
+                },
+                _,
+            )) => Err(ResolveError::NotFound),
+            Ok((RelayResponse::Refused { .. }, _)) => {
+                Err(ResolveError::Backend("relay refused resolution".to_owned()))
+            }
+            Ok((RelayResponse::FdReady, _)) => {
+                Err(ResolveError::Backend("unexpected relay reply".to_owned()))
+            }
+            Err(e) => Err(ResolveError::Backend(e.to_string())),
+        }
+    }
+}
+
+/// A [`Resolver`](crate::inet::dns::Resolver) that resolves via the parent relay,
+/// so name resolution leaves the sealed monitor while the policy decision stays.
+pub struct RelayResolver<'a>(pub &'a RelayClient);
+
+impl crate::inet::dns::Resolver for RelayResolver<'_> {
+    fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, crate::inet::dns::ResolveError> {
+        self.0.resolve(name)
+    }
+}
+
+/// The production [`RelayOps`]: the unconfined parent using host facilities.
+pub struct HostOps;
+
+impl RelayOps for HostOps {
+    fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, RefusalCode> {
+        use crate::inet::dns::{ResolveError, Resolver as _, SystemResolver};
+        SystemResolver.resolve(name).map_err(|e| match e {
+            ResolveError::NotFound => RefusalCode::NotFound,
+            ResolveError::Backend(_) => RefusalCode::ResolveFailed,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -758,10 +891,7 @@ mod tests {
     #[test]
     fn response_decode_rejects_bad_refusal_code() {
         // tag=2 (Refused), code=9 (unknown).
-        assert_eq!(
-            RelayResponse::decode(&[2, 9]),
-            Err(RelayError::BadRefusal)
-        );
+        assert_eq!(RelayResponse::decode(&[2, 9]), Err(RelayError::BadRefusal));
     }
 
     // --- transport over a real socketpair ---
@@ -816,5 +946,73 @@ mod tests {
         kennel_lib_syscall::scm::send_with_fds(a.as_fd(), &[0xff, 0x00], &[]).expect("send junk");
         let err = recv_request(b.as_fd()).expect_err("must reject");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // --- serve loop + client + resolver ---
+
+    struct FakeOps {
+        answer: Vec<IpAddr>,
+    }
+
+    impl RelayOps for FakeOps {
+        fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, RefusalCode> {
+            if name == "nx.invalid" {
+                Err(RefusalCode::NotFound)
+            } else {
+                Ok(self.answer.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_round_trips_through_serve() {
+        let (parent, child) = pair();
+        let handle = std::thread::spawn(move || {
+            let ops = FakeOps {
+                answer: vec![v4(93, 184, 216, 34)],
+            };
+            let _ = serve(parent.as_fd(), &ops);
+        });
+        let client = RelayClient::new(child);
+        assert_eq!(
+            client.resolve("example.com").expect("resolve"),
+            vec![v4(93, 184, 216, 34)]
+        );
+        assert!(matches!(
+            client.resolve("nx.invalid").expect_err("nx"),
+            crate::inet::dns::ResolveError::NotFound
+        ));
+        drop(client); // closes the monitor end → serve sees EOF and exits
+        handle.join().expect("serve thread");
+    }
+
+    #[test]
+    fn relay_resolver_implements_the_resolver_trait() {
+        use crate::inet::dns::Resolver as _;
+        let (parent, child) = pair();
+        let handle = std::thread::spawn(move || {
+            let _ = serve(
+                parent.as_fd(),
+                &FakeOps {
+                    answer: vec![v4(1, 1, 1, 1)],
+                },
+            );
+        });
+        let client = RelayClient::new(child);
+        let resolver = RelayResolver(&client);
+        assert_eq!(
+            resolver.resolve("anything").expect("resolve"),
+            vec![v4(1, 1, 1, 1)]
+        );
+        drop(client);
+        handle.join().expect("serve thread");
+    }
+
+    #[test]
+    fn host_ops_resolves_localhost_to_loopback() {
+        // localhost resolves via /etc/hosts, hermetic. Proves HostOps reaches getaddrinfo.
+        let addrs = HostOps.resolve("localhost").expect("localhost resolves");
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(IpAddr::is_loopback));
     }
 }
