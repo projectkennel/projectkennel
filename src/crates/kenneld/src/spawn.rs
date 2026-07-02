@@ -1,4 +1,4 @@
-//! The node-0 `SPAWN` handler (`docs/architecture/02-10-dynamic-spawn.md` §7.12).
+//! The node-0 `SPAWN` handler (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! A requester workload transacts [`verb::SPAWN`](kennel_lib_binder::service::verb::SPAWN) naming an
 //! operator-signed template and the manifest-field writes it wants. `kenneld` validates — all in the

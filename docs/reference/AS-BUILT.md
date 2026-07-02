@@ -1,20 +1,26 @@
-# Design / Architecture patch log
+# As-built log
 
-`docs/design/**` and `docs/architecture/**` are **frozen** pending a clean-sheet rewrite
-(the two-volume book). While the freeze is in effect, do not edit those trees. Any change
-that would normally land as an as-built update to a design or architecture chapter is
-recorded here instead, to be ingested into the rewrite.
+The durable record of **as-built facts** — what the running code actually does — kept in this
+repository, deliberately **separate from the design corpus**. The corpus (the two-volume book,
+`github.com/projectkennel/books`, checked out in-tree at `books/`) states the design and the
+intended mechanism; this log states where the built system elaborates or diverges from it. When the
+two disagree, the book is the design of record and this log is the ground truth about the code — a
+code↔design gap is code-owed, and this log is where it is written down.
 
-Each entry: the **target** (chapter / §, best guess — the rewrite may restructure), the
-**as-built fact** the docs should reflect (or the stale claim to drop), the **why**, and the
-**source** (PR / commit). Newest first.
+It is the steady-state successor of the freeze-era patch log (the frozen `docs/design/` and
+`docs/architecture/` trees retired with the corpus cutover). It is **not** an ingestion queue:
+as-built facts live here; they are not drained into the book.
+
+Each entry: the **bears-on** book chapter (Vol N ch.M, best-effort — the book may restructure), the
+**as-built fact**, the **why**, and the **source** (PR / commit). Newest first. Entries dated before
+the cutover cite the retired trees' chapter numbers in their target line, preserved as written.
 
 ---
 
 <!-- Template:
 ## YYYY-MM-DD — <short title>
-- **Target:** docs/<design|architecture>/<chapter>.md §<x> (approx)
-- **Change:** <what is now true as-built / what is stale and should be dropped>
+- **Bears-on:** Kennel book Vol <N> ch.<M> (<Title>) §<x> (best-effort)
+- **Change:** <what is now true as-built / what the book's design would otherwise imply>
 - **Why:** <one line>
 - **Source:** #<PR> / <commit>
 -->

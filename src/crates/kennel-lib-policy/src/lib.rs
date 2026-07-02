@@ -11,7 +11,7 @@
 //! hot path: one signature check, a schema version gate, and an invariant
 //! re-assertion.
 //!
-//! The crate is pure and I/O-free (`docs/architecture/03-crate-decomposition.md`):
+//! The crate is pure and I/O-free (`docs/reference/03-crate-decomposition.md`):
 //! callers read bytes from disk and pass them in; key material is supplied to a
 //! [`KeySet`] in memory.
 //!

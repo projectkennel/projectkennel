@@ -1,4 +1,4 @@
-//! The inbound BIND conduit: kenneld drives the dumb listener (`docs/design/07-5-network.md` §7.5.7).
+//! The inbound BIND conduit: kenneld drives the dumb listener (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! The reverse of `host_netproxy::conduit`. kenneld is the decision point — the `[net.bpf].bind`
 //! cgroup ACL already gated the workload's `bind()`, so kenneld registers the allowed `ip:port`

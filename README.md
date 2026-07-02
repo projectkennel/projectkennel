@@ -14,7 +14,7 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 ## Status
 
-**0.4.0 — the service-mesh release.** The reference runtime, the threat catalogue ([THREATS.md](docs/design/THREATS.md)), and the design corpus are all implemented and published — the runtime is the reference, not a sketch. Versioned on a stable-surface cadence, with a [CHANGELOG](CHANGELOG.md) recording every change.
+**0.4.0 — the service-mesh release.** The reference runtime, the threat catalogue ([THREATS.md](docs/reference/THREATS.md)), and the design corpus are all implemented and published — the runtime is the reference, not a sketch. Versioned on a stable-surface cadence, with a [CHANGELOG](CHANGELOG.md) recording every change.
 
 The full vertical runs **unprivileged**, proven end-to-end as the ordinary operator with no `sudo` (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/BUILD-ENV.md) for the kernel floor), each slice exercised by the real installed toolchain in the policy-suite e2e:
 
@@ -89,7 +89,7 @@ Almost every crate carries `#![forbid(unsafe_code)]`. The entire `unsafe` surfac
 |---|---|
 | [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
 | [NON-EXEC-SUMMARY.md](docs/design/NON-EXEC-SUMMARY.md) | The security stance and trust boundaries; the technical companion to the exec summary. |
-| [THREATS.md](docs/design/THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
+| [THREATS.md](docs/reference/THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
 | [docs/design/](docs/design/) | The design corpus — threat model, policy surface, template system, the spawn and mesh models, enforcement architecture. An implementation-independent specification. |
 | [docs/architecture/](docs/architecture/) | The reference implementation's architecture — process model, IPC, API surfaces, crate decomposition, trust boundaries, supervision, latency. |
 | [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md) | Normative engineering rules (the bar is OpenSSH / libpam). |
@@ -99,7 +99,7 @@ Almost every crate carries `#![forbid(unsafe_code)]`. The entire `unsafe` surfac
 
 Using it: [INSTALL.md](INSTALL.md) → [HOWTO.md](HOWTO.md) → [HOWTO-admin.md](HOWTO-admin.md). The installed man pages are the reference (`man kennel`, `man policy.toml`, `man kenneld`).
 
-New readers (design): [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/design/THREATS.md) → the design corpus (start at §1) → a worked policy template. Implementers and auditors then read the architecture corpus and CODING-STANDARDS.
+New readers (design): [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/reference/THREATS.md) → the design corpus (start at §1) → a worked policy template. Implementers and auditors then read the architecture corpus and CODING-STANDARDS.
 
 ## Reporting a vulnerability
 
@@ -114,4 +114,4 @@ Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The threat c
 - **Website:** <https://projectkennel.org>
 - **Repository:** <https://github.com/projectkennel/projectkennel>
 - **Security contact:** security@projectkennel.org
-- **Canonical THREATS.md:** <https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md>
+- **Canonical THREATS.md:** <https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md>

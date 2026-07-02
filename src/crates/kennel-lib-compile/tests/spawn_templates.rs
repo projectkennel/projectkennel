@@ -1,4 +1,4 @@
-//! The signed spawn-target template set (`docs/design/07-12-dynamic-spawn.md` §7.12)
+//! The signed spawn-target template set (Kennel book Vol 2 ch.13 (Dynamic Spawning))
 //! — per-template gate, mirroring `fragments_catalogue.rs`.
 //!
 //! Each `templates/<name>/policy.toml` in [`SPAWN_TEMPLATES`] is a single-leg SPAWN target.

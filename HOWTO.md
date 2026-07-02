@@ -214,7 +214,7 @@ from a grant's shape (e.g. `mode = host` reinstates host-network reconnaissance,
 T1.6). A `reason` you wrote on a grant is the answer to "why is this risk
 acceptable?", and `risks` is where you confirm the open risks are the ones you
 meant to accept. `--json` emits the report for CI. Full threat definitions live in
-[docs/design/THREATS.md](docs/design/THREATS.md).
+[docs/reference/THREATS.md](docs/reference/THREATS.md).
 
 ---
 

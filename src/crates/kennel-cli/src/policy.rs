@@ -697,7 +697,7 @@ fn print_diff_human(old_label: &str, new_label: &str, d: &kennel_lib_compile::di
             println!("  \u{26a0} no longer mitigates {}", threat_oneline(t));
         }
     }
-    println!("\nFull threat definitions and residuals: docs/design/THREATS.md");
+    println!("\nFull threat definitions and residuals: docs/reference/THREATS.md");
 }
 
 /// `T1.6 — <title> (<residual>)` for the terminal. The `id` is policy-sourced
@@ -799,7 +799,7 @@ fn print_risks_human(name: &str, report: &kennel_lib_compile::risks::RiskReport)
             println!("  {tag}  via {carrier}");
         }
     }
-    println!("\nFull threat definitions and residuals: docs/design/THREATS.md");
+    println!("\nFull threat definitions and residuals: docs/reference/THREATS.md");
 }
 
 /// JSON risk report (stable-ish shape for CI/tooling). Hand-rolled (no `serde_json`

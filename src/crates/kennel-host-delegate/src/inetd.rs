@@ -2,7 +2,7 @@
 //!
 //! # What this is
 //!
-//! `kenneld` owns the bind decision (`docs/design/07-5-network.md` §7.5.7): the `[net.bpf].bind`
+//! `kenneld` owns the bind decision (Kennel book Vol 2 ch.8 (The Network)): the `[net.bpf].bind`
 //! cgroup ACL already decided, at the workload's `bind()`, which ports the kennel may listen on.
 //! This delegate is what exposes one of those ports back on the host. It is the mirror image of the
 //! egress dialer: where `host-netproxy` *dials* a pinned address and hands the connected fd into the

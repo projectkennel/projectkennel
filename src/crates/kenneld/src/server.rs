@@ -34,7 +34,7 @@ use crate::{cgroup, start, Privileged};
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
 /// per-kennel egress proxy is configured from both derive from the same signed
 /// settled policy — the BPF funnels traffic to the proxy, the proxy enforces the
-/// per-destination allowlist (`docs/design/07-5-network.md` §7.5.2), two distinct rule
+/// per-destination allowlist (Kennel book Vol 2 ch.8 (The Network)), two distinct rule
 /// sets from one source.
 #[derive(Debug)]
 pub struct Loaded {

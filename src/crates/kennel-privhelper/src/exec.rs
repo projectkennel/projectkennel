@@ -1,7 +1,7 @@
 //! Request dispatch: validate, then perform the one privileged operation.
 //!
 //! This is the privileged side of the trust boundary
-//! (`docs/architecture/04-trust-boundaries.md`, boundary 1): every request is
+//! (Kennel book Vol 1 ch.14 (Trust and Consent), boundary 1): every request is
 //! validated against the reserved scope *before* any privileged syscall. The one
 //! remaining standalone op here is the loopback-address *delete* (teardown); the
 //! address *add* and the egress-BPF *attach* are folded into the `construct` factory,

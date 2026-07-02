@@ -1,4 +1,4 @@
-//! Verify-half spawn gates (`docs/design/07-12-dynamic-spawn.md` §7.12.8).
+//! Verify-half spawn gates (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! At `SPAWN`, `kenneld` re-runs spawn-eligibility on the **resolved** template — the authoritative
 //! gate, because the trust store is mutable and a re-signed entry must not slip an ineligible target

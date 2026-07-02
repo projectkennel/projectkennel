@@ -26,7 +26,7 @@ use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 
 /// `fork` a child that **drops to the operator identity** and `execve`s `path`.
 ///
-/// The `kennel-bin-init` spawn-owner primitive (`docs/design/07-2` §7.2.2): init runs
+/// The `kennel-bin-init` spawn-owner primitive (Kennel book Vol 2 ch.2 (Process and Privilege Model)): init runs
 /// as uid 0 in the kennel's user namespace and forks each facade and the workload,
 /// each of which must run as the **non-root masked operator**, not as init's uid 0.
 /// The child drops in the load-bearing order `set_gid` → `set_supplementary_groups`

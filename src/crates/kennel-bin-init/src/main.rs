@@ -5,7 +5,7 @@
 //! The privhelper *factory* constructs the kennel (user/mount/PID/IPC namespaces, the
 //! `0 0 1`+operator identity maps, the cgroup join, the in-namespace `lo`, the view,
 //! the binderfs mount + device chown, and the `pivot_root`) and then `fexecve`s this
-//! binary as the kennel's uid-0 PID 1 with **empty argv/envp** (`docs/design/07-2`).
+//! binary as the kennel's uid-0 PID 1 with **empty argv/envp** (Kennel book Vol 2 ch.2 (Process and Privilege Model)).
 //! So by the time `main` runs the host filesystem is already gone, this process holds
 //! uid 0 *only inside the kennel's user namespace* (no ambient host capabilities), and
 //! there is nothing on the command line.

@@ -18,7 +18,7 @@ This includes weaknesses in the policy compiler, the signature/lockfile verifica
 
 ## What is public, not a vulnerability report
 
-The [threat catalogue](../docs/design/THREATS.md) describes *classes* of risk and is public by design. Documented residual threats (those the design explicitly does not defend against — e.g. T1.8 in `ai-coding-strict`) are known limitations, not vulnerabilities. A *specific implementation flaw* that breaks a guarantee the design claims to provide is a vulnerability; report it privately.
+The [threat catalogue](../docs/reference/THREATS.md) describes *classes* of risk and is public by design. Documented residual threats (those the design explicitly does not defend against — e.g. T1.8 in `ai-coding-strict`) are known limitations, not vulnerabilities. A *specific implementation flaw* that breaks a guarantee the design claims to provide is a vulnerability; report it privately.
 
 A *suspected* threat class that the catalogue does not yet cover — where you do not have a specific exploit — is not a private report either: open a public issue tagged `[T-NEW]` (see CONTRIBUTING.md and CODING-STANDARDS.md §13.5). The split is: **specific working exploit → private email; suspected uncatalogued threat class → public `[T-NEW]` issue.** When in doubt, email privately and we will redirect you.
 

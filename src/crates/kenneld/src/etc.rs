@@ -5,7 +5,7 @@
 //! versions are wrong for a kennel (they point DNS at the host resolver, map
 //! `localhost` to the host's `127.0.0.1`, and list the host's users), so kenneld
 //! renders synthetic versions and the spawn binds them over `/etc/<file>` in the
-//! kennel's mount namespace (the "shadow" of `docs/design/07-5-network.md` §7.5.5/§7.5.10).
+//! kennel's mount namespace (the "shadow" of Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! The set:
 //! - `hosts` — `localhost` → the kennel's own primary address (so the kennel's own
@@ -91,7 +91,7 @@ impl EtcParams<'_> {
 /// `/etc/hosts` — `localhost` maps to the kennel's own primary address.
 ///
 /// So a tool checking `localhost:<port>` reaches the kennel's bound service rather
-/// than the host's loopback (`docs/design/07-5-network.md` §7.5.10). The hostname maps
+/// than the host's loopback (Kennel book Vol 2 ch.8 (The Network)). The hostname maps
 /// there too.
 #[must_use]
 pub fn hosts(p: &EtcParams<'_>) -> String {

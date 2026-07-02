@@ -1,6 +1,6 @@
 //! The machine-readable threat catalogue (`dist/threats/catalogue.toml`).
 //!
-//! The canonical catalogue is `docs/design/THREATS.md` (prose). This module loads
+//! The canonical catalogue is `docs/reference/THREATS.md` (prose). This module loads
 //! the machine form that `kennel policy risks` maps a policy's `threats` tags
 //! against: each entry is an id, family, scope, title, and a one-line distilled
 //! residual (the full prose stays in THREATS.md). A CI check keeps the two in sync.

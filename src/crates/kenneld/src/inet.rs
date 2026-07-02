@@ -1,5 +1,5 @@
 //! The `INet` egress decision: kenneld as the policy decision point for outbound
-//! connections (`docs/design/07-5-network.md` §7.5.2).
+//! connections (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! `facade-socks5` (inside the kennel) transacts a [`verb::CONNECT_INET`] request to node 0;
 //! kenneld decides it here against the signed policy's [`Ruleset`] ([`allow`]), resolves the name

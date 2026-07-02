@@ -1,7 +1,7 @@
 //! A kennel's synthetic `~/.ssh`: the re-origination bastion's client view.
 //!
 //! Per-kennel SSH leaves the kennel only through the re-origination bastion
-//! (`kennel-sshd`, `docs/design/07-10-ssh.md` §7.10). A confined workload that runs
+//! (`kennel-sshd`, Kennel book Vol 2 ch.10 (Cryptographic Services)). A confined workload that runs
 //! `git push` or `ssh -T git@github.com` needs a `~/.ssh` for the stock client to
 //! read — but it must contain **nothing real**: not the user's keys, not their
 //! `config`, not their `known_hosts`. This module renders the synthetic substitute
@@ -87,7 +87,7 @@ pub fn config(p: &SshParams<'_>) -> String {
         "# Project Kennel synthetic ssh config — generated, read-only.\n\
          # Every granted host routes to the re-origination bastion; the real key is\n\
          # used host-side, and the destination is fixed by the bastion's forced\n\
-         # command (docs/design/07-10-ssh.md §7.10). No other host is reachable.\n",
+         # command (Kennel book Vol 2 ch.10 (Cryptographic Services)). No other host is reachable.\n",
     );
     for h in p.hosts {
         let _ = write!(

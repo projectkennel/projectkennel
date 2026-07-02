@@ -1,4 +1,4 @@
-//! The `INet` conduit: kenneld drives the dumb dialer (`docs/design/07-5-network.md` §7.5.2).
+//! The `INet` conduit: kenneld drives the dumb dialer (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! kenneld is the decision point — it approves a request, resolves the name, and **pins** the
 //! vetted address (`kenneld::inet`). It then mints a `socketpair`, returns one end into the kennel

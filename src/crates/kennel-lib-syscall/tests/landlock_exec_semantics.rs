@@ -1,4 +1,4 @@
-//! Empirical proof of the exec-allowlist model (`docs/design/07-3-exec.md`):
+//! Empirical proof of the exec-allowlist model (Kennel book Vol 2 ch.7 (Execution)):
 //! a binary runs with only **READ** on its library dirs plus **EXECUTE** on the
 //! binary itself — and a binary that has READ but *not* EXECUTE is refused.
 //!
@@ -83,7 +83,7 @@ fn landlock_fs_execute_gates_libraries_not_just_the_binary() {
     // build to: under Landlock, the dynamic loader maps shared libraries (and the
     // ELF interpreter) with PROT_EXEC, which FS_EXECUTE gates — so EXECUTE on the
     // binary alone is NOT enough; the loader's lib dirs need EXECUTE too. This
-    // corrects docs/design/07-3-exec.md §7.3.7 ("libs need only READ").
+    // corrects Kennel book Vol 2 ch.7 (Execution) ("libs need only READ").
     if abi_version().is_err() {
         eprintln!("SKIP: Landlock unavailable");
         return;

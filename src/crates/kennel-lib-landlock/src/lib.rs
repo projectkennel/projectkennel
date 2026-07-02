@@ -3,7 +3,7 @@
 //! # Purpose
 //!
 //! Apply a Landlock ruleset that confines the workload's filesystem and TCP
-//! access (the design's primary filesystem-and-exec enforcement, `docs/design/08`).
+//! access (the primary filesystem-and-exec enforcement, Kennel book Vol 2 ch.6 (The Filesystem) and ch.7 (Execution)).
 //! Landlock is three syscalls and a few packed structs from the kernel UAPI
 //! (`uapi/linux/landlock.h`); small enough that owning the `unsafe` is preferable
 //! to the `landlock` crate's transitive cost (`syn` + the first proc-macros in
@@ -35,8 +35,8 @@
 //! every right an ABI defines and degrades to the empty set below it, so a newer
 //! kernel (e.g. 6.17 reports ABI 7) is used to its supported extent and an older
 //! one is never asked for a bit it lacks. Scoping (ABI 6) is the kernel-native
-//! enforcement of the `unix.abstract = "deny"` posture (`docs/design/07-6`) and a
-//! complement to the PID-namespace signal isolation (`docs/design/07-9`), superseding
+//! enforcement of the `unix.abstract = "deny"` posture (Kennel book Vol 2 ch.9 (Local Services)) and a
+//! complement to the PID-namespace signal isolation (Kennel book Vol 2 ch.12 (The Remaining Surfaces)), superseding
 //! the seccomp `connect()` filter those sections describe as a fallback.
 //!
 //! This is the fourth `unsafe`-bearing crate (after `kennel-lib-syscall`, `kennel-lib-bpf`, and
@@ -121,10 +121,10 @@ bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Scope: u64 {
         /// `connect(2)` to an abstract-namespace AF_UNIX socket bound outside the
-        /// sandbox (the `docs/design/07-6` abstract-socket gap; closed natively from
+        /// sandbox (the Kennel book Vol 2 ch.9 (Local Services) abstract-socket gap; closed natively from
         /// Landlock ABI 6).
         const ABSTRACT_UNIX_SOCKET = 0x1;
-        /// Send a signal to a process outside the sandbox (`docs/design/07-9`).
+        /// Send a signal to a process outside the sandbox (Kennel book Vol 2 ch.12 (The Remaining Surfaces)).
         const SIGNAL = 0x2;
     }
 }
@@ -380,7 +380,7 @@ impl Ruleset {
     /// and confines abstract-AF_UNIX/signal reach to the sandbox, until
     /// [`Ruleset::allow_path`] / [`Ruleset::allow_port`] grant exceptions.
     /// Scoping is all-or-nothing (no per-resource exception) and on by default,
-    /// the native form of the `unix.abstract = "deny"` posture (`docs/design/07-6`).
+    /// the native form of the `unix.abstract = "deny"` posture (Kennel book Vol 2 ch.9 (Local Services)).
     ///
     /// # Errors
     ///

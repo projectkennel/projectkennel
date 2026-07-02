@@ -1,6 +1,6 @@
 # Project Kennel — machine-readable threat catalogue.
 #
-# The canonical catalogue is docs/design/THREATS.md (prose: definitions, observed
+# The canonical catalogue is docs/reference/THREATS.md (prose: definitions, observed
 # instances, mitigations, residuals, MITRE mappings). THIS file is the machine
 # form `kennel policy risks` maps a policy's `threats` tags against: id, family,
 # title, scope, and a ONE-LINE distilled residual. The full residual prose stays

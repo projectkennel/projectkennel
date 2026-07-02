@@ -3,7 +3,7 @@
 //!
 //! # Purpose
 //!
-//! The egress facade (`docs/design/07-5-network.md` §7.5.2/§7.5.6): the workload speaks SOCKS5 or
+//! The egress facade (Kennel book Vol 2 ch.8 (The Network)): the workload speaks SOCKS5 or
 //! HTTP-proxy to this shim at the kennel's loopback `:1080`. One listener serves both — the first
 //! byte routes ([`protocol::detect`]: `0x05` → SOCKS5, an uppercase method letter → HTTP). Either
 //! way the *name* (never a resolved address) rides the request: SOCKS5 via `socks5h://`, HTTP via a

@@ -1,4 +1,4 @@
-//! The per-user SSH bastion's lifecycle and key state (`docs/design/07-10-ssh.md` §7.10.2).
+//! The per-user SSH bastion's lifecycle and key state (Kennel book Vol 2 ch.10 (Cryptographic Services)).
 //!
 //! `kenneld` runs **one** `kennel-sshd` for the session, shared by all the user's
 //! kennels — a sibling daemon, not a per-kennel child like the egress proxy. This

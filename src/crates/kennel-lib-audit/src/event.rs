@@ -6,7 +6,7 @@
 //! envelope fields it owns (`schema_version`, `ts`, `kennel`, `kennel_uuid`,
 //! `host`), runs the single sanitisation pass over the untrusted strings,
 //! applies the audit-level filter, and fans the result out to the sinks. The
-//! event schema is the durable contract (`docs/architecture/02-3-audit-schema.md`).
+//! event schema is the durable contract (Kennel book Vol 2 ch.19 (The Audit Account)).
 
 /// A value carried by one audit field.
 ///

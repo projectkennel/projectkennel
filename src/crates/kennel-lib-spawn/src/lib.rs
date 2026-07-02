@@ -271,7 +271,7 @@ pub fn prepare(
 /// after `pivot_root`; the fallback path builds in the parent without it.
 ///
 /// Public so `kennel-bin-init` builds the workload's ruleset post-pivot from its
-/// [`Supervision`] half with the identical logic (`docs/design/07-2` §7.2.2); it is
+/// [`Supervision`] half with the identical logic (Kennel book Vol 2 ch.2 (Process and Privilege Model)); it is
 /// `unsafe`-free, so sharing it keeps `kennel-bin-init` `#![forbid(unsafe_code)]`.
 ///
 /// # Errors

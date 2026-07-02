@@ -11,7 +11,7 @@ If you read this document and follow it, your contribution has a good chance of 
 Project Kennel composes existing Linux kernel primitives (Landlock, cgroup BPF, namespaces, seccomp) into a policy-driven confinement layer for AI coding agents and other unsigned user-level workloads.
 
 - [EXEC-SUMMARY.md](../docs/design/EXEC-SUMMARY.md) — why the project exists.
-- [THREATS.md](../docs/design/THREATS.md) — the threat catalogue.
+- [THREATS.md](../docs/reference/THREATS.md) — the threat catalogue.
 - [TEMPLATE-ai-coding-strict.md](../docs/design/TEMPLATE-ai-coding-strict.md) — a worked policy example.
 
 ---
@@ -31,7 +31,7 @@ Note the boundary with issue filing (below): a **suspected, non-exploit-specific
 Read, in this order:
 
 1. [EXEC-SUMMARY.md](../docs/design/EXEC-SUMMARY.md).
-2. [THREATS.md](../docs/design/THREATS.md). You will be expected to reference threat IDs by number.
+2. [THREATS.md](../docs/reference/THREATS.md). You will be expected to reference threat IDs by number.
 3. [TEMPLATE-ai-coding-strict.md](../docs/design/TEMPLATE-ai-coding-strict.md).
 4. [CODING-STANDARDS.md](../docs/governance/CODING-STANDARDS.md). Skim it; refer back as needed. Appendix B is a one-page quick reference for the tags, the close-on-arrival categories, and the commit cadence.
 
@@ -72,7 +72,7 @@ So: if the hooks pass, the *arrival-blocking* CI checks are expected to pass. Bu
 
 Every issue title must start with exactly one of three tags, as the first thing in the title. A GitHub Action enforces this on every newly-opened issue.
 
-- **`[T<id>]`** — an existing threat in [THREATS.md](../docs/design/THREATS.md), ID verbatim.
+- **`[T<id>]`** — an existing threat in [THREATS.md](../docs/reference/THREATS.md), ID verbatim.
 - **`[T-NONE]`** — a positive claim that you read the catalogue and this is **not** security-bearing (build break, typo, packaging, feature request).
 - **`[T-NEW]`** — a positive claim that you believe this **is** security-bearing but is **not** in the catalogue yet (a novel threat class, or a hardening gap THREATS.md does not cover).
 
