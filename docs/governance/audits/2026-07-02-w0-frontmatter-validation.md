@@ -48,17 +48,24 @@ default. **Access across the magic symlink cannot be granted by any path rule, n
 beneath a pre-seal dirfd.** The only mechanism that works post-seal is operating on an
 already-resolved fd — passed via `SCM_RIGHTS` or held from before the seal.
 
-**Consequence for W1.** The sealed daemon must **not** open `/proc/<pid>/root/...` by path after the
-seal. The affected reaches are small and enumerable — the binder device
-([lib.rs:1556](../../../src/crates/kenneld/src/lib.rs#L1556)), the mesh-bus device dir
+**Consequence for W1 (decided: reaches move to the parent leg).** The sealed monitor must **not** open
+`/proc/<pid>/root/...` by path after the seal. The affected reaches are small and enumerable — the
+binder device ([lib.rs:1556](../../../src/crates/kenneld/src/lib.rs#L1556)), the mesh-bus device dir
 ([mesh_bus.rs:112](../../../src/crates/kenneld/src/mesh_bus.rs#L112)), and a socket-path reach
 ([lib.rs:1234](../../../src/crates/kenneld/src/lib.rs#L1234)) — all reached via `/proc/<pid>/root`,
-all opened *per kennel, post-seal*, so none can be pre-opened before the seal. Each must be obtained
-by **fd-passing from the holder/init child**, which lives in the target mount namespace and can open
-locally, then hand the fd back over the existing socketpair. This aligns with W1's parent-relay/holder
-architecture (the holder already exists and already passes fds), and it *shrinks* the fs manifest —
-the binder `/proc` reaches drop out of the path-grant surface entirely rather than needing a rule
-shape Landlock cannot express. The fs manifest gates on this: it grants no `/proc/<pid>/root` path.
+all opened *per kennel, post-seal*, so none can be pre-opened before the seal. These reaches move to
+the **unsealed parent leg**: being unconfined, the parent follows the magic symlink freely, then hands
+the resolved fd to the monitor **once** over the existing parent→child relay (the same `SCM_RIGHTS`
+channel that carries the delegate fds). It is a one-time fd handoff, **not** a per-message forward —
+the monitor does its binder I/O directly on the fd afterwards (Landlock does not govern an already-open
+fd), so node-0 brokering stays in the monitor at full speed. This gives the clean two-leg split the
+design wants — the parent owns every unsealable operation (inet, delegate exec, cross-ns fd
+acquisition); the monitor is pure-AF_UNIX with no cross-namespace reach — and it reuses the existing
+relay rather than adding a holder→monitor channel. The fs manifest grants **no** `/proc/<pid>/root`
+path, so the class drops out of the path-grant surface entirely (rejected alternatives: a
+holder→monitor fd path, which adds a channel; and mounting binderfs in the monitor's own namespace to
+make it in-tree-grantable, which would rework the holder's node-ownership self-map and still relay
+per-message).
 
 ---
 
@@ -184,13 +191,14 @@ the artifact. When probing AppArmor path-attached profiles, use a fresh binary p
 
 | Probe | Verdict | Dependent | Consequence applied |
 | --- | --- | --- | --- |
-| P1 Landlock magic-symlink | **RED (path) / fd-passing OK** | W1 fs manifest | binder `/proc` reaches move to `SCM_RIGHTS` fd-passing from the holder; manifest grants no `/proc/<pid>/root` path |
+| P1 Landlock magic-symlink | **RED (path) / fd-passing OK** | W1 fs manifest | cross-ns binder reaches move to the unsealed parent leg; the fd rides the existing relay as a one-time handoff (not per-message); manifest grants no `/proc/<pid>/root` path |
 | P2 fork-point threading | GREEN | W1 fork split | none — startup single-threaded through `serve()` |
 | P3 child inet inventory | GREEN (broaden) | W1 seccomp seal | deny `AF_INET/AF_INET6/AF_NETLINK/AF_PACKET`; child needs only `AF_UNIX` |
 | P4 MSG_ERRQUEUE recovery | GREEN | W2 Part D | none — port-unreachable translation buildable as specified |
 | P5 AppArmor across fork | GREEN | W1 profile/seal | profile stays `flags=(unconfined)`; Landlock manifest grants `/proc` write |
 
-No probe blocks its workstream. Two shape the design before its manifest is drawn: **P1** routes the
-binder reaches through fd-passing (and keeps `/proc/<pid>/root` out of the fs manifest), and **P3**
-broadens the seccomp seal's socket-family denylist. Both land with W1 as first-class parts of its
-manifest and seal, per W0's contract.
+No probe blocks its workstream. Two shape the design before its manifest is drawn: **P1** moves the
+cross-ns binder reaches to the unsealed parent leg (the fd rides the existing relay as a one-time
+handoff) and keeps `/proc/<pid>/root` out of the fs manifest, and **P3** broadens the seccomp seal's
+socket-family denylist. Both land with W1 as first-class parts of its manifest and seal, per W0's
+contract.
