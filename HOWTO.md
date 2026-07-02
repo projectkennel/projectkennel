@@ -77,7 +77,7 @@ kennel policy generate myproject --from ai-coding-strict
 This writes a leaf `policy.toml` whose `template_base` points at
 `ai-coding-strict`. Edit it to grant exactly what your workload needs. The full
 field reference is `man policy.toml` and
-[docs/architecture/02-2-config-schema.md](docs/architecture/02-2-config-schema.md);
+[docs/archive/architecture/02-2-config-schema.md](docs/archive/architecture/02-2-config-schema.md);
 the common sections:
 
 ```toml
@@ -142,7 +142,7 @@ the same policy against the same trust store then yields a byte-identical result
 or a hard failure — never a silent substitution. The first resolution records
 the lock (trust-on-first-use); a later mismatch is an error you resolve
 deliberately. See
-[docs/architecture/02-2-config-schema.md](docs/architecture/02-2-config-schema.md)
+[docs/archive/architecture/02-2-config-schema.md](docs/archive/architecture/02-2-config-schema.md)
 §The lockfile.
 
 ---
@@ -214,7 +214,7 @@ from a grant's shape (e.g. `mode = host` reinstates host-network reconnaissance,
 T1.6). A `reason` you wrote on a grant is the answer to "why is this risk
 acceptable?", and `risks` is where you confirm the open risks are the ones you
 meant to accept. `--json` emits the report for CI. Full threat definitions live in
-[docs/design/THREATS.md](docs/design/THREATS.md).
+[docs/reference/THREATS.md](docs/reference/THREATS.md).
 
 ---
 
@@ -236,7 +236,7 @@ kennel audit myproject --novel-only           # only events not seen before
 ```
 
 The classes are `network`, `filesystem`, `exec`, and others; the schema is
-[docs/architecture/02-3-audit-schema.md](docs/architecture/02-3-audit-schema.md).
+[docs/archive/architecture/02-3-audit-schema.md](docs/archive/architecture/02-3-audit-schema.md).
 A denied connect, a refused exec, a blocked bind — each lands here with the
 attempted target, so the audit log is the first place to look when a workload
 "can't reach" something.
@@ -252,7 +252,7 @@ then add a `[[net.proxy.allow]]` (or a `[net.bpf]` CIDR rule in `host` mode).
 **A policy won't parse / compile.** `kennel policy validate <policy>` prints the
 exact field and reason. A common cause is a field name the parser does not
 accept — the authoritative list is `man policy.toml` and
-[docs/architecture/02-2-config-schema.md](docs/architecture/02-2-config-schema.md).
+[docs/archive/architecture/02-2-config-schema.md](docs/archive/architecture/02-2-config-schema.md).
 Some design-doc examples are marked roadmap (not yet built) and are rejected by
 the parser; the schema reference is the source of truth for what is accepted
 today.
@@ -304,6 +304,6 @@ prompt. See `man kennel`.
 
 - `man kennel`, `man kennel-policy`, `man policy.toml` — the reference.
 - [HOWTO-admin.md](HOWTO-admin.md) — installing and operating kennel on a host.
-- [docs/architecture/02-2-config-schema.md](docs/architecture/02-2-config-schema.md)
+- [docs/archive/architecture/02-2-config-schema.md](docs/archive/architecture/02-2-config-schema.md)
   — the complete policy schema.
-- [docs/design/](docs/design/) — the design rationale (the §7.x policy chapters).
+- [docs/archive/design/](docs/archive/design/) — the design rationale (the §7.x policy chapters).

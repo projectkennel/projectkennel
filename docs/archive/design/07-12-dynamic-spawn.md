@@ -399,7 +399,7 @@ the tools it is permitted to spawn.
 
 > **Catalogued as T3.9 — Delegated spawning.** The full entry — adversary, mitigations, the R1
 > mutable-field and R2 delegated-composition residuals, and the ATT&CK and compliance mappings — lives in
-> `docs/design/THREATS.md` (T3.9), with the machine form in `dist/threats/catalogue.toml`. The exposure is
+> `docs/reference/THREATS.md` (T3.9), with the machine form in `dist/threats/catalogue.toml`. The exposure is
 > **derived** from the `[spawn]` grant: `kennel policy risks` reports it with the grant as carrier and the
 > operator's `reason`, the path `mode = host` uses for T1.6 — no stored `threats.reinstated` field, the
 > grant is the tag. Workload-class family, sibling to T3.8.

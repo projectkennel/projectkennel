@@ -1,6 +1,6 @@
 //! The privhelper **factory**: build a kennel and `fexecve` `kennel-bin-init` into it.
 //!
-//! The construction inversion (`docs/design/07-2-kennel-bin-init.md` §7.2.1): rather than
+//! The construction inversion (Kennel book Vol 2 ch.2 (Process and Privilege Model)): rather than
 //! `kenneld` (the operator) building the sandbox unprivileged, the privhelper — holding the
 //! factory file capabilities `{cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin}` — does *all*
 //! privileged construction in its own post-`clone` child, then `fexecve`s the trusted root-owned

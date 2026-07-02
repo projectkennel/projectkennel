@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sync check: dist/threats/catalogue.toml must cover exactly the same threat ids,
-# at the same version, as the canonical docs/design/THREATS.md.
+# at the same version, as the canonical docs/reference/THREATS.md.
 #
 # THREATS.md is the canonical catalogue (prose); catalogue.toml is the machine form
 # `kennel policy risks` reads. This guard fails CI if THREATS.md gains, renames, or
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-THREATS="${KENNEL_THREATS_MD:-$ROOT/docs/design/THREATS.md}"
+THREATS="${KENNEL_THREATS_MD:-$ROOT/docs/reference/THREATS.md}"
 CAT="${KENNEL_CATALOGUE:-$ROOT/dist/threats/catalogue.toml}"
 
 fail=0

@@ -21,7 +21,7 @@
 #   - Still runs under Kennel's non-optional invariants: Landlock, no_new_privs,
 #     setuid/setgid/setcap denial, binder gateway.
 #
-# See docs/design/04-trust-boundaries.md §4.2.
+# See docs/archive/design/04-trust-boundaries.md §4.2.
 # ============================================================================
 
 template_name = "base-flatpak"

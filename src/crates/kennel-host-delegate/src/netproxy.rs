@@ -2,7 +2,7 @@
 //!
 //! # What this is
 //!
-//! `kenneld` owns the entire egress decision (`docs/design/07-5-network.md` §7.5): it reads the
+//! `kenneld` owns the entire egress decision (Kennel book Vol 2 ch.8 (The Network)): it reads the
 //! signed kennel policy, runs the allow/deny ruleset, resolves names under policy, re-checks the
 //! resolved address, and **pins** the vetted IPs — all in-process (`kenneld::inet`). The workload
 //! speaks SOCKS to `facade-socks5` inside its own net-ns, which forwards each request as a

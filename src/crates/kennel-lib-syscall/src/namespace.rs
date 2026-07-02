@@ -1,7 +1,7 @@
 //! Linux namespace operations.
 //!
 //! Safe wrappers (over nix) for `unshare(2)`, the first step of the spawn
-//! sequence (`docs/design/08` §spawn). The flag set is our own [`Namespaces`] type
+//! sequence (Kennel book Vol 2 ch.2 (Process and Privilege Model)). The flag set is our own [`Namespaces`] type
 //! rather than a re-export, so the rest of the workspace depends on this curated
 //! API and not on nix's `CloneFlags` directly. No `unsafe` of ours.
 
@@ -67,7 +67,7 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// `clone(2)` a child that is **PID 1** of a fresh PID namespace, entering all of
 /// `ns` in a single syscall, and run `child` in it.
 ///
-/// This is the privhelper-factory's construction primitive (`docs/design/07-2`): it
+/// This is the privhelper-factory's construction primitive (Kennel book Vol 2 ch.2 (Process and Privilege Model)): it
 /// `clone`s once with `NEWUSER|NEWNS|NEWPID|NEWIPC[|NEWNET]`, and the cloned child is
 /// itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)` child *is* the
 /// namespace init, unlike an `unshare` caller, which is not), so no

@@ -1,6 +1,6 @@
 # pure-compute (spawn target)
 
-A single-leg **SPAWN target** (`docs/design/07-12-dynamic-spawn.md` §7.12): run untrusted
+A single-leg **SPAWN target** (`docs/archive/design/07-12-dynamic-spawn.md` §7.12): run untrusted
 code that **reaches nothing**.
 
 - **Leg:** execution only. `net.mode = "none"` (no egress), no `fs.write` grant, ephemeral root.

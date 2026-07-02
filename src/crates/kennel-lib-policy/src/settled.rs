@@ -82,7 +82,7 @@ pub enum SeccompAction {
     KillProcess,
 }
 
-/// What to do when a kennel's TTL expires (`docs/design/09-policy-lifecycle.md` §9.7).
+/// What to do when a kennel's TTL expires (Kennel book Vol 2 ch.16 (The Policy Compiler)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
@@ -140,7 +140,7 @@ pub struct NameRule {
 }
 
 /// Where the per-kennel egress proxy listens, resolved from the source policy's
-/// `proxy_listen_*_address = "offset:port"` (`docs/design/07-5-network.md` §7.5.4).
+/// `proxy_listen_*_address = "offset:port"` (Kennel book Vol 2 ch.8 (The Network)).
 ///
 /// `offset` is the host offset within the kennel's own subnet (the `/28` in IPv4,
 /// the `/64` in IPv6); offset 1 is the kennel's primary address, where the proxy
@@ -670,7 +670,7 @@ pub struct SshGrant {
     pub key_file: String,
 }
 
-/// The per-kennel `AF_UNIX` socket shims `kenneld` realises (`docs/design/07-6-afunix.md` §7.6).
+/// The per-kennel `AF_UNIX` socket shims `kenneld` realises (Kennel book Vol 2 ch.9 (Local Services)).
 ///
 /// Like [`SshRuntime`], a *service* input rather than enforcement: `kenneld` binds
 /// each granted host socket into the kennel's constructed view at its shim path and
@@ -967,7 +967,7 @@ pub struct ServiceRuntime {
     pub max_attempts: u32,
 }
 
-/// The workload's identity inside the kennel (`docs/design/07-4-filesystem.md`): the
+/// The workload's identity inside the kennel (Kennel book Vol 2 ch.6 (The Filesystem)): the
 /// supplementary Unix groups it retains.
 ///
 /// Like [`SshRuntime`]/[`UnixRuntime`], a *service* input `kenneld` realises, not part
@@ -1075,7 +1075,7 @@ pub struct Provenance {
     pub resolved_artifacts: Vec<ResolvedArtifact>,
 }
 
-/// An active audit sink (`docs/architecture/02-3-audit-schema.md` §Sinks).
+/// An active audit sink (Kennel book Vol 2 ch.19 (The Audit Account)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AuditSinkKind {

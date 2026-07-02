@@ -17,7 +17,7 @@
 # local write, not egress); this template carries the registry allowlist so the
 # vetted egress is never operator-authored.
 #
-# See docs/design/07-11-oci-substrate.md §7.11.7 and templates/README.md.
+# See docs/archive/design/07-11-oci-substrate.md §7.11.7 and templates/README.md.
 # ============================================================================
 
 template_base = "base-confined"

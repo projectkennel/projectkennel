@@ -1,7 +1,7 @@
 //! The per-kennel SSH re-origination bastion (`kennel-sshd`): config and launch.
 //!
 //! Per-kennel SSH leaves the kennel only through a managed instance of stock
-//! OpenSSH `sshd` (`docs/design/07-10-ssh.md` §7.10). It holds no keys; it is a
+//! OpenSSH `sshd` (Kennel book Vol 2 ch.10 (Cryptographic Services)). It holds no keys; it is a
 //! forced-command router. `kenneld` owns its lifecycle and key state, exactly as it
 //! owns the egress proxy (`proxy.rs`): this module writes the hardened `sshd_config`
 //! and the per-key forced-command `authorized_keys` lines from the resolved `[ssh]`

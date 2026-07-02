@@ -1,7 +1,7 @@
 //! `host-netproxy`: the per-kennel egress **dial delegate**.
 //!
 //! `kenneld` owns the egress decision (allow/deny, DNS resolution, address pinning —
-//! `docs/design/07-5-network.md` §7.5). This binary is what's left after that: a glorified
+//! Kennel book Vol 2 ch.8 (The Network)). This binary is what's left after that: a glorified
 //! `netcat(1)`. It binds one owner-only `AF_UNIX` command socket — whose path is the sole argument,
 //! supplied by `kenneld` — and for each command `kenneld` sends `(port, pinned IPs)` plus a conduit
 //! fd over `SCM_RIGHTS`, it dials the pinned address from the host stack and splices the conduit to

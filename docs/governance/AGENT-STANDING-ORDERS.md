@@ -1,14 +1,16 @@
 # Standing orders — building against the corpus
 
-You are building against a tightly-specified architecture (`docs/architecture/`) with a
-design corpus (`docs/design/`) as backstop. Resolve every uncertainty in this order. Do not
-skip a step; do not improvise past one.
+You are building against the corpus — the **two-volume book** (`github.com/projectkennel/books`,
+checked out in-tree at `books/`): **Volume 1** is the platform-neutral design; **Volume 2** is the
+Linux realisation — the as-built contract. Resolve every uncertainty in this order. Do not skip a
+step; do not improvise past one. (The superseded pre-book `docs/design`/`docs/architecture` trees are
+preserved under `docs/archive/` for reference only — they are not the corpus and are not authoritative.)
 
 ## Escalation order
 
-1. **Corpus first — for *what should this do*.** Check the architecture doc for the contract,
-   then the design doc for the derivation behind it. Most "how should this behave" questions
-   are already answered or derivable. Resolve against the corpus before writing anything.
+1. **Corpus first — for *what should this do*.** Check Volume 2 (the Linux realisation) for the
+   contract, then Volume 1 (the design) for the derivation behind it. Most "how should this behave"
+   questions are already answered or derivable. Resolve against the corpus before writing anything.
 
 2. **Substrate second — for *what does the kernel actually do*.** For binder, namespaces,
    Landlock, seccomp, cgroups: check in this sub-order —

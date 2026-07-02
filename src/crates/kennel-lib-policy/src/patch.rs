@@ -1,4 +1,4 @@
-//! Instantiation-time patch application (`docs/design/07-12-dynamic-spawn.md` §7.12.3).
+//! Instantiation-time patch application (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! At `SPAWN`, `kenneld` takes a verified spawn-target template and an agent-supplied patch — a list
 //! of `(field, value)` pairs — and applies it to produce the instance the kennel actually runs. The

@@ -4,8 +4,8 @@ Each subdirectory here is **one self-checking policy**: a source `policy.toml` w
 `[workload]` is a `/bin/sh -c` chain that inspects the constructed kennel **from the
 inside** and exits `0` iff the slice of behaviour it proves holds. The workload's exit
 code *is* the verdict — there is no Rust assertion harness. The daemon builds each
-kennel from the signed policy exactly as it does in production (`docs/design/07-2`,
-`docs/architecture/08-enforcement-architecture.md` §8.2).
+kennel from the signed policy exactly as it does in production (`docs/archive/design/07-2`,
+`docs/archive/architecture/08-enforcement-architecture.md` §8.2).
 
 This is the self-hosting principle (`e2e-must-be-self-hosting`): drive the real
 `kennel run` against a live `kenneld`, not a hand-built `Spec`/`BinderPrep` replica that

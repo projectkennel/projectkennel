@@ -2,7 +2,7 @@
 //!
 //! Safe wrappers (over nix) for the mount operations the spawn sequence uses to
 //! build the workload's filesystem view inside a fresh mount namespace
-//! (`docs/design/07-4`, `docs/design/08` §spawn): make the tree private, bind paths in,
+//! (Kennel book Vol 2 ch.6 (The Filesystem), Kennel book Vol 2 ch.2 (Process and Privilege Model)): make the tree private, bind paths in,
 //! remount read-only, mount `proc`/`tmpfs`, then `pivot_root` into the new root
 //! and detach the old one. Flags are hidden behind named functions and bool
 //! parameters, so callers do not touch nix's `MsFlags`. No `unsafe` of ours.

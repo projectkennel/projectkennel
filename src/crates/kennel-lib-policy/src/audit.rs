@@ -25,7 +25,7 @@ const SYSLOG_FACILITIES: [&str; 20] = [
 ];
 
 /// `[audit]`: sink selection, per-class levels, and per-sink tuning
-/// (`docs/architecture/02-3-audit-schema.md` §Sink configuration). Levels and
+/// (Kennel book Vol 2 ch.19 (The Audit Account) configuration). Levels and
 /// sink names are validated at translate time.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

@@ -373,7 +373,7 @@ pub mod dbus {
 }
 
 /// Node-0 **lifecycle/config verbs** spoken only by `kennel-bin-init`, the kennel's uid-0
-/// PID 1 (`docs/design/07-2-kennel-bin-init.md` §7.2.4).
+/// PID 1 (Kennel book Vol 2 ch.2 (Process and Privilege Model)).
 ///
 /// A distinct high code range, disjoint from the [`verb`] registry codes (1–5), so the
 /// two protocols never collide and `kenneld` can gate the lifecycle branch separately:

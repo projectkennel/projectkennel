@@ -6,7 +6,7 @@
 //! source builds an [`Event`]; the [`Writer`] stamps the envelope, runs one
 //! content-sanitisation pass, applies the per-class audit [`Level`], and fans
 //! the rendered record out to every configured [`Sink`]. The event schema is the
-//! durable contract — see `docs/architecture/02-3-audit-schema.md`.
+//! durable contract — see Kennel book Vol 2 ch.19 (The Audit Account).
 //!
 //! # Why a hand-rolled JSON/timestamp/UUID path
 //!

@@ -2,7 +2,7 @@
 name = "gen-inventory"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel crate-inventory generator (not shipped). Computes the per-crate SLOC / unsafe / TCB-membership / consumer / external-dep table from the workspace itself and emits docs/architecture/crate-inventory.json (the source of truth) plus the rendered table into the marked block of 03-crate-decomposition.md, so the inventory cannot drift from the actual crate graph. Std-only: no third-party dependencies."
+description = "Project Kennel crate-inventory generator (not shipped). Computes the per-crate SLOC / unsafe / TCB-membership / consumer / external-dep table from the workspace itself and emits docs/reference/crate-inventory.json (the source of truth) plus the rendered table into the marked block of 03-crate-decomposition.md, so the inventory cannot drift from the actual crate graph. Std-only: no third-party dependencies."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

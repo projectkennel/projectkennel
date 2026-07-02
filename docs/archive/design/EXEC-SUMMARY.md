@@ -44,6 +44,6 @@ We are not asking for capital. We are asking for the readers without whom this w
 
 **Security contact:** security@projectkennel.org (see SECURITY.md)
 **Project repository:** https://github.com/projectkennel/projectkennel
-**Canonical THREATS.md:** https://github.com/projectkennel/projectkennel/blob/main/docs/design/THREATS.md
+**Canonical THREATS.md:** https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md
 
 *Full design rationale: companion design document, starting with §1 (the user-level runtime) and §2 (adversary model). Threat catalogue as a standalone artefact: THREATS.md.*

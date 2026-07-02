@@ -1,27 +1,34 @@
-# Design / Architecture patch log
+# As-built log
 
-`docs/design/**` and `docs/architecture/**` are **frozen** pending a clean-sheet rewrite
-(the two-volume book). While the freeze is in effect, do not edit those trees. Any change
-that would normally land as an as-built update to a design or architecture chapter is
-recorded here instead, to be ingested into the rewrite.
+The durable record of **as-built facts** — what the running code actually does — kept in this
+repository, deliberately **separate from the design corpus**. The corpus (the two-volume book,
+`github.com/projectkennel/books`, checked out in-tree at `books/`) states the design and the
+intended mechanism; this log states where the built system elaborates or diverges from it. When the
+two disagree, the book is the design of record and this log is the ground truth about the code — a
+code↔design gap is code-owed, and this log is where it is written down.
 
-Each entry: the **target** (chapter / §, best guess — the rewrite may restructure), the
-**as-built fact** the docs should reflect (or the stale claim to drop), the **why**, and the
-**source** (PR / commit). Newest first.
+It is the steady-state successor of the freeze-era patch log (the frozen `docs/archive/design/` and
+`docs/archive/architecture/` trees retired with the corpus cutover). It is **not** an ingestion queue:
+as-built facts live here; they are not drained into the book.
+
+Each entry: the **bears-on** book chapter (Vol N ch.M, best-effort — the book may restructure), the
+**as-built fact**, the **why**, and the **source** (PR / commit). Newest first. Entries dated before
+the cutover reference the pre-book chapters; their target lines were repointed to the archived copies
+under `docs/archive/` when the trees moved.
 
 ---
 
 <!-- Template:
 ## YYYY-MM-DD — <short title>
-- **Target:** docs/<design|architecture>/<chapter>.md §<x> (approx)
-- **Change:** <what is now true as-built / what is stale and should be dropped>
+- **Bears-on:** Kennel book Vol <N> ch.<M> (<Title>) §<x> (best-effort)
+- **Change:** <what is now true as-built / what the book's design would otherwise imply>
 - **Why:** <one line>
 - **Source:** #<PR> / <commit>
 -->
 
 ## 2026-07-01 — the policy JSON Schema is *derived* from the parser structs, not a hand-kept table
 
-- **Target:** docs/architecture/02-2-config-schema.md §intro (the "It is **generated**, not
+- **Target:** docs/archive/architecture/02-2-config-schema.md §intro (the "It is **generated**, not
   hand-maintained" paragraph), and any prose describing how `schema/policy.toml.schema` is produced.
 - **Change (as-built; drop the stale claim):** the schema is **no longer emitted from an in-repo data
   table that mirrors the source structs**, and there is **no cross-check test that "pins that table to
@@ -46,7 +53,7 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 - **Target:** the templates chapter (design §5.10 "Signing, versioned references, and includes" and
   §5.11 the upgrade flow), the config-schema chapter (`template_base`/`template_version`/`include`
   reference grammar), and the lockfile/provenance model. In the frozen trees:
-  docs/design/05-templates.md, docs/architecture/02-2-config-schema.md.
+  docs/archive/design/05-templates.md, docs/archive/architecture/02-2-config-schema.md.
 - **Change (as-built to capture in the rewrite) — this OVERRIDES §5.10:** there is **no version axis**
   on templates or fragments. A reference is a **bare name** (`template_base = "base-confined"`,
   `include = ["core-shell"]`, `[[spawn.allow]] template = "net-fetch"`); the `@vN` suffix, the
@@ -72,8 +79,8 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 
 - **Target:** the binder chapter (design §7.1, the user-defined service registry), the config-schema
   chapter (the `[binder]`, `[fs.proc]`, and `[unix]` tables), and the procfs/AF_UNIX construction. In
-  the frozen trees: docs/design/07-1-binder.md, docs/architecture/02-2-config-schema.md,
-  docs/architecture/02-4-binder.md.
+  the frozen trees: docs/archive/design/07-1-binder.md, docs/archive/architecture/02-2-config-schema.md,
+  docs/archive/architecture/02-4-binder.md.
 - **Change (as-built to capture in the rewrite):**
   - The **`[binder]` user-defined service section is removed** — `[[binder.provide]]` /
     `[[binder.consume]]`, the settled `BinderRuntime`, and `kenneld`'s node-0 service `Registry`
@@ -103,8 +110,8 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 ## 2026-06-30 — `[fs.tmp]`: `private` → `writable`, drop the DAC-mode knob (settled schema v3)
 
 - **Target:** the config-schema chapter (the `[fs.tmp]` section) and the filesystem chapter's
-  `/tmp` construction. In the frozen trees: docs/architecture/02-2-config-schema.md and
-  docs/design/07-4-filesystem.md.
+  `/tmp` construction. In the frozen trees: docs/archive/architecture/02-2-config-schema.md and
+  docs/archive/design/07-4-filesystem.md.
 - **Change (as-built to capture in the rewrite):**
   - `[fs.tmp].private` is renamed **`writable`** — that is what it always was: the Landlock write
     grant on `/tmp`. `/tmp` is *always* a fresh per-kennel tmpfs in the constructed view; `writable =
@@ -126,7 +133,7 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 
 - **Target:** the templates chapter, design §5.2-5.3 (the composition model) and the config-schema
   chapter, architecture §the policy schema / the leaf-policy delta form. In the frozen trees:
-  docs/design/05-templates.md and docs/architecture/02-2-config-schema.md.
+  docs/archive/design/05-templates.md and docs/archive/architecture/02-2-config-schema.md.
 - **Change (as-built to capture in the rewrite):** there is **one** source-policy type. The
   separate `LeafPolicy` (the delta-only `[[*.add]]` / `[[*.remove]]` form) and `SourcePolicy` (the
   bare-list "set" form) are unified — drop any framing that a leaf is a distinct type, or that the
@@ -154,7 +161,7 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 ## 2026-06-30 — reserved-namespace authority is compile-only and tier-based
 
 - **Target:** the service-catalogue chapter, design §7.13.4 / §7.13.5 (the reserved-namespace gate)
-  and §7.13.5a (host `[[reserved]]`). In the frozen trees: docs/design/07-13-service-catalog.md.
+  and §7.13.5a (host `[[reserved]]`). In the frozen trees: docs/archive/design/07-13-service-catalog.md.
 - **Change (as-built to capture in the rewrite):** the reserved-namespace authority is resolved
   **entirely at compile**, **tier-based**, and sealed into the settled policy's signature. There is
   **no runtime gate**. Drop the §7.13.4/§7.13.5 framing of a "runtime backstop / authoritative
@@ -186,7 +193,7 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 ## 2026-06-29 — D-Bus brokering is opt-in per consumer; host-dbus retained
 
 - **Target:** the D-Bus mediation chapter (design §7.7) and the mesh chapter (§7.13.2,
-  `dbus-name` shape). In the frozen trees: docs/design/07-7-dbus.md, docs/design/07-13-mesh.md.
+  `dbus-name` shape). In the frozen trees: docs/archive/design/07-7-dbus.md, docs/archive/design/07-13-mesh.md.
 - **Change (as-built to capture in the rewrite):** brokered D-Bus is **opt-in per consumer**, not
   a wholesale replacement of the `host-dbus` delegate. A kennel is routed over the standing
   `dbus-broker@v1` only when it declares **both** `[dbus.session]` **and** a `[[consumes]]` of a
@@ -204,9 +211,9 @@ Each entry: the **target** (chapter / §, best guess — the rewrite may restruc
 
 - **Target:** book ch16.3 (Audits — the commitment); the settled-policy chapter (the
   user's §17.1, "signature over the canonical serialisation"); the keys chapter (the user's
-  §18). In the frozen trees: docs/architecture/02-2-config-schema.md (§Signatures),
-  docs/design/05-templates.md (§5.10 trust store), docs/architecture/04-trust-boundaries.md,
-  docs/architecture/02-10-dynamic-spawn.md (the spawn content-pin).
+  §18). In the frozen trees: docs/archive/architecture/02-2-config-schema.md (§Signatures),
+  docs/archive/design/05-templates.md (§5.10 trust store), docs/archive/architecture/04-trust-boundaries.md,
+  docs/archive/architecture/02-10-dynamic-spawn.md (the spawn content-pin).
 - **Change (as-built to capture in the rewrite):**
   - **The on-disk signature is now an SSHSIG** (OpenSSH detached signature, `PROTOCOL.sshsig`),
     not a bare Ed25519 signature over the canonical bytes. The `[signature]` envelope's

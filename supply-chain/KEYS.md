@@ -5,7 +5,7 @@ The project's record of the upstream maintainer keys used to verify signed relea
 This is distinct from:
 
 - **Project Kennel's own release/template signing keys** — those are in [MAINTAINERS.md](../docs/governance/MAINTAINERS.md).
-- **The trust store consumed at runtime** — the public keys under `~/.config/kennel/keys/` and `/etc/kennel/keys/` that verify templates and settled policies (`docs/architecture/07-paths.md`).
+- **The trust store consumed at runtime** — the public keys under `~/.config/kennel/keys/` and `/etc/kennel/keys/` that verify templates and settled policies (`docs/archive/architecture/07-paths.md`).
 
 This file records the keys *we* trust when auditing *upstream dependencies*.
 

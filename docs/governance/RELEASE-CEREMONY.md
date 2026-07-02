@@ -13,7 +13,7 @@ usually already correct by release time — *verify*, do not blindly bump.
 |---|---|---|---|
 | **Package** | `Cargo.toml` `[workspace.package].version` (all crates inherit `version.workspace = true`) | every release | **bump** to the new `x.y.z` |
 | **Settled-schema** | `SETTLED_SCHEMA_VERSION` (+ `MIN_…`) in `kennel-lib-policy/src/lib.rs`; pinned in `schema/schema-version.lock` | the **policy schema shape** changes (field/type/required/enum) — CI's `schema-version-pin.sh` forces it per-change | **verify only.** Run the pin test; it must say "no bump owed". Bumping without a shape change *fails CI* (no pin line for the new version). |
-| **Threat-catalogue** | `catalogue_version` in `dist/threats/catalogue.toml` **and** the `Version` line in `docs/design/THREATS.md` (they must match) | a `THREATS.md` entry is added/changed | **verify only.** Confirm the two match; it was bumped when the entry landed. |
+| **Threat-catalogue** | `catalogue_version` in `dist/threats/catalogue.toml` **and** the `Version` line in `docs/reference/THREATS.md` (they must match) | a `THREATS.md` entry is added/changed | **verify only.** Confirm the two match; it was bumped when the entry landed. |
 
 > 0.5.0 example: package `0.4.0`→`0.5.0`; schema stayed `2` (no shape change — `abstract = "allow"`
 > was a value gate, not a new field); threats stayed `0.5` (W13 bumped it when its entry landed).
@@ -43,14 +43,14 @@ usually already correct by release time — *verify*, do not blindly bump.
    ```
 
 4. **Verify the threat axis:** `catalogue_version` in `dist/threats/catalogue.toml` matches the
-   `Version` line in `docs/design/THREATS.md`. (Both are *frozen-tree-exempt* only if a new entry is
+   `Version` line in `docs/reference/THREATS.md`. (Both are *frozen-tree-exempt* only if a new entry is
    genuinely owed; under the freeze, new entries are queued via `DOC-PATCH-LOG.md` and the catalogue
    version moves with the entry, not the release.)
 
 5. **Regenerate the machine artifacts** that embed counts/shape (the inventory carries SLOC; man and
    schema are version-agnostic but regen to be safe):
    ```
-   cargo run --offline --locked -p gen-inventory -- --json docs/architecture/crate-inventory.json --doc docs/architecture/03-crate-decomposition.md
+   cargo run --offline --locked -p gen-inventory -- --json docs/reference/crate-inventory.json --doc docs/reference/03-crate-decomposition.md
    cargo run --offline --locked -p gen-man -- ...            # if any CLI surface changed this cycle
    ```
 
@@ -66,7 +66,7 @@ usually already correct by release time — *verify*, do not blindly bump.
    items still deferred) and any **README / `docs/website/index.html` claim the release changes**
    (the 0.4.0 cut corrected a privhelper op-list and a "no setuid" line; 0.5.0 advanced the
    interactive-file-broker fence). **Leave historical references** (e.g. `0.4.0 F1 residual` in code
-   comments, frozen `docs/design`/`docs/architecture`, and `audits/` reports) — they name the
+   comments, the archived `docs/archive/design`/`docs/archive/architecture`, and `audits/` reports) — they name the
    release they belong to.
 
 8. **Local CI gate dry-run** before pushing (these are the jobs that bite):
@@ -74,7 +74,7 @@ usually already correct by release time — *verify*, do not blindly bump.
    cargo fmt --all -- --check
    cargo clippy --all-targets --all-features -- -D warnings
    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
-   git diff --exit-code docs/architecture/crate-inventory.json docs/architecture/03-crate-decomposition.md   # inventory regen committed
+   git diff --exit-code docs/reference/crate-inventory.json docs/reference/03-crate-decomposition.md   # inventory regen committed
    git diff --exit-code schema/policy.toml.schema                                                            # schema regen committed
    ```
    Open the PR against `main` and **watch every CI job** — especially `inventory`, `schema`,

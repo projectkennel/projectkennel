@@ -1,6 +1,6 @@
 # scratch-fs (spawn target)
 
-A single-leg **SPAWN target** (`docs/design/07-12-dynamic-spawn.md` §7.12): **data shuffling
+A single-leg **SPAWN target** (`docs/archive/design/07-12-dynamic-spawn.md` §7.12): **data shuffling
 without reach** — move and transform data on the filesystem, with no path to the network.
 
 - **Leg:** filesystem. `net.mode = "none"` (no egress), no persistence; the one leg is a writable

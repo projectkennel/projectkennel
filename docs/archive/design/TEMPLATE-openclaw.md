@@ -12,7 +12,7 @@ The leaf is reproduced in full, it is ~25 lines of which ~6 are policy, and **it
 cargo run -p kennel-lib-policy --example validate-policy -- leaf templates/examples/openclaw-myproj.toml
 ```
 
-For the meaning of every field — types, defaults, validation rules — see the schema reference in [`docs/architecture/02-2-config-schema.md`](../architecture/02-2-config-schema.md). This document explains the *security reasoning*, not the field catalogue.
+For the meaning of every field — types, defaults, validation rules — see the schema reference in [`docs/archive/architecture/02-2-config-schema.md`](../architecture/02-2-config-schema.md). This document explains the *security reasoning*, not the field catalogue.
 
 ---
 

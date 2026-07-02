@@ -1,6 +1,6 @@
 //! `host-inetd`: the per-kennel inbound **BIND delegate** (the reverse of `host-netproxy`).
 //!
-//! `kenneld` owns the bind decision (`docs/design/07-5-network.md` §7.5.7): the `[net.bpf].bind`
+//! `kenneld` owns the bind decision (Kennel book Vol 2 ch.8 (The Network)): the `[net.bpf].bind`
 //! cgroup ACL already gated the workload's `bind()`. This binary binds one owner-only `AF_UNIX`
 //! command socket — whose path is the sole argument, supplied by `kenneld` — and for each
 //! registration `kenneld` sends `(ip, port)`, it binds that `ip:port` on the host loopback,

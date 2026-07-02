@@ -1,4 +1,4 @@
-//! The mutable-field manifest and its **constraint family** (`docs/design/07-12-dynamic-spawn.md`
+//! The mutable-field manifest and its **constraint family** (Kennel book Vol 2 ch.13 (Dynamic Spawning)
 //! §7.12.3).
 //!
 //! A spawn-target template is signed *with* a manifest: a set of **variants** bounded by

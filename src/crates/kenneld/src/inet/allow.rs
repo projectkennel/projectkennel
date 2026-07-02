@@ -1,4 +1,4 @@
-//! The egress allowlist evaluator (`docs/design/07-5-network.md` §7.5.4).
+//! The egress allowlist evaluator (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! Pure, network-free policy logic: given a destination the client asked for,
 //! decide whether the proxy may connect to it. The evaluator is split from the
@@ -230,7 +230,7 @@ pub struct DenyRule {
 }
 
 /// The kennel's relationship to the network, as the egress proxy sees it
-/// (`docs/design/07-5-network.md` §7.5.1).
+/// (Kennel book Vol 2 ch.8 (The Network)).
 ///
 /// Only the proxied policy modes reach the proxy; the host-netns `open` and the no-network
 /// `none` never run a delegate, so they collapse to `None` here (deny-all) — they are
@@ -427,7 +427,7 @@ fn ends_with_label(name: &str, suffix: &str) -> bool {
 }
 
 /// Whether `port` is permitted by a rule's port set. An empty set means "any
-/// port" (`docs/design/07-5-network.md` §7.5.4 omits `ports` for portless rules).
+/// port" (Kennel book Vol 2 ch.8 (The Network) omits `ports` for portless rules).
 fn port_matches(ports: &[u16], port: u16) -> bool {
     ports.is_empty() || ports.contains(&port)
 }

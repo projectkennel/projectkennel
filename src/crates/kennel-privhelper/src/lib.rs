@@ -7,7 +7,7 @@
 //! within Project Kennel's reserved scope, performs the privileged operation,
 //! and exits. The privileged operations are: adding and removing per-kennel
 //! loopback addresses, and creating and deleting per-kennel cgroups
-//! (docs/architecture/01-process-model.md, 02-6-ipc.md).
+//! (Kennel book Vol 2 ch.2 (Process and Privilege Model), 02-6-ipc.md).
 //!
 //! This library holds the parts that are platform-independent and fully
 //! testable on any host: principally the request *validation* core
@@ -18,7 +18,7 @@
 //! # Invariants
 //!
 //! - Every field of every request is validated before any privileged syscall
-//!   (docs/architecture/04-trust-boundaries.md, boundary 1). The helper does not
+//!   (Kennel book Vol 1 ch.14 (Trust and Consent), boundary 1). The helper does not
 //!   trust the caller's claim that a request is in scope.
 //! - Requests outside the reserved address ranges or the `kennel/` cgroup
 //!   hierarchy are refused with a structured error; no privileged syscall runs.

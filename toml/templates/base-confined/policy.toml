@@ -16,7 +16,7 @@
 # enforced sections appear here; sections the runtime does not implement
 # (dbus/x11/ptrace/signal) are deliberately omitted — declaring them would warn.
 #
-# See docs/design/05-templates.md and templates/README.md.
+# See docs/archive/design/05-templates.md and templates/README.md.
 # ============================================================================
 
 template_name = "base-confined"

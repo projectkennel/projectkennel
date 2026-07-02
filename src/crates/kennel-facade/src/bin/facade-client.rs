@@ -2,7 +2,7 @@
 //!
 //! # Purpose
 //!
-//! The reverse of `facade-socks5` (`docs/design/07-5-network.md` §7.5.7). The workload `bind()`s a
+//! The reverse of `facade-socks5` (Kennel book Vol 2 ch.8 (The Network)). The workload `bind()`s a
 //! port natively in the kennel net-ns (gated by the `[net.bpf].bind` cgroup ACL); `host-inetd`
 //! mirrors that port on the host loopback and accepts. This facade is the in-kennel end that
 //! delivers each accepted connection to the workload's listener.

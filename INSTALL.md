@@ -35,7 +35,7 @@ src/tools/build-release.sh --arch "$(uname -m)-unknown-linux-gnu"
 # → dist/release/kennel-<version>-<sha>-<arch>-linux-gnu.tar.xz
 ```
 
-Then unpack it, verify the manifest, and run its bundled installer with `sudo`. It installs the binaries under `/usr/libexec/kennel` (the documented non-PATH helper location; see `docs/architecture/07-paths.md`):
+Then unpack it, verify the manifest, and run its bundled installer with `sudo`. It installs the binaries under `/usr/libexec/kennel` (the documented non-PATH helper location; see `docs/archive/architecture/07-paths.md`):
 
 ```bash
 tar xf dist/release/kennel-*.tar.xz

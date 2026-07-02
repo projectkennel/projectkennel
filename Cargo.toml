@@ -1,6 +1,6 @@
 # Project Kennel — Cargo workspace root.
 #
-# One crate per architectural module (docs/architecture/03-crate-decomposition.md).
+# One crate per architectural module (docs/reference/03-crate-decomposition.md).
 # The prefix encodes where the crate runs — the security-relevant fact:
 #   kennel-lib-*  — libraries linked into the binaries (no runtime location of their own)
 #   kennel-bin-*  — binaries that are neither end of a binder connector (e.g. init)

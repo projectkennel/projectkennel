@@ -276,9 +276,9 @@ jobs:
       - name: Regenerate the crate inventory
         run: >-
           cargo run --offline --locked -p gen-inventory --
-          --json docs/architecture/crate-inventory.json
-          --doc docs/architecture/03-crate-decomposition.md
+          --json docs/reference/crate-inventory.json
+          --doc docs/reference/03-crate-decomposition.md
       - name: No drift (the inventory matches the workspace)
-        run: git diff --exit-code docs/architecture/crate-inventory.json docs/architecture/03-crate-decomposition.md
+        run: git diff --exit-code docs/reference/crate-inventory.json docs/reference/03-crate-decomposition.md
       - name: Inventory is valid JSON
-        run: python3 -c "import json,sys; json.load(open('docs/architecture/crate-inventory.json'))"
+        run: python3 -c "import json,sys; json.load(open('docs/reference/crate-inventory.json'))"
