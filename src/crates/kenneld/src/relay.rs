@@ -66,6 +66,25 @@ pub const MAX_NAME: usize = 253;
 /// malformed count byte cannot drive an absurd read.
 pub const MAX_ADDRS: usize = 64;
 
+/// On-wire size of one address entry: a family byte plus a 16-byte address
+/// (an IPv4 address occupies the first four, the rest zero).
+const ENTRY: usize = 17;
+
+/// Append one address as `[family:u8][addr:[u8;16]]` (v4 in the first four).
+fn push_addr(b: &mut Vec<u8>, ip: IpAddr) {
+    match ip {
+        IpAddr::V4(a) => {
+            b.push(4);
+            b.extend_from_slice(&a.octets());
+            b.extend_from_slice(&[0u8; 12]);
+        }
+        IpAddr::V6(a) => {
+            b.push(6);
+            b.extend_from_slice(&a.octets());
+        }
+    }
+}
+
 /// The request opcode (first frame byte). Private: callers use [`RelayRequest`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
@@ -259,7 +278,27 @@ impl RelayRequest {
     /// Encode this request to its wire frame.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut b = Vec::new();
+        match self {
+            Self::Resolve { name } => {
+                b.push(Op::Resolve.to_byte());
+                // Bounded by MAX_NAME on decode; the monitor constructs within it.
+                let len = u16::try_from(name.len()).unwrap_or(u16::MAX);
+                b.extend_from_slice(&len.to_ne_bytes());
+                b.extend_from_slice(name.as_bytes());
+            }
+            Self::SpawnDelegate { kind, ctx } => {
+                b.push(Op::SpawnDelegate.to_byte());
+                b.push(kind.to_byte());
+                b.extend_from_slice(&ctx.to_ne_bytes());
+            }
+            Self::FdRelay { resource, pid } => {
+                b.push(Op::FdRelay.to_byte());
+                b.push(resource.to_byte());
+                b.extend_from_slice(&pid.to_ne_bytes());
+            }
+        }
+        b
     }
 
     /// Decode a request frame received by the parent.
@@ -271,8 +310,56 @@ impl RelayRequest {
     /// [`RelayError::BadResource`] on an unknown enum byte;
     /// [`RelayError::NameTooLong`] / [`RelayError::NonUtf8Name`] on a bad name.
     pub fn decode(buf: &[u8]) -> Result<Self, RelayError> {
-        let _ = buf;
-        todo!()
+        let op = Op::from_byte(*buf.first().ok_or(RelayError::BadLength)?)
+            .ok_or(RelayError::BadTag)?;
+        match op {
+            Op::Resolve => {
+                let len_bytes = buf.get(1..3).ok_or(RelayError::BadLength)?;
+                let name_len = usize::from(u16::from_ne_bytes(
+                    len_bytes.try_into().map_err(|_| RelayError::BadLength)?,
+                ));
+                if name_len > MAX_NAME {
+                    return Err(RelayError::NameTooLong);
+                }
+                let name_bytes = buf.get(3..).ok_or(RelayError::BadLength)?;
+                if name_bytes.len() != name_len {
+                    return Err(RelayError::BadLength);
+                }
+                let name = std::str::from_utf8(name_bytes)
+                    .map_err(|_| RelayError::NonUtf8Name)?
+                    .to_owned();
+                Ok(Self::Resolve { name })
+            }
+            Op::SpawnDelegate => {
+                if buf.len() != 4 {
+                    return Err(RelayError::BadLength);
+                }
+                let kind = DelegateKind::from_byte(*buf.get(1).ok_or(RelayError::BadLength)?)
+                    .ok_or(RelayError::BadKind)?;
+                let ctx = u16::from_ne_bytes(
+                    buf.get(2..4)
+                        .ok_or(RelayError::BadLength)?
+                        .try_into()
+                        .map_err(|_| RelayError::BadLength)?,
+                );
+                Ok(Self::SpawnDelegate { kind, ctx })
+            }
+            Op::FdRelay => {
+                if buf.len() != 6 {
+                    return Err(RelayError::BadLength);
+                }
+                let resource =
+                    RelayResource::from_byte(*buf.get(1).ok_or(RelayError::BadLength)?)
+                        .ok_or(RelayError::BadResource)?;
+                let pid = i32::from_ne_bytes(
+                    buf.get(2..6)
+                        .ok_or(RelayError::BadLength)?
+                        .try_into()
+                        .map_err(|_| RelayError::BadLength)?,
+                );
+                Ok(Self::FdRelay { resource, pid })
+            }
+        }
     }
 }
 
@@ -307,7 +394,19 @@ impl RelayResponse {
     /// Encode this reply to its wire frame.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        match self {
+            Self::Resolved { addrs } => {
+                let mut b = Vec::new();
+                b.push(0);
+                b.push(u8::try_from(addrs.len()).unwrap_or(u8::MAX));
+                for &ip in addrs {
+                    push_addr(&mut b, ip);
+                }
+                b
+            }
+            Self::FdReady => vec![1],
+            Self::Refused { code } => vec![2, code.to_byte()],
+        }
     }
 
     /// Decode a reply frame received by the monitor.
@@ -319,8 +418,57 @@ impl RelayResponse {
     /// bad address family; [`RelayError::TooManyAddrs`] past [`MAX_ADDRS`];
     /// [`RelayError::BadRefusal`] on an unknown refusal code.
     pub fn decode(buf: &[u8]) -> Result<Self, RelayError> {
-        let _ = buf;
-        todo!()
+        let tag = *buf.first().ok_or(RelayError::BadLength)?;
+        match tag {
+            0 => {
+                let count = *buf.get(1).ok_or(RelayError::BadLength)?;
+                let n = usize::from(count);
+                if n > MAX_ADDRS {
+                    return Err(RelayError::TooManyAddrs);
+                }
+                let body = buf.get(2..).ok_or(RelayError::BadLength)?;
+                let expected = n.checked_mul(ENTRY).ok_or(RelayError::BadLength)?;
+                if body.len() != expected {
+                    return Err(RelayError::BadLength);
+                }
+                let mut addrs = Vec::with_capacity(n);
+                for chunk in body.chunks_exact(ENTRY) {
+                    let family = *chunk.first().ok_or(RelayError::BadLength)?;
+                    let a16: [u8; 16] = chunk
+                        .get(1..ENTRY)
+                        .and_then(|s| s.try_into().ok())
+                        .ok_or(RelayError::BadLength)?;
+                    let ip = match family {
+                        4 => {
+                            let v4: [u8; 4] = a16
+                                .get(..4)
+                                .and_then(|s| s.try_into().ok())
+                                .ok_or(RelayError::BadLength)?;
+                            IpAddr::V4(Ipv4Addr::from(v4))
+                        }
+                        6 => IpAddr::V6(Ipv6Addr::from(a16)),
+                        _ => return Err(RelayError::BadFamily),
+                    };
+                    addrs.push(ip);
+                }
+                Ok(Self::Resolved { addrs })
+            }
+            1 => {
+                if buf.len() != 1 {
+                    return Err(RelayError::BadLength);
+                }
+                Ok(Self::FdReady)
+            }
+            2 => {
+                if buf.len() != 2 {
+                    return Err(RelayError::BadLength);
+                }
+                let code = RefusalCode::from_byte(*buf.get(1).ok_or(RelayError::BadLength)?)
+                    .ok_or(RelayError::BadRefusal)?;
+                Ok(Self::Refused { code })
+            }
+            _ => Err(RelayError::BadTag),
+        }
     }
 }
 
@@ -412,7 +560,7 @@ mod tests {
     fn decode_rejects_name_too_long() {
         let mut buf = vec![1u8];
         let n = MAX_NAME + 1;
-        buf.extend_from_slice(&u16::try_from(n).unwrap().to_ne_bytes());
+        buf.extend_from_slice(&u16::try_from(n).unwrap_or(u16::MAX).to_ne_bytes());
         buf.extend_from_slice(&vec![b'a'; n]);
         assert_eq!(RelayRequest::decode(&buf), Err(RelayError::NameTooLong));
     }

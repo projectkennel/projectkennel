@@ -49,6 +49,14 @@ pub fn fuzz_parsers(data: &[u8]) {
     let _ = kenneld::control::Response::decode(data);
     let _ = kennel_privhelper::wire::Request::decode(data);
 
+    // The parent-child relay wire (W1 self-confinement, Kennel book Vol 2 ch.2): the
+    // unconfined parent decodes requests from the *sealed monitor*, which it treats as
+    // hostile — the whole surface a compromised monitor can drive the parent across, so
+    // its request decoder is the primary target. The monitor's response decoder is
+    // included for completeness (bounded either way).
+    let _ = kenneld::relay::RelayRequest::decode(data);
+    let _ = kenneld::relay::RelayResponse::decode(data);
+
     // The enforcement-plan wire (07-2): kenneld builds these bytes, but a *privileged* process
     // decodes them — the privhelper factory the construction-half, root `kennel-bin-init` the
     // supervision-half. A compromised kenneld supplying a malformed plan must hit a clean
