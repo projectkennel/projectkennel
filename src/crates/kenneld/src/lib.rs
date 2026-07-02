@@ -56,7 +56,7 @@ pub mod tripwire;
 pub use kennel_lib_control::{control, socket};
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -64,7 +64,7 @@ use std::process::{Child, Command};
 use kennel_lib_policy::{NetMode, NetPolicy};
 use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
 use kennel_lib_syscall::namespace::Namespaces;
-use kennel_privhelper::addr::{loopback_v4, loopback_v6, V4_PREFIX, V6_PREFIX};
+use kennel_privhelper::addr::{loopback_v6, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
 use kennel_privhelper::wire::{EgressPayload, Response};
 
@@ -512,7 +512,6 @@ pub struct Kennel {
     init_pid: i32,
     cgroup: PathBuf,
     ctx: u16,
-    v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     /// The egress-proxy child, if one was launched. Killed and reaped on teardown.
     proxy: Option<Child>,
@@ -608,7 +607,6 @@ impl Kennel {
             privileged,
             self.ctx,
             Some(self.cgroup.as_path()),
-            self.v4,
             self.v6,
             self.proxy.take(),
             self.inetd.take(),
@@ -637,7 +635,6 @@ fn reap_proxy(proxy: Option<Child>) {
 #[derive(Default)]
 struct Provision {
     made_cgroup: bool,
-    v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
     inetd: Option<Child>,
@@ -708,7 +705,6 @@ pub fn start<P: Privileged + Sync>(
             init_pid,
             cgroup,
             ctx,
-            v4: state.v4,
             v6: state.v6,
             proxy: state.proxy,
             inetd: state.inetd,
@@ -726,7 +722,6 @@ pub fn start<P: Privileged + Sync>(
                 privileged,
                 ctx,
                 state.made_cgroup.then_some(cgroup.as_path()),
-                state.v4,
                 state.v6,
                 state.proxy,
                 state.inetd,
@@ -819,15 +814,9 @@ fn bring_up<P: Privileged + Sync>(
     let mirror_ports = mirror_bind_ports(net);
     let mut loopback: Vec<kennel_lib_spawn::LoopbackAddr> = Vec::new();
     if proxied && !mirror_ports.is_empty() {
-        let addr6 = loopback_v6(scope.ula_gid(), ctx, u64::from(offset));
-        if let Ok(c) = u8::try_from(ctx) {
-            let addr = loopback_v4(scope.tag(), c, offset);
-            loopback.push(kennel_lib_spawn::LoopbackAddr {
-                addr: addr.into(),
-                prefix: V4_PREFIX,
-            });
-            state.v4 = Some(addr);
-        }
+        // v6-only ULA: the inbound-mirror address derives from the caller's uid (W10); there
+        // is no IPv4 loopback alias anymore.
+        let addr6 = loopback_v6(scope.uid(), ctx, u64::from(offset));
         loopback.push(kennel_lib_spawn::LoopbackAddr {
             addr: addr6.into(),
             prefix: V6_PREFIX,
@@ -941,10 +930,10 @@ fn bring_up<P: Privileged + Sync>(
             home: &etc.home,
             groups: &etc.groups,
             shell: &etc.shell,
-            // The kennel's `localhost` maps to its per-kennel address only when it has one (a bind);
-            // otherwise to the standard loopback — a no-bind kennel reaches its own services on
-            // `127.0.0.1`/`::1` like any host.
-            v4: state.v4,
+            // No per-kennel v4 alias anymore (addressing is v6-only); `/etc/hosts` gets the
+            // standard `127.0.0.1 localhost` line via the `None` fallback. The v6 `localhost`
+            // maps to the kennel's per-kennel v6 address when it has one (a bind), else `::1`.
+            v4: None,
             v6: state.v6.unwrap_or(std::net::Ipv6Addr::LOCALHOST),
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
@@ -1260,11 +1249,7 @@ fn bring_up<P: Privileged + Sync>(
     // host-inetd's accepted conduits into the kennel (DELIVER_INET) once the facade has registered.
     if let Some(setup) = proxy {
         if !mirror_ports.is_empty() {
-            if let Some(kennel_ip) = state
-                .v4
-                .map(std::net::IpAddr::from)
-                .or_else(|| state.v6.map(std::net::IpAddr::from))
-            {
+            if let Some(kennel_ip) = state.v6.map(std::net::IpAddr::from) {
                 std::fs::create_dir_all(&setup.config_dir)?;
                 let inetd_sock = setup.config_dir.join(format!("inetd-cmd-{ctx}.sock"));
                 tracer.step(&format!(
@@ -1965,7 +1950,6 @@ fn teardown<P: Privileged>(
     privileged: &P,
     ctx: u16,
     cgroup: Option<&Path>,
-    v4: Option<Ipv4Addr>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
     inetd: Option<Child>,
@@ -1980,9 +1964,6 @@ fn teardown<P: Privileged>(
     tracer.step("teardown: proxies + delegates reaped; releasing addresses");
     if let Some(addr) = v6 {
         let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V6_PREFIX);
-    }
-    if let Some(addr) = v4 {
-        let _ = privileged.del_address(ctx, LOOPBACK, addr.into(), V4_PREFIX);
     }
     if let Some(cg) = cgroup {
         let _ = std::fs::remove_dir(cg);

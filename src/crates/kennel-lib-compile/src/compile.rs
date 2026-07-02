@@ -73,8 +73,8 @@ pub struct Compiled {
 ///
 /// `entry` is the most-derived source artefact (a leaf or a template); `source`
 /// supplies its ancestors; `compiler_version` is recorded in provenance. All
-/// placeholders (including `<tag>`/`<gid>`) are deferred to spawn; the compiler
-/// never needs the installation's tag/gid.
+/// per-user placeholders are deferred to spawn; the compiler is host- and
+/// user-independent.
 ///
 /// # Errors
 ///

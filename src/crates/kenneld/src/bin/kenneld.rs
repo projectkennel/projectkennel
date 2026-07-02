@@ -2,9 +2,9 @@
 //!
 //! A user-space, per-user daemon: socket-activated on the first `kennel run` and
 //! persisting for the session (see [`kenneld::socket`]). It builds the user's
-//! [`Identity`] from kernel-trusted sources — the real uid, the
-//! `/etc/kennel/subkennel` allocation, and its own delegated cgroup — and serves
-//! the control socket, orchestrating kennels through the setuid privhelper.
+//! [`Identity`] from kernel-trusted sources — the real uid (from which the reserved
+//! scope is derived) and its own delegated cgroup — and serves the control socket,
+//! orchestrating kennels through the setuid privhelper.
 
 #![forbid(unsafe_code)]
 
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv6Addr};
 
 use kenneld::server::{serve, BastionSetup, Identity, Shared};
 use kenneld::{policy, socket, HelperClient, ProxySetup};
@@ -76,8 +76,9 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
-    let scope = kennel_privhelper::alloc::load(uid)
-        .ok_or_else(|| format!("no kennel allocation for uid {uid} in /etc/kennel/subkennel"))?;
+    // The reserved scope derives from the kernel-trusted real uid — no `/etc/kennel/subkennel`
+    // allocation (W10). Every uid has a scope; there is no refuse-to-start.
+    let scope = kennel_privhelper::validate::ReservedScope::new(uid);
     let cgroup_base =
         kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
     // Vacate the base cgroup and enable the pids/memory controllers for the kennel children, so
@@ -106,10 +107,11 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
         std::env::var_os("XDG_STATE_HOME").map_or_else(|| home.join(".local/state"), PathBuf::from);
     let audit_base = Some(state_home.join("kennel"));
     // The per-user SSH bastion (§7.10): one managed kennel-sshd for the session, on a
-    // host-loopback port derived from the user's tag (so two users' daemons do not
-    // clash on 127.0.0.1). Each forced command runs `ssh <options> -- <dest>` as the
-    // operator, signing with whatever the policy's per-destination `options` name from the
-    // operator's own host-side key store — no agent, no key material kenneld can reach.
+    // v6 host-loopback (`::1`); the bastion picks a random high port at start (trying sshd on it
+    // and re-rolling on failure), so co-located daemons do not clash — no per-user derived port.
+    // Each forced command runs `ssh <options> -- <dest>` as the operator, signing with whatever the
+    // policy's per-destination `options` name from the operator's own host-side key store — no
+    // agent, no key material kenneld can reach.
     //
     // Keys are vended through the root-owned AuthorizedKeysCommand (§7.10.7): it queries
     // this running daemon for the live forced-command bindings, so the bindings never
@@ -118,8 +120,7 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
     let bastion = Some(BastionSetup {
         dir: socket::runtime_dir().join("bastion"),
         ssh_bin: deployment.ssh(),
-        listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        port: 8022_u16.saturating_add(scope.tag()),
+        listen: IpAddr::V6(Ipv6Addr::LOCALHOST),
         akc: Some(kenneld::bastion::Akc {
             command: deployment.akc(),
             user: username.clone(),

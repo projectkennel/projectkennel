@@ -16,9 +16,10 @@
 //! the verdict); these in-process tests complement it where Rust-level harnessing of
 //! signals, ptys, or the orchestration return value is needed.
 //!
-//! Both need the same one-time host setup (factory caps on the privhelper, an
-//! `/etc/kennel/subkennel` allocation, a root-owned `kennel-bin-init`, an `AppArmor`
-//! `userns` grant, a writable delegated cgroup). For these in-process tests the runner
+//! Both need the same one-time host setup (factory caps on the privhelper, a
+//! root-owned `kennel-bin-init`, an `AppArmor` `userns` grant, a writable delegated
+//! cgroup — the reserved scope is uid-derived, so no allocation file). For these
+//! in-process tests the runner
 //! is `src/tools/unprivileged-e2e.sh`; where a prerequisite is missing a test **skips
 //! with the precise cause** (never a false pass).
 
@@ -33,12 +34,6 @@ use kennel_lib_policy::{
 };
 use kennel_privhelper::validate::ReservedScope;
 use kenneld::HelperClient;
-
-/// The operator's allocation, matching the `/etc/kennel/subkennel` line the runner
-/// provisions for the test uid: `<uid>:42:0000000002:kennel-dev`.
-const TEST_TAG: u16 = 42;
-const TEST_ULA_GID: [u8; 5] = [0, 0, 0, 0, 2];
-const TEST_NAMESPACE: &str = "kennel-dev";
 
 /// Locate a binary built alongside this test (`target/<profile>/<name>`).
 fn sibling_binary(name: &str) -> PathBuf {
@@ -212,13 +207,6 @@ fn dev_allow() -> Vec<String> {
     v
 }
 
-/// Whether `/etc/kennel/subkennel` has a line for `uid` (the privhelper's reserved
-/// scope source).
-fn subkennel_has_line(uid: u32) -> bool {
-    std::fs::read_to_string("/etc/kennel/subkennel")
-        .is_ok_and(|t| t.lines().any(|l| l.trim().starts_with(&format!("{uid}:"))))
-}
-
 /// on a real error or any other variant.
 #[cfg(feature = "e2e")]
 #[must_use]
@@ -280,10 +268,6 @@ fn no_ipc_kennel_runs_through_the_factory() {
         eprintln!("SKIP: HOME is not set");
         return;
     };
-    if !subkennel_has_line(uid) {
-        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
-        return;
-    }
     let Some(base) = own_cgroup_base() else {
         eprintln!("SKIP: cannot read a delegated cgroup base");
         return;
@@ -317,7 +301,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
         gid,
         username: "dev".to_owned(),
         home,
-        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        scope: ReservedScope::new(uid),
         cgroup_base: base,
         proxy: None,
         etc_base: Some(etc_base.clone()),
@@ -411,10 +395,6 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         eprintln!("SKIP: HOME is not set");
         return;
     };
-    if !subkennel_has_line(uid) {
-        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
-        return;
-    }
     let Some(base) = own_cgroup_base() else {
         eprintln!("SKIP: cannot read a delegated cgroup base");
         return;
@@ -465,7 +445,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
         gid,
         username: "dev".to_owned(),
         home,
-        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        scope: ReservedScope::new(uid),
         cgroup_base: base,
         proxy: None,
         etc_base: Some(etc_base.clone()),
@@ -562,10 +542,6 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
-    if !subkennel_has_line(uid) {
-        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
-        return;
-    }
     let Some(base) = own_cgroup_base() else {
         return;
     };
@@ -616,7 +592,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         gid,
         username: "dev".to_owned(),
         home,
-        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        scope: ReservedScope::new(uid),
         cgroup_base: base,
         proxy: None,
         etc_base: Some(etc_base.clone()),
@@ -739,10 +715,6 @@ fn run_ttl_kennel(
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    if !subkennel_has_line(uid) {
-        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
-        return None;
-    }
     let base = own_cgroup_base()?;
     if std::fs::create_dir_all(&base).is_err() {
         eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
@@ -781,7 +753,7 @@ fn run_ttl_kennel(
         gid,
         username: "dev".to_owned(),
         home,
-        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        scope: ReservedScope::new(uid),
         cgroup_base: base,
         proxy: None,
         etc_base: Some(etc_base.clone()),
@@ -943,10 +915,6 @@ fn interactive_harness(tag: &str) -> Option<InteractiveHarness> {
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    if !subkennel_has_line(uid) {
-        eprintln!("SKIP: no /etc/kennel/subkennel line — run src/tools/unprivileged-e2e.sh");
-        return None;
-    }
     let base = own_cgroup_base()?;
     if std::fs::create_dir_all(&base).is_err() {
         eprintln!("SKIP: cgroup base not writable — run under the e2e runner");
@@ -984,7 +952,7 @@ fn interactive_harness(tag: &str) -> Option<InteractiveHarness> {
         gid,
         username: "dev".to_owned(),
         home,
-        scope: ReservedScope::new(TEST_TAG, TEST_ULA_GID, TEST_NAMESPACE),
+        scope: ReservedScope::new(uid),
         cgroup_base: base,
         proxy: None,
         etc_base: Some(etc_base.clone()),

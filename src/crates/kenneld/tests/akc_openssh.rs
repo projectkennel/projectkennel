@@ -74,7 +74,6 @@ fn root_owned_akc_vends_the_forced_command_for_a_registered_key() {
     let bastion: SharedBastion = Arc::new(Mutex::new(Bastion::new(BastionConfig {
         dir: stage.join("bastion"),
         listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
-        port: 8022,
         akc: Some(Akc {
             command: akc.clone(),
             user: "root".to_owned(),

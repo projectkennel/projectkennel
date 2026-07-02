@@ -64,11 +64,6 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "keygen <key-id> [--dir DIR] [--force]",
     },
     CommandSpec {
-        name: "subkennel",
-        summary: "manage /etc/kennel/subkennel allocations",
-        usage: "subkennel <add|check> [--uid N] [--namespace NS] [--tag N] [--file PATH]",
-    },
-    CommandSpec {
         name: "audit",
         summary: "show a kennel's audit log",
         usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",

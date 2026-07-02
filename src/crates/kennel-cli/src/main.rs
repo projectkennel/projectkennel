@@ -2,7 +2,7 @@
 //!
 //! Installed at `/usr/libexec/kennel/host` and reached through the `kennel` shim (which
 //! detects host-vs-cage context). Dispatches every operator verb — `run`, `attach`, `stop`,
-//! `list`, `review`, `release`, `daemon-reload`, `policy`, `oci`, `keygen`, `subkennel`,
+//! `list`, `review`, `release`, `daemon-reload`, `policy`, `oci`, `keygen`,
 //! `audit` — over the `kennel_cli` library crate.
 
 #![forbid(unsafe_code)]
@@ -46,7 +46,6 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "daemon-reload" => kennel_cli::runtime::daemon_reload(),
         "policy" => dispatch_policy(rest),
         "keygen" => kennel_cli::misc::keygen(rest),
-        "subkennel" => kennel_cli::misc::subkennel(rest),
         "audit" => kennel_cli::misc::audit(rest),
         other => Err(format!("unknown command `{other}` — run `kennel --help`")),
     }

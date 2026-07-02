@@ -18,6 +18,7 @@ use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::time::Duration;
 
 use crate::sshd::{self, AuthSource, SshdParams};
 
@@ -66,8 +67,6 @@ pub struct BastionConfig {
     pub dir: PathBuf,
     /// The loopback address the bastion listens on (the egress proxy forwards here).
     pub listen: IpAddr,
-    /// The bastion's port.
-    pub port: u16,
     /// The root-owned `AuthorizedKeysCommand` to vend keys through (production,
     /// §7.10.7). `None` falls back to a static `AuthorizedKeysFile` the bastion-user
     /// owns — the prototype/e2e source, which writes the bindings to disk.
@@ -98,6 +97,9 @@ pub struct Bastion {
     /// The bastion host key's public line (for the kennels' synthetic `known_hosts`),
     /// set once the daemon is first started.
     host_pub: Option<String>,
+    /// The port sshd actually bound, discovered at start (a random high port). `None`
+    /// until the daemon is started.
+    port: Option<u16>,
 }
 
 impl Bastion {
@@ -109,6 +111,7 @@ impl Bastion {
             edges: Vec::new(),
             child: None,
             host_pub: None,
+            port: None,
         }
     }
 
@@ -116,6 +119,12 @@ impl Bastion {
     #[must_use]
     pub const fn is_running(&self) -> bool {
         self.child.is_some()
+    }
+
+    /// The port sshd bound at start (`None` until started).
+    #[must_use]
+    pub const fn port(&self) -> Option<u16> {
+        self.port
     }
 
     /// The bastion host key's public line, once started (for synthetic `known_hosts`).
@@ -258,27 +267,51 @@ impl Bastion {
             },
             None => AuthSource::File(self.config.authorized_keys()),
         };
-        let params = SshdParams {
-            listen: self.config.listen,
-            port: self.config.port,
-            host_key: &host_key,
-            pid_file: &self.config.pid_file(),
-            auth,
-        };
-        let config_path = self.config.config_file();
-        std::fs::write(&config_path, sshd::sshd_config(&params))?;
         // With the file source, an authorized_keys must exist before sshd reads it on
-        // the first connection; with the AKC there is no file.
+        // the first connection; with the AKC there is no file. Port-independent, so once.
         if self.uses_file() {
             self.write_authorized_keys()?;
         }
+        let config_path = self.config.config_file();
 
-        self.child = Some(sshd::spawn(
-            Path::new(sshd::DEFAULT_SSHD_BIN),
-            &config_path,
-        )?);
-        Ok(())
+        // Pick a random high port and *try to start sshd on it*: a successful start is the bind
+        // test, so there is no pre-bind probe and thus no TOCTOU. sshd runs foreground (`-D`); if
+        // the bind fails it exits promptly, so we give it a moment and re-roll on an early exit.
+        for _ in 0..BASTION_PORT_ATTEMPTS {
+            let port = pick_bastion_port()?;
+            let params = SshdParams {
+                listen: self.config.listen,
+                port,
+                host_key: &host_key,
+                pid_file: &self.config.pid_file(),
+                auth: auth.clone(),
+            };
+            std::fs::write(&config_path, sshd::sshd_config(&params))?;
+            let mut child = sshd::spawn(Path::new(sshd::DEFAULT_SSHD_BIN), &config_path)?;
+            std::thread::sleep(Duration::from_millis(200));
+            // Still running ⇒ it bound the port; keep it. Exited already ⇒ the port was
+            // unavailable (try_wait reaped it), so re-roll and try another.
+            if child.try_wait()?.is_none() {
+                self.child = Some(child);
+                self.port = Some(port);
+                return Ok(());
+            }
+        }
+        Err(io::Error::other(format!(
+            "bastion sshd could not bind a high port after {BASTION_PORT_ATTEMPTS} attempts"
+        )))
     }
+}
+
+/// How many random high ports to try starting sshd on before giving up.
+const BASTION_PORT_ATTEMPTS: u32 = 16;
+
+/// A random high port for the bastion, `61000 + rand%4096` (61000..=65095) — the
+/// ephemeral-adjacent range, chosen at random so co-located daemons rarely collide on
+/// the first try. Entropy from `getrandom`; the authoritative bind test is starting sshd.
+fn pick_bastion_port() -> io::Result<u16> {
+    let b = kennel_lib_syscall::random::bytes::<2>()?;
+    Ok(61000u16.saturating_add(u16::from_le_bytes(b) % 4096))
 }
 
 impl Drop for Bastion {
@@ -301,13 +334,12 @@ fn key_id(line: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
 
     fn config() -> BastionConfig {
         BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
-            listen: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port: 7022,
+            listen: IpAddr::V6(Ipv6Addr::LOCALHOST),
             akc: None,
         }
     }

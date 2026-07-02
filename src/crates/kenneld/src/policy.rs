@@ -365,8 +365,6 @@ mod tests {
             kennel: "t".to_owned(),
             home: PathBuf::from("/home/dev"),
             namespace: "kennel-test".to_owned(),
-            tag: 42,
-            ula_gid: [0, 0, 0, 0, 2],
         }
     }
 

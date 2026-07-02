@@ -229,7 +229,7 @@ pub fn decide(
         // here, mirroring the resolved-name gate below. This closes the by-address path the
         // ruleset alone would admit (an `unconstrained` mode, or a by-address `[net.allow]`):
         // without it a workload could egress-dial a per-kennel inbound-mirror alias
-        // (`127.<tag>.<ctx>.x` / `fd<gid>:<tag>:<ctx>::`, §7.5.7) — looping a host-side *inbound*
+        // (the uid-derived v6 subnet `fd6b:6e00:<uid-subnet>:<ctx>::`, §7.5.7) — looping a host-side *inbound*
         // mirror port back into egress, and reaching a *sibling* kennel's alias is cross-kennel
         // lateral movement across the net-ns boundary the mirror is meant to respect. The SSH
         // bastion is the one sanctioned host-loopback literal and was already returned above.
@@ -448,9 +448,11 @@ mod tests {
 
     #[test]
     fn a_literal_mirror_alias_is_denied_even_in_unconstrained() {
-        // §7.5.7 per-kennel inbound-mirror alias `127.<tag>.<ctx>.x`. Without the by-address
-        // special-use gate, `unconstrained` would dial it (looping inbound back into egress, or
-        // reaching a sibling kennel's alias — cross-kennel lateral movement). It must be denied.
+        // §7.5.7 per-kennel inbound-mirror alias (the uid-derived v6 subnet
+        // `fd6b:6e00:<uid-subnet>:<ctx>::`). The by-address special-use gate denies any host-
+        // loopback / ULA literal — without it, `unconstrained` would dial one (looping inbound
+        // back into egress, or reaching a sibling kennel's alias — cross-kennel lateral movement).
+        // A stray v4 loopback literal is denied by the same gate; it must be denied.
         let rt = unconstrained();
         let resolver = FakeResolver(Err(())); // a literal never resolves
         assert_eq!(
@@ -464,7 +466,7 @@ mod tests {
             InetDecision::Denied,
             "an unconstrained workload must not egress-dial a host-loopback mirror alias"
         );
-        // A v6 ULA mirror alias (`fd<gid>:<tag>:<ctx>::`) is likewise refused.
+        // A v6 ULA mirror alias (`fd6b:6e00:<uid-subnet>:<ctx>::`) is likewise refused.
         let ula = IpAddr::V6("fd00:0:0:42::1".parse().expect("v6"));
         assert_eq!(
             decide(
