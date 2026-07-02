@@ -85,7 +85,7 @@ documentation sweep.
 - **Kenneld restart-fork resolution — kennels that survive a daemon restart.** A kenneld restart
   today ends every running kennel: each kennel's serving thread lives in the daemon process, so
   detach survives a *client* leaving, not kenneld leaving
-  (`docs/architecture/05-state-and-supervision.md`). Every daemon upgrade or reinstall is therefore
+  (`docs/archive/architecture/05-state-and-supervision.md`). Every daemon upgrade or reinstall is therefore
   a fleet-wide workload restart. The fix is structural — the serving relationship must be
   re-adoptable across a daemon generation (state handoff or re-attach, never authored daemon state
   that contradicts repo-is-truth). Named as a 0.6.0-horizon item by the 0.5.0 roadmap; not taken for

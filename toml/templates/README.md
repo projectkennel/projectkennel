@@ -4,7 +4,7 @@ Operators do not write policy from scratch. They derive from the **templates**
 here: signed, versioned, threat-tagged baselines for recognisable workflows. A
 user's leaf policy is a short delta from a template (typically 5–15 lines with a
 `reason` on every addition). The template system is specified in
-`docs/design/05-templates.md`; the fully-annotated reference is
+`docs/archive/design/05-templates.md`; the fully-annotated reference is
 `TEMPLATE-ai-coding-strict.md` at the repo root.
 
 ## The set (this directory)
@@ -24,7 +24,7 @@ Each template directory carries `policy.toml` (the template's policy), `meta.tom
 ## Spawn targets (§7.12)
 
 A second, distinct set: **single-leg SPAWN targets** an agent holding `[spawn]` may
-instantiate as ephemeral sibling kennels (`docs/design/07-12-dynamic-spawn.md`). Each holds
+instantiate as ephemeral sibling kennels (`docs/archive/design/07-12-dynamic-spawn.md`). Each holds
 **at most one** trifecta leg, declares a self-reaping TTL + memory/pids/CPU ceilings (a
 spawn-target must, §7.12.8), carries no `[spawn]` of its own (depth-1), and opens its mutable
 surface through a signed `[[mutable]]` manifest (§7.12.3). Composing two is a visible, signed

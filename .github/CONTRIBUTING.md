@@ -10,9 +10,9 @@ If you read this document and follow it, your contribution has a good chance of 
 
 Project Kennel composes existing Linux kernel primitives (Landlock, cgroup BPF, namespaces, seccomp) into a policy-driven confinement layer for AI coding agents and other unsigned user-level workloads.
 
-- [EXEC-SUMMARY.md](../docs/design/EXEC-SUMMARY.md) — why the project exists.
+- [EXEC-SUMMARY.md](../docs/archive/design/EXEC-SUMMARY.md) — why the project exists.
 - [THREATS.md](../docs/reference/THREATS.md) — the threat catalogue.
-- [TEMPLATE-ai-coding-strict.md](../docs/design/TEMPLATE-ai-coding-strict.md) — a worked policy example.
+- [TEMPLATE-ai-coding-strict.md](../docs/archive/design/TEMPLATE-ai-coding-strict.md) — a worked policy example.
 
 ---
 
@@ -30,9 +30,9 @@ Note the boundary with issue filing (below): a **suspected, non-exploit-specific
 
 Read, in this order:
 
-1. [EXEC-SUMMARY.md](../docs/design/EXEC-SUMMARY.md).
+1. [EXEC-SUMMARY.md](../docs/archive/design/EXEC-SUMMARY.md).
 2. [THREATS.md](../docs/reference/THREATS.md). You will be expected to reference threat IDs by number.
-3. [TEMPLATE-ai-coding-strict.md](../docs/design/TEMPLATE-ai-coding-strict.md).
+3. [TEMPLATE-ai-coding-strict.md](../docs/archive/design/TEMPLATE-ai-coding-strict.md).
 4. [CODING-STANDARDS.md](../docs/governance/CODING-STANDARDS.md). Skim it; refer back as needed. Appendix B is a one-page quick reference for the tags, the close-on-arrival categories, and the commit cadence.
 
 If you skip these, every other step below will feel arbitrary.

@@ -3,7 +3,7 @@
 The cgroup-attached BPF programs that enforce Project Kennel's network
 constraints, plus the map/event ABI shared with the Rust loader
 (`kennel-lib-bpf`). The authoritative description of this surface is
-[docs/architecture/02-7-bpf-abi.md](../../docs/architecture/02-7-bpf-abi.md); the C-code
+[docs/archive/architecture/02-7-bpf-abi.md](../../docs/archive/architecture/02-7-bpf-abi.md); the C-code
 discipline is [CODING-STANDARDS.md](../../docs/governance/CODING-STANDARDS.md) §4.1.
 
 ## Build status: compiled + verifier-clean on Linux 6.8.0
@@ -44,7 +44,7 @@ One verifier fix was needed versus the blind draft: the IPv6 programs
 
 | File | What |
 |---|---|
-| `maps.h` | Map definitions and the per-kennel map value structs. Single source of truth for the map ABI; the Rust side's types are generated to match (docs/architecture/02-7). |
+| `maps.h` | Map definitions and the per-kennel map value structs. Single source of truth for the map ABI; the Rust side's types are generated to match (docs/archive/architecture/02-7). |
 | `audit_events.h` | Ringbuf event header and per-kind payload structs. |
 | `kennel.bpf.h` | Shared inline helpers (meta lookup, deny/allow evaluation, audit emit). Not a documented ABI surface; an implementation detail to keep each program small and the lookup logic in one reviewed place. |
 | `connect4.bpf.c`, `connect6.bpf.c` | Egress allowlist enforcement (the central programs). |
@@ -70,7 +70,7 @@ gone.
 
 The Rust loader crate `kennel-lib-bpf` loads these via a hand-rolled `bpf(2)` loader
 over `libc`, using `object` only for ELF parsing — **not** libbpf-rs/libbpf-sys
-(see `docs/architecture/02-7`, `03-crate-decomposition.md`). Manual compile:
+(see `docs/archive/architecture/02-7`, `03-crate-decomposition.md`). Manual compile:
 
 ```sh
 clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
@@ -88,7 +88,7 @@ The multiarch include path (`/usr/include/x86_64-linux-gnu`) is where
   (the kernel fails the syscall, typically `EPERM`/`ECONNREFUSED`).
 - Lookup order in the connect/sendmsg programs is **deny-first**: the invariant
   deny trie is consulted before the allow trie, so an allow rule can never
-  cover an invariant-denied range (docs/architecture/02-7).
+  cover an invariant-denied range (docs/archive/architecture/02-7).
 - Every pointer dereference is preceded by an explicit bounds check; loops are
   bounded; only whitelisted helpers (`HELPERS.md`) are called; `bpf_printk` is
   forbidden in shipped programs.

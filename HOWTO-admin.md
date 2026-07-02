@@ -10,7 +10,7 @@ The privilege model in one line: **one** privileged factory
 (`kennel-privhelper`, file-capped not sudo) plus its narrow single-capability
 sub-helpers, bounded to the kennel-construction operation and a few host-context
 steps; kenneld and everything else run as the
-user. See [docs/architecture/01-process-model.md](docs/architecture/01-process-model.md).
+user. See [docs/archive/architecture/01-process-model.md](docs/archive/architecture/01-process-model.md).
 
 ---
 
@@ -102,7 +102,7 @@ systemctl --user enable --now kenneld.socket
 
 The socket starts kenneld on the first `kennel` CLI connection; it then persists
 for the session. There is no system-wide kenneld and no long-lived privileged
-daemon — see [docs/architecture/05-state-and-supervision.md](docs/architecture/05-state-and-supervision.md).
+daemon — see [docs/archive/architecture/05-state-and-supervision.md](docs/archive/architecture/05-state-and-supervision.md).
 
 Diagnose a user's daemon:
 
@@ -172,7 +172,7 @@ Three layers, each with a distinct trust posture (`man system.toml`,
 |---|---|---|---|
 | `system.toml` | admin | **integrity-sensitive** (binary paths, trust store); never read from `~` | `/usr/lib/kennel` → `/etc/kennel` |
 | `config.toml` | user | convenience only (CLI search paths); cannot affect enforcement | `/usr/lib/kennel` → `/etc/kennel` → `~/.config/kennel` |
-| `audit.toml` | admin/user | audit sink + per-class levels | per `docs/architecture/02-3-audit-schema.md` |
+| `audit.toml` | admin/user | audit sink + per-class levels | per `docs/archive/architecture/02-3-audit-schema.md` |
 
 A higher layer overrides a lower one **per key**; compiled-in defaults apply
 where a key is unset, so a host with no config file still runs. To relocate one
@@ -208,5 +208,5 @@ wins over the vendor copy. Every override key is documented inline in the shippe
 - `man kenneld`, `man system.toml`, `man subkennel`, `man config.toml`.
 - [HOWTO.md](HOWTO.md) — authoring and running policies (user-facing).
 - [INSTALL.md](INSTALL.md) — the installer in detail.
-- [docs/architecture/01-process-model.md](docs/architecture/01-process-model.md),
-  [07-paths.md](docs/architecture/07-paths.md) — the privilege and path models.
+- [docs/archive/architecture/01-process-model.md](docs/archive/architecture/01-process-model.md),
+  [07-paths.md](docs/archive/architecture/07-paths.md) — the privilege and path models.

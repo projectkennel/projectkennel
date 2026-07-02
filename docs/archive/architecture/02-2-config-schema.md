@@ -79,7 +79,7 @@ The full section list:
 | `[fs].exclusive` | Writable paths bound **exclusively**: while the kennel runs, the factory over-mounts an opaque sentinel on the host path so the operator and the workload do not use it concurrently (severs the live confused-deputy channel, T2.8 / §2.7). Subset of `fs.write`; ownership-gated (the privhelper refuses a path the operator does not own); released at teardown, `kennel release` for crash recovery | §7.4 |
 | `[audit]` and `[audit.*]` | Audit sinks (file, journald, syslog, stdout), per-class levels, file rotation parameters | §8.6 |
 
-This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
+This chapter describes *how the sections compose and inherit*, and gives the full field-level schema for **every** section — `[net]`/`[net.*]` in §The `[net]` section, the rest in §The remaining sections — field reference, both kept exact against the parser. The §7.x design chapters carry the *rationale* for each section; the worked, validated policies in [`docs/archive/design/06-worked-examples.md`](../design/06-worked-examples.md) — and the annotated [`TEMPLATE-openclaw.md`](../design/TEMPLATE-openclaw.md) — show every common section in real use.
 
 ---
 

@@ -1,7 +1,7 @@
 # Composable fragments
 
 A **fragment** is a signed, version-pinned, additive-only capability bundle a policy can
-`include` instead of hand-listing the same grants every time (`docs/design/05-templates.md`
+`include` instead of hand-listing the same grants every time (`docs/archive/design/05-templates.md`
 §5.10). Where a *template* (`../templates/`) is the single-parent backbone a leaf derives
 from, a fragment is a cross-cutting à-la-carte add-on: pull in exactly the capabilities a
 workload needs and nothing else.

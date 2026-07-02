@@ -7,7 +7,7 @@
 # redirect the trust store would defeat policy signing.
 #
 # Resolution order (lowest priority first): this file, then /etc/kennel/system.toml.
-# See docs/architecture/07-paths.md and the kennel-lib-config crate.
+# See docs/archive/architecture/07-paths.md and the kennel-lib-config crate.
 
 # Directory holding kenneld's helper binaries. Each binary defaults to
 # <libexec_dir>/<name>; override an individual one with the keys below.

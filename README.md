@@ -16,7 +16,7 @@ Policy describes kernel-level constraints (which files, which network destinatio
 
 **0.4.0 — the service-mesh release.** The reference runtime, the threat catalogue ([THREATS.md](docs/reference/THREATS.md)), and the design corpus are all implemented and published — the runtime is the reference, not a sketch. Versioned on a stable-surface cadence, with a [CHANGELOG](CHANGELOG.md) recording every change.
 
-The full vertical runs **unprivileged**, proven end-to-end as the ordinary operator with no `sudo` (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/design/BUILD-ENV.md) for the kernel floor), each slice exercised by the real installed toolchain in the policy-suite e2e:
+The full vertical runs **unprivileged**, proven end-to-end as the ordinary operator with no `sudo` (kernel 6.17, Landlock ABI ≥ 6; see [BUILD-ENV.md](docs/archive/design/BUILD-ENV.md) for the kernel floor), each slice exercised by the real installed toolchain in the policy-suite e2e:
 
 - **The spawn.** An identity-mapped user namespace; the workload as PID 1 of its own PID namespace; the constructed-`$HOME` view via `pivot_root` (non-granted paths *absent*, not denied); a synthetic `/etc`; an allowlisted `/dev` with host-device passthrough; a fresh `/proc` and private `/tmp`; Landlock filesystem and network rules with abstract-unix/signal scoping; a seccomp denylist; `PR_SET_NO_NEW_PRIVS`; and a cgroup the kennel is *born in* (`clone3(CLONE_INTO_CGROUP)`, no post-hoc migration). Construction is per-task and **cheap enough to be disposable** — the ≈ 3.7 ms floor above is what lets confinement be per-task rather than per-session.
 
@@ -53,7 +53,7 @@ Project Kennel routes SSH through a per-user **re-origination bastion** (a stock
 - **The workload is blind to the credential.** Its constructed `~/.ssh` holds only a *disposable synthetic* ed25519 key — never a real key, never an agent socket. The real key stays in the user's host-side store.
 - **The credential cannot be aimed by the workload.** Which synthetic key authenticates is the destination selector: the bastion's forced command bakes in the `(host, real-key-fingerprint)` edge, re-originating a fresh, host-key-verified `ssh` with `IdentitiesOnly` to exactly that host and no other. The workload cannot redirect it, and a non-synthetic key is refused.
 
-A synthetic key is thus a capability for exactly one `(host, key)` edge: `git push` to a granted host works, with zero key material in the sandbox and no signing oracle to abuse. Validated against stock OpenSSH 9.6 (design [§7.10](docs/design/07-10-ssh.md)).
+A synthetic key is thus a capability for exactly one `(host, key)` edge: `git push` to a granted host works, with zero key material in the sandbox and no signing oracle to abuse. Validated against stock OpenSSH 9.6 (design [§7.10](docs/archive/design/07-10-ssh.md)).
 
 ## What is deliberately not here
 
@@ -63,7 +63,7 @@ Three things are declined on principle, not deferred for capacity — recorded s
 - **No first-party OCI unpacker** — the security argument (unpacking is adversarial-input parsing) is already met by running the unpack confined; a bespoke parser would be cost and risk for marginal gain.
 - **No daemon-side protocol mediation** — `kenneld` brokers and resolves; it never parses MCP frames or portal bodies. (The D-Bus facade's per-method filtering is the one mediated exception, and it runs in an out-of-TCB facade, not the daemon.) Application-semantic mediation, if ever wanted, is a confined interposer, never the daemon.
 
-Genuinely deferred, designed but not built: a macOS port (Mach ports, Seatbelt SBPL — the mechanism mapping exists, the runtime does not); per-method policy on *mesh* service grants (mesh grants are service-name-level today; the D-Bus facade aside, there is no per-method filtering on a mesh capability); and the OCI integrity ladder above the digest-pinned floor. See [docs/architecture/](docs/architecture/) for the as-built boundary.
+Genuinely deferred, designed but not built: a macOS port (Mach ports, Seatbelt SBPL — the mechanism mapping exists, the runtime does not); per-method policy on *mesh* service grants (mesh grants are service-name-level today; the D-Bus facade aside, there is no per-method filtering on a mesh capability); and the OCI integrity ladder above the digest-pinned floor. See [docs/archive/architecture/](docs/archive/architecture/) for the as-built boundary.
 
 ## Residuals, named
 
@@ -75,8 +75,8 @@ A rough sense of scale — more specification than code, and the code that exist
 
 | Artefact | Size |
 |---|---|
-| Design docs (`docs/design/`) | ≈ 111,000 words |
-| Architecture docs (`docs/architecture/`) | ≈ 79,500 words |
+| Corpus — the two-volume book ([`books/`](books/), separate repo) | Vol 1 design + Vol 2 Linux realisation |
+| Superseded pre-book design/architecture docs (`docs/archive/`) | ≈ 190,000 words, preserved for reference |
 | Implementation — Rust (26 crates) | ≈ 33,800 SLOC |
 | Implementation — BPF (C, host-mode egress) | ≈ 600 SLOC |
 | `unsafe` Rust | quarantined to 5 small crates (below) |
@@ -87,11 +87,12 @@ Almost every crate carries `#![forbid(unsafe_code)]`. The entire `unsafe` surfac
 
 | Path | What |
 |---|---|
-| [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
-| [NON-EXEC-SUMMARY.md](docs/design/NON-EXEC-SUMMARY.md) | The security stance and trust boundaries; the technical companion to the exec summary. |
+| [EXEC-SUMMARY.md](docs/archive/design/EXEC-SUMMARY.md) | Why the project exists; the one-page case. |
+| [NON-EXEC-SUMMARY.md](docs/archive/design/NON-EXEC-SUMMARY.md) | The security stance and trust boundaries; the technical companion to the exec summary. |
 | [THREATS.md](docs/reference/THREATS.md) | The threat catalogue: stable IDs, incident citations, MITRE/compliance mappings. The durable contribution. |
-| [docs/design/](docs/design/) | The design corpus — threat model, policy surface, template system, the spawn and mesh models, enforcement architecture. An implementation-independent specification. |
-| [docs/architecture/](docs/architecture/) | The reference implementation's architecture — process model, IPC, API surfaces, crate decomposition, trust boundaries, supervision, latency. |
+| [books/](books/) (separate repo) | The corpus — the two-volume book: Vol 1 the platform-neutral design, Vol 2 the Linux realisation. The authoritative "what it should do." |
+| [docs/reference/](docs/reference/) | Machine-coupled and as-built artefacts kept in-repo: the threat catalogue, the crate inventory / SLOC table, the as-built log. |
+| [docs/archive/](docs/archive/) | The superseded pre-book design/architecture trees, preserved for reference (not authoritative). |
 | [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md) | Normative engineering rules (the bar is OpenSSH / libpam). |
 | [CONTRIBUTING.md](.github/CONTRIBUTING.md) | How to contribute, and what gets closed without review. |
 
@@ -99,7 +100,7 @@ Almost every crate carries `#![forbid(unsafe_code)]`. The entire `unsafe` surfac
 
 Using it: [INSTALL.md](INSTALL.md) → [HOWTO.md](HOWTO.md) → [HOWTO-admin.md](HOWTO-admin.md). The installed man pages are the reference (`man kennel`, `man policy.toml`, `man kenneld`).
 
-New readers (design): [EXEC-SUMMARY.md](docs/design/EXEC-SUMMARY.md) → [THREATS.md](docs/reference/THREATS.md) → the design corpus (start at §1) → a worked policy template. Implementers and auditors then read the architecture corpus and CODING-STANDARDS.
+New readers (design): [THREATS.md](docs/reference/THREATS.md) → the book ([`books/`](books/)), Volume 1 (design) then Volume 2 (the Linux realisation) → a worked policy template. Implementers and auditors then read Volume 2 and CODING-STANDARDS.
 
 ## Reporting a vulnerability
 

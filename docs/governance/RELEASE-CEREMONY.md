@@ -66,7 +66,7 @@ usually already correct by release time — *verify*, do not blindly bump.
    items still deferred) and any **README / `docs/website/index.html` claim the release changes**
    (the 0.4.0 cut corrected a privhelper op-list and a "no setuid" line; 0.5.0 advanced the
    interactive-file-broker fence). **Leave historical references** (e.g. `0.4.0 F1 residual` in code
-   comments, frozen `docs/design`/`docs/architecture`, and `audits/` reports) — they name the
+   comments, the archived `docs/archive/design`/`docs/archive/architecture`, and `audits/` reports) — they name the
    release they belong to.
 
 8. **Local CI gate dry-run** before pushing (these are the jobs that bite):

@@ -28,7 +28,7 @@
 # secrets (DB passwords, …) come from the user's secret store at run time, never
 # from the policy file; a kernel/Landlock CVE is beyond any userspace framework.
 #
-# See docs/design/05-templates.md and templates/README.md.
+# See docs/archive/design/05-templates.md and templates/README.md.
 # ============================================================================
 
 template_name = "containerised-service"

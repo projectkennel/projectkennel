@@ -1,6 +1,6 @@
 # net-fetch (spawn target)
 
-A single-leg **SPAWN target** (`docs/design/07-12-dynamic-spawn.md` §7.12): **reach without
+A single-leg **SPAWN target** (`docs/archive/design/07-12-dynamic-spawn.md` §7.12): **reach without
 code** — fetch from the network and stream the bytes back over the spawn channel.
 
 - **Leg:** network. `net.mode = "constrained"` (frozen — the proxy is the egress gate); no

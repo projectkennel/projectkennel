@@ -5,7 +5,7 @@ Baseline: 0.5.0 (released)
 
 > This is a planning artefact, not a design or as-built document. The corpus remains the source
 > of truth for *what each item is* — and 0.6.0 is the release in which the corpus itself moves:
-> the frozen `docs/design/` and `docs/architecture/` trees retire in favour of the two-volume
+> the frozen `docs/archive/design/` and `docs/archive/architecture/` trees retire in favour of the two-volume
 > book (W9). Until W9 lands, the frozen trees and the patch log remain the record. This file
 > records *what 0.6.0 commits to, why, and in what order*.
 
@@ -44,7 +44,7 @@ Standing constraints carried from 0.5.0:
 
 - **Not kenneld restart-fork resolution and not global spawn-storm accounting.** Both are real and
   corpus-grounded — a kenneld restart still ends every running kennel
-  (`docs/architecture/05-state-and-supervision.md`), and per-spawn cgroup ceilings (§7.12) have no
+  (`docs/archive/architecture/05-state-and-supervision.md`), and per-spawn cgroup ceilings (§7.12) have no
   aggregate — but neither is this release's bet. Both move to [BACKLOG.md](BACKLOG.md) with named
   promote conditions rather than riding roadmap non-goal prose from release to release.
 - **Not multi-operator delegation.** The keys design deliberately leaves the delegation model open
@@ -513,7 +513,7 @@ Decisions settled up front (2026-07-02):
 - **The machine-coupled and as-built artefacts get one durable home in this repo** —
   `docs/reference/` (name final at landing): the canonical `THREATS.md`; the generated crate
   inventory and SLOC table (`crate-inventory.json` + the generated decomposition doc, today
-  regenerated into `docs/architecture/` by CI); the pointer to the authoritative policy schema
+  regenerated into `docs/archive/architecture/` by CI); the pointer to the authoritative policy schema
   (the artefact itself stays `schema/policy.toml.schema`, derived from the parser structs); and
   the **as-built log**, the successor of `DOC-PATCH-LOG.md` — per-PR as-built deltas recorded
   against *book* chapter targets, ingested on the book's cadence. The freeze's one-way ingestion
@@ -530,16 +530,19 @@ The mechanical body:
 - **Repoint the governance and user-facing set.** The standing orders' corpus definition (the
   escalation order names the book: Vol 1 for design intent, Vol 2 for the as-built contract),
   CODING-STANDARDS' chapter pointers, RELEASE-CEREMONY, README/INSTALL/HOWTOs.
-- **Repoint CI.** The inventory job regenerates into the new home instead of
+- **Repoint CI.** The inventory job regenerates into the new home (`docs/reference/`) instead of
   `docs/architecture/`; the threats guard follows `THREATS.md`; the schema job is untouched.
-- **Then delete.** `docs/design/` and `docs/architecture/` leave the tree; the patch log closes
-  with a final entry naming its successor. Git history keeps both trees.
+- **Then archive, don't delete.** `docs/design/` and `docs/architecture/` move to `docs/archive/` —
+  a large body of work, preserved for reference rather than binned. The patch log becomes the
+  as-built log (`docs/reference/AS-BUILT.md`); as-built is kept separate from the book, not ingested
+  into it.
 
-**Exit:** the book is the named corpus in the standing orders and README (URL + in-tree
-convention); the reference home carries the canonical threat catalogue, the regenerated
-inventory/SLOC artefacts, and the as-built log; the 11 queued patch entries are verified ingested;
-no source, governance, or CI reference to `docs/design/` or `docs/architecture/` remains; both
-trees are deleted; CI is green with the inventory and threats jobs on their new targets.
+**Exit:** the book is the named corpus in the standing orders and README (URL + in-tree convention);
+the reference home carries the canonical threat catalogue, the regenerated inventory/SLOC artefacts,
+and the as-built log; the pre-book trees are moved to `docs/archive/` with nothing treating them as
+the corpus; no source, governance, or CI reference is left dangling; CI is green with the inventory
+and threats jobs on their new targets. (The website's deeper reconciliation is owed work, not part of
+the cutover — a short pass repoints its corpus links to the book and the threat catalogue.)
 
 ## Sequencing
 

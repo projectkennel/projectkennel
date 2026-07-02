@@ -1,6 +1,6 @@
 # Build environment
 
-The pinned build environment, referenced by [CODING-STANDARDS.md](../governance/CODING-STANDARDS.md) §2.2 (C/BPF toolchain) and `docs/architecture/06-build-and-test.md`. Reproducible builds require the same compilers on every runner; this file is where their versions are pinned.
+The pinned build environment, referenced by [CODING-STANDARDS.md](../governance/CODING-STANDARDS.md) §2.2 (C/BPF toolchain) and `docs/archive/architecture/06-build-and-test.md`. Reproducible builds require the same compilers on every runner; this file is where their versions are pinned.
 
 ## Status
 
@@ -35,5 +35,5 @@ The workspace is built and the reference runtime is verified on kernel 6.17 (Lan
 
 These pins are part of the release pipeline and land with it. Until then the hosted CI gate (above) is authoritative for what every commit is checked against.
 
-- **Release-build container.** Release builds run in a container image pinned by digest, whose recipe lives in `tools/release-image/`. The image holds the pinned Rust toolchain, a pinned clang, bpftool, and the coreutils `sha256sum` the shell checksum verifier uses. Release builds run twice on two runners and compare output hashes (`docs/architecture/06-build-and-test.md`). The recipe, the digest, and clang's in-image version pin are set when the image is created.
-- **Verifier-load kernel matrix.** Beyond the hosted compile check, CI loads each BPF program through the verifier on a matrix of kernels (`docs/architecture/06-build-and-test.md`, `02-7-bpf-abi.md`); verifier rejection on any entry blocks merge. The project floor is **6.10** (required for Landlock `FS_EXECUTE`; §8.2). The concrete latest-LTS / current-stable / latest-mainline entries are fixed when the custom-kernel runners that host the matrix exist.
+- **Release-build container.** Release builds run in a container image pinned by digest, whose recipe lives in `tools/release-image/`. The image holds the pinned Rust toolchain, a pinned clang, bpftool, and the coreutils `sha256sum` the shell checksum verifier uses. Release builds run twice on two runners and compare output hashes (`docs/archive/architecture/06-build-and-test.md`). The recipe, the digest, and clang's in-image version pin are set when the image is created.
+- **Verifier-load kernel matrix.** Beyond the hosted compile check, CI loads each BPF program through the verifier on a matrix of kernels (`docs/archive/architecture/06-build-and-test.md`, `02-7-bpf-abi.md`); verifier rejection on any entry blocks merge. The project floor is **6.10** (required for Landlock `FS_EXECUTE`; §8.2). The concrete latest-LTS / current-stable / latest-mainline entries are fixed when the custom-kernel runners that host the matrix exist.
