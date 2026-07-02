@@ -14,10 +14,10 @@
 //! away, a sequence point only the orchestrator holds); the orchestrator gains the capability
 //! across the `exec` without holding it itself.
 //!
-//! Gating: the caller must hold a `/etc/kennel/subkennel` allocation, and the over-mount is
-//! refused over any path the **caller does not own** (`check_owned_dir`, the authoritative
-//! overreach gate — the helper trusts only the kernel-stamped real uid). The release unmounts
-//! only a mount carrying this helper's own sentinel.
+//! Gating: the over-mount is refused over any path the **caller does not own**
+//! (`check_owned_dir`, the authoritative overreach gate — the helper trusts only the
+//! kernel-stamped real uid). The release unmounts only a mount carrying this helper's
+//! own sentinel.
 //!
 //! Usage: `kennel-privhelper-mounts {mount|unmount} <host-path>`.
 
@@ -45,12 +45,8 @@ fn main() -> ExitCode {
         std::env::remove_var(key);
     }
 
-    // Gate on the caller's subkennel allocation, like every privileged op.
+    // The caller's real uid is the trusted identity; the over-mount is gated by path ownership below.
     let uid = kennel_lib_syscall::unistd::real_uid();
-    if kennel_privhelper::alloc::load(uid).is_none() {
-        eprintln!("kennel-privhelper-mounts: caller has no /etc/kennel/subkennel allocation");
-        return ExitCode::from(1);
-    }
 
     let args: Vec<String> = std::env::args().collect();
     let Some(host) = args.get(2) else {

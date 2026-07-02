@@ -48,7 +48,6 @@ pub fn bpf_pin_root(uid: u32) -> std::path::PathBuf {
 }
 
 pub mod addr;
-pub mod alloc;
 pub mod client;
 pub mod construct;
 pub mod exec;

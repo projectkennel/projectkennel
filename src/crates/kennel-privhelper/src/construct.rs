@@ -174,12 +174,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     //     subnet inside `kennel-privhelper-net` — the operator does not get to pick arbitrary
     //     addresses — then added on `lo`; the egress BPF, if present, is attached to the kennel
     //     cgroup by `kennel-privhelper-bpf` (cgroup ownership re-checked there).
-    // Gate (defence in depth; `main.rs` gates `construct` on the same allocation): the caller
-    // must hold a subkennel allocation. The per-address subnet validation now lives in the
-    // `kennel-privhelper-net` sub-helper, which re-loads the scope and validates itself.
-    if crate::alloc::load(real_uid()).is_none() {
-        return Err(io::Error::other("caller has no reserved scope"));
-    }
+    // The per-address subnet validation lives in the `kennel-privhelper-net` sub-helper, which
+    // derives the caller's v6 subnet from its kernel-trusted real uid and validates each address
+    // against it — the operator cannot pick an address outside its own subnet.
     tracer.step(&format!(
         "construct: adding {} host loopback address(es) (ctx {})",
         half.loopback.len(),

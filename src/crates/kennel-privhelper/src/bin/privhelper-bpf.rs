@@ -17,11 +17,10 @@
 //! by `kenneld` directly). It carries its own `cap_bpf,cap_net_admin,cap_perfmon` file caps, so
 //! the orchestrator gains them across the `exec` without holding them.
 //!
-//! Gating (boundary 1, `04-trust-boundaries.md`): the caller must hold a
-//! `/etc/kennel/subkennel` allocation, and the attach is performed only on a cgroup
-//! the **caller owns** (the delegation boundary, `REFUSAL_CGROUP_NOT_OWNED`) — the fd
-//! is opened once and `fstat`ed, so the ownership check and the attach use the same
-//! inode (no TOCTOU).
+//! Gating (boundary 1, `04-trust-boundaries.md`): the attach is performed only on a
+//! cgroup the **caller owns** (the delegation boundary, `REFUSAL_CGROUP_NOT_OWNED`) —
+//! the fd is opened once and `fstat`ed, so the ownership check and the attach use the
+//! same inode (no TOCTOU).
 //!
 //! Usage: `kennel-privhelper-bpf attach <cgroup-path>` with the `EgressPayload` bytes
 //! on stdin.
@@ -50,13 +49,6 @@ fn main() -> ExitCode {
     // root-owned config. `vars_os` is a snapshot, so removing during iteration is sound.
     for (key, _) in std::env::vars_os() {
         std::env::remove_var(key);
-    }
-
-    // Gate on the caller's subkennel allocation, exactly as every privileged op is
-    // gated — an unallocated user performs nothing.
-    if kennel_privhelper::alloc::load(kennel_lib_syscall::unistd::real_uid()).is_none() {
-        eprintln!("kennel-privhelper-bpf: caller has no /etc/kennel/subkennel allocation");
-        return ExitCode::from(1);
     }
 
     let args: Vec<String> = std::env::args().collect();

@@ -14,11 +14,10 @@
 //! orchestrator — which holds only the identity-map caps — gains it across the
 //! `exec` without holding it itself.
 //!
-//! Gating (boundary 1): like every privileged op it requires the caller to hold a
-//! `/etc/kennel/subkennel` allocation, and it re-validates the address against the
-//! caller's reserved subnet (`validate_addr`) before the netlink syscall — so
-//! holding `cap_net_admin` here grants only this one scoped job, not arbitrary
-//! address configuration.
+//! Gating (boundary 1): like every privileged op it re-validates the address against
+//! the caller's uid-derived reserved subnet (`validate_addr`) before the netlink
+//! syscall — so holding `cap_net_admin` here grants only this one scoped job, not
+//! arbitrary address configuration.
 
 #![forbid(unsafe_code)]
 
@@ -28,8 +27,7 @@ use std::process::ExitCode;
 
 use kennel_lib_syscall::netlink;
 use kennel_lib_syscall::unistd::real_uid;
-use kennel_privhelper::alloc;
-use kennel_privhelper::validate::{validate_addr, AddrRequest};
+use kennel_privhelper::validate::{validate_addr, AddrRequest, ReservedScope};
 
 /// The loopback interface the mirror address is added to (`lo`).
 const LOOPBACK: &str = "lo";
@@ -57,18 +55,14 @@ fn main() -> ExitCode {
     })
 }
 
-/// Parse `{add|del} <ctx> <addr> <prefix>`, gate on the allocation, validate the
-/// address against the caller's reserved subnet, and perform the netlink op.
+/// Parse `{add|del} <ctx> <addr> <prefix>`, validate the address against the caller's
+/// uid-derived reserved subnet, and perform the netlink op.
 fn run() -> Result<(), u8> {
     let args: Vec<String> = std::env::args().collect();
     let (op, ctx, addr, prefix) = parse_args(&args)?;
 
-    // Gate on the caller's subkennel allocation (its real uid is the trusted
-    // identity), exactly as every privileged op is gated. No allocation ⇒ no op.
-    let Some(scope) = alloc::load(real_uid()) else {
-        eprintln!("kennel-privhelper-net: caller has no /etc/kennel/subkennel allocation");
-        return Err(REFUSED);
-    };
+    // The caller's real uid is the trusted identity; its reserved v6 subnet derives from it.
+    let scope = ReservedScope::new(real_uid());
 
     // Re-validate against the reserved subnet: the orchestrator supplies the
     // address but this helper does not trust it — one outside the per-kennel
