@@ -132,7 +132,9 @@ justified. Authentication, never attestation, carries through unchanged.
 - **Network, seccomp, not a netns and not Landlock.** kenneld stays in the host network namespace by
   necessity: its control plane rides AF_UNIX sockets, and abstract-namespace sockets are scoped to the netns,
   so a fresh `CLONE_NEWNET` would sever the broker and delegate connections. The seal is a seccomp
-  `socket(AF_INET)`/`socket(AF_INET6)` deny, tighter than a Landlock TCP rule because it removes UDP and raw
+  `socket()` family deny — `AF_INET`/`AF_INET6`/`AF_NETLINK`/`AF_PACKET` (W0 P3 found `getaddrinfo` also opens
+  a `NETLINK_ROUTE` socket, so the denylist is broader than TCP alone), leaving the child only `AF_UNIX` —
+  tighter than a Landlock TCP rule because it removes UDP and raw
   at the source rather than gating `connect`/`bind` on TCP alone. The runtime does not use this mechanism
   elsewhere; kennels gate egress at the BPF CIDR ACL, the monitor gates its own at the syscall. kenneld does
   open inet sockets today, for DNS resolution (`inet::dns::SystemResolver`), so the seal is not free: that one
@@ -148,9 +150,16 @@ justified. Authentication, never attestation, carries through unchanged.
   and denying the rest.
 
 **The fork split.** kenneld forks once at startup, before the seal. The parent stays host-side and unsealed;
-the child installs the seal and becomes the monitor. The parent is the inet-capable relay: it launches the
-`host-netproxy` and `host-inetd` delegates, so they descend from it and inherit no seal, and it relays their
-fds to and from the child over a socketpair held across the fork. The child mints AF_UNIX socketpairs, vets,
+the child installs the seal and becomes the monitor. The parent is the leg that does what the seal
+structurally cannot: it launches the `host-netproxy` and `host-inetd` delegates, so they descend from it and
+inherit no seal, it relays their fds to and from the child over a socketpair held across the fork, and it
+performs the **cross-namespace binder reaches** — the per-kennel `/proc/<pid>/root/…binderfs/binder` opens
+that Landlock cannot grant to a sealed child (W0 P1). Being unconfined, the parent follows the magic symlink
+freely, then hands the resolved binder fd to the child over that same relay — a **one-time fd handoff, not a
+per-message forward**: the monitor does its binder I/O directly on the fd (Landlock does not govern an
+already-open fd), so node-0 brokering stays in the monitor at full speed. This keeps the split clean — the
+parent owns every unsealable operation (inet, delegate exec, cross-ns fd acquisition); the child is
+pure-AF_UNIX with no cross-namespace reach of its own. The child mints AF_UNIX socketpairs, vets,
 pins, brokers, and passes fds, none of which needs an inet socket. DNS moves to the parent and nowhere else,
 not into the dumb dialer, which stays dumb so the pin holds: the parent resolves, the child re-checks every
 address against `[dns]` and the denylist and pins the vetted set, the dialer dials the pinned literal.
@@ -183,7 +192,10 @@ so its box freezes. kenneld is long-lived and keeps opening kennel resources as 
 reaches, new binder devices, new control connections. Its box grants operational classes rather than a fixed
 set, which makes the surface broader than a kennel's and harder to draw. Drawing it precisely is the bulk of
 the work, and it is the test the `do-less` discipline sets itself, the claim that the surface is enumerable,
-made to prove itself on the monitor.
+made to prove itself on the monitor. W0 P1 already resolved one class out of the manifest entirely: the
+per-kennel `/proc/<pid>/root` binder reaches are not path-grantable under the seal (Landlock cannot name a
+target across a mount-namespace boundary), so they move to the parent leg and ride the relay as fds — the fs
+manifest grants **no** `/proc/<pid>/root` path, which narrows the surface rather than widening it.
 
 **Dependency, and what the mesh already settled.** Gated on the 0.5.0 mesh, which has done more than provide
 the ground to stand on. The mesh fork-holder measured the keystone the whole family rests on: kenneld's
@@ -198,10 +210,11 @@ carry different risk. The process shape is the near-known half: fork the parent 
 seal the child, and define the small protocol across the three seams that already exist, DNS behind the
 `inet::decide` resolver parameter and the netproxy and inetd spawns that are already separate delegates driven
 over command sockets. None of that cuts a new seam; it traces lines the runtime already draws, on a fork
-primitive the mesh holder proved. The filesystem surface is the unknown half: the manifest must enumerate
+primitive the mesh holder proved. The filesystem surface is the harder half: the manifest must enumerate
 everything kenneld touches and prove nothing was missed, and a missed seam hides there, not in the process
-shape. It is gated on the W0 P1 probe, and it is where the real remaining work and the real remaining risk
-both sit.
+shape. W0 P1 retired the one named unknown — the cross-ns binder reaches are ungrantable and move to the
+parent leg (above), so the manifest grants no `/proc/<pid>/root` path — leaving the fs half enumeration work,
+not open risk.
 
 **Sketch of the steps.**
 
@@ -210,17 +223,19 @@ The process half, mostly mechanical:
 1. The parent-child protocol: fixed-layout length-prefixed frames, three messages (resolve, spawn-delegate,
    fd-relay), the privhelper's wire discipline. This is the new boundary, so it gets the care — and a fuzz
    target lands with the frame parser (§10.6).
-2. Fork the parent at startup before threads (P2); seal the child (seccomp `socket(AF_INET)` deny,
-   `no_new_privs`); hold the relay socketpair across the fork.
+2. Fork the parent at startup before threads (P2); seal the child (seccomp `socket()`-family deny of
+   `AF_INET/AF_INET6/AF_NETLINK/AF_PACKET`, `no_new_privs`); hold the relay socketpair across the fork.
 3. Relocate the delegate spawns to the parent, netproxy and inetd descending from it rather than the sealed
    child, and swap DNS to a parent-backed resolver behind the `inet::decide` seam, the dumb dialer and the
    pin unchanged.
 
-The filesystem half, where the unknown is:
+The filesystem half:
 
-4. The W0 P1 Landlock traversal probe result applied. Gates the fs manifest.
+4. Apply the W0 P1 outcome: move the cross-ns binder reaches to the parent leg and relay the fd (a one-time
+   handoff, not a per-message forward); the fs manifest grants no `/proc/<pid>/root` path.
 5. kenneld's `[fs]` manifest: enumerate the surface against the as-built reach set, grant exactly it, with the
-   exec and seccomp floors alongside.
+   exec and seccomp floors alongside — the seccomp floor denies `AF_INET/AF_INET6/AF_NETLINK/AF_PACKET`
+   (W0 P3), and the Landlock manifest grants `/proc` write for the holder's userns map writes (W0 P5).
 6. The open-and-seal sequencing: acquire every handle the job needs, the relay socketpair among them, then
    seal, then serve, so the seal precedes the first kennel input.
 
