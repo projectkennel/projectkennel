@@ -124,11 +124,6 @@ pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
         "keygen <key-id> [--dir DIR] [--force]",
     ),
     (
-        "subkennel",
-        "manage /etc/kennel/subkennel allocations",
-        "subkennel <add|check> [--uid N] [--namespace NS] [--tag N] [--file PATH]",
-    ),
-    (
         "audit",
         "show a kennel's audit log",
         "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
@@ -270,33 +265,21 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
             Command { usage: SYNC_COMMANDS[1].2, summary: SYNC_COMMANDS[1].1, options: &[] },
             Command { usage: SYNC_COMMANDS[2].2, summary: SYNC_COMMANDS[2].1, options: &[] },
             Command {
-                usage: SYNC_COMMANDS[3].2,
-                summary: SYNC_COMMANDS[3].1,
+                usage: SYNC_COMMANDS[7].2,
+                summary: SYNC_COMMANDS[7].1,
                 options: &[("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign, lint.")],
             },
             Command {
-                usage: SYNC_COMMANDS[4].2,
-                summary: SYNC_COMMANDS[4].1,
+                usage: SYNC_COMMANDS[8].2,
+                summary: SYNC_COMMANDS[8].1,
                 options: &[
                     ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
                     ("--force", "Overwrite an existing key of the same id."),
                 ],
             },
             Command {
-                usage: SYNC_COMMANDS[5].2,
-                summary: SYNC_COMMANDS[5].1,
-                options: &[
-                    ("add", "Append a provably-valid allocation line for a uid (collision-free tag/gid)."),
-                    ("check", "Validate the allocation file and report malformed lines."),
-                    ("--uid N", "The target uid (defaults to the caller)."),
-                    ("--namespace NS", "The allocation namespace."),
-                    ("--tag N", "A specific 12-bit tag (otherwise allocated)."),
-                    ("--file PATH", "Operate on PATH instead of /etc/kennel/subkennel."),
-                ],
-            },
-            Command {
-                usage: SYNC_COMMANDS[6].2,
-                summary: SYNC_COMMANDS[6].1,
+                usage: SYNC_COMMANDS[9].2,
+                summary: SYNC_COMMANDS[9].1,
                 options: &[
                     ("--resource CLASS", "Filter to one class (network, filesystem, exec, ...)."),
                     ("--since DUR", "Only events newer than DUR (e.g. 1h, 30m)."),
@@ -322,7 +305,6 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
         files: &[
             ("/usr/libexec/kennel/", "The helper binaries kenneld resolves (see kennel-helpers via the .8 pages)."),
             ("~/.config/kennel/config.toml", "User CLI conveniences (search paths). See config.toml(5)."),
-            ("/etc/kennel/subkennel", "Per-user kennel allocations. See subkennel(5)."),
         ],
         examples: &[
             ("kennel run ai-coding-strict -- claude", "Run Claude Code confined by the ai-coding-strict template."),
@@ -330,7 +312,7 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
             ("kennel list", "Show running kennels."),
             ("kennel audit myjob --follow", "Stream myjob's audit log."),
         ],
-        see_also: &["kennel-policy(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)", "subkennel(5)"],
+        see_also: &["kennel-policy(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)"],
     },
     // -- kennel-policy(1) ---------------------------------------------------
     Page {
@@ -457,11 +439,10 @@ there and split across the user and system journals.",
             ("/usr/libexec/kennel/", "The helper binaries kenneld forks (see the host-*, facade-*, kennel-* .8 pages)."),
             ("/etc/kennel/system.toml", "Integrity-sensitive deployment config (binary paths, trust store). See system.toml(5)."),
             ("/etc/kennel/keys/", "The daemon's signing-key trust store."),
-            ("/etc/kennel/subkennel", "Per-user allocations kenneld requires to start a kennel. See subkennel(5)."),
             ("~/.local/state/kennel/<kennel>/", "Per-kennel audit log (append-only)."),
         ],
         examples: &[],
-        see_also: &["kennel(1)", "kennel-privhelper(8)", "system.toml(5)", "subkennel(5)"],
+        see_also: &["kennel(1)", "kennel-privhelper(8)", "system.toml(5)"],
     },
     // -- policy.toml(5) -----------------------------------------------------
     Page {
@@ -671,42 +652,6 @@ $XDG_CONFIG_HOME), /etc/kennel/config.toml, then the vendor copy. A set list \
         ],
         examples: &[],
         see_also: &["kennel(1)", "kennel-policy(1)", "system.toml(5)"],
-    },
-    // -- subkennel(5) -------------------------------------------------------
-    Page {
-        name: "subkennel",
-        section: 5,
-        summary: "Project Kennel per-user allocation file",
-        synopsis: "/etc/kennel/subkennel",
-        description: "\
-/etc/kennel/subkennel records, one line per user, the per-user resources a kennel \
-draws on \\(em analogous to /etc/subuid and /etc/subgid. A user with no valid line \
-cannot start \\fBkenneld\\fR(8). Use \\fBkennel subkennel add\\fR to append a \
-provably-valid line and \\fBkennel subkennel check\\fR to validate the file.
-
-Each line is colon-separated: \\fIuid\\fB:\\fItag\\fB:\\fIgid\\fB:\\fInamespace\\fR. \
-Fields after the fourth are ignored. Blank lines and lines beginning with # are \
-comments.",
-        commands: &[],
-        fields: &[
-            FieldGroup {
-                heading: "fields",
-                intro: "uid:tag:gid:namespace",
-                fields: &[
-                    Field { name: "uid", kind: "decimal", desc: "The owning user's uid." },
-                    Field { name: "tag", kind: "decimal", desc: "A per-user 12-bit tag (0..4095), unique per uid; partitions the kennel's reserved ranges." },
-                    Field { name: "gid", kind: "10 hex digits", desc: "The reserved gid base, exactly ten lowercase hex digits." },
-                    Field { name: "namespace", kind: "string", desc: "The allocation namespace (non-empty)." },
-                ],
-            },
-        ],
-        exit_status: &[],
-        files: &[("/etc/kennel/subkennel", "The allocation file itself.")],
-        examples: &[
-            ("kennel subkennel add --uid 1000", "Append a collision-free allocation for uid 1000."),
-            ("kennel subkennel check", "Validate every line and report malformed ones."),
-        ],
-        see_also: &["kennel(1)", "kenneld(8)"],
     },
     // -- helper .8 pages (terse) -------------------------------------------
     helper("host-netproxy", "egress CONNECT delegate (the dumb dialer)",

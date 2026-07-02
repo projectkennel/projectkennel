@@ -36,7 +36,6 @@ isn't mirrored into the page data fails the build before the pages can drift.
 | `policy.toml` | 5 | the policy file format |
 | `system.toml` | 5 | deployment config (integrity-sensitive) |
 | `config.toml` | 5 | user CLI config |
-| `subkennel` | 5 | the `/etc/kennel/subkennel` allocation file |
 | `host-netproxy`, `host-inetd`, `facade-socks5`, `facade-client`, `facade-afunix`, `facade-ssh`, `kennel-akc`, `kennel-bin-init`, `kennel-privhelper` | 8 | the internal helper binaries kenneld forks (terse — each notes it is not invoked directly) |
 
 `install.sh` installs every `man/*.<section>` into `$mandir/man<section>`
