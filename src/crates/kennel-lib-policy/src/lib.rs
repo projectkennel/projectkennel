@@ -67,10 +67,10 @@ pub use spawn::spawn_eligible;
 /// Bumped to 2 with the SSHSIG signature format; to 3 for a schema cleanup: `[fs.tmp]` lost its
 /// DAC-mode knob and renamed `private` → `writable`, the `[binder]` user-service section and its
 /// settled runtime were removed, and the invariant-only `fs.proc.visibility` / `unix.default`
-/// keys were dropped — all changing the settled shape; to 4 for the additive `[workload]`
-/// `allowed_args` and `[fs.cwd]` (invocation-cwd grant) fields (both optional, so a v3 artefact is
-/// still readable — MIN stays 3 and no recompile is forced).
-pub const SETTLED_SCHEMA_VERSION: u32 = 4;
+/// keys were dropped — all changing the settled shape. `[workload] allowed_args` and `[fs.cwd]`
+/// (0.6.0) are additive-optional, so they extend v3 without a bump (a policy not using them is
+/// byte-identical, and old v3 artefacts stay valid) — the shape fingerprint is re-pinned in place.
+pub const SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
 /// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.

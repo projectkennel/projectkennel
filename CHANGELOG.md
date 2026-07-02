@@ -20,9 +20,9 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Policy schema changes
 
-- **Settled schema version 3 → 4.** Two additive-optional fields; a v3 artefact is still read
-  unchanged, so `MIN_SETTLED_SCHEMA_VERSION` stays `3` and no recompile is forced. Policies
-  using the new fields compile to v4.
+- **Two additive-optional settled fields (schema stays v3).** Both are backward-compatible — a
+  policy not using them is byte-identical and old v3 artefacts stay valid — so the schema shape is
+  re-pinned without a version bump.
   - **`[workload] allowed_args`** — when a `[workload]` is `pinned`, CLI `-- <args>` tokens are
     *appended* to the pinned argv instead of refused. The program and base argv stay pinned
     exactly (the fd-pin/digest binds the program, not the args).
