@@ -1,0 +1,114 @@
+# ============================================================================
+# Reference policy: claude — Claude Code, confined, out of the box.
+#
+# Vendor-authored leaf on ai-coding-strict: adds the Claude Code binary, its state
+# directory, the Anthropic API endpoints, the coding-agent toolset (agent-tools) and
+# node (lang-node, for the npm install layout) that the generic template omits, and
+# the invocation-cwd grant so `kennel run claude` works from a marked project root.
+# Maintainer-signed at source; host-compiled at install (install_reference_policies).
+#
+# `kennel run claude [-- <args>]` — the pinned [workload] launcher (allowed_args)
+# discovers the claude entry point in-view and execs it with any appended args.
+#
+# Residuals: T1.8 (exfil via the granted LLM API — inherent in the grant); T2.8 on
+# the writable project root (carried by the trust manifest; `kennel review` re-pins).
+# ============================================================================
+
+name = "claude"
+template_base = "ai-coding-strict"
+include = ["agent-tools", "lang-node"]
+
+# --- The binary: both install layouts (absent paths normalise away at construction) ---
+[[fs.read.add]]
+path = [
+    "~/.local/bin/claude",                                  # native: launcher
+    "~/.local/share/claude",                                # native: versioned payload
+    "/usr/lib/node_modules/@anthropic-ai/claude-code",      # npm global (node runs cli.js)
+    "/usr/local/lib/node_modules/@anthropic-ai/claude-code",
+]
+reason = "the Claude Code binary, in whichever install layout is present"
+
+[[exec.allow.add]]
+path = ["~/.local/bin/claude", "~/.local/share/claude/**"]
+reason = "execute the Claude Code entry point and its versioned payload (glob; survives self-update)"
+
+# --- The project tree: the invocation cwd, writable, marker-gated ---
+[fs.cwd]
+grant = "write"
+required = [".git", ".claude/"]
+reason = "the agent edits the project it is invoked from; the writable root is a project the operator marked for agent use (.claude), carrying the T2.8 trust manifest"
+
+# --- State: the RO/RW split (defends the injection-persistence channel) ----------
+# `persist` binds the real host inode READ-WRITE; Landlock is allow-only, so a
+# wholesale `.claude` persist could not carve out a read-only subset. The split is
+# therefore per-child: mutable session state persists RW; the instruction/config
+# surface — the injection-persistence channel into future, *unconfined* sessions —
+# binds read-only via the `~/.claude/*` read grants below. Unenumerated writes to
+# ~/.claude/ land in the tmpfs home and are ephemeral (absence-by-default).
+[fs.home]
+persist = [
+    ".claude/projects",          # transcripts / session state
+    ".claude/todos",
+    ".claude/shell-snapshots",
+    ".claude/statsig",
+    ".claude/ide",
+    ".claude/.credentials.json", # OAuth refresh rewrites it; RO would break re-auth
+    ".claude.json",              # residual: mixes state with config-as-code (see below)
+]
+
+# The instruction/config surface, bound READ-ONLY: a hostile agent editing these would
+# otherwise persist executable config (hooks, skills, slash-commands, subagents) into a
+# later, unconfined session. Read-only closes that channel.
+[[fs.read.add]]
+path = [
+    "~/.claude/CLAUDE.md",       # standing instructions
+    "~/.claude/settings.json",   # permission rules + hooks (commands on events)
+    "~/.claude/commands",        # slash-command prompt templates
+    "~/.claude/agents",          # subagent definitions
+    "~/.claude/skills",          # instructions + executable scripts
+    "~/.claude/plugins",
+]
+reason = "the instruction/config surface, read-only: config-as-code (hooks, skills, commands, subagents) must not be agent-writable, or it persists into a later unconfined session"
+# Residual [agent-writable startup config persists into unconfined sessions]: ~/.claude.json
+# mixes mutable state with config-as-code (global mcpServers = command lines executed at
+# startup) in one file; a bind cannot split a file, so it stays writable. Dissolves if
+# upstream splits state from config.
+
+# --- Network: the Anthropic endpoints (extend the template's registry set) ---
+[[net.proxy.allow]]
+name = "api.anthropic.com"
+ports = [443]
+protocol = "tcp"
+reason = "the model API"
+threats.exposed = ["T1.8"]
+
+[[net.proxy.allow]]
+name = "claude.ai"
+ports = [443]
+protocol = "tcp"
+reason = "OAuth login flow (first run / re-auth)"
+threats.exposed = ["T1.8"]
+
+[[net.proxy.allow]]
+name = "console.anthropic.com"
+ports = [443]
+protocol = "tcp"
+reason = "OAuth login flow (API-key accounts)"
+threats.exposed = ["T1.8"]
+
+# Telemetry silenced so the egress audit stays clean rather than recording denied
+# connects (statsig feature flags, sentry crash reporting deliberately NOT granted).
+[env]
+set = { CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1" }
+
+# --- The invocation: pinned in-view launcher, with -- passthrough ---
+[workload]
+argv = ["/usr/libexec/kennel-facades/run-claude.sh"]
+pinned = true
+allowed_args = true
+
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCfpuppP8o+4dR9eU2fo362IKzYsLxYJJr\nEp+ebXN1l6BFC610AUGWQb136yojOqoUSX2gjfKynw5X4WsRAnLw0=\n-----END SSH SIGNATURE-----\n"
