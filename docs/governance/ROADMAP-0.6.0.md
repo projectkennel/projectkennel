@@ -19,9 +19,11 @@ bet, the release finishes what the `dbus-broker` started: the interactive file b
 GUI has owed since §7.14.7 (W3), and the retirement of the legacy per-kennel `host-dbus` delegate
 once the broker demonstrably subsumes it (W4). Three small owed debts ride along (W5–W7), and the
 clunky admin-provisioned `/etc/kennel/subkennel` per-user allocation retires — derived from the
-kernel-trusted uid instead, which also clears the ULA addressing scheme for W2 (W10). The release
-also carries the corpus succession: the frozen design/architecture trees retire in favour of the
-two-volume book (W9). The release opens with a validation stream (W0): every empirical unknown the
+kernel-trusted uid instead, which also clears the ULA addressing scheme for W2 (W10). The adoption
+story finally reaches its last mile: a maintainer-signed `claude` policy that runs in three commands
+with no user-authored leaf, on two small additive policy fields that generalise to a catalogue of
+agent policies (W11). The release also carries the corpus succession: the frozen design/architecture
+trees retire in favour of the two-volume book (W9). The release opens with a validation stream (W0): every empirical unknown the
 work rests on is measured before a manifest or schema is drawn, not reasoned about. A pre-ship
 adversarial pass on the new boundaries gates the tag (W8).
 
@@ -382,23 +384,90 @@ settled once. `install.sh` stops provisioning `subkennel`.
 from the uid; the file, the `alloc` module, and the refuse-to-start gate are gone; the installer no
 longer provisions it; the policy suite (inbound mirror + bastion) passes on the derived addressing.
 
+### W11 · `kennel run claude`: `allowed_args`, the invocation-cwd grant, and the vendor agent leaf
+
+**[quality] S. The adoption story's last mile: a shipped, signed agent policy that runs in three
+commands — invocation, binary, state, endpoints, and the project tree all resolved without the user
+authoring any policy.**
+
+The generic `ai-coding-strict` template deliberately omits the LLM API endpoint, the agent binary,
+and the project path, so today the honest quickstart is "derive and sign a leaf" — which contradicts
+the out-of-the-box pitch. Three deltas close it, each riding mechanism that already exists:
+
+- **`[workload] allowed_args`.** The `-- <args>` tokens append to a pinned workload's argv instead of
+  being refused. The append itself already exists — the OCI branch does it unconditionally
+  ([server.rs](../../src/crates/kenneld/src/server.rs), the launcher-argv `extend`) — so this exposes
+  it as a schema field and adds a third arm to `effective_workload`: policy argv present ∧ `pinned` ∧
+  `allowed_args` ∧ request argv non-empty ⇒ `workload.argv ⧺ req.argv`. `pinned` still binds the
+  program and base argv exactly (the fd-pin/digest binds the *program*, not the args); the
+  pinned-refusal diagnostic names the field.
+
+- **`[fs] cwd.grant` / `cwd.required`, with a required `reason`.** A signed policy may declare that
+  the invocation cwd is materialised into the view: `cwd.grant = "read" | "write" | "none"` (default
+  `none`) and `cwd.required = [".git", ".claude/"]` (dirent markers; trailing slash ⇒ directory). A
+  non-`none` grant **requires a `reason`** — the same acknowledged-tradeoff forcing function as
+  `mode = host` and `[[net.proxy.allow]]`, because this is a genuinely new authority shape (signed
+  policy declares the slot; the invocation fills it with a writable directory). kenneld resolves
+  `req.cwd` host-side pre-spawn, checks it against the floor and markers, and appends it to the run's
+  effective grant set; the materialised grant is recorded in the run audit event. **Framework floor,
+  non-overridable:** realpath-normalised, owned by the operator, never `$HOME`. Resolution rides the
+  0.5.0 `RESOLVE_NO_SYMLINKS` writable-bind-source path. Floor or markers unmet ⇒ the run **refuses**
+  with a diagnostic naming the missing marker — never a silent no-grant. A `write` grant lands the
+  T2.8 trust manifest at the project root, which is where that workflow belongs.
+
+- **The `claude` vendor leaf + in-view launcher.** `policies/claude` on `ai-coding-strict`: both
+  install layouts granted (native `~/.local/{bin,share}/claude` and the npm-global module tree —
+  absent layouts normalise away, verified: `materialize_binds` skips a bind whose source does not
+  exist and the Landlock seal builds `skip_missing`, so a grant for an absent path is vacuous, not an
+  error), `[fs.home] persist` for `.claude`/`.claude.json`, the Anthropic API + OAuth endpoints
+  (T1.8-tagged), telemetry silenced via `[env] set` rather than audit-noisy denied connects,
+  `cwd.grant = "write"` (with its `reason`) and `[".git", ".claude/"]` as per-project consent
+  markers, and a pinned `[workload]` pointing at `kennel-facades/run-claude.sh` — an in-view discovery
+  launcher (layout probing belongs inside the view, not in policy) with `allowed_args` for passthrough.
+  Maintainer-signed at source, host-signed settled at install, like the existing reference leaves. The
+  drafted leaf and launcher are in `scratch/claude.toml` / `scratch/run-claude.sh`. `codex`/`gemini`
+  siblings follow the same shape when wanted; not this workstream (and MCP-server confinement is a
+  distinct shape — an endpoint the agent dials, not an agent binary — deferred to the backlog).
+
+**Schema.** `allowed_args` and the `[fs] cwd` fields are additive optionals on settled v3; they ride
+the release's **single** `SETTLED_SCHEMA_VERSION` bump (shared with W2 Part A — one bump for 0.6.0,
+not three), and are recorded under Policy schema changes. The book's policy chapter and
+`policy.toml(5)` gain both; `kennel(1)` documents the append semantics.
+
+**Endpoints are measured, not drafted.** The `claude.toml` endpoint set (`api.anthropic.com`,
+`claude.ai`, `console.anthropic.com`; statsig/sentry silenced) is a hypothesis until one live
+`kennel run claude` pass with the egress audit open confirms it — the denied-connect set is the
+authoritative list. An exec-glob check confirms the versioned-payload grant survives a claude
+self-update.
+
+**Sequencing.** Independent of the other feature work; its schema fields land with W2 Part A's version
+bump. The `cwd`-write authority is a W8 adversarial target (below).
+
+**Exit:** `kennel run claude -- <args>` works from a marked project root on a stock install with no
+user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
+endpoint set is confirmed by a live audit pass; the two schema fields land under the shared version
+bump; the README/website quickstart claim ships in the same release, not before.
+
 ### W8 · Pre-ship adversarial pass on the new boundaries
 
 **[security, ship-gate] S.**
 
-0.6.0 creates two boundaries that did not exist: the UDP facade predicate and flow broker (hostile L3
-and DNS wire parsed in operator context), and the file-broker consent path (a host-side picker
-delivering fds across the boundary). The 0.5.0 precedent holds — no finding from a focused pass is not
-proven safe — and neither has been driven from the hostile seat. Drive each live:
+0.6.0 creates boundaries and authorities that did not exist: the UDP facade predicate and flow broker
+(hostile L3 and DNS wire parsed in operator context), the file-broker consent path (a host-side picker
+delivering fds across the boundary), and the W11 invocation-cwd write grant (a signed slot the
+invocation fills with a writable directory). The 0.5.0 precedent holds — no finding from a focused pass
+is not proven safe — and none has been driven from the hostile seat. Drive each live:
 
 - the **UDP facade and broker** with the four crafted-frame classes and DNS-wire fuzz — the §10.6
   fuzz targets land with their parsers in W2; this pass drives them further and from composed
   positions (facade and broker together);
 - the **picker path** for consent bypass, fd-scope widening, and confused-deputy shapes (a kennel
-  inducing a picker it should not reach).
+  inducing a picker it should not reach);
+- the **cwd-write grant** for floor escape — symlink/bind-mount races against the `RESOLVE_NO_SYMLINKS`
+  resolution, marker spoofing, and any path to a `$HOME`-or-unowned target slipping past the floor.
 
-**Exit:** a dated `audits/` note covers both boundaries; every confirmed finding is fixed before the
-tag.
+**Exit:** a dated `audits/` note covers all three boundaries; every confirmed finding is fixed before
+the tag.
 
 (The parent-child relay boundary this pass was also to cover is gone with the withdrawn W1.)
 
@@ -471,14 +540,17 @@ W5 (raw-base64 removal)── XS, independent ───────────�
 W6 (enum validation)   ── S,  independent ────────────────────────────────────────►
 W7 (gen-man)           ── S,  independent ────────────────────────────────────────►
 W10 (retire subkennel) ── S–M, before/with W2's ULA addressing ───────────────────►
-W8 (adversarial pass)  ── S,  after W2 + W3, ship gate ───────────────────────────►
+W11 (kennel run claude)── S,  schema fields ride W2 Part A's version bump ─────────►
+W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
 ```
 
 W0 opened the release and is cheap insurance on the work that remains; with W1 withdrawn, its live
 consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
 is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
-that W4's subsumption gate wants as evidence. W5–W7 slot against capacity. W8 blocks the tag.
+that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity; W11's two additive
+schema fields ride W2 Part A's single `SETTLED_SCHEMA_VERSION` bump rather than minting a second. W8
+blocks the tag.
 
 ## Exit criteria
 
@@ -503,18 +575,23 @@ that W4's subsumption gate wants as evidence. W5–W7 slot against capacity. W8 
 - kenneld starts with no `/etc/kennel/subkennel`; per-user loopback/bastion addressing derives from
   the uid; the file, the `alloc` module, and the refuse-to-start gate are gone; the installer no
   longer provisions it (W10).
+- `kennel run claude -- <args>` runs from a marked project root on a stock install with no
+  user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
+  `claude` endpoint set is confirmed by a live egress-audit pass; `allowed_args` and the `[fs] cwd`
+  fields land under the shared `SETTLED_SCHEMA_VERSION` bump; the quickstart claim ships with it (W11).
 - The corpus cutover is complete: the book is the named corpus, the reference home carries the
   catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
   deleted with no dangling reference (W9).
-- The adversarial pass covers the relay, the UDP facade/broker, and the picker path; every confirmed
-  finding is fixed before the tag (W8, ship gate).
+- The adversarial pass covers the UDP facade/broker, the picker path, and the W11 cwd-write grant;
+  every confirmed finding is fixed before the tag (W8, ship gate).
 
 CHANGELOG records every stable-surface change — the `[net.udp]` section and the settled-schema bump,
 the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
 raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
 bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
-derived from the uid), and the corpus move to the book (with the reference-home relocation of the
-catalogue and inventory artefacts).
+derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (under the shared
+schema bump) and the `claude` reference policy, and the corpus move to the book (with the reference-home
+relocation of the catalogue and inventory artefacts).
 
 ## Parked work
 
