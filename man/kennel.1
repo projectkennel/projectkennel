@@ -45,16 +45,16 @@ reattach a terminal to a running kennel (Ctrl\-\ d to detach)
 \fBkennel review <policy> [\-\-yes] [\-\-revert]\fR
 review a workspace's trust manifest: re\-pin legitimate edits, or \-\-revert tampering
 .TP
-\fBkennel release <policy>\fR
-release a leaked exclusive over\-mount (fs.exclusive crash recovery)
+\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]\fR
+author, inspect, sign, and check policies
 .RS
 .TP
 \fB(sub\-verbs)\fR
 See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint.
 .RE
 .TP
-\fBkennel stop <name>\fR
-stop a running kennel
+\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
+generate a policy\-signing key
 .RS
 .TP
 \fB\-\-dir DIR\fR
@@ -66,41 +66,8 @@ Write the key pair to DIR instead of the default key store.
 Overwrite an existing key of the same id.
 .RE
 .TP
-\fBkennel list\fR
-list running kennels and the cross\-kennel service mesh
-.RS
-.TP
-\fBadd\fR
-Append a provably\-valid allocation line for a uid (collision\-free tag/gid).
-.RE
-.RS
-.TP
-\fBcheck\fR
-Validate the allocation file and report malformed lines.
-.RE
-.RS
-.TP
-\fB\-\-uid N\fR
-The target uid (defaults to the caller).
-.RE
-.RS
-.TP
-\fB\-\-namespace NS\fR
-The allocation namespace.
-.RE
-.RS
-.TP
-\fB\-\-tag N\fR
-A specific 12\-bit tag (otherwise allocated).
-.RE
-.RS
-.TP
-\fB\-\-file PATH\fR
-Operate on PATH instead of /etc/kennel/subkennel.
-.RE
-.TP
-\fBkennel daemon\-reload\fR
-re\-derive the service catalogue from the enablement links
+\fBkennel audit <name> [\-\-resource CLASS] [\-\-since DUR] [\-\-novel\-only] [\-\-follow] [\-\-print\-journalctl\-command]\fR
+show a kennel's audit log
 .RS
 .TP
 \fB\-\-resource CLASS\fR
@@ -127,8 +94,8 @@ Stream new events as they arrive.
 Print the equivalent journalctl invocation and exit.
 .RE
 .TP
-\fBkennel audit <name> [\-\-resource CLASS] [\-\-since DUR] [\-\-novel\-only] [\-\-follow] [\-\-print\-journalctl\-command]\fR
-show a kennel's audit log
+\fBkennel oci <build|run|revert|update> <name> [\-\-image <ref>] [\-\-key K] [\-\-force] [\-\- <cmd...>]\fR
+build and run an OCI image as a confined kennel substrate (§7.11)
 .RS
 .TP
 \fBbuild <name> \-\-image <ref>\fR
@@ -177,9 +144,6 @@ The helper binaries kenneld resolves (see kennel\-helpers via the .8 pages).
 .TP
 \fI~/.config/kennel/config.toml\fR
 User CLI conveniences (search paths). See config.toml(5).
-.TP
-\fI/etc/kennel/subkennel\fR
-Per\-user kennel allocations. See subkennel(5).
 .SH EXAMPLES
 .TP
 \fBkennel run ai\-coding\-strict \-\- claude\fR
@@ -194,4 +158,4 @@ Show running kennels.
 \fBkennel audit myjob \-\-follow\fR
 Stream myjob's audit log.
 .SH SEE ALSO
-\fBkennel\-policy\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5), \fBsubkennel\fR(5)
+\fBkennel\-policy\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5)

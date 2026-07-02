@@ -65,8 +65,8 @@ templates govern the **policy**, not the tool binaries. Gated in CI by
 ## Conventions
 
 - `policy.toml` references its parent as `template_base = "<name>@v<version>"` and
-- Substitution variables (`<kennel>`, `<uid>`, `<user>`, `<home>`, `<tag>`,
-  `<ctx>`, `<gid>`) are expanded at spawn time (§5.4); a leftover variable is a
+- Substitution variables (`<kennel>`, `<uid>`, `<user>`, `<group>`, `<home>`,
+  `<ctx>`) are expanded at spawn time (§5.4); a leftover variable is a
   hard error.
 - Every grant carries a `reason`; capability-granting rules carry
   `threats.exposed` (§5.6).

@@ -19,7 +19,7 @@ src/tools/policy-e2e.sh net-none     # one (or several) by name
 ```
 
 The runner does the one-time host setup the unprivileged spawn path needs (factory caps
-on the privhelper, an `/etc/kennel/subkennel` allocation at tag 42, a root-owned
+on the privhelper, a root-owned
 `kennel-bin-init`, an `/etc/kennel/system.toml` pointing the daemon at the build-tree
 helpers, an AppArmor `userns` grant, a delegated cgroup), stages the fixtures a policy
 cannot carry, then runs every case as the ordinary operator. A skip is never a pass: a

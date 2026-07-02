@@ -62,24 +62,27 @@ sudo ./install.sh --dry-run
 
 ## 2. Admin Configuration (Root)
 
-After the installation script finishes, the administrator must configure the system inputs in `/etc/kennel/`:
+After the installation script finishes, the administrator configures the system inputs in `/etc/kennel/`:
 
-1. **User Allocations (`/etc/kennel/subkennel`)**:
-   Add one line per operator user following the format `<uid>:<tag>:<gid-hex>:<namespace>`.
-   Example for UID `1000` (tag `42`, GID `0000000001`, namespace `kennel-alice`):
-   ```text
-   1000:42:0000000001:kennel-alice
-   ```
-2. **Scope Constants (`/etc/kennel/scope`)**:
-   Provision `/etc/kennel/scope` with the installation's global tag and ULA GID constants that `kennel-privhelper` validates against.
-3. **Public Signing Keys**:
+1. **Public Signing Keys**:
    Add any organizational or customer public keys to `/etc/kennel/keys/<key_id>.pub`. The project's own template-signing keys are automatically copied there by the installer.
+
+There is no per-user allocation step: everything a kennel needs is derived from the caller's kernel-trusted real uid (the per-user loopback subnet is an FNV-1a hash of the uid, recomputed identically by `kenneld` and by `kennel-privhelper`'s validator).
+
+**Restricting who may run kennels (optional).** By default the privhelper is world-executable, so any user may start a kennel. Access is governed by execute permission on the privhelper binary. To limit it to a group, give the binary to that group and drop other-execute:
+
+```bash
+sudo chgrp kennel-users /usr/libexec/kennel/kennel-privhelper
+sudo chmod 0750 /usr/libexec/kennel/kennel-privhelper
+```
+
+Only members of `kennel-users` can then invoke the privileged factory and start a kennel.
 
 ---
 
 ## 3. User Setup (Unprivileged)
 
-Once the administrator has provisioned `/etc/kennel/subkennel`, each user enables the user-level systemd service:
+Each user enables the user-level systemd service — no admin provisioning is required:
 
 ```bash
 systemctl --user enable --now kenneld.socket
@@ -105,6 +108,6 @@ sudo apparmor_parser -r -W /etc/apparmor.d/kenneld
 
 ## Next steps
 
-- **Operating a host** (trust store, signing keys, systemd, per-user provisioning, the config cascade, upgrades): [HOWTO-admin.md](HOWTO-admin.md).
+- **Operating a host** (trust store, signing keys, systemd, restricting who runs kennels, the config cascade, upgrades): [HOWTO-admin.md](HOWTO-admin.md).
 - **Running and authoring policies** (your first kennel, confining an agent, writing/signing a policy, reading the audit log): [HOWTO.md](HOWTO.md).
-- **Reference**: the installed man pages — `man kennel`, `man kenneld`, `man policy.toml`, `man system.toml`, `man subkennel`.
+- **Reference**: the installed man pages — `man kennel`, `man kenneld`, `man policy.toml`, `man system.toml`.

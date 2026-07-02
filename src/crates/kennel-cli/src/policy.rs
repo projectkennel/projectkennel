@@ -130,9 +130,8 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     let bytes = std::fs::read(&policy_path)
         .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
 
-    // No installation constants here: `<tag>`/`<gid>` are deferred to spawn, where
-    // the daemon fills them from the user's scope (`/etc/kennel/subkennel`). The CLI
-    // neither knows nor needs them.
+    // No installation constants here: per-kennel loopback addressing is derived at spawn from
+    // the caller's uid (v6-only ULA), never baked into the compiled policy. The CLI has no part in it.
     let source = FsTemplateSource {
         dirs: template_dirs,
     };

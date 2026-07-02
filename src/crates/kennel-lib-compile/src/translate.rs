@@ -22,11 +22,10 @@
 //! # Substitution
 //!
 //! Nothing is substituted at compile time. Every placeholder — `<kennel>`, `<ctx>`,
-//! `<uid>`, `<home>`, `<user>`, and the per-user `<tag>`/`<gid>` — is left in place
-//! and recorded in `deferred_substitutions`; the daemon fills them all at spawn from
-//! the user's scope and identity (it loads the scope from `/etc/kennel/subkennel`),
-//! and refuses to spawn if any *other* placeholder survives (02-2
-//! substitution). The compiler never needs to know the installation's tag/gid.
+//! `<uid>`, `<home>`, `<user>`, `<group>` — is left in place and recorded in
+//! `deferred_substitutions`; the daemon fills them all at spawn from the caller's
+//! uid-derived scope and identity, and refuses to spawn if any *other* placeholder
+//! survives (02-2 substitution). The compiler is host- and user-independent.
 //!
 //! # Non-goals
 //!
@@ -1538,11 +1537,10 @@ fn parse_duration_ms(s: &str) -> Result<u64, PolicyError> {
 
 /// Substitute install constants in `s` and record any remaining `<…>` placeholders.
 fn subst(s: &str, deferred: &mut BTreeSet<String>) -> String {
-    // `<tag>`/`<gid>` are NOT substituted here. They are per-user values the daemon
-    // already holds (the reserved scope it loads from `/etc/kennel/subkennel`), so
-    // they are deferred to spawn like `<ctx>`/`<uid>` — the compiler only records
-    // them. This keeps one source of truth (the daemon) and means the CLI never has
-    // to know or find out the installation's tag/gid.
+    // Per-user placeholders (`<ctx>`/`<uid>`/`<home>`/…) are NOT substituted here.
+    // They are values only the daemon holds at spawn (it derives the reserved scope
+    // from the caller's kernel-trusted uid), so the compiler only records them. This
+    // keeps one source of truth (the daemon) and keeps the compiler host-independent.
     let s = canonicalize_home(s);
     collect_placeholders(&s, deferred);
     s
@@ -3034,15 +3032,15 @@ mod tests {
     }
 
     #[test]
-    fn tag_and_gid_are_deferred_to_spawn_not_substituted() {
-        // The compiler no longer knows the installation's tag/gid; <tag>/<gid> are
-        // left in place and recorded as deferred, for the daemon to fill from the
-        // user's scope (it loads it from /etc/kennel/subkennel).
+    fn per_user_placeholders_are_deferred_to_spawn_not_substituted() {
+        // The compiler is user-independent; per-user placeholders are left in place
+        // and recorded as deferred, for the daemon to fill from the caller's
+        // uid-derived scope at spawn.
         let mut deferred = BTreeSet::new();
-        let out = subst("addr-<tag>-<gid>-<kennel>", &mut deferred);
-        assert_eq!(out, "addr-<tag>-<gid>-<kennel>");
-        assert!(deferred.contains("<tag>"));
-        assert!(deferred.contains("<gid>"));
+        let out = subst("addr-<ctx>-<uid>-<kennel>", &mut deferred);
+        assert_eq!(out, "addr-<ctx>-<uid>-<kennel>");
+        assert!(deferred.contains("<ctx>"));
+        assert!(deferred.contains("<uid>"));
         assert!(deferred.contains("<kennel>"));
     }
 

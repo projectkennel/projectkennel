@@ -5,8 +5,8 @@
 //! Turn a settled policy into a confined workload. The runtime pipeline is:
 //! verify the settled-policy bytes (one signature, schema gate, framework
 //! invariants — via [`kennel_lib_policy::verify_settled`]); substitute the
-//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`, `<tag>`,
-//! `<gid>`, and the masked `<user>`/`<group>`) and refuse any that remain;
+//! per-instance placeholders (`<ctx>`, `<uid>`, `<kennel>`, `<home>`, and the
+//! masked `<user>`/`<group>`) and refuse any that remain;
 //! translate the result into a [`Plan`] of kernel enforcement
 //! objects; then apply the plan and exec.
 //!
@@ -54,16 +54,9 @@ pub struct RuntimeSubstitutions {
     pub kennel: String,
     /// The user's home directory (`<home>`).
     pub home: PathBuf,
-    /// The caller's resource namespace (from `/etc/kennel/subkennel`), under
+    /// The caller's resource namespace (derived from the caller's uid), under
     /// which this kennel's cgroup lives (`/sys/fs/cgroup/<namespace>/<ctx>`).
     pub namespace: String,
-    /// The installation/user tag (`<tag>`) — the 12-bit IPv4 loopback selector from
-    /// the caller's scope. A per-user value the daemon already holds; the compiler
-    /// defers it here rather than baking an install constant.
-    pub tag: u16,
-    /// The IPv6 ULA global ID (`<gid>`) — the 40 bits after `0xfd`, from the
-    /// caller's scope. Rendered as 10 lowercase hex digits.
-    pub ula_gid: [u8; 5],
 }
 
 /// Everything that can stop a spawn before exec.
@@ -119,14 +112,10 @@ impl From<PolicyError> for SpawnError {
 /// masked identity (`[identity].user`/`.group`, default `kennel`), not runtime
 /// context — they are grammar-validated names (§7.4), so safe to splice into paths.
 fn substitute_str(s: &str, subst: &RuntimeSubstitutions, user: &str, group: &str) -> String {
-    let [g0, g1, g2, g3, g4] = subst.ula_gid;
-    let gid = format!("{g0:02x}{g1:02x}{g2:02x}{g3:02x}{g4:02x}");
     s.replace("<ctx>", &subst.ctx.to_string())
         .replace("<uid>", &subst.uid.to_string())
         .replace("<kennel>", &subst.kennel)
         .replace("<home>", &subst.home.to_string_lossy())
-        .replace("<tag>", &subst.tag.to_string())
-        .replace("<gid>", &gid)
         .replace("<user>", user)
         .replace("<group>", group)
 }
@@ -1054,8 +1043,6 @@ mod tests {
             kennel: "ai-coding".to_owned(),
             home: PathBuf::from("/home/dev"),
             namespace: "kennel-dev".to_owned(),
-            tag: 42,
-            ula_gid: [0, 0, 0, 0, 2],
         }
     }
 
@@ -1074,23 +1061,18 @@ mod tests {
     }
 
     #[test]
-    fn tag_and_gid_are_filled_from_scope_at_spawn() {
-        // <tag>/<gid> are deferred by the compiler and filled here, from the
-        // RuntimeSubstitutions the daemon builds from the user's scope.
+    fn ctx_and_kennel_are_filled_at_spawn() {
+        // The deferred placeholders the compiler leaves are filled here from the
+        // RuntimeSubstitutions the daemon builds (loopback addressing is v6-only and
+        // uid-derived, so there is no `<tag>`/`<gid>` to substitute anymore).
         let mut p = policy_with_placeholders();
         p.env
             .vars
-            .insert("PROXY".to_owned(), "127.<tag>.<ctx>.1".to_owned());
-        p.env.vars.insert("ULA".to_owned(), "fd<gid>".to_owned());
+            .insert("LABEL".to_owned(), "kennel-<kennel>-ctx<ctx>".to_owned());
         let out = substitute(&p, &subst()).expect("substitute");
-        // subst(): tag 42, ctx 7, ula_gid [0,0,0,0,2].
         assert_eq!(
-            out.env.vars.get("PROXY").map(String::as_str),
-            Some("127.42.7.1")
-        );
-        assert_eq!(
-            out.env.vars.get("ULA").map(String::as_str),
-            Some("fd0000000002")
+            out.env.vars.get("LABEL").map(String::as_str),
+            Some("kennel-ai-coding-ctx7")
         );
     }
 

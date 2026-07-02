@@ -94,7 +94,6 @@ CASE_RUN="$CASE_DIR/run.sh"
 SYSTEM_TOML="/etc/kennel/system.toml"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
 SUITE_KEY="$KEY_DIR/kennel-suite.key"
-SUBKENNEL_LINE="${UID_NUM}:42:0000000002:kennel-dev"
 
 [ -n "$COMPARE_IN" ] && { [ -f "$COMPARE_IN" ] || { echo "no baseline to compare: $COMPARE_IN" >&2; exit 2; }; }
 
@@ -140,9 +139,8 @@ if [ "$DO_INSTALL" = 1 ]; then
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
-# 2. Admin inputs install.sh does not fabricate: the subkennel allocation + a trusted signing key.
-sudo touch /etc/kennel/subkennel
-sudo grep -qE "^${UID_NUM}:" /etc/kennel/subkennel || echo "$SUBKENNEL_LINE" | sudo tee -a /etc/kennel/subkennel >/dev/null
+# 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
+#    reserved subnet is uid-derived, so there is no allocation file to provision).
 [ -f "$SUITE_KEY" ] || "$KENNEL" keygen kennel-suite >/dev/null
 
 # 3. Turn on the timestamped spawn-path trace (restored on exit) and restart the service.

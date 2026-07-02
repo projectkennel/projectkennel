@@ -1125,11 +1125,11 @@
                     <div class="cell">
                         <p class="snip-cap">1 · install (root, once)</p>
 <pre class="snippet"><span class="c"># unpack a release tarball for your arch, then:</span>
-<span class="k">sudo</span> ./install.sh --provision-users</pre>
+<span class="k">sudo</span> ./install.sh</pre>
                         <p style="font-size:15px;color:var(--blue-soft);margin:0">Installs the binaries under
                             <code>/usr/libexec/kennel</code>, the per-user systemd units, the AppArmor userns grant,
-                            and the maintainer trust key. <code>--provision-users</code> allocates a subkennel line
-                            for every member of the <code>users</code> group.</p>
+                            and the maintainer trust key. No per-user provisioning step: each kennel's
+                            loopback and inbound-mirror addressing is derived from the caller's uid.</p>
                     </div>
                     <div class="cell">
                         <p class="snip-cap">2 · enable the daemon (each user)</p>

@@ -788,8 +788,8 @@ pub struct ConstructionHalf {
     /// The kennel's context number — re-supplied so the factory can re-validate each
     /// [`loopback`](Self::loopback) address against the caller's reserved per-kennel subnet.
     pub ctx: u16,
-    /// The per-kennel loopback addresses to add on host `lo` (`127.<tag>.<ctx>.x/28` and
-    /// `fd<gid>:<tag>:<ctx>::/64`). The factory adds these itself (folding the former
+    /// The per-kennel loopback address to add on host `lo` (the v6 ULA `/64`
+    /// `fd6b:6e00:<uid_subnet>:<ctx>::/64`). The factory adds it itself (folding the former
     /// separate `add-addr` privhelper ops into the one `construct` op), re-validating each is
     /// within the caller's reserved scope before the netlink add. Empty ⇒ no loopback adds.
     pub loopback: Vec<LoopbackAddr>,
@@ -828,11 +828,11 @@ pub struct LoopbackAddr {
 impl Plan {
     /// Build the plan from a settled policy whose deferred placeholders have
     /// already been substituted. `ctx` is the kennel's context number, and
-    /// `namespace` the caller's resource namespace (from their
-    /// `/etc/kennel/subkennel` allocation); together they locate the kennel's
-    /// cgroup (`/sys/fs/cgroup/<namespace>/<ctx>`), and `ctx` stamps the BPF
-    /// metadata. The cgroup path is the one the privhelper will independently
-    /// re-validate against the caller's allocation before creating it.
+    /// `namespace` the caller's resource namespace (derived from their
+    /// kernel-trusted uid); together they locate the kennel's cgroup
+    /// (`/sys/fs/cgroup/<namespace>/<ctx>`), and `ctx` stamps the BPF metadata.
+    /// The cgroup path is the one the privhelper will independently re-validate
+    /// against the caller's ownership before creating it.
     ///
     /// # Errors
     ///

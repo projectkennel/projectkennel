@@ -13,9 +13,9 @@
 # The shape this template pins:
 #   * reachable from the developer's workstation, NOT the LAN. base-confined
 #     rewrites a wildcard bind (0.0.0.0 / ::) to the kennel's OWN private
-#     loopback address (computed from <tag>/<ctx>), so the service answers within
-#     the kennel's address space but is invisible to the LAN (T3.3). Binding the
-#     host's 0.0.0.0 is refused; privileged ports are refused.
+#     loopback address (the uid-derived IPv6 subnet + <ctx>), so the service
+#     answers within the kennel's address space but is invisible to the LAN
+#     (T3.3). Binding the host's 0.0.0.0 is refused; privileged ports are refused.
 #   * data confined to ONE path. The leaf grants a single writable, persisted
 #     data directory; everything else in the view is ephemeral or absent (T1.1).
 #   * deny-by-default execution. exec.allow is empty here (inherited); the leaf

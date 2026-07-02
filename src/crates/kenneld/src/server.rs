@@ -225,8 +225,6 @@ pub struct BastionSetup {
     pub ssh_bin: PathBuf,
     /// The loopback address the bastion listens on.
     pub listen: IpAddr,
-    /// The bastion's port.
-    pub port: u16,
     /// The root-owned `AuthorizedKeysCommand` the bastion vends keys through
     /// (production, §7.10.7): it queries this running daemon for the live bindings,
     /// so no `authorized_keys` file is written. `None` falls back to a static
@@ -431,7 +429,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             crate::bastion::Bastion::new(crate::bastion::BastionConfig {
                 dir: setup.dir.clone(),
                 listen: setup.listen,
-                port: setup.port,
                 akc: setup.akc.clone(),
             })
         });
@@ -472,6 +469,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .host_pub()
             .ok_or("bastion failed to start (no host key)")?
             .to_owned();
+        // The port sshd actually bound (a random high port, discovered at start).
+        let bastion_port = bastion
+            .port()
+            .ok_or("bastion started but reported no bound port")?;
         // The bastion lock is only needed for minting + registration; release it
         // before the synthetic-config file I/O below.
         drop(guard);
@@ -487,7 +488,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         let connect_bin = setup.ssh_bin.to_string_lossy().into_owned();
         let params = crate::ssh::SshParams {
             bastion_host: &listen,
-            bastion_port: setup.port,
+            bastion_port,
             bastion_host_key: &host_pub,
             ssh_bin: &connect_bin,
             // The bastion login user is the operator: the bastion runs the forced command
@@ -500,7 +501,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(|e| e.to_string())?;
         Ok(crate::SshPrep {
             file_binds,
-            host_service: Some(SocketAddr::new(setup.listen, setup.port)),
+            host_service: Some(SocketAddr::new(setup.listen, bastion_port)),
             ssh_bin: Some(setup.ssh_bin.clone()),
         })
     }
@@ -1319,12 +1320,7 @@ pub fn run_kennel<P, L>(
         uid: shared.identity.uid,
         kennel: req.kennel.clone(),
         home: shared.identity.home.clone(),
-        namespace: shared.identity.scope.namespace().to_owned(),
-        // `<tag>`/`<gid>` come from the user's reserved scope (loaded from
-        // /etc/kennel/subkennel) — the daemon is the one source of truth, so the
-        // compiler/CLI never bakes them in.
-        tag: shared.identity.scope.tag(),
-        ula_gid: shared.identity.scope.ula_gid(),
+        namespace: shared.identity.scope.namespace(),
     };
 
     // A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
@@ -2750,7 +2746,7 @@ mod tests {
                 gid: 1000,
                 username: "dev".to_owned(),
                 home: PathBuf::from("/home/dev"),
-                scope: ReservedScope::new(9, [0, 0, 0, 0, 1], "kennel-test"),
+                scope: ReservedScope::new(9),
                 cgroup_base: base,
                 proxy: None,
                 etc_base: None,
@@ -2809,8 +2805,6 @@ mod tests {
             kennel: "t".to_owned(),
             home: PathBuf::from("/home/dev"),
             namespace: "kennel-test".to_owned(),
-            tag: 42,
-            ula_gid: [0, 0, 0, 0, 2],
         };
         let consume = |name: &str, shape: Shape, at: Option<&str>, env: &[&str]| {
             kennel_lib_policy::ConsumeRuntime {
@@ -2892,7 +2886,6 @@ mod tests {
         let mut bastion = Bastion::new(BastionConfig {
             dir: PathBuf::from("/run/user/1000/kennel-bastion"),
             listen: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            port: 7022,
             akc: None,
         });
         bastion.push_edge_for_test(Edge {

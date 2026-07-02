@@ -6,6 +6,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### CLI changes
+
+- **Removed `kennel subkennel`** (the `add` / `check` sub-verbs) and its `subkennel(5)`
+  man page. The per-user `/etc/kennel/subkennel` allocation file is retired: a kennel's
+  reserved loopback subnet is now derived from the caller's kernel-trusted real uid (an
+  FNV-1a hash into the fixed Kennel ULA space `fd6b:6e00::/24`, `/64` per kennel), so there
+  is nothing to provision. Per-kennel loopback and inbound-mirror addressing is **IPv6-only**
+  — the IPv4 loopback alias was removed (a v4-only inbound service is an accepted non-goal).
+  Who may run kennels is governed by execute permission on the privhelper under the libexec
+  dir (`chgrp` / `chmod`), not an allocation file; `install.sh` drops its `--provision-users`
+  flag accordingly. The unused `<tag>` / `<gid>` template substitution variables are removed.
+
 ## [0.5.0] — 2026-06-29
 
 **Owed work and quality of life.** 0.5.0 pays the debt the two large prior releases accrued. It
