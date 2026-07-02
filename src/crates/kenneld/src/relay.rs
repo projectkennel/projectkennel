@@ -57,7 +57,9 @@
 //! loop), does not fork or seal (that is startup), and does not pass fds (that
 //! is [`kennel_lib_scm`]); it is only the codec.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::{BorrowedFd, OwnedFd};
 
 /// Maximum encoded length of a name in a [`RelayRequest::Resolve`] (DNS limit).
 pub const MAX_NAME: usize = 253;
@@ -472,9 +474,86 @@ impl RelayResponse {
     }
 }
 
+/// Upper bound on a relay frame, sized for the largest reply (a full
+/// [`MAX_ADDRS`] address list) with headroom. A frame that would exceed this is
+/// truncated by `SOCK_SEQPACKET` and then fails to decode — rejected, never
+/// over-read.
+const MAX_FRAME: usize = 2048;
+
+/// Send a request over the relay socket. A request never carries an fd.
+///
+/// # Errors
+///
+/// An OS error if the underlying `sendmsg` fails.
+pub fn send_request(sock: BorrowedFd<'_>, req: &RelayRequest) -> io::Result<()> {
+    kennel_lib_syscall::scm::send_with_fds(sock, &req.encode(), &[])?;
+    Ok(())
+}
+
+/// Receive and decode a request. This is the parent's hostile boundary: any fds
+/// that accompany a request (there should be none) are dropped.
+///
+/// # Errors
+///
+/// An OS error if `recvmsg` fails, or [`io::ErrorKind::InvalidData`] if the
+/// frame does not decode to a [`RelayRequest`].
+pub fn recv_request(sock: BorrowedFd<'_>) -> io::Result<RelayRequest> {
+    let mut buf = [0u8; MAX_FRAME];
+    let (n, _fds) = kennel_lib_syscall::scm::recv_with_fds(sock, &mut buf)?;
+    let frame = buf
+        .get(..n)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "short frame"))?;
+    RelayRequest::decode(frame).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+/// Send a reply over the relay socket, with exactly the fds its variant expects.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] if `fds.len()` does not match
+/// [`RelayResponse::expected_fds`]; an OS error if `sendmsg` fails.
+pub fn send_response(
+    sock: BorrowedFd<'_>,
+    resp: &RelayResponse,
+    fds: &[BorrowedFd<'_>],
+) -> io::Result<()> {
+    if fds.len() != resp.expected_fds() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "fd count does not match reply variant",
+        ));
+    }
+    kennel_lib_syscall::scm::send_with_fds(sock, &resp.encode(), fds)?;
+    Ok(())
+}
+
+/// Receive and decode a reply, returning any accompanying fds.
+///
+/// # Errors
+///
+/// An OS error if `recvmsg` fails; [`io::ErrorKind::InvalidData`] if the frame
+/// does not decode or the fd count does not match the decoded variant.
+pub fn recv_response(sock: BorrowedFd<'_>) -> io::Result<(RelayResponse, Vec<OwnedFd>)> {
+    let mut buf = [0u8; MAX_FRAME];
+    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(sock, &mut buf)?;
+    let frame = buf
+        .get(..n)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "short frame"))?;
+    let resp =
+        RelayResponse::decode(frame).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if fds.len() != resp.expected_fds() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "reply fd count does not match variant",
+        ));
+    }
+    Ok((resp, fds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::AsFd;
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
@@ -683,5 +762,59 @@ mod tests {
             RelayResponse::decode(&[2, 9]),
             Err(RelayError::BadRefusal)
         );
+    }
+
+    // --- transport over a real socketpair ---
+
+    fn pair() -> (OwnedFd, OwnedFd) {
+        kennel_lib_syscall::scm::seqpacket_pair().expect("socketpair")
+    }
+
+    #[test]
+    fn transport_request_round_trips() {
+        let (a, b) = pair();
+        let req = RelayRequest::Resolve {
+            name: "example.com".to_owned(),
+        };
+        send_request(a.as_fd(), &req).expect("send");
+        assert_eq!(recv_request(b.as_fd()).expect("recv"), req);
+    }
+
+    #[test]
+    fn transport_resolved_reply_round_trips() {
+        let (a, b) = pair();
+        let resp = RelayResponse::Resolved {
+            addrs: vec![v4(1, 2, 3, 4), IpAddr::V6(Ipv6Addr::LOCALHOST)],
+        };
+        send_response(a.as_fd(), &resp, &[]).expect("send");
+        let (got, fds) = recv_response(b.as_fd()).expect("recv");
+        assert_eq!(got, resp);
+        assert!(fds.is_empty());
+    }
+
+    #[test]
+    fn transport_fd_ready_carries_exactly_one_fd() {
+        let (a, b) = pair();
+        let f = std::fs::File::open("/dev/null").expect("open /dev/null");
+        send_response(a.as_fd(), &RelayResponse::FdReady, &[f.as_fd()]).expect("send");
+        let (got, fds) = recv_response(b.as_fd()).expect("recv");
+        assert_eq!(got, RelayResponse::FdReady);
+        assert_eq!(fds.len(), 1);
+    }
+
+    #[test]
+    fn send_response_rejects_wrong_fd_count() {
+        let (a, _b) = pair();
+        // FdReady expects one fd; sending none is a caller error.
+        let err = send_response(a.as_fd(), &RelayResponse::FdReady, &[]).expect_err("must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn recv_request_rejects_junk_frame() {
+        let (a, b) = pair();
+        kennel_lib_syscall::scm::send_with_fds(a.as_fd(), &[0xff, 0x00], &[]).expect("send junk");
+        let err = recv_request(b.as_fd()).expect_err("must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
