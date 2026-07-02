@@ -1,6 +1,6 @@
 # Project Kennel — backlog / parking lot
 
-Status: **standing** · Last touched: 2026-07-01
+Status: **standing** · Last touched: 2026-07-02
 
 > The parking lot for work that is **not on any release roadmap** and should not be carried from one to
 > the next. Three kinds live here: items **declined on principle** (mostly risk, little reward — re-open
@@ -82,41 +82,33 @@ documentation sweep.
 
 ## Fenced to a later release
 
-- **Minimal view floor — tighten the default host-rootfs visibility (`/usr`, `/var`).** The base templates
-  grant `fs.read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]`, so every constructed view sees the
-  *entire* `/usr` (incl. `/usr/share`, `/usr/src`, `/usr/local`) — more host rootfs than a confined workload
-  needs. The principle is the one the W10 `/usr/libexec/kennel` blacklist is a single concrete instance of:
-  **a view should see the minimum host rootfs it needs, not a blanket subtree** (the read-side of
-  construction-by-absence, §4.2). The reason it is fenced rather than a quick edit: curating `/usr` is
-  breakage-prone — `terminfo`, `ca-certificates`, locale/`gconv` data live under `/usr/share`, the loader and
-  lib closure under `/usr/lib*` — so the floor must be **derived from what workloads actually resolve at
-  runtime** (measure-then-narrow), or it ships a default that mysteriously breaks TLS or the terminal. Pin it
-  as a design-corpus *principle* (the minimal-view floor, beside §4.2) + the *concrete floor* in the base
-  templates' fs grants + a *threat* entry (host-rootfs info-leak into views). **Out of 0.4.0** — a deliberate
-  later-release item, not a near-term follow-on: 0.4.0's down-payment on the principle is the W10
-  `/usr/libexec/kennel` blacklist (built), and the full floor-tightening is a measure-then-narrow exercise
-  that earns its own release slot rather than riding the service-mesh release. Promote onto a roadmap when
-  that release schedules it.
-- **Interactive file broker (confined GUI's §7.14.7 residual) — fenced post-0.4.0, behind a D-Bus-broker
-  re-evaluation.** The confined-GUI render/display leg shipped (#99); the one committed residual is the
-  Kennel-native file broker — a host-side transient picker the user consents through, delivering one fd into
-  the workload's view (§4.3 fd-broker, no portal). It is fenced not for capacity but because its **app-facing
-  interface is unsettled and couples to a deliberate re-evaluation now that service kennels exist**: an
-  unmodified GTK/Qt app reaches a file chooser only through the `org.freedesktop.portal.FileChooser` D-Bus
-  interface, which §7.14 cuts — so the broker's app-facing surface is entangled with **where the D-Bus broker
-  itself (the `org.projectkennel.IDBus` facade, §7.7) should live now that the GUI service kennel exists**:
-  whether the D-Bus mediation belongs in daemon/host-facade surface or in a signed service kennel of its own,
-  and how a FileChooser-shaped request rides that home. Settle the D-Bus-broker home first; the file broker
-  follows whatever that decides. Promote when that re-evaluation lands and the app-facing interface is chosen
-  (the coarse open/save-one-file floor first; the fine-grained per-method policy below is a further increment
-  on top). Until then a confined GUI app touches only its pre-granted paths — a real limit, recorded, not
-  rushed into the tag.
-- **Mesh connector handoff: dbus-name + binder-connector shapes** — the `[[provides]]`/`[[consumes]]`
-  schema types three transports (`af-unix` / `dbus-name` / `binder-connector`), and 0.4.0 brokers only
-  the **af-unix** handoff — the critical shape (confined GUI rides a Wayland af-unix socket) and the one
-  that reuses the existing `CONNECT_AFUNIX` facade byte-identically. The other two are schema-accepted but
-  broker-refused until built; promote when a real consumer needs a brokered D-Bus name or a binder
-  connector node-handle. Not a 0.4.0 gap — a later increment on a frozen schema.
+- **Kenneld restart-fork resolution — kennels that survive a daemon restart.** A kenneld restart
+  today ends every running kennel: each kennel's serving thread lives in the daemon process, so
+  detach survives a *client* leaving, not kenneld leaving
+  (`docs/architecture/05-state-and-supervision.md`). Every daemon upgrade or reinstall is therefore
+  a fleet-wide workload restart. The fix is structural — the serving relationship must be
+  re-adoptable across a daemon generation (state handoff or re-attach, never authored daemon state
+  that contradicts repo-is-truth). Named as a 0.6.0-horizon item by the 0.5.0 roadmap; not taken for
+  0.6.0 (the release's structural bet is kenneld self-confinement, and reshaping the process
+  lifecycle *while* sealing it is two structural changes to one process in one release). Promote
+  when an availability-focused release schedules it — after the sealed-daemon shape has settled,
+  since adoption must be designed against the sealed topology, not the monolith.
+- **Global spawn-storm accounting.** Per-spawn resource ceilings exist (each dynamic spawn carries
+  its own cgroup limits, §7.12); there is no *aggregate* — N spawned kennels are N × ceiling, and
+  nothing accounts for the sum. A spraying parent saturates the host by fan-out rather than by any
+  single kennel. Bounded work: a per-operator (or per-parent-kennel) aggregate budget enforced at
+  spawn admission. Promote when an availability/hardening pass is scheduled; pairs naturally with
+  the restart-fork item above.
+- **Multi-operator delegation — design-gated, do not schedule build work.** The keys model
+  deliberately leaves the delegation question open: a trust tier can carry many signers, but who may
+  add a key to a place and how holders are scoped against one another is unsettled (the keys
+  chapter records it as open). There is nothing buildable until the design track answers that;
+  promote only after the book settles the delegation model.
+- **First-party MASQUE/`connect-udp` endpoint.** If the ecosystem brings UDP to the existing
+  CONNECT chokepoint, proxy-aware clients get UDP through the already-brokered path and the 0.6.0
+  tun/broker path serves only proxy-oblivious stacks. That would be a later, cheaper workstream —
+  recorded so the 0.6.0 UDP workstream is not read as preempting it. Promote if/when MASQUE support
+  in mainstream client stacks makes the chokepoint real.
 - **Fine-grained service-method policy** — `[consumes]` at interface/method granularity (FileChooser
   yes, Camera no) rather than coarse service-name reachability. Ships coarse first; finer policy must
   not drag a protocol-body parser into a broker.
@@ -133,47 +125,11 @@ documentation sweep.
   composition, the host-mode caveats). Deliberately **not a release gate**: positioning copy cannot be
   "done" the way a passing corpus is, and gating a release on prose is process theatre. Promote when a
   positioning pass is scheduled.
-- **Live-topology surface — the consumer side (who-consumes-what).** The mesh topology view projects
-  who-*provides*-what (readiness / shape / enablement / tier / pid); the consumer half — each running
-  kennel's `[[consumes]]` — is loaded into its `KennelData` but not held in the registry, so surfacing it
-  needs a `KennelMeta` field set in `run_kennel`. Deferred to keep the increment off the construction hot
-  path. Promote when the demand side is wanted: a flaked dependency is already visible provider-side
-  (`failed` readiness), this completes the picture with who-reaches-for-what.
-- **Cross-kennel red-team — the two dynamic-pass residuals.** The static red-team closed safe-with-fixes;
-  two residuals were recorded for a later *dynamic* (runtime) pass — the connector-broker resolution race
-  and the GUI confidentiality legs — neither blocking the tag. They are written up in
-  [`audits/2026-06-24-cross-kennel-redteam.md`](audits/2026-06-24-cross-kennel-redteam.md); promote when a
-  dynamic red-team is scheduled.
-- **Writable-bind SOURCE symlink guard (`persist`-gated).** A writable bind's *source* resolution follows
-  symlinks; the fix is an **anchored** runtime guard — `openat2 RESOLVE_NO_SYMLINKS` past the shallowest
-  writable ancestor, then bind `/proc/self/fd/N` (no new `unsafe`). It is narrow: gated behind
-  `[fs.home].persist` (a writable home is ephemeral by default), so the exposure exists only for an opt-in
-  persistent writable home. The BPF-DoS half of the original finding is already solid — do **not** add
-  eviction. Maintainer-deferred; promote when the `persist` exposure is taken on.
 - **Small designed-but-unbuilt pieces (parked from the old `08-as-built-notes` roadmap).** Each is a
   convenience or a low-level hardening with a working path today — recorded so they are neither
   re-proposed nor lost, none blocking a release: the `[env].template` / `[fs.home].template` file-seed
   (design §7.9.2a — the inline `[env].set` + built-in dotfile defaults cover it); the `[unix]`
-  deferred bits (§7.6 — the ABI-gated `abstract = "allow"` escape hatch and the
-  `--dry-run`/`inspect` shim output); `kennel_meta` BPF-map **read-only sealing + `magic`/`abi` readback**
-  (`02-7-bpf-abi.md` — written once by loader convention, not yet frozen with `BPF_F_RDONLY_PROG`); and
+  `--dry-run` shim output (§7.6 — `kennel inspect --unix` shipped in 0.5.0; the dry-run half did not);
   the removed-from-schema `fs.scrub` / `fs.home.sanitise` design (§7.4.5 — revive only on a concrete need);
   and the **rendezvous-ownership incumbency tiebreak** (§7.13.4b — a `Ready` owner keeps the slot over an
   equal newcomer across `daemon-reload`; the default stable-resolution order is correct without it).
-- **Runtime-validate the four schema-enum'd policy fields.** Six policy fields carry closed value-sets;
-  two — `[rootfs].persistence` and the per-class `[audit.<class>].level` — validate through their enums'
-  `Deserialize` (`Persistence` / `AuditClassLevel`), so an invalid value errors at compile. The other
-  four — `[net.bind].inaddr_any_policy` / `in6addr_any_policy`, `[net.audit].level`, `[dbus.audit].level`
-  — get schema enum *hints* from real types (`WildcardBindPolicy` / `NetAuditLevel` / `DbusAuditLevel`,
-  #142) but are still passed through **unchecked** at compile/translate (a pre-existing gap, not a #142
-  regression). Route them through the same enum `Deserialize` so an invalid value is rejected at compile
-  rather than carried into the settled artefact. It is a **behaviour change** — it starts rejecting
-  values that slip through today — which is why it was not folded into #142. Promote when a
-  validation-hardening pass is taken on.
-- **`gen-man` — derive the man pages from the CLI, retire the hand-kept data table.** `gen-man` emits the
-  groff man pages from an in-repo data table that **mirrors** the CLI dispatch, kept honest by a sync
-  test — the exact hand-mirror-plus-babysitter-test pattern #142 removed from `gen-schema` (a second
-  source of truth a forgotten entry can silently desync). Lower stakes than the schema (man pages do not
-  gate template validation), so not urgent — but the same drift class and the same fix: reflect the man
-  pages from the CLI definition so the table cannot diverge. Promote alongside any `gen-schema`-style
-  tooling pass or the next time the CLI surface churns.
