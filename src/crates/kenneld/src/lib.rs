@@ -42,6 +42,7 @@ pub mod policy;
 pub mod prompt;
 pub mod proxy;
 pub mod pty_broker;
+pub mod relay;
 pub mod server;
 pub mod spawn;
 pub mod ssh;
