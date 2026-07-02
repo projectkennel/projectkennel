@@ -1559,15 +1559,33 @@ fn acquire_binder_node0(
     // Deterministic: the factory has mounted the binderfs and is blocking its child before
     // `fexecve` (it reported the pid only after the device existed), so this is a single open with
     // no retry. The pid is stable across the upcoming `fexecve` (same process becomes kennel-bin-init).
-    let dev = format!("/proc/{init_pid}/root/dev/binderfs/binder");
-    // std opens files O_CLOEXEC by default on Unix.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&dev)
-        .map_err(|e| io::Error::new(e.kind(), format!("open kennel binderfs {dev}: {e}")))?;
+    //
+    // The device lives in the kennel's mount namespace, reached via the magic symlink. A sealed
+    // monitor cannot open it (Landlock cannot grant a cross-mount-namespace target — W0 P1), so it
+    // asks the unconfined relay for the fd; a non-forked/degraded daemon opens it directly.
+    let device: OwnedFd = if let Some(relay) = prep.relay.as_deref() {
+        let pid = i32::try_from(init_pid)
+            .map_err(|_| io::Error::other(format!("init pid {init_pid} out of range")))?;
+        relay
+            .fd_relay(crate::relay::RelayResource::BinderDevice, pid)
+            .map_err(|e| {
+                io::Error::new(e.kind(), format!("relay binder open (pid {init_pid}): {e}"))
+            })?
+    } else {
+        let dev = format!("/proc/{init_pid}/root/dev/binderfs/binder");
+        // std opens files O_CLOEXEC by default on Unix.
+        OwnedFd::from(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&dev)
+                .map_err(|e| {
+                    io::Error::new(e.kind(), format!("open kennel binderfs {dev}: {e}"))
+                })?,
+        )
+    };
     crate::binder::spawn(
-        OwnedFd::from(file),
+        device,
         ctx,
         prep.unix.clone(),
         lifecycle,

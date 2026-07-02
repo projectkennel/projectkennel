@@ -562,6 +562,14 @@ pub trait RelayOps {
     /// pins every returned address under policy, so a wrong answer cannot widen
     /// egress.
     fn resolve(&self, name: &str) -> Result<Vec<IpAddr>, RefusalCode>;
+
+    /// Open a per-kennel resource across a mount-namespace boundary (W0 P1) and
+    /// return the fd for the monitor.
+    ///
+    /// # Errors
+    ///
+    /// [`RefusalCode::OpenFailed`] if the resource cannot be opened.
+    fn fd_relay(&self, resource: RelayResource, pid: i32) -> Result<OwnedFd, RefusalCode>;
 }
 
 /// The parent's serve loop: one request at a time over `sock` until the monitor
@@ -569,9 +577,9 @@ pub trait RelayOps {
 ///
 /// The parent treats every frame as hostile: a frame that does not decode is
 /// answered [`RefusalCode::Internal`] and the loop continues (a spamming monitor
-/// only hurts itself). `SpawnDelegate` and `FdRelay` are protocol-defined but not
-/// yet served here (the unsealed monitor still performs them directly); they are
-/// refused until the seal relocates them.
+/// only hurts itself). `SpawnDelegate` is protocol-defined but not yet served
+/// here (the unsealed monitor still execs delegates directly); it is refused
+/// until the seal relocates it.
 ///
 /// # Errors
 ///
@@ -587,23 +595,27 @@ pub fn serve(sock: BorrowedFd<'_>, ops: &dyn RelayOps) -> io::Result<()> {
             .get(..n)
             .ok_or(RelayError::BadLength)
             .and_then(RelayRequest::decode);
-        let reply = match decoded {
+        let (reply, fd): (RelayResponse, Option<OwnedFd>) = match decoded {
             Ok(RelayRequest::Resolve { name }) => match ops.resolve(&name) {
-                Ok(addrs) => RelayResponse::Resolved { addrs },
-                Err(code) => RelayResponse::Refused { code },
+                Ok(addrs) => (RelayResponse::Resolved { addrs }, None),
+                Err(code) => (RelayResponse::Refused { code }, None),
             },
-            // Not yet served over the relay: refused until the seal relocates them.
-            Ok(RelayRequest::SpawnDelegate { .. } | RelayRequest::FdRelay { .. }) => {
+            Ok(RelayRequest::FdRelay { resource, pid }) => match ops.fd_relay(resource, pid) {
+                Ok(fd) => (RelayResponse::FdReady, Some(fd)),
+                Err(code) => (RelayResponse::Refused { code }, None),
+            },
+            // SpawnDelegate is not yet served over the relay (the unsealed monitor execs delegates
+            // directly until the seal relocates it); a malformed frame is refused the same way.
+            Ok(RelayRequest::SpawnDelegate { .. }) | Err(_) => (
                 RelayResponse::Refused {
                     code: RefusalCode::Internal,
-                }
-            }
-            Err(_) => RelayResponse::Refused {
-                code: RefusalCode::Internal,
-            },
+                },
+                None,
+            ),
         };
+        let fds: Vec<BorrowedFd<'_>> = fd.as_ref().map(AsFd::as_fd).into_iter().collect();
         // Best effort: if the reply cannot be sent the monitor is gone; next recv exits.
-        send_response(sock, &reply, &[])?;
+        send_response(sock, &reply, &fds)?;
     }
 }
 
@@ -659,6 +671,30 @@ impl RelayClient {
             Err(e) => Err(ResolveError::Backend(e.to_string())),
         }
     }
+
+    /// Open a per-kennel cross-mount-namespace resource via the parent, returning
+    /// the fd.
+    ///
+    /// # Errors
+    ///
+    /// An OS error if the transaction fails or the parent refused the open.
+    pub fn fd_relay(&self, resource: RelayResource, pid: i32) -> io::Result<OwnedFd> {
+        let req = RelayRequest::FdRelay { resource, pid };
+        let (resp, mut fds) = {
+            let guard = self
+                .sock
+                .lock()
+                .map_err(|_| io::Error::other("relay lock poisoned"))?;
+            send_request(guard.as_fd(), &req).and_then(|()| recv_response(guard.as_fd()))?
+        };
+        match resp {
+            RelayResponse::FdReady => fds
+                .pop()
+                .ok_or_else(|| io::Error::other("relay returned no fd")),
+            RelayResponse::Refused { .. } => Err(io::Error::other("relay refused fd-relay")),
+            RelayResponse::Resolved { .. } => Err(io::Error::other("unexpected relay reply")),
+        }
+    }
 }
 
 /// A [`Resolver`](crate::inet::dns::Resolver) that resolves via the parent relay,
@@ -681,6 +717,27 @@ impl RelayOps for HostOps {
             ResolveError::NotFound => RefusalCode::NotFound,
             ResolveError::Backend(_) => RefusalCode::ResolveFailed,
         })
+    }
+
+    fn fd_relay(&self, resource: RelayResource, pid: i32) -> Result<OwnedFd, RefusalCode> {
+        match resource {
+            // The per-kennel binder device in the kennel's mount namespace, reached via the magic
+            // symlink (Landlock cannot grant this to the sealed monitor — W0 P1). std opens O_CLOEXEC.
+            RelayResource::BinderDevice => {
+                let dev = format!("/proc/{pid}/root/dev/binderfs/binder");
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&dev)
+                    .map(OwnedFd::from)
+                    .map_err(|_| RefusalCode::OpenFailed)
+            }
+            // Not yet relocated to the relay (their call sites still open directly); refused so a
+            // premature request is a clean error, not a wrong fd.
+            RelayResource::MeshBusDeviceDir | RelayResource::RendezvousSocket => {
+                Err(RefusalCode::OpenFailed)
+            }
+        }
     }
 }
 
@@ -963,6 +1020,16 @@ mod tests {
                 Ok(self.answer.clone())
             }
         }
+
+        fn fd_relay(&self, _resource: RelayResource, pid: i32) -> Result<OwnedFd, RefusalCode> {
+            // pid 0 stands in for "cannot open"; otherwise hand back a real fd (/dev/null).
+            if pid == 0 {
+                return Err(RefusalCode::OpenFailed);
+            }
+            std::fs::File::open("/dev/null")
+                .map(OwnedFd::from)
+                .map_err(|_| RefusalCode::OpenFailed)
+        }
     }
 
     #[test]
@@ -1015,5 +1082,32 @@ mod tests {
         let addrs = HostOps.resolve("localhost").expect("localhost resolves");
         assert!(!addrs.is_empty());
         assert!(addrs.iter().all(IpAddr::is_loopback));
+    }
+
+    #[test]
+    fn fd_relay_round_trips_a_descriptor_through_serve() {
+        use std::os::fd::AsRawFd;
+        let (parent, child) = pair();
+        let handle = std::thread::spawn(move || {
+            let _ = serve(parent.as_fd(), &FakeOps { answer: vec![] });
+        });
+        let client = RelayClient::new(child);
+        let fd = client
+            .fd_relay(RelayResource::BinderDevice, 4242)
+            .expect("fd relay");
+        assert!(fd.as_raw_fd() >= 0);
+        // pid 0 → the fake refuses → an error, no fd.
+        assert!(client.fd_relay(RelayResource::BinderDevice, 0).is_err());
+        drop(client);
+        handle.join().expect("serve thread");
+    }
+
+    #[test]
+    fn host_ops_fd_relay_refuses_a_bogus_pid() {
+        // No such pid → the /proc path open fails → OpenFailed (never a panic).
+        assert!(matches!(
+            HostOps.fd_relay(RelayResource::BinderDevice, 2_000_000_000),
+            Err(RefusalCode::OpenFailed)
+        ));
     }
 }
