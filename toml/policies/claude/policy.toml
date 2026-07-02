@@ -32,47 +32,37 @@ reason = "the Claude Code binary, in whichever install layout is present"
 path = ["~/.local/bin/claude", "~/.local/share/claude/**"]
 reason = "execute the Claude Code entry point and its versioned payload (glob; survives self-update)"
 
+# The pinned in-view launcher (a facade) must itself be executable in the view.
+[[exec.allow.add]]
+path = "/usr/libexec/kennel-facades/run-claude.sh"
+reason = "the pinned [workload] launcher runs in the view; exec it there"
+
 # --- The project tree: the invocation cwd, writable, marker-gated ---
 [fs.cwd]
 grant = "write"
 required = [".git", ".claude/"]
 reason = "the agent edits the project it is invoked from; the writable root is a project the operator marked for agent use (.claude), carrying the T2.8 trust manifest"
 
-# --- State: the RO/RW split (defends the injection-persistence channel) ----------
-# `persist` binds the real host inode READ-WRITE; Landlock is allow-only, so a
-# wholesale `.claude` persist could not carve out a read-only subset. The split is
-# therefore per-child: mutable session state persists RW; the instruction/config
-# surface — the injection-persistence channel into future, *unconfined* sessions —
-# binds read-only via the `~/.claude/*` read grants below. Unenumerated writes to
-# ~/.claude/ land in the tmpfs home and are ephemeral (absence-by-default).
-[fs.home]
-persist = [
-    ".claude/projects",          # transcripts / session state
-    ".claude/todos",
-    ".claude/shell-snapshots",
-    ".claude/statsig",
-    ".claude/ide",
-    ".claude/.credentials.json", # OAuth refresh rewrites it; RO would break re-auth
-    ".claude.json",              # residual: mixes state with config-as-code (see below)
-]
-
-# The instruction/config surface, bound READ-ONLY: a hostile agent editing these would
-# otherwise persist executable config (hooks, skills, slash-commands, subagents) into a
-# later, unconfined session. Read-only closes that channel.
+# --- State: read-only + ephemeral (Landlock is allow-only — you cannot carve a RO island
+# out of a RW parent, so there is no RW-\.claude + RO-config split; it would leave config
+# writable). The login token and the config-as-code surface are bound READ-ONLY: the agent
+# uses the operator's existing host login (no in-kennel OAuth) and can read hooks/skills/
+# commands/subagents but never rewrite them into a later, UNCONFINED session. Everything
+# else in ~/.claude is a fresh tmpfs each run — a clean agent per run; re-login on the host
+# when the token expires. Nothing under ~/.claude is writable: no injection-persistence
+# channel, no cross-project history exposure.
 [[fs.read.add]]
 path = [
-    "~/.claude/CLAUDE.md",       # standing instructions
-    "~/.claude/settings.json",   # permission rules + hooks (commands on events)
-    "~/.claude/commands",        # slash-command prompt templates
-    "~/.claude/agents",          # subagent definitions
-    "~/.claude/skills",          # instructions + executable scripts
+    "~/.claude/.credentials.json",   # OAuth login token (read-only: usable, not rewritable)
+    "~/.claude/CLAUDE.md",           # standing instructions
+    "~/.claude/settings.json",       # permission rules + hooks
+    "~/.claude/commands",            # slash-command templates
+    "~/.claude/agents",              # subagent definitions
+    "~/.claude/skills",              # instructions + executable scripts
     "~/.claude/plugins",
+    "~/.claude.json",           # account + onboarding state (read-only: skip in-kennel OAuth; no mcpServers injection, no history writes)
 ]
-reason = "the instruction/config surface, read-only: config-as-code (hooks, skills, commands, subagents) must not be agent-writable, or it persists into a later unconfined session"
-# Residual [agent-writable startup config persists into unconfined sessions]: ~/.claude.json
-# mixes mutable state with config-as-code (global mcpServers = command lines executed at
-# startup) in one file; a bind cannot split a file, so it stays writable. Dissolves if
-# upstream splits state from config.
+reason = "the operator's login token + the config-as-code surface, bound read-only: usable but not agent-writable (no in-kennel OAuth, no injection into later unconfined sessions)"
 
 # --- Network: the Anthropic endpoints (extend the template's registry set) ---
 [[net.proxy.allow]]
@@ -80,6 +70,13 @@ name = "api.anthropic.com"
 ports = [443]
 protocol = "tcp"
 reason = "the model API"
+threats.exposed = ["T1.8"]
+
+[[net.proxy.allow]]
+name = "platform.claude.com"
+ports = [443]
+protocol = "tcp"
+reason = "Claude Code control/telemetry plane (v2.x connects here at startup)"
 threats.exposed = ["T1.8"]
 
 [[net.proxy.allow]]
@@ -108,7 +105,14 @@ pinned = true
 allowed_args = true
 
 
+
+
+
+
+
+
+
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCfpuppP8o+4dR9eU2fo362IKzYsLxYJJr\nEp+ebXN1l6BFC610AUGWQb136yojOqoUSX2gjfKynw5X4WsRAnLw0=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQK/fPKirFRbMEq99TKdBPtCjA9MkkSKjmr\nJYxVSfbRWkRFLBxeINTZzKJ49pav2uNpIpgbbzTFwpYnwSc80mjAk=\n-----END SSH SIGNATURE-----\n"
