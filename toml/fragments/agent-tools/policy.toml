@@ -1,0 +1,74 @@
+# ============================================================================
+# Fragment: agent-tools — the tools a coding agent shells out to.
+#
+# The delta over the core-* set: search, JSON, process management of its own
+# children, command wrapping, patching, and binary inspection. Composed by
+# ai-coding-strict; generic across agents (Claude Code, Codex, …).
+#
+# Additive-only (§5.10): every entry is an `[[exec.allow.add]]` delta. Composing
+# this widens the program menu only; `argv[0]` stays gated by the resolved
+# `[exec].allow` under Landlock execve default-deny, and the cage (net/fs/ttl/
+# ceilings) is untouched.
+# ============================================================================
+
+name = "agent-tools"
+
+[[exec.allow.add]]
+path = "/usr/bin/rg"
+reason = "recursive code search (ripgrep); the agents' primary search tool"
+
+[[exec.allow.add]]
+path = "/usr/bin/fd"
+reason = "file finding (fd-find)"
+
+[[exec.allow.add]]
+path = "/usr/bin/fdfind"
+reason = "fd under its Debian/Ubuntu binary name"
+
+[[exec.allow.add]]
+path = "/usr/bin/jq"
+reason = "JSON query/transform"
+
+[[exec.allow.add]]
+path = "/usr/bin/patch"
+reason = "apply diffs"
+
+[[exec.allow.add]]
+path = "/usr/bin/timeout"
+reason = "bound long-running child commands"
+
+[[exec.allow.add]]
+path = "/usr/bin/ps"
+reason = "process listing; the visible universe is the workload's own tree by construction"
+
+[[exec.allow.add]]
+path = "/usr/bin/pgrep"
+reason = "find processes by name; only the workload's own tree exists to match"
+
+[[exec.allow.add]]
+path = "/usr/bin/pkill"
+reason = "signal processes by name; only the workload's own tree exists to signal"
+
+[[exec.allow.add]]
+path = "/usr/bin/kill"
+reason = "signal by pid; the PID namespace contains nothing else"
+
+[[exec.allow.add]]
+path = "/usr/bin/strings"
+reason = "printable-string extraction from binaries"
+
+[[exec.allow.add]]
+path = "/usr/bin/xxd"
+reason = "hex dump / reverse"
+
+[[exec.allow.add]]
+path = "/usr/bin/od"
+reason = "octal/hex dump; the POSIX fallback where xxd is absent"
+
+[[exec.allow.add]]
+path = "/usr/bin/sqlite3"
+reason = "inspect and manipulate SQLite files in the granted tree"
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBptHRn+iJUD58xagKyb6f2vE5+oIRFuvC\nplap7oxeZxry5ZOVXtMx0bykVOy/swv34aqOXfgiWugNO7sbY1EgM=\n-----END SSH SIGNATURE-----\n"
