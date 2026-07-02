@@ -3,9 +3,11 @@
 Status: **active** · Promoted: 2026-07-02 · Targets: 0.6.0
 Baseline: 0.5.0 (released)
 
-> This is a planning artefact, not a design or as-built document. The design corpus
-> (`docs/design/`) and the as-built notes (`docs/architecture/`) remain the source of truth
-> for *what each item is*; this file records *what 0.6.0 commits to, why, and in what order*.
+> This is a planning artefact, not a design or as-built document. The corpus remains the source
+> of truth for *what each item is* — and 0.6.0 is the release in which the corpus itself moves:
+> the frozen `docs/design/` and `docs/architecture/` trees retire in favour of the two-volume
+> book (W9). Until W9 lands, the frozen trees and the patch log remain the record. This file
+> records *what 0.6.0 commits to, why, and in what order*.
 
 ## Theme
 
@@ -18,9 +20,12 @@ carried the transport class the web is moving to — UDP egress lands without gi
 that DNS exfiltration is unexpressible (W2). Around the bets, the release finishes what the
 `dbus-broker` started: the interactive file broker the confined GUI has owed since §7.14.7 (W3), and
 the retirement of the legacy per-kennel `host-dbus` delegate once the broker demonstrably subsumes
-it (W4). Three small owed debts ride along (W5–W7). The release opens with a validation stream (W0):
-every empirical unknown the bets rest on is measured before a manifest or schema is drawn, not
-reasoned about. A pre-ship adversarial pass on the three new boundaries gates the tag (W8).
+it (W4). Three small owed debts ride along (W5–W7). The release also carries the corpus
+succession: the frozen design/architecture trees retire in favour of the two-volume book (W9),
+sequenced early because both bets write their corpus halves into it. The release opens with a
+validation stream (W0): every empirical unknown the bets rest on is measured before a manifest or
+schema is drawn, not reasoned about. A pre-ship adversarial pass on the three new boundaries gates
+the tag (W8).
 
 Standing constraints carried from 0.5.0:
 
@@ -468,10 +473,64 @@ pass is not proven safe — and none of these has been driven from the hostile s
 **Exit:** a dated `audits/` note covers all three boundaries; every confirmed finding is fixed
 before the tag.
 
+### W9 · Corpus cutover: retire `docs/design` + `docs/architecture` in favour of the book
+
+**[debt, structural] M. The parallel track, recorded; sequenced early because W1 and W2 write
+their corpus halves into the book.**
+
+The clean-sheet rewrite has landed: the two-volume book — its own repo, `projectkennel/books`,
+typically checked out in-tree at `books/` (gitignored) — carries the design (Vol 1,
+platform-neutral) and the Linux realisation (Vol 2), with a Threats tree at T-ID parity with the
+frozen catalogue (verified 2026-07-02: identical heading sets). The frozen trees retire in its
+favour. Most of the work is mechanical; the discipline is in not losing anything load-bearing on
+the way out.
+
+Decisions settled up front (2026-07-02):
+
+- **The threat catalogue stays canonical in this repo.** `THREATS.md` is machine-coupled —
+  `dist/threats/catalogue.toml` (what `kennel policy risks` reads), the CI sync guard, compile
+  diagnostics citing T-IDs, the issue-tag Action — and none of that can depend on a sibling
+  checkout. The book's Threats material derives from this repo's catalogue; it never forks it
+  (derive, don't duplicate-then-sync).
+- **The book is referenced, not vendored.** The corpus is named by URL, with the in-tree `books/`
+  checkout as the expected working convention; the standing orders and README say so. No submodule
+  pin — the book has its own cadence.
+- **The machine-coupled and as-built artefacts get one durable home in this repo** —
+  `docs/reference/` (name final at landing): the canonical `THREATS.md`; the generated crate
+  inventory and SLOC table (`crate-inventory.json` + the generated decomposition doc, today
+  regenerated into `docs/architecture/` by CI); the pointer to the authoritative policy schema
+  (the artefact itself stays `schema/policy.toml.schema`, derived from the parser structs); and
+  the **as-built log**, the successor of `DOC-PATCH-LOG.md` — per-PR as-built deltas recorded
+  against *book* chapter targets, ingested on the book's cadence. The freeze's one-way ingestion
+  queue becomes the steady-state channel between the repos.
+
+The mechanical body:
+
+- **Drain the queue first.** The patch log holds 11 entries; each is verified present in the book
+  (or ingested now) before anything is deleted, itemised in the PR that performs the drain.
+- **Repoint the code to chapter and verse.** ~40 source files cite the old trees' chapter/§ scheme
+  in rustdoc and comments. Build the mapping once — old chapter/§ → book volume/chapter/section —
+  and rewrite every citation to the book's chapter and verse. Where the book dissolved a section,
+  the citation follows the fact to its new home, never the old filename.
+- **Repoint the governance and user-facing set.** The standing orders' corpus definition (the
+  escalation order names the book: Vol 1 for design intent, Vol 2 for the as-built contract),
+  CODING-STANDARDS' chapter pointers, RELEASE-CEREMONY, README/INSTALL/HOWTOs.
+- **Repoint CI.** The inventory job regenerates into the new home instead of
+  `docs/architecture/`; the threats guard follows `THREATS.md`; the schema job is untouched.
+- **Then delete.** `docs/design/` and `docs/architecture/` leave the tree; the patch log closes
+  with a final entry naming its successor. Git history keeps both trees.
+
+**Exit:** the book is the named corpus in the standing orders and README (URL + in-tree
+convention); the reference home carries the canonical threat catalogue, the regenerated
+inventory/SLOC artefacts, and the as-built log; the 11 queued patch entries are verified ingested;
+no source, governance, or CI reference to `docs/design/` or `docs/architecture/` remains; both
+trees are deleted; CI is green with the inventory and threats jobs on their new targets.
+
 ## Sequencing
 
 ```
 W0 (validation probes) ── S,  first: P1→W1-fs, P2/P3→W1-fork, P4→W2-D, P5→W1 ►
+W9 (corpus cutover)    ── M,  early: before W1/W2 write their corpus halves ─►
 W1 (self-confinement)  ── L,  process half after P2/P3; fs half after P1 ────►
 W2 (UDP egress)        ── L,  A→B→C/D→E; independent of W1/W3 ───────────────►
 W3 (file broker)       ── M,  independent; lands before W4 ──────────────────►
@@ -482,10 +541,12 @@ W7 (gen-man)           ── S,  independent ───────────�
 W8 (adversarial pass)  ── S,  after W1 + W2 + W3, ship gate ─────────────────►
 ```
 
-W0 opens the release and is cheap insurance on both bets. W1 and W2 are the two long poles and are
-independent of each other — they proceed in parallel against capacity. W3 lands before W4 because
-the file broker is itself the brokered-D-Bus consumer that W4's subsumption gate wants as evidence.
-W5–W7 slot against capacity. W8 blocks the tag.
+W0 opens the release and is cheap insurance on both bets. W9 runs alongside it — the cutover does
+not touch the bets' code but must land before W1/W2 write their corpus halves, so those chapters
+are written once, in the book. W1 and W2 are the two long poles and are independent of each other —
+they proceed in parallel against capacity. W3 lands before W4 because the file broker is itself the
+brokered-D-Bus consumer that W4's subsumption gate wants as evidence. W5–W7 slot against capacity.
+W8 blocks the tag.
 
 ## Exit criteria
 
@@ -511,13 +572,17 @@ W5–W7 slot against capacity. W8 blocks the tag.
   (W5).
 - The four unchecked enum fields reject invalid values at compile with tests per field (W6).
 - The man pages derive from the CLI definition; the hand-kept table and its sync test are gone (W7).
+- The corpus cutover is complete: the book is the named corpus, the reference home carries the
+  catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
+  deleted with no dangling reference (W9).
 - The adversarial pass covers the relay, the UDP facade/broker, and the picker path; every confirmed
   finding is fixed before the tag (W8, ship gate).
 
 CHANGELOG records every stable-surface change — the sealed-daemon process shape, the `[net.udp]`
 section and the settled-schema bump, the portal FileChooser surface, the `host-dbus` retirement (or
 its recorded retention), the raw-base64 removal, the four-field validation tightening, the
-threat-catalogue additions (+ version bump), and the man-page derivation.
+threat-catalogue additions (+ version bump), the man-page derivation, and the corpus move to the
+book (with the reference-home relocation of the catalogue and inventory artefacts).
 
 ## Parked work
 
