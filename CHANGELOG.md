@@ -22,13 +22,40 @@ no finding. Verified on Linux 7.0 against the installed stack.
 
 ### Policy schema changes
 
-- **`[unix].abstract = "allow"`** — an ABI-gated escape hatch for workloads that need an
-  abstract-namespace peer. Denied by default (the always-on Landlock `ABSTRACT_UNIX_SOCKET` scope,
-  ABI ≥ 6); the opt-in restores it where the kernel supports it. **`abstract = "allow"` with
-  `net.mode = "host"` is a hard compile error** (a typed diagnostic citing the new threat ID): an
-  abstract socket is scoped to the network namespace, so a host-mode kennel sharing the host netns
-  would have a direct hole into the host abstract namespace below every other gate. The settled
-  schema version is unchanged (`SETTLED_SCHEMA_VERSION = 2`): this is a value gate, not a new field.
+- **Settled schema version 2 → 3** (`SETTLED_SCHEMA_VERSION` and `MIN_SETTLED_SCHEMA_VERSION` are
+  both `3`). A 0.5.0 daemon loads only v3 settled policies, so any settled artefact compiled under
+  0.4.0 (v2) must be recompiled. The bump is the sum of the shape changes below; a source
+  `policy.toml` written for 0.4.0 recompiles unchanged except where it used a removed key.
+- **`[fs.tmp]`: `private` renamed to `writable`, and `mode` removed.** `/tmp` is always a fresh
+  per-kennel tmpfs in the constructed view; `writable = true` grants the workload write, absent
+  leaves it read-only (the old `private = false` never bind-mounted the host `/tmp`). The per-policy
+  DAC `mode` gated no real adversary — the tmpfs lives in the workload's own mount namespace, owned
+  by the workload uid — so it is gone; the mount fixes `0700` internally.
+- **`[binder]` user-defined service section removed.** `[[binder.provide]]`/`[[binder.consume]]`
+  and kenneld's node-0 service registry were wired-but-unused, superseded by the capability mesh
+  (`[[provides]]`/`[[consumes]]` → `SVC_CONNECT`). The binder transport is untouched — kenneld still
+  owns node 0 and the per-kennel binder device stays the control plane. Shrinks the TCB ~250 SLOC.
+- **`fs.proc.visibility` and `unix.default` removed** — each had exactly one legal value (`self`,
+  `deny`) encoding a framework invariant, not an authorable choice. procfs is always self-only;
+  `[unix]` is always default-deny. `[fs.proc]` keeps `hidepid`; `[unix]` keeps `abstract` and
+  `[[unix.allow]]`.
+- **`[[provides]]` / `[[consumes]]`: `name` and `shape` are now required** (they were already
+  compile-validated as such; the schema now types them so). `endpoint`/`at` keep their documented
+  defaults.
+- **`[unix].abstract = "allow"`** — an ABI-gated escape hatch for a workload that needs an
+  abstract-namespace peer, denied by default (the always-on Landlock `ABSTRACT_UNIX_SOCKET` scope,
+  ABI ≥ 6). **`abstract = "allow"` with `net.mode = "host"` is a hard compile error** (a typed
+  diagnostic citing the new threat ID): an abstract socket is scoped to the network namespace, so a
+  host-mode kennel sharing the host netns would have a direct hole into the host abstract namespace
+  below every other gate.
+- **Templates drop the version axis.** The `@vN` suffix, `template_version`, and the `meta.toml`
+  `version` key are gone — a reference is a bare name (`template_base = "base-confined"`), and the
+  signature is the content commitment (the lockfile pins name → signature and hard-errors on drift).
+  Coexisting "versions" become coexisting names: a breaking base change is authored as
+  `base-confined-v2` and pointed at deliberately.
+- **The published JSON Schema (`schema/policy.toml.schema`) is now derived from the parser structs**,
+  so it cannot drift from what the compiler accepts (it previously came from a hand-kept mirror that
+  omitted the `[[*.add]]` increment forms). Build-only; the runtime/TCB build is unaffected.
 
 ### Keys & signing
 
@@ -52,6 +79,8 @@ no finding. Verified on Linux 7.0 against the installed stack.
 - **`kennel inspect <name> --unix`** — surfaces a kennel's resolved `AF_UNIX` grants (§7.6.5).
 - **`kennel list`** now shows the **consumer** leg of the mesh topology (who-consumes-what:
   capability, shape, required/optional, resolution state) beside who-provides-what.
+- **`kennel policy upgrade` removed** — it existed only to bump template `@vN` references, which no
+  longer exist (see *Policy schema changes*).
 - The proposed keyword CLI split (`kennel-run`/`-policy`/`-oci`) was **prototyped, measured, and
   declined** — it tripled deployed size for no functional gain; the host CLI stays one `kennel-host`
   unit behind the context-detecting shim (the `kennel-cli` library extraction was kept).
@@ -83,6 +112,27 @@ no finding. Verified on Linux 7.0 against the installed stack.
   0.4.0 F1 writable-bind-source aliasing residual.
 - **`kennel_meta` BPF map sealed read-only.** Created with `BPF_F_RDONLY_PROG` and frozen, so a
   workload cannot corrupt the meta map even if it reached the BPF subsystem.
+
+### Corpus & references
+
+- **Confined GUI desktop corpus.** A nested-compositor confined desktop on the connector mesh:
+  **`gui-broker`** — a GUI-service kennel that holds the GPU (`/dev/dri/renderD128`) and the single
+  host-Wayland leg, provides the reserved `org.projectkennel.wayland`, and spawns a fresh nested
+  compositor per accepted mesh connection; **`gui-session`** — runs its own software-rendered `sway`
+  under a private session bus, consuming the broker's display over the mesh; plus app fragments
+  (`gui-desktop`, `gui-editor`, `gui-accessories`, `gui-viewers`, `gui-files`) that compose
+  additively. The `compositor-broker` runs in-cage.
+- **Reference policies ship and compile at install.** The payload carries the maintainer-signed
+  reference policy *sources* (runnable leaves + service providers); `install.sh` mints a host signing
+  key in `/etc/kennel/keys` and compiles each to a **host-signed settled artefact** under
+  `/etc/kennel/policies` — a settled policy is host-specific (the loader pin embeds the host library
+  closure), so it cannot be shipped pre-compiled. A thin leaf inherits reserved-namespace authority
+  from the vendor-signed template it derives, so the host key signs it with no maintainer key on the
+  target. Maintainer-signed templates and fragments ship to the vendor tier (`/usr/lib/kennel`),
+  never to `/etc/kennel`; every shipped template carries a `meta.toml`.
+- **`dbus-broker` restructured to the thin-leaf shape.** The whole D-Bus-broker shape (the host
+  session-bus leg, the broker exec grant, the `org.projectkennel.dbus` provide) moves into the
+  template; the provider policy is a thin leaf that derives it and pins the workload.
 
 ### Privilege model
 
