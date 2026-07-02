@@ -90,8 +90,22 @@ usually already correct by release time — *verify*, do not blindly bump.
    - cross linker via `CARGO_TARGET_<TRIPLE>_LINKER` (e.g. `gcc-x86-64-linux-gnu`);
    - `dpkg --add-architecture <other>` + `linux-libc-dev:<arch>` + `libc6-dev:<arch>`.
 
-10. **Tag and publish.** `git tag v<x.y.z>` on the merged release commit, then
-    `gh release create v<x.y.z>` with the tarballs and the CHANGELOG section as the body.
+10. **Acceptance-test the payload on a real host before publishing.** Unpack a tarball, verify it
+    against `SHA256SUMS`, then run `sudo ./install.sh` and WATCH the effects land — the binaries in the
+    three-dir layout; the reference policies actually *compiling* host-signed into `/etc/kennel/policies`;
+    `/etc/kennel/templates` staying empty (maintainer content is vendor-tier, `/usr/lib/kennel`); the
+    host key minted or reused — then a `kennel run <settled> -- …` that exits cleanly. Green CI does not
+    exercise a real install: the 0.5.0 cut shipped an installer that put templates in the admin tier,
+    never staged the reference policies, and (after those fixes) had `install_reference_policies`
+    silently compile **zero** policies because it looked for the `kennel` shim at `$libexec` instead of
+    `/usr/bin` — all three passed CI and surfaced only here. Fix and re-cut before tagging.
+
+11. **Tag and publish.** First **re-verify the CHANGELOG against `gh pr list --state merged` since the
+    readiness PR** — the prep (step 6) is written at readiness and DRIFTS if work merges after it; the
+    0.5.0 notes still claimed the settled schema "stayed 2" when the merged tree was 3, and omitted a
+    whole corpus/schema wave. Correct the section, then `git tag v<x.y.z>` on the merged release commit
+    and `gh release create v<x.y.z>` with the tarballs + a `SHA256SUMS.txt` and the corrected CHANGELOG
+    section as the body.
 
 ## Why these gotchas exist
 
@@ -106,3 +120,10 @@ usually already correct by release time — *verify*, do not blindly bump.
 - **Cross-build headers.** The BPF privhelper compiles cgroup programs with clang at build time;
   cross-compiling the other arch needs that arch's libc headers present, or clang cannot find
   `asm/types.h`.
+- **The real install-test is the only gate that exercises `install.sh`.** CI builds and unit/e2e-tests
+  the binaries, but nothing drives an unpacked payload through `sudo ./install.sh` on a real host — so
+  install-only logic (placement tiers, payload staging, the host-key compile) is unverified until
+  step 10. The 0.5.0 cut proved the cost: three install bugs rode green CI to the edge of publish.
+- **The CHANGELOG is written at readiness, tagged later.** Anything that merges between the prep PR and
+  the tag is in the release but not yet in the notes — so the notes are re-verified against the merged
+  PR list at tag time (step 11), not trusted from readiness.
