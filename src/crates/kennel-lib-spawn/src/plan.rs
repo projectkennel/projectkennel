@@ -826,6 +826,33 @@ pub struct LoopbackAddr {
 }
 
 impl Plan {
+    /// Grant an already-resolved host directory into the view at its own path — the
+    /// materialised `[fs.cwd]` invocation grant (§7.9).
+    ///
+    /// The daemon resolves and floor-checks the invocation cwd host-side, then calls this to
+    /// add the bind (read-only, or writable when `writable`) and the matching Landlock rule.
+    /// Unlike the policy fs grants the path is **not** remapped — it keeps its absolute host
+    /// path, so the workload's cwd (the same path) is valid in the view. No EXECUTE is granted
+    /// on the tree: the workload execs only its `exec.allow` binaries, never project files.
+    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool) {
+        let access = if writable {
+            write_access()
+        } else {
+            read_access(false)
+        };
+        // The Landlock rule references the post-pivot target; the cwd is bound at its own
+        // absolute path (not remapped), so target == source == host_dir.
+        self.landlock_fs.push((host_dir.clone(), access));
+        if let Some(view) = self.view.as_mut() {
+            view.binds.push(BindMount {
+                source: host_dir.clone(),
+                target: host_dir,
+                writable,
+                exclusive: false,
+            });
+        }
+    }
+
     /// Build the plan from a settled policy whose deferred placeholders have
     /// already been substituted. `ctx` is the kennel's context number, and
     /// `namespace` the caller's resource namespace (derived from their

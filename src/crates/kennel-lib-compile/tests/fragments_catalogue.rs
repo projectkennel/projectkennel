@@ -45,6 +45,10 @@ const CATALOGUE: &[Expect] = &[
         grants: &["/usr/bin/git", "git-core", "/etc/gitconfig"],
     },
     Expect {
+        fragment: "agent-tools",
+        grants: &["/usr/bin/rg", "/usr/bin/jq", "/usr/bin/pgrep"],
+    },
+    Expect {
         fragment: "net-permissive",
         grants: &["crates.io", "github.com", "ghcr.io"],
     },

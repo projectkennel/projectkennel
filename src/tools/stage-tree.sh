@@ -90,6 +90,9 @@ for b in $FACADE_STAT_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; do
 install -m 0755 "$STAT/kennel"       "$DEST/pathbin/kennel"
 install -m 0755 "$REL/kennel-host"   "$DEST/bin/host"
 install -m 0755 "$STAT/kennel-spawn" "$DEST/facades/spawn"
+# Script facades (shell launchers shipped as source, e.g. the claude run launcher).
+SRC_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+for f in "$SRC_ROOT"/src/facades/*.sh; do [ -f "$f" ] && install -m 0755 "$f" "$DEST/facades/$(basename "$f")"; done
 # The standalone policy-authoring tool (`kennel-compose`): a host-side CLI on PATH, disjunct from
 # the `kennel` dispatch tree and the runtime — dynamic (host glibc), like the other host tools.
 install -m 0755 "$REL/kennel-compose" "$DEST/pathbin/kennel-compose"

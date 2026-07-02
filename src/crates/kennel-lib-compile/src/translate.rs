@@ -38,8 +38,8 @@
 
 use crate::source::{PathField, SourcePolicy};
 use kennel_lib_policy::settled::{
-    AuditRuntime, CapPolicy, ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy,
-    EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
+    AuditRuntime, CapPolicy, ConsumeRuntime, CwdGrant, CwdPolicy, DbusBusRuntime, DbusRuntime,
+    DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
     MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, Protocol, ProvideRuntime,
     ProxyListen, RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime,
     SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
@@ -252,6 +252,7 @@ fn translate_workload(
     let argv = w.argv.clone().unwrap_or_default();
     let cwd = w.cwd.as_deref().map(|c| subst(c, deferred));
     let pinned = w.pinned.unwrap_or(false);
+    let allowed_args = w.allowed_args.unwrap_or(false);
     let mut sha256 = Vec::new();
     for h in w.sha256.iter().flatten() {
         if !is_sha256_hex(h) {
@@ -265,6 +266,7 @@ fn translate_workload(
         argv,
         cwd,
         pinned,
+        allowed_args,
         sha256,
     })
 }
@@ -1288,6 +1290,31 @@ fn translate_fs(
         }
     }
 
+    // `[fs.cwd]`: the invocation-cwd grant. The `reason` requirement (for a non-`none`
+    // grant) is checked in `validate` with the other reason-bearing sections; here we parse
+    // the grant enum (an unknown value is a translation error) and carry the markers. The
+    // grant is *not* an fs path — the spawn materialises it from the request cwd under the
+    // framework floor — so it never enters the `read`/`write` bind lists.
+    let cwd = match fs.cwd.as_ref() {
+        Some(c) => {
+            let grant = match c.grant.as_deref() {
+                None | Some("none") => CwdGrant::None,
+                Some("read") => CwdGrant::Read,
+                Some("write") => CwdGrant::Write,
+                Some(other) => {
+                    return Err(translation(format!(
+                        "[fs.cwd].grant `{other}` is not one of none/read/write"
+                    )))
+                }
+            };
+            CwdPolicy {
+                grant,
+                required: c.required.clone().unwrap_or_default(),
+            }
+        }
+        None => CwdPolicy::default(),
+    };
+
     Ok(FsPolicy {
         home_shadow: home.shadow.unwrap_or(false),
         read,
@@ -1295,6 +1322,7 @@ fn translate_fs(
         exclusive,
         home_persist,
         home_readonly: home.readonly.unwrap_or(false),
+        cwd,
         tmp,
         dev,
     })
@@ -1964,6 +1992,7 @@ mod tests {
                 argv: Some(vec!["run-tests.sh".to_owned(), "--all".to_owned()]),
                 cwd: Some("~/suite".to_owned()),
                 pinned: Some(true),
+                allowed_args: Some(true),
                 sha256: Some(vec!["a".repeat(64), "b".repeat(64)]),
             }),
             ..SourcePolicy::default()
@@ -1972,6 +2001,7 @@ mod tests {
         let w = translate_workload(&src, &mut deferred).expect("translate workload");
         assert_eq!(w.argv, vec!["run-tests.sh", "--all"]);
         assert!(w.pinned);
+        assert!(w.allowed_args);
         // A SET of accepted digests (multiple versions valid under one policy).
         assert_eq!(w.sha256, vec!["a".repeat(64), "b".repeat(64)]);
         // `~` is the canonical home form in the settled policy; the spawn resolves it to
@@ -3029,6 +3059,33 @@ mod tests {
             ("fd00:ec2::254".to_owned(), 128)
         );
         assert!(parse_cidr("10.0.0.0/999").is_err());
+    }
+
+    #[test]
+    fn fs_cwd_grant_translates_and_rejects_unknown() {
+        use crate::source::{FsCwd, FsHome, FsSection};
+        let make = |grant: &str| SourcePolicy {
+            fs: Some(FsSection {
+                home: Some(FsHome {
+                    shadow: Some(true),
+                    ..Default::default()
+                }),
+                cwd: Some(FsCwd {
+                    grant: Some(grant.to_owned()),
+                    required: Some(vec![".git".to_owned()]),
+                    reason: Some("r".to_owned()),
+                }),
+                ..Default::default()
+            }),
+            ..SourcePolicy::default()
+        };
+        let out = translate_fs(&make("write"), &mut BTreeSet::new()).expect("translate fs");
+        assert_eq!(out.cwd.grant, CwdGrant::Write);
+        assert_eq!(out.cwd.required, vec![".git".to_owned()]);
+        assert!(
+            translate_fs(&make("sideways"), &mut BTreeSet::new()).is_err(),
+            "unknown grant must be a translation error"
+        );
     }
 
     #[test]

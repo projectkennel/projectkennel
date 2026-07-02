@@ -31,6 +31,7 @@ destination fail to compile with an explicit conflict, never a silent last-wins.
 | **`lang-node`** | `node`/`npm`/`npx` on `exec.allow`, the npm cache writable, the npm registry on egress |
 | **`toolchain-c`** | `cc`/`gcc`/`g++`/`as`/`ld`/`ar`/`make` and gcc's backend binaries (`/usr/lib/gcc/**`) |
 | **`vcs-git`** | `git` + its `git-core` helpers, the system git config read-only (no egress — that is the leaf's or `net-permissive`'s) |
+| **`agent-tools`** | the delta a coding agent shells out to over the `core-*` set: search (`rg`/`fd`), JSON (`jq`), `patch`, `timeout`, own-tree process management (`ps`/`pgrep`/`pkill`/`kill`), binary inspection (`strings`/`xxd`/`od`), `sqlite3` — generic across agents (Claude Code, Codex, …) |
 | **`net-permissive`** | broad egress to the common public package ecosystems and code forges (PyPI, npm, crates.io, GitHub, ghcr.io) for a human-driven workflow |
 
 The `core-*` bundles are the base userland a template would otherwise hand-list; the shipped reference

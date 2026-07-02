@@ -18,6 +18,34 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   dir (`chgrp` / `chmod`), not an allocation file; `install.sh` drops its `--provision-users`
   flag accordingly. The unused `<tag>` / `<gid>` template substitution variables are removed.
 
+### Policy schema changes
+
+- **Two additive-optional settled fields (schema stays v3).** Both are backward-compatible — a
+  policy not using them is byte-identical and old v3 artefacts stay valid — so the schema shape is
+  re-pinned without a version bump.
+  - **`[workload] allowed_args`** — when a `[workload]` is `pinned`, CLI `-- <args>` tokens are
+    *appended* to the pinned argv instead of refused. The program and base argv stay pinned
+    exactly (the fd-pin/digest binds the program, not the args).
+  - **`[fs.cwd]`** — a signed policy may materialise the invocation cwd into the view:
+    `grant = "read" | "write" | "none"` (default `none`) with `required = [".git", ".claude/"]`
+    dirent markers. A non-`none` grant requires a `reason`. The spawn resolves the cwd host-side
+    under a non-overridable framework floor (realpath-normalised, operator-owned, never `$HOME`);
+    an unmet floor or marker refuses the run with a naming diagnostic, and the materialised grant
+    is recorded in the run audit event.
+- **`[[fs.read/write/deny.add]]` and `[[exec.allow.add]]` now accept an array `path`** (a list of
+  paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
+  still serialises as a bare string, so existing signed artefacts verify unchanged.
+
+### New reference content
+
+- **The `claude` reference policy** (`kennel run claude [-- <args>]`): a maintainer-signed leaf on
+  `ai-coding-strict` that resolves the Claude Code binary (both native and npm layouts), the
+  Anthropic API endpoints, session state (with a read-only split over the instruction/config
+  surface so agent edits cannot persist executable config into a later unconfined session), and
+  the writable project root via `[fs.cwd]` — runnable with no user-authored policy. Ships with an
+  in-view discovery launcher and the **`agent-tools`** fragment (the coding-agent toolset:
+  `rg`/`fd`/`jq`/`patch`/own-tree process management/binary inspection/`sqlite3`).
+
 ## [0.5.0] — 2026-06-29
 
 **Owed work and quality of life.** 0.5.0 pays the debt the two large prior releases accrued. It

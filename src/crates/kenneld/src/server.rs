@@ -104,6 +104,10 @@ pub struct Loaded {
     /// command is supplied at `kennel run … -- <cmd>`. `run_kennel` merges this with the
     /// request's argv (the request wins unless `pinned`); see `effective_workload`.
     pub workload: kennel_lib_policy::WorkloadRuntime,
+    /// The invocation-cwd grant (`[fs.cwd]`, §7.9). When `grant` is not `none`, `run_kennel`
+    /// resolves the request cwd host-side under the framework floor and materialises the
+    /// grant into the plan; default (no grant) leaves the plan untouched.
+    pub cwd: kennel_lib_policy::settled::CwdPolicy,
     /// The `[spawn]` delegated-instantiation grant (§7.12.2): the templates this kennel may
     /// instantiate, each content-pinned, plus `max_instances`. `None` for a kennel with no
     /// `[spawn]`. Drives the node-0 `SPAWN` handler; `kenneld` holds it in the per-kennel binder
@@ -1401,6 +1405,27 @@ pub fn run_kennel<P, L>(
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
         }
     };
+    // `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
+    // declared the slot; here — host-side, in operator context, before the kennel exists —
+    // we resolve `req.cwd` under the framework floor and add the bind/Landlock grant. A
+    // floor or marker failure REFUSES the run (never a silent no-grant).
+    if !loaded.cwd.grant.is_none() {
+        match resolve_cwd_grant(&req.cwd, &loaded.cwd.required) {
+            Ok(resolved) => {
+                let writable = matches!(
+                    loaded.cwd.grant,
+                    kennel_lib_policy::settled::CwdGrant::Write
+                );
+                tr.detail(&format!(
+                    "run_kennel: [fs.cwd] grant {:?} materialised at {} (writable={writable})",
+                    loaded.cwd.grant,
+                    resolved.display()
+                ));
+                loaded.plan.grant_cwd(resolved, writable);
+            }
+            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "fs.cwd", reason),
+        }
+    }
     tr.detail(&format!(
         "run_kennel: effective workload argv={argv:?} cwd={}",
         cwd.display()
@@ -2305,6 +2330,60 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
 ///
 /// A human-readable reason when neither the request nor the policy supplies an argv, or
 /// when a non-empty request argv would override a pinned policy workload without `--force`.
+/// Resolve and floor-check the invocation cwd for a `[fs.cwd]` grant (§7.9).
+///
+/// Returns the canonical host directory to bind, or a refusal reason. The framework floor is
+/// non-overridable: the path must be a directory, realpath-normalised, owned by the operator,
+/// and not the operator's `$HOME`; every `required` marker must be present. Resolution is
+/// host-side, in operator context, before the kennel exists — the workload (the adversary) is
+/// not yet running, so there is no TOCTOU against it.
+fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt as _;
+    // Realpath-normalise: resolve symlinks to the real directory, so the bound path is the
+    // canonical owned inode (a symlinked invocation dir resolves to its target, which the
+    // ownership check below then vets — a symlink into a non-owned tree is refused there).
+    let resolved = std::fs::canonicalize(cwd)
+        .map_err(|e| format!("cannot resolve the invocation cwd {}: {e}", cwd.display()))?;
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|e| format!("cannot stat {}: {e}", resolved.display()))?;
+    if !meta.is_dir() {
+        return Err(format!("{} is not a directory", resolved.display()));
+    }
+    let uid = kennel_lib_syscall::unistd::real_uid();
+    if meta.uid() != uid {
+        return Err(format!(
+            "{} is not owned by the operator (uid {uid}); the cwd grant is refused",
+            resolved.display()
+        ));
+    }
+    // Never `$HOME`: a whole-home bind is exactly what the persona view exists to prevent. A
+    // path *under* the home is fine (a project dir); the home root itself is not.
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if std::fs::canonicalize(&home).is_ok_and(|h| h == resolved) {
+            return Err(format!(
+                "the invocation cwd {} is the operator's $HOME; the cwd grant never binds $HOME",
+                resolved.display()
+            ));
+        }
+    }
+    // Markers: each required dirent must be present (a trailing slash requires a directory),
+    // so the grant applies only to a project the operator has marked for agent use.
+    for marker in required {
+        let (name, want_dir) = marker
+            .strip_suffix('/')
+            .map_or((marker.as_str(), false), |n| (n, true));
+        let present = std::fs::metadata(resolved.join(name)).is_ok_and(|m| !want_dir || m.is_dir());
+        if !present {
+            return Err(format!(
+                "the invocation cwd {} is missing the required marker `{marker}` — mark the \
+                 project for agent use (e.g. `mkdir {name}`) or run from a marked project root",
+                resolved.display()
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
 fn effective_workload(
     req: &StartRequest,
     workload: &kennel_lib_policy::WorkloadRuntime,
@@ -2324,11 +2403,23 @@ fn effective_workload(
             .map_or_else(|| req.cwd.clone(), PathBuf::from);
         return Ok((workload.argv.clone(), cwd));
     }
+    // Pinned workload that allows argument passthrough: append the request tokens to the
+    // pinned argv. The program and base argv stay pinned exactly (the fd-pin/digest binds
+    // the program, not the args); the cwd follows the pin (its own, else the request's).
+    if workload.pinned && workload.allowed_args {
+        let mut argv = workload.argv.clone();
+        argv.extend(req.argv.iter().cloned());
+        let cwd = workload
+            .cwd
+            .as_deref()
+            .map_or_else(|| req.cwd.clone(), PathBuf::from);
+        return Ok((argv, cwd));
+    }
     // Request-supplied argv: overrides the policy workload unless it is pinned.
     if workload.pinned && !req.force {
         return Err(format!(
             "policy [workload] is pinned to `{}`; refusing the `-- {}` override \
-             (pass --force to override)",
+             (pass --force to override, or set [workload] allowed_args to append)",
             workload.argv.join(" "),
             req.argv.join(" ")
         ));
@@ -2518,8 +2609,67 @@ mod tests {
             argv: argv.iter().map(|s| (*s).to_owned()).collect(),
             cwd: cwd.map(str::to_owned),
             pinned,
+            allowed_args: false,
             sha256: Vec::new(),
         }
+    }
+
+    #[test]
+    fn resolve_cwd_grant_accepts_owned_marked_dir_and_refuses_unmarked() {
+        let uid = kennel_lib_syscall::unistd::real_uid();
+        let base = std::env::temp_dir().join(format!(
+            "kennel-cwd-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".git")).expect("mk .git");
+        std::fs::create_dir_all(base.join(".claude")).expect("mk .claude");
+        // Owned dir with both markers present resolves to its canonical path.
+        let ok = resolve_cwd_grant(&base, &[".git".to_owned(), ".claude/".to_owned()])
+            .expect("marked dir ok");
+        assert_eq!(ok, std::fs::canonicalize(&base).expect("canonicalize base"));
+        // A missing marker refuses with a naming diagnostic.
+        let err =
+            resolve_cwd_grant(&base, &["NOPE".to_owned()]).expect_err("missing marker refuses");
+        assert!(err.contains("NOPE"), "{err}");
+        // A trailing-slash marker that exists only as a file is refused.
+        std::fs::write(base.join("marker"), b"x").expect("write file");
+        assert!(
+            resolve_cwd_grant(&base, &["marker/".to_owned()]).is_err(),
+            "file cannot satisfy a dir marker"
+        );
+        // A non-existent cwd refuses.
+        assert!(resolve_cwd_grant(&base.join("does-not-exist"), &[]).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = uid; // real_uid is the ownership anchor the fn checks against.
+    }
+
+    #[test]
+    fn resolve_cwd_grant_refuses_home() {
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            if home.is_dir() {
+                let err = resolve_cwd_grant(&home, &[]).expect_err("$HOME must be refused");
+                assert!(err.contains("$HOME"), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn effective_workload_pinned_allowed_args_appends() {
+        let mut w = workload(&["/launcher", "--base"], None, true);
+        w.allowed_args = true;
+        let (argv, _) = effective_workload(&start_req(&["--extra", "x"], false), &w)
+            .expect("allowed_args appends");
+        assert_eq!(argv, vec!["/launcher", "--base", "--extra", "x"]);
+    }
+
+    #[test]
+    fn effective_workload_pinned_allowed_args_no_cli_is_just_the_pin() {
+        let mut w = workload(&["/launcher"], None, true);
+        w.allowed_args = true;
+        let (argv, _) = effective_workload(&start_req(&[], false), &w).expect("bare pin");
+        assert_eq!(argv, vec!["/launcher"]);
     }
 
     #[test]
@@ -2724,6 +2874,7 @@ mod tests {
                     ttl_seconds: None,
                     ttl_action: kennel_lib_policy::TtlAction::Exit,
                 },
+                cwd: kennel_lib_policy::settled::CwdPolicy::default(),
                 workload: kennel_lib_policy::WorkloadRuntime::default(),
                 tty_filter: true,
                 on_change: kennel_lib_policy::OnChangeAction::Warn,

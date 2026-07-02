@@ -80,7 +80,7 @@ check_dir() {
 	fi
 }
 check_dir bin     "$host_rel_bins $host_stat_bins host"
-check_dir facades "$facade_stat_bins spawn"
+check_dir facades "$facade_stat_bins spawn run-claude.sh"
 check_dir pathbin "kennel kennel-compose"
 
 # The integrity manifest must cover EVERYTHING shipped — and the verify must actually pass from the
