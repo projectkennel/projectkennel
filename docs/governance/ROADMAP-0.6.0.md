@@ -11,34 +11,39 @@ Baseline: 0.5.0 (released)
 
 ## Theme
 
-**Two structural bets, and the mediation story finished.** 0.5.0 paid the debt the spawn and mesh
-releases accrued; 0.6.0 spends the ground they cleared on the two largest gaps left in the
-confinement story itself. First: the monitor is the one process that has never been inside a box —
-kenneld constructs and seals its own confinement before it touches kennel input, converting "monitor
-compromise is total" into "monitor compromise is bounded" (W1). Second: constrained mode has never
-carried the transport class the web is moving to — UDP egress lands without giving up the property
-that DNS exfiltration is unexpressible (W2). Around the bets, the release finishes what the
-`dbus-broker` started: the interactive file broker the confined GUI has owed since §7.14.7 (W3), and
-the retirement of the legacy per-kennel `host-dbus` delegate once the broker demonstrably subsumes
-it (W4). Three small owed debts ride along (W5–W7). The release also carries the corpus
-succession: the frozen design/architecture trees retire in favour of the two-volume book (W9),
-sequenced early because both bets write their corpus halves into it. The release opens with a
-validation stream (W0): every empirical unknown the bets rest on is measured before a manifest or
-schema is drawn, not reasoned about. A pre-ship adversarial pass on the three new boundaries gates
-the tag (W8).
+**One structural bet, and the mediation story finished.** 0.5.0 paid the debt the spawn and mesh
+releases accrued; 0.6.0 spends the ground they cleared on the largest tractable gap left in the
+confinement story: constrained mode has never carried the transport class the web is moving to — UDP
+egress lands without giving up the property that DNS exfiltration is unexpressible (W2). Around the
+bet, the release finishes what the `dbus-broker` started: the interactive file broker the confined
+GUI has owed since §7.14.7 (W3), and the retirement of the legacy per-kennel `host-dbus` delegate
+once the broker demonstrably subsumes it (W4). Three small owed debts ride along (W5–W7), and the
+clunky admin-provisioned `/etc/kennel/subkennel` per-user allocation retires — derived from the
+kernel-trusted uid instead, which also clears the ULA addressing scheme for W2 (W10). The release
+also carries the corpus succession: the frozen design/architecture trees retire in favour of the
+two-volume book (W9). The release opens with a validation stream (W0): every empirical unknown the
+work rests on is measured before a manifest or schema is drawn, not reasoned about. A pre-ship
+adversarial pass on the new boundaries gates the tag (W8).
+
+**kenneld self-confinement was the release's second structural bet (W1); it is withdrawn.** Building
+its relay half surfaced that the fork-split seam is drawn through code not factored for it — the
+daemon's host-facing effects (exec, inet, cross-namespace opens) are interleaved through construction
+and brokering, so the boundary keeps hitting them ad hoc and the relay protocol grows without
+converging. The tidy prerequisite (factoring all host effects behind one seam) is larger than the
+seal itself. The finding is written up in
+[audits/2026-07-02-w1-self-confinement-seam.md](audits/2026-07-02-w1-self-confinement-seam.md); W1
+moves to [BACKLOG.md](BACKLOG.md), gated on that factoring as its named first step.
 
 Standing constraints carried from 0.5.0:
 
-- **The TCB does not grow to add a capability.** W1 adds no privilege and reuses only mechanisms the
-  daemon already wields for kennels; W2's adversarial parsing lands entirely outside the daemon
-  (facade on the untrusted side, broker as a quarantined operator-context leaf). Where a workstream
-  touches a TCB crate, the growth is measured (`gen-inventory`) and justified, never assumed — and
-  W4 is measured because it *shrinks*.
+- **The TCB does not grow to add a capability.** W2's adversarial parsing lands entirely outside the
+  daemon (facade on the untrusted side, broker as a quarantined operator-context leaf). Where a
+  workstream touches a TCB crate, the growth is measured (`gen-inventory`) and justified, never
+  assumed — and W4 is measured because it *shrinks*.
 - **Authentication, never attestation.** Load-bearing for W3: file-open consent is the operator's
   act, performed host-side; nothing confined can vouch for it.
-- **Never overclaim.** W1's claim is *bounded* compromise, not containment — the docs ship that
-  claim exactly as scoped or not at all. W2's accepted residuals (AF_INET-only legacy clients,
-  exfil inside approved flows) are recorded, not papered over.
+- **Never overclaim.** W2's accepted residuals (AF_INET-only legacy clients, exfil inside approved
+  flows) are recorded, not papered over.
 
 ## What this release is *not*
 
@@ -68,10 +73,11 @@ Tags: **[dep]** · **[debt]** · **[security]** · **[quality]** · **[validatio
 **[validation] S. Runs first; a red result reshapes the dependent workstream before its manifest or
 schema lands, which is the entire point of paying for it up front.**
 
-The codebase measures rather than reasons about kernel behaviour, and both bets rest on specific,
-cheaply-probeable claims. Each probe below names its dependent and what a red result means. Results
-are recorded in a dated note under `audits/` so the manifests that follow cite measurements, not
-assumptions.
+The codebase measures rather than reasons about kernel behaviour, and the structural work rests on
+specific, cheaply-probeable claims. Each probe below names its dependent and what a red result means.
+Results are recorded in a dated note under `audits/` so the manifests that follow cite measurements,
+not assumptions. (P1/P2/P3/P5 gated the now-withdrawn W1 — recorded for a future attempt; P4 feeds
+W2. The probe descriptions below are kept as the historical record of what W0 measured.)
 
 - **P1 — Landlock across the magic symlink (gates the W1 fs manifest).** kenneld reaches
   `/proc/<init>/root/dev/binderfs/binder` for each kennel — a magic-symlink traversal into another
@@ -103,149 +109,25 @@ assumptions.
 consequence applied to its dependent workstream before that workstream's manifest, schema, or wire
 protocol is committed.
 
-### W1 · kenneld self-confinement · the monitor inside its own kennel
+### W1 · kenneld self-confinement — WITHDRAWN
 
-**[security, foundational] L.**
+**[security, foundational] L. Withdrawn 2026-07-02; moved to [BACKLOG.md](BACKLOG.md).**
 
-The reference monitor is the floor of the TCB, and the tamperproof property says nothing below it can
-reach up and alter it. That property is real until something gets in, and then it is empty: a compromised
-kenneld holds total authority and the game is over. This is the one place the property was always vacuous,
-and the work closes it. kenneld constructs and seals its own confinement before it touches any kennel input,
-so a breakout from a kennel into kenneld lands inside a box kenneld no longer controls. The seal does not
-reverse within a process, so even an owned monitor stays held. That converts "monitor compromise is total"
-into "monitor compromise is bounded," and it does so by turning the framework on its own root: kenneld writes
-the same `[fs]`/`[net]`/`[exec]` manifest it writes for every workload, for itself.
+Sealing kenneld inside its own confinement (an unsealed relay + a sealed monitor, split at a startup
+fork) was this release's second structural bet. Building the relay half surfaced that the seam is
+drawn through code not factored for it: the daemon's host-facing effects — exec (`sha256sum`, the
+netproxy/inetd/dbus delegates, the ssh bastion), inet resolution, and cross-mount-namespace binder
+opens — are interleaved through construction and runtime brokering, not routed through one seam. So
+the confinement boundary hits them one at a time and the relay protocol grows without converging; and
+seccomp's inheritance across `execve` forces every inet-needing delegate onto the unsealed relay,
+which a bounded-allowlist seal cannot accommodate. The tidy prerequisite — factoring **all** host
+effects behind one narrow interface, after which the seal is mechanical — is larger than the seal
+itself, so the split was premature.
 
-**Standing constraint.** The seal adds no privilege and no TCB. It reuses mechanisms the daemon already
-wields for kennels: the AppArmor `userns` grant, Landlock, `no_new_privs`, seccomp. The privhelper stays the
-only file-caps component, and where the work touches a TCB crate the growth is measured (`gen-inventory`) and
-justified. Authentication, never attestation, carries through unchanged.
-
-**The seal.**
-
-- **Filesystem, Landlock fs.** kenneld's filesystem surface is enumerable and small: the trust store (read),
-  the runtime dir under `$XDG_RUNTIME_DIR/kennel/` (read-write, the control socket and per-kennel state),
-  templates, fragments, and keys (read), the privhelper (read and execute), and the procfs reaches into
-  kennels. A Landlock ruleset grants exactly those and denies the operator's home and the rest of the host.
-  This is kenneld's own `[fs]`, drawn the way a kennel's is.
-
-- **Network, seccomp, not a netns and not Landlock.** kenneld stays in the host network namespace by
-  necessity: its control plane rides AF_UNIX sockets, and abstract-namespace sockets are scoped to the netns,
-  so a fresh `CLONE_NEWNET` would sever the broker and delegate connections. The seal is a seccomp
-  `socket()` family deny — `AF_INET`/`AF_INET6`/`AF_NETLINK`/`AF_PACKET` (W0 P3 found `getaddrinfo` also opens
-  a `NETLINK_ROUTE` socket, so the denylist is broader than TCP alone), leaving the child only `AF_UNIX` —
-  tighter than a Landlock TCP rule because it removes UDP and raw
-  at the source rather than gating `connect`/`bind` on TCP alone. The runtime does not use this mechanism
-  elsewhere; kennels gate egress at the BPF CIDR ACL, the monitor gates its own at the syscall. kenneld does
-  open inet sockets today, for DNS resolution (`inet::dns::SystemResolver`), so the seal is not free: that one
-  operation has to move, which the fork split below handles. Accepted trade: no netns means kenneld keeps
-  host-netns visibility, so a compromised monitor can still enumerate interfaces. For the monitor, action
-  denial outweighs recon denial, and the view cannot be flattened without cutting the AF_UNIX sockets the
-  control plane needs.
-
-- **Execution, the privhelper only.** Landlock execute on the privhelper and its narrow sub-helpers, nothing
-  else, under `no_new_privs`.
-
-- **Syscalls, seccomp floor.** A filter admitting the mount, clone, and binder operations the job requires
-  and denying the rest.
-
-**The fork split.** kenneld forks once at startup, before the seal. The parent stays host-side and unsealed;
-the child installs the seal and becomes the monitor. The parent is the leg that does what the seal
-structurally cannot: it launches the `host-netproxy` and `host-inetd` delegates, so they descend from it and
-inherit no seal, it relays their fds to and from the child over a socketpair held across the fork, and it
-performs the **cross-namespace binder reaches** — the per-kennel `/proc/<pid>/root/…binderfs/binder` opens
-that Landlock cannot grant to a sealed child (W0 P1). Being unconfined, the parent follows the magic symlink
-freely, then hands the resolved binder fd to the child over that same relay — a **one-time fd handoff, not a
-per-message forward**: the monitor does its binder I/O directly on the fd (Landlock does not govern an
-already-open fd), so node-0 brokering stays in the monitor at full speed. This keeps the split clean — the
-parent owns every unsealable operation (inet, delegate exec, cross-ns fd acquisition); the child is
-pure-AF_UNIX with no cross-namespace reach of its own. The child mints AF_UNIX socketpairs, vets,
-pins, brokers, and passes fds, none of which needs an inet socket. DNS moves to the parent and nowhere else,
-not into the dumb dialer, which stays dumb so the pin holds: the parent resolves, the child re-checks every
-address against `[dns]` and the denylist and pins the vetted set, the dialer dials the pinned literal.
-`inet::decide` already takes the resolver as a parameter, so the move is one resolver implementation swapped
-behind an existing seam, with the decision and the pin unchanged in the child. The parent is not confined,
-because its job is inet and exec of the delegates, and a sandbox that granted those back would protect
-nothing. Its safety is that it is small, reachable only from the child, treats every message from the child as
-hostile, and is mutually un-`ptrace`-able with it. The boundary the seal buys is the gap between what a
-monolithic kenneld could do on compromise, arbitrary inet and arbitrary host, and what this parent will do on
-request, a DNS lookup and a delegate spawn. That request channel is the one new artifact in the whole shape, and
-because the parent is unconfined it is the entire boundary, so it takes the privhelper's wire discipline:
-fixed-layout structs, length-prefixed frames, no TOML, a message set held to three, resolve a name and return
-the addresses, spawn a delegate and return its fd, and the fd relay itself. The smaller that protocol, the
-smaller the surface a compromised child can drive the parent across.
-
-**What the seal keeps, and what it cannot.** The seal strips everything outside the job: the operator's home
-and keys, arbitrary host writes, arbitrary exec, and direct inet, the raw sockets, backdoor listeners, and
-scanning a monitor never needs. It cannot strip kenneld's reason for
-existing. The monitor keeps its parent-userns authority over kennels, the privhelper exec, and the
-trust-store read, because those are the job. A compromised-and-sealed kenneld can still mis-broker inside that
-authority (a new threat-catalogue entry is minted for the sealed monitor mis-brokering within its retained
-authority): it can drive the dumb dialer to an address it pins, because brokering egress is the job and the
-pin is the monitor's own step. The win is precise and worth stating plainly: a kennel breakout into kenneld
-can no longer open a raw socket, plant a host backdoor, exec a payload, or read the operator's keys, but it
-stays inside kenneld's legitimate authority and could still mis-route. Bounded, not neutered, and
-the docs ship that claim or none.
-
-**The surface is operational classes, not a frozen fd set.** A kennel opens once and runs a fixed workload,
-so its box freezes. kenneld is long-lived and keeps opening kennel resources as it spawns: new procfs
-reaches, new binder devices, new control connections. Its box grants operational classes rather than a fixed
-set, which makes the surface broader than a kennel's and harder to draw. Drawing it precisely is the bulk of
-the work, and it is the test the `do-less` discipline sets itself, the claim that the surface is enumerable,
-made to prove itself on the monitor. W0 P1 already resolved one class out of the manifest entirely: the
-per-kennel `/proc/<pid>/root` binder reaches are not path-grantable under the seal (Landlock cannot name a
-target across a mount-namespace boundary), so they move to the parent leg and ride the relay as fds — the fs
-manifest grants **no** `/proc/<pid>/root` path, which narrows the surface rather than widening it.
-
-**Dependency, and what the mesh already settled.** Gated on the 0.5.0 mesh, which has done more than provide
-the ground to stand on. The mesh fork-holder measured the keystone the whole family rests on: kenneld's
-`userns` grant crosses a `clone(CLONE_NEWUSER)` child and not an exec'd binary, and a single-uid
-`0 <kenneld-uid> 1` self-map mounts binderfs and adds the device with no caps and no privhelper. The holder is
-the proof of concept for the parent relay, the same fork-from-the-single-threaded-startup-parent move with a
-different payload, so the parent and the mesh-inits inherit a primitive that is already built and de-risked
-rather than one still to invent.
-
-**Two halves, one de-risked.** The work divides cleanly, and the division is worth holding because the halves
-carry different risk. The process shape is the near-known half: fork the parent before threads at startup,
-seal the child, and define the small protocol across the three seams that already exist, DNS behind the
-`inet::decide` resolver parameter and the netproxy and inetd spawns that are already separate delegates driven
-over command sockets. None of that cuts a new seam; it traces lines the runtime already draws, on a fork
-primitive the mesh holder proved. The filesystem surface is the harder half: the manifest must enumerate
-everything kenneld touches and prove nothing was missed, and a missed seam hides there, not in the process
-shape. W0 P1 retired the one named unknown — the cross-ns binder reaches are ungrantable and move to the
-parent leg (above), so the manifest grants no `/proc/<pid>/root` path — leaving the fs half enumeration work,
-not open risk.
-
-**Sketch of the steps.**
-
-The process half, mostly mechanical:
-
-1. The parent-child protocol: fixed-layout length-prefixed frames, three messages (resolve, spawn-delegate,
-   fd-relay), the privhelper's wire discipline. This is the new boundary, so it gets the care — and a fuzz
-   target lands with the frame parser (§10.6).
-2. Fork the parent at startup before threads (P2); seal the child (seccomp `socket()`-family deny of
-   `AF_INET/AF_INET6/AF_NETLINK/AF_PACKET`, `no_new_privs`); hold the relay socketpair across the fork.
-3. Relocate the delegate spawns to the parent, netproxy and inetd descending from it rather than the sealed
-   child, and swap DNS to a parent-backed resolver behind the `inet::decide` seam, the dumb dialer and the
-   pin unchanged.
-
-The filesystem half:
-
-4. Apply the W0 P1 outcome: move the cross-ns binder reaches to the parent leg and relay the fd (a one-time
-   handoff, not a per-message forward); the fs manifest grants no `/proc/<pid>/root` path.
-5. kenneld's `[fs]` manifest: enumerate the surface against the as-built reach set, grant exactly it, with the
-   exec and seccomp floors alongside — the seccomp floor denies `AF_INET/AF_INET6/AF_NETLINK/AF_PACKET`
-   (W0 P3), and the Landlock manifest grants `/proc` write for the holder's userns map writes (W0 P5).
-6. The open-and-seal sequencing: acquire every handle the job needs, the relay socketpair among them, then
-   seal, then serve, so the seal precedes the first kennel input.
-
-**Exit:** kenneld forks the unsealed parent relay at startup and the child installs the full seal
-(Landlock fs manifest, seccomp inet-deny + syscall floor, `no_new_privs`, privhelper-only exec)
-before reading any kennel input; the parent-child protocol is the three-message fixed-layout set
-with a fuzz target; the policy suite passes end-to-end under the sealed daemon; the sealed child
-demonstrably cannot open an inet socket, exec outside the privhelper set, or read the operator's
-home (asserted by test from inside the sealed process); the mis-brokering threat entry is minted
-(catalogue version bump); the corpus ships the bounded-compromise claim exactly as scoped.
+The full analysis (including what W0's probes settled, which still holds) is in
+[audits/2026-07-02-w1-self-confinement-seam.md](audits/2026-07-02-w1-self-confinement-seam.md). W1 is
+backlogged, gated on the host-effects factoring as its named first step; PR #154 (the relay work) was
+closed and the primitive removed (unused TCB weight if the seam moves).
 
 ### W2 · UDP egress in constrained mode: the naming shim, the tun facade, and the flow broker
 
@@ -347,8 +229,8 @@ construction-time broker spawn. The adversarial parsing (facade egress, broker L
 entirely outside the daemon — facade on the untrusted side, broker as a quarantined
 operator-context leaf. Measured by `gen-inventory` at landing, per the standing constraint.
 
-**Sequencing.** A → B → C/D (parallel once the socketpair contract is fixed) → E. No dependency on
-W1 or W3; independent of both.
+**Sequencing.** A → B → C/D (parallel once the socketpair contract is fixed) → E. Independent of the
+other workstreams.
 
 **Exit criteria.**
 - A `constrained` kennel with `[net.udp]` and one `protocol = "udp"` grant runs a stock QUIC client
@@ -467,31 +349,63 @@ cannot diverge, and delete the table and its sync test — derive, don't duplica
 **Exit:** the man pages are generated from the CLI definition with no hand-kept mirror; the sync
 test is deleted (nothing left to desync); the man regen CI job passes unchanged.
 
-### W8 · Pre-ship adversarial pass on the three new boundaries
+### W10 · Retire `/etc/kennel/subkennel` — derive per-user disambiguation from the uid
+
+**[debt, quality] S–M. Clears W2's path; capacity opened by W1's withdrawal.**
+
+`/etc/kennel/subkennel` is an `/etc/subuid`-shaped, root-owned, admin-provisioned file — one line per
+user — that kenneld **refuses to start without** ([bin/kenneld.rs](../../src/crates/kenneld/src/bin/kenneld.rs)).
+Despite the framing, it does **not** allocate subuid ranges (the userns id-map is the privhelper's
+self-map); it now carries only three per-user *disambiguation* values: a `tag` byte (the SSH bastion
+port `8022+tag` and the v4 loopback alias), a 40-bit ULA `gid` (the kennel's v6 loopback address), and
+a `namespace` name (cosmetic — a topology label). Their whole job is to keep two users' daemons from
+colliding on shared host loopback for the inbound BIND mirror (§7.5.7) and the bastion. That is a
+heavyweight ceremony — an admin must provision a line before a user can run kenneld at all — for what
+is now a small, derivable quantity.
+
+**Why now, and why it touches W2.** With W1 withdrawn there is room; and the per-user ULA `gid` is the
+same addressing axis W2's synthetic-UDP ULA /64 pool lives on, so the two schemes would otherwise have
+to be reconciled. Removing subkennel lets W2 own the ULA scheme cleanly and drops a provisioning step
+from every install.
+
+The change: derive `tag`/`ula_gid`/`namespace` deterministically from the **kernel-trusted real uid**
+(no NSS in any privileged path, no `/etc` file), delete the `kennel-privhelper::alloc` module and the
+file, and drop the refuse-to-start gate. One real design point: the `tag` byte's collision domain on a
+shared host (uid mod 256) — decide the derivation and whether the 40-bit `ula_gid` simply *is* the uid
+(or a hash of it). No security boundary moves: the values are collision-avoidance, not access control
+(identity stays the kernel's real uid); the admin loses an allocation knob that gated nothing.
+
+**Sequenced before or with W2's addressing** (Part B, the tun ULA /64), so the ULA derivation is
+settled once. `install.sh` stops provisioning `subkennel`.
+
+**Exit:** kenneld starts with no `/etc/kennel/subkennel`; per-user loopback/bastion addressing derives
+from the uid; the file, the `alloc` module, and the refuse-to-start gate are gone; the installer no
+longer provisions it; the policy suite (inbound mirror + bastion) passes on the derived addressing.
+
+### W8 · Pre-ship adversarial pass on the new boundaries
 
 **[security, ship-gate] S.**
 
-0.6.0 creates three boundaries that did not exist: the parent-child relay protocol (the one
-unconfined component reachable from the sealed monitor), the UDP facade predicate and flow broker
-(hostile L3 and DNS wire parsed in operator context), and the file-broker consent path (a host-side
-picker delivering fds across the boundary). The 0.5.0 precedent holds — no finding from a focused
-pass is not proven safe — and none of these has been driven from the hostile seat. Drive each live:
+0.6.0 creates two boundaries that did not exist: the UDP facade predicate and flow broker (hostile L3
+and DNS wire parsed in operator context), and the file-broker consent path (a host-side picker
+delivering fds across the boundary). The 0.5.0 precedent holds — no finding from a focused pass is not
+proven safe — and neither has been driven from the hostile seat. Drive each live:
 
-- the **relay** from a compromised-child position: arbitrary bytes on the wire, message flooding,
-  fd-relay abuse, anything that makes the parent do more than resolve, spawn, and relay;
 - the **UDP facade and broker** with the four crafted-frame classes and DNS-wire fuzz — the §10.6
-  fuzz targets land with their parsers in W1/W2; this pass drives them further and from composed
+  fuzz targets land with their parsers in W2; this pass drives them further and from composed
   positions (facade and broker together);
 - the **picker path** for consent bypass, fd-scope widening, and confused-deputy shapes (a kennel
   inducing a picker it should not reach).
 
-**Exit:** a dated `audits/` note covers all three boundaries; every confirmed finding is fixed
-before the tag.
+**Exit:** a dated `audits/` note covers both boundaries; every confirmed finding is fixed before the
+tag.
+
+(The parent-child relay boundary this pass was also to cover is gone with the withdrawn W1.)
 
 ### W9 · Corpus cutover: retire `docs/design` + `docs/architecture` in favour of the book
 
-**[debt, structural] M. The parallel track, recorded; sequenced early because W1 and W2 write
-their corpus halves into the book.**
+**[debt, structural] M. The parallel track, recorded; sequenced early because W2 writes its corpus
+half into the book.**
 
 The clean-sheet rewrite has landed: the two-volume book — its own repo, `projectkennel/books`,
 typically checked out in-tree at `books/` (gitignored) — carries the design (Vol 1,
@@ -547,35 +461,31 @@ the cutover — a short pass repoints its corpus links to the book and the threa
 ## Sequencing
 
 ```
-W0 (validation probes) ── S,  first: P1→W1-fs, P2/P3→W1-fork, P4→W2-D, P5→W1 ►
-W9 (corpus cutover)    ── M,  early: before W1/W2 write their corpus halves ─►
-W1 (self-confinement)  ── L,  process half after P2/P3; fs half after P1 ────►
-W2 (UDP egress)        ── L,  A→B→C/D→E; independent of W1/W3 ───────────────►
-W3 (file broker)       ── M,  independent; lands before W4 ──────────────────►
-W4 (host-dbus retire)  ── M,  after W3 (its consumer is the evidence) ───────►
-W5 (raw-base64 removal)── XS, independent ───────────────────────────────────►
-W6 (enum validation)   ── S,  independent ───────────────────────────────────►
-W7 (gen-man)           ── S,  independent ───────────────────────────────────►
-W8 (adversarial pass)  ── S,  after W1 + W2 + W3, ship gate ─────────────────►
+W0 (validation probes) ── S,  first: P4→W2-D (P1/P2/P3/P5 gated the withdrawn W1) ►
+W9 (corpus cutover)    ── M,  early: before W2 writes its corpus half ────────────►
+W1 (self-confinement)  ── WITHDRAWN → BACKLOG (seam not tidy; see the audit note) ►
+W2 (UDP egress)        ── L,  A→B→C/D→E; the release's structural bet ────────────►
+W3 (file broker)       ── M,  independent; lands before W4 ───────────────────────►
+W4 (host-dbus retire)  ── M,  after W3 (its consumer is the evidence) ────────────►
+W5 (raw-base64 removal)── XS, independent ────────────────────────────────────────►
+W6 (enum validation)   ── S,  independent ────────────────────────────────────────►
+W7 (gen-man)           ── S,  independent ────────────────────────────────────────►
+W10 (retire subkennel) ── S–M, before/with W2's ULA addressing ───────────────────►
+W8 (adversarial pass)  ── S,  after W2 + W3, ship gate ───────────────────────────►
 ```
 
-W0 opens the release and is cheap insurance on both bets. W9 runs alongside it — the cutover does
-not touch the bets' code but must land before W1/W2 write their corpus halves, so those chapters
-are written once, in the book. W1 and W2 are the two long poles and are independent of each other —
-they proceed in parallel against capacity. W3 lands before W4 because the file broker is itself the
-brokered-D-Bus consumer that W4's subsumption gate wants as evidence. W5–W7 slot against capacity.
-W8 blocks the tag.
+W0 opened the release and is cheap insurance on the work that remains; with W1 withdrawn, its live
+consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
+cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
+is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
+that W4's subsumption gate wants as evidence. W5–W7 slot against capacity. W8 blocks the tag.
 
 ## Exit criteria
 
 0.6.0 ships when:
 
 - Every W0 probe has a recorded result and every red result has its named consequence applied (W0).
-- kenneld runs sealed: the fork split is in place, the child installs the full seal before any
-  kennel input, the three-message relay protocol carries a fuzz target, the policy suite passes
-  under the sealed daemon, in-process assertions prove the child cannot open inet sockets, exec
-  outside the privhelper set, or read the operator's home; the mis-brokering threat entry is minted
-  and the corpus ships the bounded-compromise claim exactly as scoped (W1).
+  (W1's probes are recorded for a future W1; P4 feeds W2.)
 - A constrained kennel with `[net.udp]` runs a stock QUIC client and `dig` with zero wire activity
   for denied names (packet-capture asserted); literal-IP egress dies in-kernel; the facade fuzz
   corpus covers the four crafted-frame classes; broker ceilings hold under flow-spray with kenneld's
@@ -590,17 +500,21 @@ W8 blocks the tag.
   (W5).
 - The four unchecked enum fields reject invalid values at compile with tests per field (W6).
 - The man pages derive from the CLI definition; the hand-kept table and its sync test are gone (W7).
+- kenneld starts with no `/etc/kennel/subkennel`; per-user loopback/bastion addressing derives from
+  the uid; the file, the `alloc` module, and the refuse-to-start gate are gone; the installer no
+  longer provisions it (W10).
 - The corpus cutover is complete: the book is the named corpus, the reference home carries the
   catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
   deleted with no dangling reference (W9).
 - The adversarial pass covers the relay, the UDP facade/broker, and the picker path; every confirmed
   finding is fixed before the tag (W8, ship gate).
 
-CHANGELOG records every stable-surface change — the sealed-daemon process shape, the `[net.udp]`
-section and the settled-schema bump, the portal FileChooser surface, the `host-dbus` retirement (or
-its recorded retention), the raw-base64 removal, the four-field validation tightening, the
-threat-catalogue additions (+ version bump), the man-page derivation, and the corpus move to the
-book (with the reference-home relocation of the catalogue and inventory artefacts).
+CHANGELOG records every stable-surface change — the `[net.udp]` section and the settled-schema bump,
+the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
+raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
+bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
+derived from the uid), and the corpus move to the book (with the reference-home relocation of the
+catalogue and inventory artefacts).
 
 ## Parked work
 

@@ -82,6 +82,22 @@ documentation sweep.
 
 ## Fenced to a later release
 
+- **kenneld self-confinement — the monitor inside its own box (was 0.6.0 W1; withdrawn 2026-07-02).**
+  Seal kenneld inside its own `[fs]`/`[net]`/`[exec]` confinement so a kennel breakout into the daemon
+  is *bounded*, not total. The 0.6.0 attempt (an unsealed relay + a sealed monitor split at a startup
+  fork) was withdrawn: the seam is drawn through code not factored for it. kenneld's host-facing
+  effects — exec (`sha256sum`, the netproxy/inetd/dbus delegates, the ssh bastion), inet resolution,
+  and cross-mount-namespace binder opens — are interleaved through construction and runtime brokering,
+  so the confinement boundary hits them one at a time and the relay protocol grows without converging;
+  seccomp's inheritance across `execve` additionally forces every inet-needing delegate onto the
+  unsealed side, which a bounded-allowlist seal cannot accommodate. **Promote only after the named
+  prerequisite: factor *all* host-facing effects behind one narrow interface** (a `HostEffects` seam —
+  resolve, exec-delegate + lifecycle, open-cross-ns, run-to-completion), after which the seal is
+  mechanical (sealed side = logic + an effects-client; unsealed side = the one effects-impl). The full
+  analysis, and what W0's probes settled (still valid), is in
+  [`audits/2026-07-02-w1-self-confinement-seam.md`](audits/2026-07-02-w1-self-confinement-seam.md).
+  Even complete, the sealed monitor retains authority to *drive* the effects side, so the
+  "bounded compromise" claim is real but wide — weigh that against the factoring cost before promoting.
 - **Kenneld restart-fork resolution — kennels that survive a daemon restart.** A kenneld restart
   today ends every running kennel: each kennel's serving thread lives in the daemon process, so
   detach survives a *client* leaving, not kenneld leaving
