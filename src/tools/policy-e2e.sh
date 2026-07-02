@@ -19,8 +19,9 @@
 # What it does:
 #   1. build the release, stage it into a flat payload (stage-tree.sh), and run the real
 #      `sudo ./install.sh` against it — unless --no-install (use what is already installed);
-#   2. provision the admin inputs install.sh deliberately does NOT fabricate: this user's
-#      /etc/kennel/subkennel allocation (tag 42) and a suite signing key the daemon trusts;
+#   2. provision the admin input install.sh deliberately does NOT fabricate: a suite
+#      signing key the daemon trusts (the kennel's reserved subnet is uid-derived, so
+#      there is no allocation file to provision);
 #   3. (re)start the installed kenneld.service so it runs the just-installed binary;
 #   4. stage the shared fixtures a policy cannot carry (the AF_UNIX echo listener + the
 #      granted home subtree), then run each case via the installed `kennel` CLI.
@@ -57,10 +58,7 @@ for arg in "$@"; do
     esac
 done
 
-# Constants the cases depend on (the reserved scope the suite policies assume).
-SUBKENNEL_TAG=42
-SUBKENNEL_NS="kennel-dev"
-SUBKENNEL_LINE="${UID_NUM}:${SUBKENNEL_TAG}:0000000002:${SUBKENNEL_NS}"
+# Constants the cases depend on.
 SUITE_KEY_ID="kennel-suite"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
 # Post-SSHSIG (#134): `kennel keygen <id>` writes the OpenSSH private key as `<id>` (no `.key`
@@ -72,15 +70,11 @@ HOME_FIXTURE="$HOME/kennel-e2e"
 SYSTEM_TOML="/etc/kennel/system.toml"
 
 ECHO_PID=""
-SUBKENNEL_SAVED=""
 SYSTEM_TOML_SAVED=""        # prior /etc/kennel/system.toml contents (restored on exit)
 SYSTEM_TOML_EXISTED=0
 
 cleanup() {
     [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null || true
-    if [ -n "$SUBKENNEL_SAVED" ]; then
-        sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
-    fi
     # Restore the system.toml we may have rewritten for --debug.
     if [ "$DEBUG" = 1 ]; then
         if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
@@ -125,19 +119,9 @@ if [ "$DO_INSTALL" = 1 ]; then
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
 
-# 2. The admin inputs install.sh deliberately does not fabricate:
-#    the subkennel allocation for this user, and a signing key the daemon trusts.
-echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
-sudo touch /etc/kennel/subkennel
-EXISTING="$(sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel 2>/dev/null | head -1 || true)"
-if [ -z "$EXISTING" ]; then
-    echo "$SUBKENNEL_LINE" | sudo tee -a /etc/kennel/subkennel >/dev/null
-elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
-    SUBKENNEL_SAVED="$EXISTING"
-    sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_LINE}|" /etc/kennel/subkennel
-fi
-sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
-
+# 2. The admin input install.sh deliberately does not fabricate: a signing key the
+#    daemon trusts. (The kennel's reserved subnet is derived from the uid — no
+#    allocation file to provision.)
 echo "== suite signing key (the daemon trusts the user key dir) =="
 # `kennel run` compiles+signs each source policy in memory; the daemon verifies against the
 # user key dir (trusted alongside /etc/kennel/keys). A dedicated key keeps `--key` unambiguous.

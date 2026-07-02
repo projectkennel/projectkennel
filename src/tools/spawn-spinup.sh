@@ -61,7 +61,6 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEY_DIR="$CFG/keys"
 SUITE_KEY="$KEY_DIR/kennel-suite.key"
 TPL_DIR="$CFG/templates"
-SUBKENNEL_LINE="${UID_NUM}:42:0000000002:kennel-dev"
 
 WORKLOAD_LABELS=("/bin/true" "python3 -c print('hello')")
 WORKLOAD_TEMPLATES=("true-tool" "pyhello-tool")
@@ -99,9 +98,8 @@ if [ "$DO_INSTALL" = 1 ]; then
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
-# 2. Admin inputs install.sh does not fabricate: the subkennel allocation + a trusted signing key.
-sudo touch /etc/kennel/subkennel
-sudo grep -qE "^${UID_NUM}:" /etc/kennel/subkennel || echo "$SUBKENNEL_LINE" | sudo tee -a /etc/kennel/subkennel >/dev/null
+# 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
+#    reserved subnet is uid-derived, so there is no allocation file to provision).
 [ -f "$SUITE_KEY" ] || "$KENNEL" keygen kennel-suite >/dev/null
 
 # 3. Compile + SIGN the two spawn templates to their settled form (suite key the daemon trusts) and

@@ -17,15 +17,15 @@
 #   2. `sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid=ep` on the
 #      privhelper (the production install posture — 07-paths.md — never sudo at
 #      runtime; cap_setuid is the factory's 0 0 1 uid_map write, 07-2);
-#   3. provisions an /etc/kennel/subkennel allocation for the operator's uid;
-#   4. loads an AppArmor profile granting `userns` to the test binary (Ubuntu's
+#   3. loads an AppArmor profile granting `userns` to the test binary (Ubuntu's
 #      kernel.apparmor_restrict_unprivileged_userns=1; dist/apparmor/kenneld is the
 #      production analogue for the real daemon binary);
-#   5. runs the test under `systemd-run --user --scope -p Delegate=yes` so kenneld
+#   4. runs the test under `systemd-run --user --scope -p Delegate=yes` so kenneld
 #      has a writable delegated cgroup (a plain login session scope is not writable).
 #
-# The sudo steps (2-4) are reversible and local; the AppArmor profile is unloaded on
-# exit. Usage: src/tools/unprivileged-e2e.sh
+# The sudo steps (2-3) are reversible and local; the AppArmor profile is unloaded on
+# exit. The kennel's reserved subnet is derived from the operator's uid, so there is
+# no allocation file to provision. Usage: src/tools/unprivileged-e2e.sh
 
 set -euo pipefail
 
@@ -38,13 +38,8 @@ if [ "$UID_NUM" = "0" ]; then
     exit 2
 fi
 
-# The allocation the test expects (matches the TEST_* constants in tests/e2e.rs).
-SUBKENNEL_LINE="${UID_NUM}:42:0000000002:kennel-dev"
 AA_PROFILE_NAME="kennel_e2e_test"
 AA_PROFILE_FILE="$(mktemp /tmp/kennel-e2e-aa.XXXXXX)"
-# Set when the runner temporarily rewrites a pre-existing, mismatched subkennel line
-# for this uid (e.g. a real allocation): the original is saved here and restored on exit.
-SUBKENNEL_SAVED=""
 # The privhelper resolves kennel-bin-init from the root-owned deployment cascade itself and
 # verifies it is root-owned + non-writable before fexecve (sec review / design 07-2). The
 # build tree is operator-owned, so install a root-owned copy at the default libexec path.
@@ -57,11 +52,6 @@ cleanup() {
     if [ -f "$AA_PROFILE_FILE" ]; then
         sudo apparmor_parser -R "$AA_PROFILE_FILE" 2>/dev/null || true
         rm -f "$AA_PROFILE_FILE"
-    fi
-    # Restore the operator's original subkennel line if we swapped it in.
-    if [ -n "$SUBKENNEL_SAVED" ]; then
-        sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_SAVED}|" /etc/kennel/subkennel 2>/dev/null || true
-        echo "  restored original subkennel line for uid $UID_NUM"
     fi
     # Restore (or remove) the root-owned kennel-bin-init we installed for the run.
     if [ -n "$INIT_DEST_CREATED" ]; then
@@ -103,22 +93,6 @@ echo "== file capabilities on the privhelper (sudo, one-time) =="
 # an escalated-root writer.
 sudo setcap cap_net_admin,cap_sys_admin,cap_setgid,cap_setuid,cap_setfcap=ep "$PRIVHELPER"
 getcap "$PRIVHELPER"
-
-echo "== /etc/kennel/subkennel allocation for uid $UID_NUM (sudo) =="
-sudo mkdir -p /etc/kennel
-sudo touch /etc/kennel/subkennel
-EXISTING="$(sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel 2>/dev/null | head -1 || true)"
-if [ -z "$EXISTING" ]; then
-    # No line for this uid: append the test allocation (left in place — it is ours).
-    echo "$SUBKENNEL_LINE" | sudo tee -a /etc/kennel/subkennel >/dev/null
-elif [ "$EXISTING" != "$SUBKENNEL_LINE" ]; then
-    # A different line exists (likely a real allocation): swap to the test line for the
-    # run and restore the original on exit (see cleanup).
-    SUBKENNEL_SAVED="$EXISTING"
-    echo "  temporarily replacing existing line: $EXISTING"
-    sudo sed -i "s|^${UID_NUM}:.*|${SUBKENNEL_LINE}|" /etc/kennel/subkennel
-fi
-sudo grep -E "^${UID_NUM}:" /etc/kennel/subkennel
 
 echo "== root-owned kennel-bin-init at $INIT_DEST (sudo) =="
 # The privhelper factory resolves kennel-bin-init from the root-owned deployment cascade itself

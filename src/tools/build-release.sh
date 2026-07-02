@@ -122,9 +122,11 @@ grant, the maintainer trust-store key, and the signed reference templates under
 /etc/kennel/templates. Relocate with --prefix DIR; preview with --dry-run.
 
 ## Admin steps (root), then per-user enable
-1. Provision /etc/kennel/subkennel — one line per user:
-       <uid>:<tag>:<gid>:<namespace>      e.g.  1000:42:0000000001:kennel-alice
-2. Add any org policy-signing keys to /etc/kennel/keys/<key_id>.pub.
+1. Add any org policy-signing keys to /etc/kennel/keys/<key_id>.pub.
+2. (Optional) restrict who may run kennels by group-gating the privhelper:
+       chgrp kennel-users /usr/libexec/kennel/kennel-privhelper && chmod 0750 /usr/libexec/kennel/kennel-privhelper
+   By default it is world-executable (any user may run kennels). A kennel's reserved
+   loopback subnet is derived from the caller's uid — there is no allocation file.
 3. Each user: systemctl --user enable --now kenneld.socket
 
 ## Verify (from this unpacked directory, BEFORE installing)

@@ -1,10 +1,10 @@
 # Project Kennel — HOWTO (operator / administrator)
 
 Deploying and operating Project Kennel on a host: install, the trust store and
-signing keys, systemd, AppArmor, per-user provisioning, the config cascade, and
-upgrades. For authoring and running policies as a user, see
+signing keys, systemd, AppArmor, restricting who may run kennels, the config
+cascade, and upgrades. For authoring and running policies as a user, see
 [HOWTO.md](HOWTO.md). Reference detail is in the man pages
-(`man kenneld`, `man system.toml`, `man subkennel`) and `docs/`.
+(`man kenneld`, `man system.toml`) and `docs/`.
 
 The privilege model in one line: **one** privileged factory
 (`kennel-privhelper`, file-capped not sudo) plus its narrow single-capability
@@ -135,31 +135,32 @@ in INSTALL.md). On hosts that do not restrict userns, the profile is harmless.
 
 ---
 
-## 5. Per-user provisioning (`/etc/kennel/subkennel`)
+## 5. Who may run kennels
 
-Each user that runs kennels needs one allocation line in `/etc/kennel/subkennel`
-(analogous to `/etc/subuid`); a user with no valid line cannot start kenneld. The
-format is `uid:tag:gid:namespace` (`man subkennel`):
-
-```
-1000:42:0000000001:kennel-alice
-```
-
-- `uid` — the user.
-- `tag` — a per-user 12-bit tag (0–4095), unique per uid.
-- `gid` — the reserved gid base, exactly ten lowercase hex digits.
-- `namespace` — the allocation namespace (non-empty).
-
-Do not hand-compute these. Use the CLI to append a provably-valid, collision-free
-line and to validate the whole file:
+There is no per-user allocation file. Everything a kennel needs is derived from
+the caller's kernel-trusted real uid: the per-user loopback subnet is an FNV-1a
+hash of the uid (both kenneld and the privhelper's validator recompute the same
+value, so the "add only your own subnet" capability holds with no `/etc` file),
+and the bastion sshd binds `::1` on a random high port. A user starts their own
+daemon with no admin step:
 
 ```sh
-sudo kennel subkennel add --uid 1000
-sudo kennel subkennel check
+systemctl --user enable --now kenneld.socket
 ```
 
-The installer deliberately does **not** fabricate these (a security-sensitive
-admin input); it creates the directory and tells you to populate it.
+Who *may* do this is governed by **execute permission on the privhelper
+binary** under the libexec dir (default
+`/usr/libexec/kennel/kennel-privhelper`) — the one privileged factory. By
+default it is world-executable, so any user may run kennels. To restrict it,
+give it to a group and drop other-execute:
+
+```sh
+sudo chgrp kennel-users /usr/libexec/kennel/kennel-privhelper
+sudo chmod 0750 /usr/libexec/kennel/kennel-privhelper
+```
+
+Now only members of `kennel-users` can invoke the privileged factory and thus
+start a kennel; everyone else is refused at exec.
 
 ---
 
@@ -199,13 +200,13 @@ wins over the vendor copy. Every override key is documented inline in the shippe
    over an in-place re-sign so users get a reviewable upgrade rather than a hard
    error.
 4. Re-verify: `ls -l /usr/libexec/kennel/kennel-privhelper` (still setuid-root)
-   and a smoke `kennel run interactive -- /bin/true` as a provisioned user.
+   and a smoke `kennel run interactive -- /bin/true` as an ordinary user.
 
 ---
 
 ## See also
 
-- `man kenneld`, `man system.toml`, `man subkennel`, `man config.toml`.
+- `man kenneld`, `man system.toml`, `man config.toml`.
 - [HOWTO.md](HOWTO.md) — authoring and running policies (user-facing).
 - [INSTALL.md](INSTALL.md) — the installer in detail.
 - [docs/archive/architecture/01-process-model.md](docs/archive/architecture/01-process-model.md),

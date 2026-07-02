@@ -265,7 +265,7 @@ asks for consent, and re-pins the lock (§8). A mismatch you did not expect is a
 supply-chain signal, not a nuisance — review before accepting. See `man kennel`.
 
 **A kennel won't start at all.** Spawn failures are an admin/host concern (userns
-support, the privhelper, an `/etc/kennel/subkennel` allocation). Capture detail
+support, execute permission on the privhelper). Capture detail
 by setting `log_level = "debug"` in `system.toml` (admin) and reading both the
 user journal (`journalctl --user -u kenneld.service`) and the system journal
 (`sudo journalctl -t kenneld`) merged by time. See

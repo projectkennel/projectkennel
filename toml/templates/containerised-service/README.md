@@ -33,9 +33,9 @@ never from the policy file.
 
 - **Reachable from the workstation, not the LAN (T3.3).** base-confined rewrites a
   wildcard bind (`0.0.0.0` / `::`) to the kennel's own private loopback address
-  (computed from `<tag>`/`<ctx>`), so the service answers within the kennel's
-  address space and is invisible to the LAN. Binding the host's `0.0.0.0` is
-  refused; privileged ports are refused.
+  (the uid-derived IPv6 subnet plus `<ctx>`), so the service answers within the
+  kennel's address space and is invisible to the LAN. Binding the host's `0.0.0.0`
+  is refused; privileged ports are refused.
 - **Data confined to one path (T1.1).** The leaf grants a single writable `~/`
   directory, which binds the real host inode read-write beneath the constructed
   `$HOME` so the data persists across runs. Everything else in the view is
