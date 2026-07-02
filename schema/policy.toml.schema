@@ -506,6 +506,14 @@
       "additionalProperties": false,
       "description": "`[fs]` and its sub-tables.",
       "properties": {
+        "cwd": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/fs_cwd"
+            }
+          ],
+          "description": "`[fs.cwd]`: materialise the invocation cwd into the view."
+        },
         "deny": {
           "description": "Categorical denies (belt-and-braces over the constructed view). Replace or increment",
           "oneOf": [
@@ -586,6 +594,33 @@
               "$ref": "#/definitions/path_delta"
             }
           ]
+        }
+      },
+      "type": "object"
+    },
+    "fs_cwd": {
+      "additionalProperties": false,
+      "description": "`[fs.cwd]`: materialise the directory `kennel run` is invoked from into the view.",
+      "properties": {
+        "grant": {
+          "description": "Whether and how the invocation cwd is bound (`none`/`read`/`write`; default `none`).",
+          "enum": [
+            "none",
+            "read",
+            "write"
+          ],
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why the cwd grant is warranted. Required when `grant` is not `none`; compile-time-only",
+          "type": "string"
+        },
+        "required": {
+          "description": "Dirent markers that must be present in the cwd for the grant to apply (e.g. `.git`,",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "type": "object"
@@ -1238,11 +1273,14 @@
     },
     "path_entry": {
       "additionalProperties": false,
-      "description": "One entry in the `{ add, remove }` increment of a path-list field.",
+      "description": "`fs.read`, `fs.write`, `fs.deny`, and `exec.allow`.",
       "properties": {
         "path": {
-          "description": "The path to add or remove.",
-          "type": "string"
+          "description": "The path(s) to add or remove. Accepts a single string or an array of strings, so a",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "reason": {
           "description": "Why (required on every delta entry; validated at compile).",
@@ -1711,6 +1749,10 @@
       "additionalProperties": false,
       "description": "`[workload]`: the command the kennel runs, optionally pinned.",
       "properties": {
+        "allowed_args": {
+          "description": "Append CLI `-- <args>` to the pinned `argv` instead of refusing them. Only",
+          "type": "boolean"
+        },
         "argv": {
           "description": "The command + args (`argv[0]` is the program). Absent ⇒ supplied at `kennel run`.",
           "items": {

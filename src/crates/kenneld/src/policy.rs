@@ -312,6 +312,7 @@ pub fn loaded_from_settled(
         lifecycle,
         tty_filter,
         on_change,
+        cwd: substituted.effective_policy.fs.cwd,
         workload: substituted.workload,
         spawn: substituted.spawn,
     })

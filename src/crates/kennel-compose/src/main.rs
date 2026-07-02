@@ -349,7 +349,7 @@ fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
         push_add(
             &mut fs.write,
             PathEntry {
-                path: home_path.to_owned(),
+                path: vec![home_path.to_owned()],
                 reason: Some("operator-specified write access".to_owned()),
                 threats: None,
             },
@@ -377,7 +377,7 @@ fn populate_exec_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::Probe
         .exec_allow
         .iter()
         .map(|path| PathEntry {
-            path: path.clone(),
+            path: vec![path.clone()],
             reason: Some(format!("probed from {}", probe_result.workload)),
             threats: None,
         })
@@ -400,7 +400,7 @@ fn populate_fs_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::ProbeRe
         .extra_fs_read
         .iter()
         .map(|grant| PathEntry {
-            path: grant.path.clone(),
+            path: vec![grant.path.clone()],
             reason: Some(grant.reason.clone()),
             threats: None,
         })

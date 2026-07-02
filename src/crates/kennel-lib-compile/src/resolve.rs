@@ -441,6 +441,7 @@ fn fold_workload(p: &WorkloadSection, c: &WorkloadSection) -> WorkloadSection {
         argv: or(&c.argv, &p.argv),
         cwd: or(&c.cwd, &p.cwd),
         pinned: or(&c.pinned, &p.pinned),
+        allowed_args: or(&c.allowed_args, &p.allowed_args),
         sha256: or(&c.sha256, &p.sha256),
     }
 }
@@ -492,11 +493,13 @@ fn fold_pathfield(child: &Option<PathField>, parent: &Option<PathField>) -> Opti
                 _ => Vec::new(),
             };
             for e in &d.add {
-                if !base.iter().any(|p| p == &e.path) {
-                    base.push(e.path.clone());
+                for path in &e.path {
+                    if !base.contains(path) {
+                        base.push(path.clone());
+                    }
                 }
             }
-            base.retain(|p| !d.remove.iter().any(|e| &e.path == p));
+            base.retain(|p| !d.remove.iter().any(|e| e.path.contains(p)));
             Some(PathField::Set(base))
         }
     }
@@ -572,6 +575,9 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),
         proc: merge(&p.proc, &c.proc, fold_fs_proc),
         dev: merge(&p.dev, &c.dev, fold_fs_dev),
+        // Scalar-wins: a child that declares `[fs.cwd]` redefines it wholesale (the grant is
+        // an authority the leaf owns end-to-end, not a set to union into).
+        cwd: or(&c.cwd, &p.cwd),
     }
 }
 

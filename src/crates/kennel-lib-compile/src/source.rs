@@ -293,13 +293,39 @@ pub struct Threats {
 /// One entry in the `{ add, remove }` increment of a path-list field.
 ///
 /// A `path` plus the required `reason` (and optional threat tags): the `+=` / `-=` unit for
+/// Deserialize a delta entry `path` as either a single string or an array of strings.
+fn de_path_list<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(match OneOrMany::deserialize(d)? {
+        OneOrMany::One(s) => vec![s],
+        OneOrMany::Many(v) => v,
+    })
+}
+
+/// Serialize a delta entry `path` back as a bare string when there is exactly one path, so a
+/// single-path entry's canonical form — and thus every existing signature — is unchanged.
+fn ser_path_list<S: serde::Serializer>(v: &[String], s: S) -> Result<S::Ok, S::Error> {
+    match v {
+        [one] => s.serialize_str(one),
+        many => many.serialize(s),
+    }
+}
+
 /// `fs.read`, `fs.write`, `fs.deny`, and `exec.allow`.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct PathEntry {
-    /// The path to add or remove.
-    pub path: String,
+    /// The path(s) to add or remove. Accepts a single string or an array of strings, so a
+    /// `[[fs.read.add]]` may carry several paths under one `reason` (mirroring the bare-set
+    /// form). Normalisation happens on the folded set, so order/dedup need no care here.
+    #[serde(deserialize_with = "de_path_list", serialize_with = "ser_path_list")]
+    pub path: Vec<String>,
     /// Why (required on every delta entry; validated at compile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -666,6 +692,9 @@ pub struct FsSection {
     /// `[fs.dev]`: the minimal `/dev`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dev: Option<FsDev>,
+    /// `[fs.cwd]`: materialise the invocation cwd into the view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<FsCwd>,
 }
 
 impl Serialize for FsSection {
@@ -707,8 +736,38 @@ impl Serialize for FsSection {
         if let Some(v) = &self.dev {
             m.serialize_entry("dev", v)?;
         }
+        if let Some(v) = &self.cwd {
+            m.serialize_entry("cwd", v)?;
+        }
         m.end()
     }
+}
+
+/// `[fs.cwd]`: materialise the directory `kennel run` is invoked from into the view.
+///
+/// A signed policy declares the slot (`grant` mode + required markers + a `reason`); the
+/// spawn fills it with the resolved invocation cwd under a non-overridable framework floor
+/// (realpath-normalised, operator-owned, never `$HOME`). A non-`none` grant **requires a
+/// `reason`** — the acknowledged-tradeoff forcing function, since this is a new authority.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub struct FsCwd {
+    /// Whether and how the invocation cwd is bound (`none`/`read`/`write`; default `none`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(
+        feature = "schema",
+        schema(values_from = "kennel_lib_policy::settled::CwdGrant")
+    )]
+    pub grant: Option<String>,
+    /// Dirent markers that must be present in the cwd for the grant to apply (e.g. `.git`,
+    /// `.claude/`; trailing slash ⇒ directory). An absent marker refuses the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<Vec<String>>,
+    /// Why the cwd grant is warranted. Required when `grant` is not `none`; compile-time-only
+    /// (validated, then dropped from the settled artefact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `[fs.home]`: the mandatory constructed-`$HOME` shim.
@@ -1326,6 +1385,11 @@ pub struct WorkloadSection {
     /// Refuse a CLI `--` override of `argv` unless `--force` (pin exactly what runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+    /// Append CLI `-- <args>` to the pinned `argv` instead of refusing them. Only
+    /// meaningful with `pinned = true`: the program and base argv stay pinned exactly,
+    /// and the request's tokens are appended. Absent ⇒ false (a pin refuses `--`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_args: Option<bool>,
     /// Accepted lowercase-hex SHA-256 digests of the workload binary; the spawn verifies
     /// the binary against this set before exec. A list so multiple accepted versions of
     /// one binary validate under a single policy. Absent/empty ⇒ no pin.
@@ -1670,6 +1734,7 @@ impl SourcePolicy {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // cohesive per-section reason checks; the fs.cwd check tipped it over.
     fn check_reasons(&self, errs: &mut Vec<String>) {
         if let Some(net) = &self.net {
             if let Some(proxy) = &net.proxy {
@@ -1732,7 +1797,7 @@ impl SourcePolicy {
                     if is_blank(e.reason.as_deref()) {
                         errs.push(format!(
                             "[[{label}.*]] \"{}\" is missing a `reason`",
-                            e.path
+                            e.path.join(", ")
                         ));
                     }
                 }
@@ -1747,13 +1812,25 @@ impl SourcePolicy {
                     }
                 }
             }
+            // A non-`none` `[fs.cwd]` grant is a new authority (a writable/readable bind of
+            // the invocation dir), so it requires a `reason` — the acknowledged-tradeoff
+            // forcing function, as for `net.mode = host` and the allow/deny rules above.
+            if let Some(cwd) = &fs.cwd {
+                let grants = matches!(cwd.grant.as_deref(), Some("read" | "write"));
+                if grants && is_blank(cwd.reason.as_deref()) {
+                    errs.push(format!(
+                        "[fs.cwd] grant `{}` is missing a `reason`",
+                        cwd.grant.as_deref().unwrap_or("none")
+                    ));
+                }
+            }
         }
         if let Some(exec) = &self.exec {
             for e in exec.allow.iter().flat_map(PathField::delta_entries) {
                 if is_blank(e.reason.as_deref()) {
                     errs.push(format!(
                         "[[exec.allow.*]] \"{}\" is missing a `reason`",
-                        e.path
+                        e.path.join(", ")
                     ));
                 }
             }
@@ -2270,6 +2347,58 @@ image = \"docker.io/library/postgres:17\"
             pol.validate().is_err(),
             "template_name + name is incoherent"
         );
+    }
+
+    #[test]
+    fn path_add_accepts_a_string_or_an_array() {
+        // QoL: the `.add` form takes a single path or an array (like the bare-set form).
+        fn first_add_path(src: &str) -> Vec<String> {
+            let pol = parse(src.as_bytes()).expect("parse add");
+            let read = pol.fs.expect("fs").read.expect("fs.read");
+            let PathField::Delta(d) = read else {
+                return Vec::new(); // a non-delta makes the caller's assert_eq fail clearly
+            };
+            d.add.into_iter().next().expect("one add entry").path
+        }
+        let arr = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                   [[fs.read.add]]\npath = [\"/a\", \"/b\"]\nreason = \"r\"\n";
+        assert_eq!(first_add_path(arr), vec!["/a".to_owned(), "/b".to_owned()]);
+        let one = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                   [[fs.read.add]]\npath = \"/a\"\nreason = \"r\"\n";
+        assert_eq!(first_add_path(one), vec!["/a".to_owned()]);
+    }
+
+    #[test]
+    fn fs_cwd_grant_without_reason_is_rejected() {
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                   [fs.cwd]\ngrant = \"write\"\n";
+        let pol = parse(src.as_bytes()).expect("parse");
+        let err = pol
+            .validate()
+            .expect_err("a cwd grant with no reason must fail");
+        assert!(matches!(err, PolicyError::SourceValidation(_)), "got {err}");
+        if let PolicyError::SourceValidation(ms) = err {
+            assert!(
+                ms.iter()
+                    .any(|m| m.contains("fs.cwd") && m.contains("reason")),
+                "{ms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fs_cwd_none_grant_needs_no_reason() {
+        // The default (no grant) is not an authority, so it carries no reason requirement.
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n[fs.cwd]\ngrant = \"none\"\n";
+        let pol = parse(src.as_bytes()).expect("parse");
+        // Whatever else validate says, it must NOT complain about a missing fs.cwd reason.
+        if let Err(PolicyError::SourceValidation(ms)) = pol.validate() {
+            assert!(
+                !ms.iter()
+                    .any(|m| m.contains("fs.cwd") && m.contains("reason")),
+                "{ms:?}"
+            );
+        }
     }
 
     #[test]

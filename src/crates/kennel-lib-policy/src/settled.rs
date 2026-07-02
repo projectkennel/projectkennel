@@ -307,6 +307,58 @@ pub struct DevPolicy {
     pub allow: Vec<String>,
 }
 
+/// How the invocation cwd is materialised into the view (`[fs.cwd].grant`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub enum CwdGrant {
+    /// The invocation cwd is not materialised (default).
+    #[default]
+    None,
+    /// The invocation cwd is bound **read-only** into the view.
+    Read,
+    /// The invocation cwd is bound **writable** into the view.
+    Write,
+}
+
+impl CwdGrant {
+    /// Whether no cwd grant is declared (the default; omitted from the canonical form).
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+/// The invocation-cwd grant (`[fs.cwd]`, §7.9): a signed policy declares that the
+/// directory `kennel run` is invoked from is materialised into the view.
+///
+/// The grant is a *slot*: the policy states the mode and the required markers, and the
+/// spawn fills it with the resolved invocation cwd, subject to a non-overridable framework
+/// floor (realpath-normalised, operator-owned, never `$HOME`) checked host-side. `reason`
+/// is compile-time-only (validated, then dropped like other informational fields), so the
+/// settled artefact carries only the enforced shape.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CwdPolicy {
+    /// Whether and how the invocation cwd is bound into the view.
+    #[serde(default, skip_serializing_if = "CwdGrant::is_none")]
+    pub grant: CwdGrant,
+    /// Dirent markers that must be present in the invocation cwd for the grant to apply
+    /// (e.g. `.git`, `.claude/`; a trailing slash requires a directory). Empty ⇒ no marker
+    /// requirement. A marker that is absent refuses the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
+}
+
+impl CwdPolicy {
+    /// Whether this is the default (no grant, no markers) — omitted from the canonical form
+    /// so a policy without a `[fs.cwd]` signs exactly as before.
+    #[must_use]
+    pub const fn is_default(&self) -> bool {
+        self.grant.is_none() && self.required.is_empty()
+    }
+}
+
 /// Filesystem policy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -336,6 +388,11 @@ pub struct FsPolicy {
     /// signs unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub home_readonly: bool,
+    /// The invocation-cwd grant. Declared among the sub-tables so the canonical TOML
+    /// emits it as a table; omitted entirely when default, so a policy without a
+    /// `[fs.cwd]` signs exactly as before.
+    #[serde(default, skip_serializing_if = "CwdPolicy::is_default")]
+    pub cwd: CwdPolicy,
     /// Private-`/tmp` tmpfs parameters. Declared after the scalar/array fields
     /// so the canonical TOML emits this sub-table last (valid table ordering).
     pub tmp: TmpPolicy,
@@ -1326,6 +1383,12 @@ pub struct WorkloadRuntime {
     /// signed policy pins exactly what runs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub pinned: bool,
+    /// When true, CLI `-- <args>` tokens are *appended* to the pinned `argv` rather than
+    /// refused. The program and base argv stay pinned exactly (the fd-pin/digest binds the
+    /// program, not the args); only meaningful with `pinned`. Omitted when false, so a
+    /// policy without it signs unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allowed_args: bool,
     /// Accepted lowercase-hex SHA-256 digests of the workload binary (`argv[0]` resolved
     /// against `PATH`). When non-empty, the spawn hashes the resolved binary just before
     /// `execve` and refuses to run it unless its digest is in this set — the signed policy
@@ -1572,6 +1635,7 @@ pub fn sample_settled() -> SettledPolicy {
                 exclusive: Vec::new(),
                 home_persist: Vec::new(),
                 home_readonly: false,
+                cwd: CwdPolicy::default(),
                 tmp: TmpPolicy {
                     writable: true,
                     size_mib: 512,
