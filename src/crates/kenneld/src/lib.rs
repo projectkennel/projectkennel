@@ -325,6 +325,10 @@ pub struct BinderPrep {
     /// through this when a `SVC_CONNECT` resolves to a not-yet-running one. `None` on a construction
     /// path with no activator (a test path) — a `Pending` consume then waits out the deadline.
     pub activator: Option<std::sync::Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// The parent relay (W1): threaded to the per-kennel [`crate::inet::NetRuntime`] so a sealed
+    /// monitor resolves names via the unconfined parent (it cannot open inet sockets itself). `None`
+    /// in a non-forked or degraded daemon, where the OS resolver is used directly.
+    pub relay: Option<std::sync::Arc<crate::relay::RelayClient>>,
     /// Whether this kennel's D-Bus is brokered over the connector mesh bus (the standing
     /// `dbus-broker` service kennel is enabled). When set, the per-kennel relay only locates the
     /// mesh bus; the session is minted by the mesh handler (§7.7). When clear, a legacy host-dbus
@@ -912,6 +916,7 @@ fn bring_up<P: Privileged + Sync>(
                 net,
                 host_services,
                 Some(command_socket.clone()),
+                binder.and_then(|b| b.relay.clone()),
             );
             (Some(command_socket), net_runtime)
         } else {

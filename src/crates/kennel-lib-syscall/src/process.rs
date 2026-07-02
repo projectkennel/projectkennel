@@ -1,9 +1,51 @@
 //! Process-wide privilege settings.
 //!
-//! Thin safe wrappers (over nix) for the `prctl` flags the spawn sequence sets.
-//! No `unsafe` of ours — nix owns it.
+//! Thin wrappers (over nix) for the `prctl` flags the spawn sequence sets, plus
+//! the single startup [`fork`] the kenneld self-confinement split uses. Only
+//! [`fork`] carries `unsafe` (the `fork(2)` call, §4 SAFETY below); the prctl
+//! wrappers add none — nix owns theirs.
 
 use std::io;
+
+/// Which side of a [`fork`] the caller is now running on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForkSide {
+    /// The parent process; carries the child's pid.
+    Parent(i32),
+    /// The freshly-forked child.
+    Child,
+}
+
+/// Fork the current process, returning which side the caller is now on.
+///
+/// Used once, at kenneld startup, to split the unsealed relay from the sealed
+/// monitor (`01-process-model.md`).
+///
+/// # Safety discipline
+///
+/// Safe to *call*, but the fork point must be single-threaded — the caller's
+/// responsibility. The kenneld relay split forks before any thread exists (W0
+/// P2). The child branch must keep to async-signal-safe work (atfork-safe
+/// `malloc` and plain syscalls) until it settles into its own loop.
+///
+/// # Errors
+///
+/// The OS error if `fork(2)` fails.
+pub fn fork() -> io::Result<ForkSide> {
+    // SAFETY: `fork(2)` via nix. glibc runs the `pthread_atfork` handlers that
+    // quiesce the malloc arenas; the caller guarantees a single-threaded fork
+    // point (W0 P2), so the child inherits a consistent heap.
+    //
+    // INVARIANTS UPHELD: the child returns `ForkSide::Child` and keeps to the
+    // async-signal discipline documented above; the parent gets the child pid.
+    //
+    // FAILURE MODE: `fork(2)` returns `-1`/`Err` on resource exhaustion; no
+    // child is created and the caller sees the OS error.
+    match unsafe { nix::unistd::fork() }.map_err(|e| io::Error::from_raw_os_error(e as i32))? {
+        nix::unistd::ForkResult::Parent { child } => Ok(ForkSide::Parent(child.as_raw())),
+        nix::unistd::ForkResult::Child => Ok(ForkSide::Child),
+    }
+}
 
 /// Set `PR_SET_NO_NEW_PRIVS`: from now on no `execve` can grant this process (or
 /// its descendants) new privileges via setuid/setgid/file capabilities.

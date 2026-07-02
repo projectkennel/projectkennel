@@ -302,6 +302,11 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// exactly as long as the kennel does. It is *not* a session/credential store: identity is the
     /// kernel's per-transaction attestation, this is only the policy to apply once identified.
     dbus_filters: std::sync::Arc<Mutex<HashMap<u16, kennel_lib_policy::DbusRuntime>>>,
+    /// The parent relay (W1 self-confinement): the sealed monitor's handle to its unconfined
+    /// parent, set once at `serve` startup after the fork. Threaded into each kennel's
+    /// [`crate::inet::NetRuntime`] so name resolution runs in the parent. `None` before startup
+    /// wires it, or in a non-forked test/degraded daemon.
+    relay: std::sync::OnceLock<std::sync::Arc<crate::relay::RelayClient>>,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -327,7 +332,20 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
             mesh_buses: Mutex::new(HashMap::new()),
             dbus_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            relay: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Record the parent relay after the startup fork. A second call is ignored; the relay is set
+    /// for the daemon's life.
+    pub fn set_relay(&self, relay: std::sync::Arc<crate::relay::RelayClient>) {
+        let _ = self.relay.set(relay);
+    }
+
+    /// The parent relay, if the daemon forked one (`None` in a non-forked test/degraded daemon).
+    #[must_use]
+    pub fn relay(&self) -> Option<std::sync::Arc<crate::relay::RelayClient>> {
+        self.relay.get().cloned()
     }
 
     /// Re-derive the service catalogue from the enablement links on disk (the `daemon-reload`
@@ -1927,6 +1945,7 @@ pub fn run_kennel<P, L>(
             consumes: loaded.consumes,
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
+            relay: shared.relay(),
             brokered_dbus: {
                 // Brokered only when this kennel actually consumes the broker (a `dbus-name`
                 // `[[consumes]]`) AND the broker is enabled in the catalogue. `[dbus]` alone is the

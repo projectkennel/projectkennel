@@ -8,14 +8,16 @@
 
 #![forbid(unsafe_code)]
 
+use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use std::net::{IpAddr, Ipv4Addr};
 
+use kennel_lib_syscall::process::ForkSide;
 use kenneld::server::{serve, BastionSetup, Identity, Shared};
-use kenneld::{policy, socket, HelperClient, ProxySetup};
+use kenneld::{policy, relay, socket, HelperClient, ProxySetup};
 
 fn main() -> ExitCode {
     match run() {
@@ -28,6 +30,26 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    // Split the unsealed relay off first, while still single-threaded (W0 P2). This process
+    // continues as the monitor (soon sealed); the child becomes the unconfined relay that resolves
+    // names, execs delegates, and opens cross-namespace fds on the sealed monitor's behalf (W1).
+    // The relay is a one-per-daemon child; its socketpair end lives across the fork.
+    let (monitor_end, relay_end) =
+        kennel_lib_syscall::scm::seqpacket_pair().map_err(|e| format!("relay socketpair: {e}"))?;
+    let relay_client =
+        match kennel_lib_syscall::process::fork().map_err(|e| format!("relay fork: {e}"))? {
+            ForkSide::Child => {
+                drop(monitor_end);
+                // The unconfined relay: serve until the monitor closes the socket (or dies), then exit.
+                let _ = relay::serve(relay_end.as_fd(), &relay::HostOps);
+                std::process::exit(0);
+            }
+            ForkSide::Parent(_) => {
+                drop(relay_end);
+                Arc::new(relay::RelayClient::new(monitor_end))
+            }
+        };
+
     // Become a child subreaper so an orphaned `kennel-bin-init` reparents to us: the privhelper
     // factory exits as soon as it has reported the init pid (it is not a reaper proxy), and we
     // must remain able to `waitpid` the kennel for its exit status (`07-2`). Set once, before
@@ -65,6 +87,7 @@ fn run() -> Result<(), String> {
     );
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));
+    shared.set_relay(relay_client);
     let listener = socket::listener().map_err(|e| format!("control socket: {e}"))?;
     serve(&shared, &listener).map_err(|e| format!("serving: {e}"))
 }

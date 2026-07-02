@@ -788,7 +788,15 @@ fn inet_connect(
         Destination::Name(name) => name.clone(),
         Destination::Addr(addr) => addr.to_string(),
     };
-    let (outcome, reply) = match crate::inet::decide(net, &SystemResolver, &dest, port, transport) {
+    // Resolution runs in the unconfined parent when the monitor is sealed (it cannot open inet
+    // sockets); the decision and the pin stay here. A non-forked/degraded daemon uses the OS
+    // resolver directly.
+    let relay_resolver = net.relay().map(crate::relay::RelayResolver);
+    let resolver: &dyn crate::inet::dns::Resolver = match &relay_resolver {
+        Some(r) => r,
+        None => &SystemResolver,
+    };
+    let (outcome, reply) = match crate::inet::decide(net, resolver, &dest, port, transport) {
         crate::inet::InetDecision::Denied => (Outcome::Deny, Reply::Data(one(status::DENIED))),
         crate::inet::InetDecision::Unreachable => {
             (Outcome::Error, Reply::Data(one(status::NOT_FOUND)))

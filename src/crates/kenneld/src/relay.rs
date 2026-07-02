@@ -609,6 +609,7 @@ pub fn serve(sock: BorrowedFd<'_>, ops: &dyn RelayOps) -> io::Result<()> {
 
 /// The sealed monitor's handle to the relay: one serialized transaction at a
 /// time over the socketpair end held across the fork.
+#[derive(Debug)]
 pub struct RelayClient {
     sock: std::sync::Mutex<OwnedFd>,
 }

@@ -42,6 +42,10 @@ pub struct NetRuntime {
     /// The per-kennel `kenneld`↔delegate command socket the conduit dial is driven over (the path
     /// the dial delegate binds). `None` when the kennel runs no egress delegate.
     command_socket: Option<PathBuf>,
+    /// The parent relay, when the monitor is sealed: name resolution is delegated to the
+    /// unconfined parent, since the sealed monitor cannot open inet sockets (W1). `None` in a
+    /// non-forked or degraded daemon, where the OS resolver is used directly.
+    resolver: Option<std::sync::Arc<crate::relay::RelayClient>>,
 }
 
 impl NetRuntime {
@@ -57,6 +61,7 @@ impl NetRuntime {
         net: &NetPolicy,
         host_services: Vec<SocketAddr>,
         command_socket: Option<PathBuf>,
+        resolver: Option<std::sync::Arc<crate::relay::RelayClient>>,
     ) -> Self {
         let mut allow: Vec<Rule> = net.allow.iter().filter_map(rule_from_cidr).collect();
         allow.extend(net.allow_names.iter().map(rule_from_name));
@@ -78,6 +83,7 @@ impl NetRuntime {
             accept_private_resolved: false,
             host_services,
             command_socket,
+            resolver,
         }
     }
 
@@ -85,6 +91,12 @@ impl NetRuntime {
     #[must_use]
     pub fn command_socket(&self) -> Option<&Path> {
         self.command_socket.as_deref()
+    }
+
+    /// The parent relay for name resolution, if the monitor is sealed.
+    #[must_use]
+    pub fn relay(&self) -> Option<&crate::relay::RelayClient> {
+        self.resolver.as_deref()
     }
 
     /// A deny-all runtime (network mode `none`): every `INet` request is refused. Used when the
@@ -100,6 +112,7 @@ impl NetRuntime {
             accept_private_resolved: false,
             host_services: Vec::new(),
             command_socket: None,
+            resolver: None,
         }
     }
 
@@ -323,6 +336,7 @@ mod tests {
             accept_private_resolved: false,
             host_services: Vec::new(),
             command_socket: None,
+            resolver: None,
         }
     }
 
@@ -443,6 +457,7 @@ mod tests {
             accept_private_resolved: false,
             host_services: Vec::new(),
             command_socket: None,
+            resolver: None,
         }
     }
 
