@@ -2,7 +2,7 @@
 //!
 //! The two address primitives every egress gate re-checks a *resolved* address against, in one
 //! place so they cannot drift between enforcers. The egress proxy (`kenneld`'s `NetRuntime`) and
-//! the UDP-egress broker (`kennel-udp-broker`) each resolve a policy-permitted name and must then
+//! the UDP-egress broker (`kennel-tun-broker`) each resolve a policy-permitted name and must then
 //! re-vet the answer against the categorical deny CIDRs and the non-public ranges — the rebinding /
 //! SSRF-to-internal defence. That vetting is byte-for-byte identical wherever it runs, so it lives
 //! here (the sibling of [`name_matches`](crate::name_matches), which shares names the same way).

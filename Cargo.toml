@@ -66,7 +66,7 @@ members = [
     "src/crates/kennel-dbus-broker",
     # The W2 UDP-egress fenced flow broker: a per-kennel host-mode leaf running the DNS naming
     # shim (mint synthetic on approval, AAAA/NODATA) + the L3 flow forwarder driving host-netproxy.
-    "src/crates/kennel-udp-broker",
+    "src/crates/kennel-tun-broker",
     # The in-kennel ends of binder connectors (push workload traffic into binder, or pull it back):
     # one crate, four binaries (facade-afunix/socks5/client/ssh).
     "src/crates/kennel-facade",

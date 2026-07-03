@@ -1,13 +1,17 @@
 [package]
-name = "kennel-udp-broker"
+name = "kennel-tun-broker"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel W2 UDP-egress fenced flow broker: a per-kennel host-mode leaf running the DNS naming shim (mint a synthetic IPv6 on allowlist approval, answer AAAA / NODATA, zero wire) and the L3 flow forwarder that drives host-netproxy's UDP dial. kenneld is absent from the per-flow path; the broker cgroup's net.bpf deny-first floor is the IP-layer fence that closes DNS rebinding at connect()."
+description = "Project Kennel tun-broker: the standing L3-egress mediation service kennel (§8, W2). Reached over the connector mesh bus like dbus-broker — kenneld pushes one ACCEPT_SESSION per [net.udp] consumer (grants, deny CIDRs, tun /64) and the broker replies with the session's AF_UNIX fd, then mediates whole L3 frames over it (kenneld absent from the data path). UDP is the first transport it carries: a DNS naming shim mints synthetic IPv6 on approval, and the flow forwarder resolves, re-vets, and dials each flow from the host stack. The same tun/session mechanism extends to TCP later."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+
+[[bin]]
+name = "tun-broker"
+path = "src/main.rs"
 
 [dependencies]
 # The DNS message codec for the naming shim: parse the workload's (hostile) query, build the

@@ -58,15 +58,20 @@ pub fn fuzz_parsers(data: &[u8]) {
     // query via simple-dns and builds the AAAA/NODATA reply; `query_question` reads the question.
     // `data` is the raw query — fully workload-controlled. Must never panic on any bytes.
     {
+        let grant = |name: &str| kennel_lib_policy::settled::NameRule {
+            name: name.to_owned(),
+            ports: Vec::new(),
+            protocol: kennel_lib_policy::settled::Protocol::Udp,
+        };
         let allow =
-            kennel_udp_broker::shim::Allowlist::new(["example.com".to_owned(), ".test".to_owned()]);
+            kennel_tun_broker::shim::Allowlist::new([grant("example.com"), grant(".test")]);
         let mut pool =
-            kennel_udp_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
-        let _ = kennel_udp_broker::shim::respond(data, &allow, &mut pool);
-        let _ = kennel_udp_broker::query_question(data);
+            kennel_tun_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
+        let _ = kennel_tun_broker::shim::respond(data, &allow, &mut pool);
+        let _ = kennel_tun_broker::query_question(data);
         // The flow forwarder reads an L3 frame facade-tun handed it (workload-derived bytes) to
         // extract the routed name/ports/payload; it must never panic on any frame.
-        let _ = kennel_udp_broker::forward::route(data, &pool);
+        let _ = kennel_tun_broker::forward::route(data, &pool);
     }
 
     // IPC wire formats: the kenneld control protocol and the privhelper request.

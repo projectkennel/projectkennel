@@ -1,12 +1,13 @@
-//! `udp-broker`: the standing UDP-egress mediation service kennel (§8 / W2 Part D).
+//! `tun-broker`: the standing L3-egress mediation service kennel (§8 / W2 Part D).
 //!
-//! A long-running service on the connector mesh bus — the host-side, kenneld-absent half of UDP
-//! egress. It runs inside its own kennel and decides nothing: kenneld is the only authority.
+//! A long-running service on the connector mesh bus — the host-side, kenneld-absent half of tun
+//! egress. It runs inside its own kennel and decides nothing: kenneld is the only authority. UDP is
+//! the first transport it mediates; the same session mechanism carries TCP later.
 //!
 //! **Control plane (kenneld → broker):** kenneld owns node 0 of the mesh bus and reaches the
 //! broker's **control node** (registered via `ADD_SERVICE`). When a `[net.udp]` consumer connects,
 //! kenneld resolves that consumer's grants + deny CIDRs + tun `/64` *in its own namespace* and sends
-//! one [`udp_broker::ACCEPT_SESSION`] to the control node. The broker mints the session's data
+//! one [`tun_broker::ACCEPT_SESSION`] to the control node. The broker mints the session's data
 //! channel — a connected `AF_UNIX` datagram pair — spawns the flow mediation ([`serve::run`]) on the
 //! broker end, and **replies with the consumer end's fd**, which kenneld forwards to the consumer's
 //! `facade-tun`.
@@ -32,20 +33,20 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use kennel_lib_binder::client::{Connection, Incoming};
-use kennel_lib_binder::service::{status, udp_broker, verb};
+use kennel_lib_binder::service::{status, tun_broker, verb};
 use kennel_lib_policy::settled::{NameRule, NetRule, Protocol};
 use kennel_lib_syscall::poll::Poller;
 
-use kennel_udp_broker::flow::DenyList;
-use kennel_udp_broker::serve::{self, Broker, Ceilings};
-use kennel_udp_broker::shim::Allowlist;
+use kennel_tun_broker::flow::DenyList;
+use kennel_tun_broker::serve::{self, Broker, Ceilings};
+use kennel_tun_broker::shim::Allowlist;
 
 /// The mesh binder device path — the `[[provides]]` endpoint, bind-mounted by `kenneld`.
 const MESH_DEVICE: &str = "/dev/binderfs-mesh/binder";
 
 /// The control service registered on the mesh bus via `ADD_SERVICE`. kenneld reaches this node to
 /// push `ACCEPT_SESSION`; consumers are never handed it.
-const SERVICE_NAME: &str = "org.projectkennel.udp-broker";
+const SERVICE_NAME: &str = "org.projectkennel.tun-broker";
 
 /// The mmap size for the broker's binder connection. Control transactions are small (grants + a few
 /// CIDRs); no frame data crosses binder.
@@ -71,7 +72,7 @@ const POLL_EVENTS: usize = 64;
 /// Accept one session kenneld has authorized: mint the data channel, start its mediation, and reply
 /// with the consumer's end.
 fn accept_session(conn: &Connection, incoming: &Incoming) {
-    let Some(acc) = udp_broker::decode_accept(&incoming.data) else {
+    let Some(acc) = tun_broker::decode_accept(&incoming.data) else {
         let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
         return;
     };
@@ -79,7 +80,7 @@ fn accept_session(conn: &Connection, incoming: &Incoming) {
     let allow = Allowlist::new(acc.grants.into_iter().map(|g| NameRule {
         name: g.name,
         ports: g.ports,
-        protocol: Protocol::Udp,
+        protocol: protocol_from_ordinal(g.protocol),
     }));
     let deny_rules: Vec<NetRule> = acc
         .denies
@@ -121,7 +122,7 @@ fn accept_session(conn: &Connection, incoming: &Incoming) {
 
     if conn.reply_with_fd(incoming, consumer_end.as_fd()).is_err() {
         // The consumer end never left; dropping it here HUPs the mediation, which unwinds cleanly.
-        eprintln!("udp-broker: failed to hand back session fd; session torn down");
+        eprintln!("tun-broker: failed to hand back session fd; session torn down");
     }
 }
 
@@ -135,7 +136,7 @@ const fn protocol_from_ordinal(ordinal: u8) -> Protocol {
 }
 
 fn run() -> std::io::Result<()> {
-    eprintln!("udp-broker: starting");
+    eprintln!("tun-broker: starting");
 
     let device_fd = std::fs::OpenOptions::new()
         .read(true)
@@ -152,7 +153,7 @@ fn run() -> std::io::Result<()> {
         CONTROL_NODE_COOKIE,
         0,
     )?;
-    eprintln!("udp-broker: registered control service `{SERVICE_NAME}` on mesh bus");
+    eprintln!("tun-broker: registered control service `{SERVICE_NAME}` on mesh bus");
 
     conn.enter_looper()?;
     loop {
@@ -162,7 +163,7 @@ fn run() -> std::io::Result<()> {
         for incoming in conn.recv_batch()?.transactions {
             // The control node honours only ACCEPT_SESSION; consumers never hold this node, so
             // reaching it is itself the authorization.
-            if incoming.code == udp_broker::ACCEPT_SESSION {
+            if incoming.code == tun_broker::ACCEPT_SESSION {
                 accept_session(&conn, &incoming);
             } else {
                 let _ = conn.reply_and_free(&incoming, &[status::BAD_REQUEST]);
@@ -175,7 +176,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("udp-broker: fatal: {e}");
+            eprintln!("tun-broker: fatal: {e}");
             ExitCode::FAILURE
         }
     }

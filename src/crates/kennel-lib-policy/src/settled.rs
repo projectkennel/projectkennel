@@ -143,7 +143,7 @@ pub struct NameRule {
 /// dot-convention.
 ///
 /// This is the single source both the egress proxy (`kenneld`'s `NetRuntime`) and the UDP-egress
-/// broker's naming shim (`kennel-udp-broker`) match names against, so the two cannot drift:
+/// broker's naming shim (`kennel-tun-broker`) match names against, so the two cannot drift:
 ///
 /// - a plain pattern (`example.com`) matches that name **exactly** — the safe whitelist default, so
 ///   an allow of `example.com` does not silently admit subdomains;

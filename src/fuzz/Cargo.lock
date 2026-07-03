@@ -82,7 +82,7 @@ dependencies = [
  "kennel-lib-spawn",
  "kennel-lib-term",
  "kennel-privhelper",
- "kennel-udp-broker",
+ "kennel-tun-broker",
  "kenneld",
  "mini-sansio-dbus",
 ]
@@ -221,10 +221,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "kennel-udp-broker"
+name = "kennel-tun-broker"
 version = "0.5.0"
 dependencies = [
+ "kennel-lib-binder",
  "kennel-lib-policy",
+ "kennel-lib-syscall",
  "simple-dns",
 ]
 

@@ -42,7 +42,7 @@ kennel-lib-spawn = { path = "../crates/kennel-lib-spawn" }
 kennel-facade = { path = "../crates/kennel-facade" }
 # The W2 UDP-egress broker's DNS naming shim (Part D): parses the workload's DNS query (via
 # simple-dns) and builds the AAAA/NODATA reply — fully workload-controlled bytes (§10.6).
-kennel-udp-broker = { path = "../crates/kennel-udp-broker" }
+kennel-tun-broker = { path = "../crates/kennel-tun-broker" }
 # The D-Bus facade's incoming-message decoder (07-7 §7.7): the workload's bus client
 # speaks raw D-Bus wire to facade-dbus, so the header/body decode reads fully
 # workload-controlled bytes. Driven through the public sans-IO read loop.

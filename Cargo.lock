@@ -332,7 +332,7 @@ name = "kennel-shim"
 version = "0.5.0"
 
 [[package]]
-name = "kennel-udp-broker"
+name = "kennel-tun-broker"
 version = "0.5.0"
 dependencies = [
  "kennel-lib-binder",

@@ -836,7 +836,7 @@ pub mod mesh {
 /// Shared big-endian byte-codec primitives for the mesh control-channel wire protocols.
 ///
 /// A cursor `take`, fixed integers, and `u16`-length-prefixed strings / string-lists, shared by
-/// [`broker`] and [`udp_broker`] so the two control verbs cannot drift on their framing.
+/// [`broker`] and [`tun_broker`] so the two control verbs cannot drift on their framing.
 mod codec {
     /// Split `n` bytes off the front of the cursor, advancing it; `None` if short.
     pub(super) fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
@@ -1012,18 +1012,18 @@ pub mod broker {
     }
 }
 
-/// The `udp-broker` control-channel wire protocol (§8 / W2 Part D).
+/// The `tun-broker` control-channel wire protocol (§8 / W2 Part D).
 ///
 /// The verb `kenneld` speaks on the UDP-egress broker's control node, acquired on the connector mesh
-/// bus. One verb, [`udp_broker::ACCEPT_SESSION`]: kenneld, having identified a `[net.udp]` consumer on
+/// bus. One verb, [`tun_broker::ACCEPT_SESSION`]: kenneld, having identified a `[net.udp]` consumer on
 /// its per-kennel bus, tells the broker to accept one egress session with that consumer's compiled
 /// UDP grants and deny CIDRs, and the tun `/64` the consumer's synthetics live in. The broker mints
 /// a per-session data channel (an `AF_UNIX` fd it hands back), runs the flow mediation over it, and
 /// keys the session by the kernel-attested node — never by anything the consumer says. kenneld
 /// decides the grants; the broker applies and never relays through kenneld on the data path.
 ///
-/// **Wire layout (all big-endian):** see [`udp_broker::encode_accept`].
-pub mod udp_broker {
+/// **Wire layout (all big-endian):** see [`tun_broker::encode_accept`].
+pub mod tun_broker {
     use super::codec::{put_count, put_str, put_u16, put_u8, take, take_str, take_u16, take_u8};
 
     /// Tell the UDP-egress broker to accept a session kenneld has authorized.
@@ -1032,14 +1032,19 @@ pub mod udp_broker {
     /// data channel and replies with its fd; kenneld forwards the fd to the consumer's `facade-tun`.
     pub const ACCEPT_SESSION: u32 = 1;
 
-    /// One UDP name grant: a host pattern and its permitted ports (empty = any port). Mirrors the
-    /// settled `NameRule` (all UDP grants carry protocol `udp`, so it is implied, not on the wire).
+    /// One name grant: a host pattern, its permitted ports (empty = any), and its transport.
+    ///
+    /// Mirrors the settled `NameRule`. `protocol` is carried on the wire (not implied) so a TCP
+    /// grant rides this same `ACCEPT_SESSION` unchanged when the tun broker gains TCP mediation — the
+    /// mechanism is transport-agnostic; UDP is only the first transport over it.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Grant {
         /// The host pattern (dot-convention: `example.com` exact, `.example.com` apex+subdomains).
         pub name: String,
         /// Permitted ports; empty means any port.
         pub ports: Vec<u16>,
+        /// Protocol ordinal (`0` any, `1` tcp, `2` udp) — the settled `Protocol` order.
+        pub protocol: u8,
     }
 
     /// One deny CIDR the broker re-checks each resolved address against.
@@ -1062,7 +1067,7 @@ pub mod udp_broker {
 
     /// A decoded UDP `ACCEPT_SESSION`: the consumer's tun `/64` address, its grants, and the deny set.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct AcceptUdpSession {
+    pub struct AcceptTunSession {
         /// The consumer's tun interface address (`::1` in its `/64`); its low 64 bits' prefix is the
         /// synthetic pool. Sixteen octets.
         pub tun_addr: [u8; 16],
@@ -1073,7 +1078,7 @@ pub mod udp_broker {
     }
 
     /// Encode an `ACCEPT_SESSION` request:
-    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16) | denies: count·(cidr, u8, u16, u16, u8)]`.
+    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16, u8 proto) | denies: count·(cidr, u8, u16, u16, u8)]`.
     #[must_use]
     pub fn encode_accept(tun_addr: [u8; 16], grants: &[Grant], denies: &[Deny]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -1085,6 +1090,7 @@ pub mod udp_broker {
             for &p in &g.ports {
                 put_u16(&mut out, p);
             }
+            put_u8(&mut out, g.protocol);
         }
         put_count(&mut out, denies.len());
         for d in denies {
@@ -1099,7 +1105,7 @@ pub mod udp_broker {
 
     /// Decode an `ACCEPT_SESSION` request. `None` for malformed input.
     #[must_use]
-    pub fn decode_accept(data: &[u8]) -> Option<AcceptUdpSession> {
+    pub fn decode_accept(data: &[u8]) -> Option<AcceptTunSession> {
         let mut cur = data;
         let tun_addr = <[u8; 16]>::try_from(take(&mut cur, 16)?).ok()?;
         let n_grants = take_u16(&mut cur)?;
@@ -1111,7 +1117,12 @@ pub mod udp_broker {
             for _ in 0..n_ports {
                 ports.push(take_u16(&mut cur)?);
             }
-            grants.push(Grant { name, ports });
+            let protocol = take_u8(&mut cur)?;
+            grants.push(Grant {
+                name,
+                ports,
+                protocol,
+            });
         }
         let n_denies = take_u16(&mut cur)?;
         let mut denies = Vec::with_capacity(usize::from(n_denies));
@@ -1132,7 +1143,7 @@ pub mod udp_broker {
         if !cur.is_empty() {
             return None; // trailing garbage
         }
-        Some(AcceptUdpSession {
+        Some(AcceptTunSession {
             tun_addr,
             grants,
             denies,
@@ -1152,10 +1163,12 @@ pub mod udp_broker {
                 Grant {
                     name: "example.com".to_owned(),
                     ports: vec![443, 53],
+                    protocol: 2,
                 },
                 Grant {
                     name: ".internal.example".to_owned(),
                     ports: Vec::new(),
+                    protocol: 2,
                 },
             ];
             let denies = vec![Deny {
