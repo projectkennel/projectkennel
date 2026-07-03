@@ -22,6 +22,7 @@
 
 pub mod flow;
 pub mod forward;
+pub mod icmp;
 pub mod shim;
 
 use simple_dns::Packet;

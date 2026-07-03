@@ -111,10 +111,18 @@ pub fn build_udp_datagram(
     Some(frame)
 }
 
-/// The IPv6 UDP checksum (RFC 8200 §8.1): the one's-complement sum over the pseudo-header
-/// (`src` | `dst` | u32 UDP length | 3 zero bytes | next-header 17) and the UDP datagram
-/// (`udp`, its checksum field zeroed), folded and complemented.
+/// The IPv6 UDP checksum: [`checksum_v6`] over the UDP datagram with next-header 17.
 fn udp_checksum_v6(src: Ipv6Addr, dst: Ipv6Addr, udp: &[u8]) -> u16 {
+    checksum_v6(src, dst, NEXT_UDP, udp)
+}
+
+/// The IPv6 upper-layer checksum (RFC 8200 §8.1): the one's-complement sum over the pseudo-header
+/// (`src` | `dst` | u32 upper-layer length | 3 zero bytes | `next_header`) and the upper-layer
+/// `payload` (its own checksum field zeroed), folded and complemented.
+///
+/// Shared by the UDP datagram builder and the `ICMPv6` error builder — the same algorithm keyed only
+/// by the `next_header` byte (17 for UDP, 58 for `ICMPv6`).
+pub(crate) fn checksum_v6(src: Ipv6Addr, dst: Ipv6Addr, next_header: u8, payload: &[u8]) -> u16 {
     let mut sum: u32 = 0;
     let mut add = |bytes: &[u8]| {
         let mut chunks = bytes.chunks_exact(2);
@@ -129,11 +137,11 @@ fn udp_checksum_v6(src: Ipv6Addr, dst: Ipv6Addr, udp: &[u8]) -> u16 {
     };
     add(&src.octets());
     add(&dst.octets());
-    // UDP length as a 32-bit pseudo-header field, then 3 zero bytes + the next-header byte.
-    let len = u32::try_from(udp.len()).unwrap_or(u32::MAX);
+    // Upper-layer length as a 32-bit pseudo-header field, then 3 zero bytes + the next-header byte.
+    let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     add(&len.to_be_bytes());
-    add(&[0, 0, 0, NEXT_UDP]);
-    add(udp);
+    add(&[0, 0, 0, next_header]);
+    add(payload);
     // Fold carries into 16 bits.
     while sum >> 16 != 0 {
         sum = (sum & 0xffff).wrapping_add(sum >> 16);
