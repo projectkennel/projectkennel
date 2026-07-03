@@ -156,8 +156,10 @@ cannot complete a dial the kernel BPF fence will not clear.
   (*do-less*). **Hostnames only:** a UDP entry must carry a `name`; a bare-IP/CIDR (allow *or* deny)
   is refused at compile — the capture-by-synthetic mechanism has no IP to match, and a literal-IP UDP
   datagram dies `ENETUNREACH` in-kernel anyway (Part B). This rule folds into the **existing**
-  `net.proxy.allow` parser, which now takes the opt-in flag (CIDR-allowed is per-entry `!is_udp`) —
-  not a second parser. **There is no compile-time table:** the allowlist may hold wildcards
+  `net.proxy.allow` parser, which now takes the opt-in flag. CIDR-allowance is an **exhaustive
+  per-transport** decision (`cidr_allowed`), not `!is_udp`: a name-only transport — UDP today,
+  tun-routed TCP later — refuses a bare IP/CIDR, and adding a transport is a compile error until it
+  states its own CIDR-allowance rather than inheriting the CIDR-allowed default. No second parser. **There is no compile-time table:** the allowlist may hold wildcards
   (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
   only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
   (Part D). `[net.udp]` is an **additive-optional** settled field (a v3 artefact without it stays
