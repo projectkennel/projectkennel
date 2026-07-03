@@ -15,6 +15,9 @@ repository.workspace = true
 # `vte` precedent, §5.1); the shim only mints synthetics — no resolver, no wire. Only transitive is
 # `bitflags`, already vendored via `nix`.
 simple-dns = "=0.11.3"
+# The settled allowlist grants (`udp_allow_names: Vec<NameRule>`) and the shared `name_matches`
+# dot-convention — the single source the egress proxy also uses, so the two cannot drift.
+kennel-lib-policy = { path = "../kennel-lib-policy" }
 
 [lints]
 workspace = true

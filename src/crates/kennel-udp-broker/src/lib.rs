@@ -17,6 +17,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod shim;
+
 use simple_dns::Packet;
 
 /// The `AAAA` record type number (RFC 3596) — the only type the shim answers with an address.
