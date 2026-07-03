@@ -168,6 +168,8 @@ pub enum Source {
     Bpf,
     /// The per-kennel egress proxy.
     Proxy,
+    /// The per-kennel UDP-egress flow broker (a trusted-side writer outside the daemon).
+    UdpBroker,
     /// The D-Bus mediation membrane (the `IDBus` facade).
     DbusProxy,
     /// The spawn wrapper.
@@ -186,6 +188,7 @@ impl Source {
             Self::Kernel => "kernel",
             Self::Bpf => "bpf",
             Self::Proxy => "proxy",
+            Self::UdpBroker => "udp-broker",
             Self::DbusProxy => "dbus-proxy",
             Self::KennelSpawn => "kennel-lib-spawn",
             Self::Kenneld => "kenneld",
