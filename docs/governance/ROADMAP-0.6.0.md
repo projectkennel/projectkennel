@@ -157,12 +157,14 @@ cannot complete a dial the kernel BPF fence will not clear.
   overload of the proxy list (*do-less* = reuse the shape, not the endpoint). **Hostnames only:** a
   UDP entry carries a `name`, never a `protocol` (the transport is implied) and never a bare IP/CIDR
   — the capture-by-synthetic mechanism has no address to match, and a literal-IP UDP datagram dies
-  `ENETUNREACH` in-kernel anyway (Part B). One parser serves both endpoints on a single flag — *is a
-  CIDR allowed here?* — true for the proxy list, false for `[[net.udp.allow]]`; the proxy list in
-  turn refuses `protocol = "udp"` (wrong endpoint). UDP destinations settle into their **own**
-  `udp_allow_names` list, kept separate from the existing `allow_names` (which `kenneld` consumes
-  protocol-blind, so a UDP name there would over-grant). The fenced broker (Part D) is that list's
-  sole consumer; fragments compose `[[net.udp.allow.add]]` exactly like the proxy list.
+  `ENETUNREACH` in-kernel anyway (Part B). The tun endpoints (`net.udp.allow`, and the future
+  `net.tcp.allow`) share one parser carrying a `cidr_allowed` flag — the `NetAllow` grammar allows a
+  CIDR by default; the tun endpoints pass `false`. `net.proxy.allow` is **untouched**: it keeps its
+  own parser and its CIDR-and-name grammar, since UDP has its own endpoint. UDP destinations settle
+  into their **own** `udp_allow_names` list, kept separate from the existing `allow_names` (which
+  `kenneld` consumes protocol-blind, so a UDP name there would over-grant). The fenced broker (Part
+  D) is that list's sole consumer; fragments compose `[[net.udp.allow.add]]` exactly like the proxy
+  list.
   **There is no compile-time table:** the allowlist may hold wildcards
   (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
   only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
