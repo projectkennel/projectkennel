@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::net::Ipv6Addr;
 
 use kennel_lib_policy::name_matches;
+use kennel_lib_policy::settled::NameRule;
 use simple_dns::rdata::{RData, AAAA};
 use simple_dns::{Packet, ResourceRecord, CLASS};
 
@@ -34,25 +35,45 @@ const SYNTH_TTL: u32 = 60;
 // so a mint can never collide with either — enforced at compile time.
 const _: () = assert!(FIRST_POOL_HOST > RESOLVER_HOST && RESOLVER_HOST > TUN_HOST);
 
-/// The per-kennel name allowlist: the `[[net.udp.allow]]` patterns, matched by the shared
-/// dot-convention (`example.com` exact; `.example.com` apex + subdomains).
+/// The per-kennel UDP allowlist: the settled `[[net.udp.allow]]` grants (`udp_allow_names`),
+/// matched by the shared dot-convention (`example.com` exact; `.example.com` apex + subdomains).
+///
+/// The shim answers DNS **by name** ([`allows_name`](Self::allows_name)) — no port is known at
+/// query time — and the flow gate re-checks the datagram's destination port
+/// ([`allows`](Self::allows)) against the same grants. One source, two phases: the shim never
+/// admits a port the flow gate would reject, because both consult these rules.
 pub struct Allowlist {
-    patterns: Vec<String>,
+    rules: Vec<NameRule>,
 }
 
 impl Allowlist {
-    /// Build the allowlist from the settled grant names (each a `NameRule.name`).
-    pub fn new(patterns: impl IntoIterator<Item = String>) -> Self {
+    /// Build the allowlist from the settled UDP grants (`udp_allow_names`).
+    pub fn new(rules: impl IntoIterator<Item = NameRule>) -> Self {
         Self {
-            patterns: patterns.into_iter().collect(),
+            rules: rules.into_iter().collect(),
         }
     }
 
-    /// Whether `name` is permitted by any pattern.
+    /// Whether any grant permits `name`, regardless of port — the DNS-time check (a query carries no
+    /// port, so the shim mints a synthetic for any allowed name and the flow gate vets the port).
     #[must_use]
-    pub fn allows(&self, name: &str) -> bool {
-        self.patterns.iter().any(|p| name_matches(p, name))
+    pub fn allows_name(&self, name: &str) -> bool {
+        self.rules.iter().any(|r| name_matches(&r.name, name))
     }
+
+    /// Whether any grant permits `(name, port)` — the flow-time check the forwarder applies before
+    /// dialling.
+    #[must_use]
+    pub fn allows(&self, name: &str, port: u16) -> bool {
+        self.rules
+            .iter()
+            .any(|r| name_matches(&r.name, name) && port_permitted(&r.ports, port))
+    }
+}
+
+/// Whether `port` is permitted by a grant's port set. An empty set means "any port".
+fn port_permitted(ports: &[u16], port: u16) -> bool {
+    ports.is_empty() || ports.contains(&port)
 }
 
 /// The synthetic-address pool: one stable `name → synthetic IPv6` per allowed name.
@@ -121,7 +142,7 @@ pub fn respond(query: &[u8], allow: &Allowlist, pool: &mut Pool) -> Option<Vec<u
 
     let mut reply = Packet::new_reply(parsed.id());
     reply.questions.push(question.clone());
-    if u16::from(question.qtype) == QTYPE_AAAA && allow.allows(&name) {
+    if u16::from(question.qtype) == QTYPE_AAAA && allow.allows_name(&name) {
         let synth: u128 = pool.mint(&name).into();
         reply.answers.push(ResourceRecord::new(
             question.qname.clone(),
@@ -138,10 +159,20 @@ pub fn respond(query: &[u8], allow: &Allowlist, pool: &mut Pool) -> Option<Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kennel_lib_policy::settled::Protocol;
     use simple_dns::{Name, Question, QCLASS, QTYPE, TYPE};
 
     // fd6b:6e9c:691c:8001::/64 — a kennel tun /64.
     const PREFIX: [u8; 8] = [0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01];
+
+    /// A UDP grant for `name` permitting any port (the common shim case).
+    fn grant(name: &str) -> NameRule {
+        NameRule {
+            name: name.to_owned(),
+            ports: Vec::new(),
+            protocol: Protocol::Udp,
+        }
+    }
 
     fn query(name: &str, qtype: QTYPE) -> Vec<u8> {
         let mut p = Packet::new_query(0x4242);
@@ -166,7 +197,7 @@ mod tests {
 
     #[test]
     fn allowed_aaaa_gets_a_synthetic_in_the_pool() {
-        let allow = Allowlist::new([".example.com".to_owned()]);
+        let allow = Allowlist::new([grant(".example.com")]);
         let mut pool = Pool::new(PREFIX);
         let bytes = respond(
             &query("api.example.com", QTYPE::TYPE(TYPE::AAAA)),
@@ -186,7 +217,7 @@ mod tests {
 
     #[test]
     fn the_mapping_is_stable_across_queries() {
-        let allow = Allowlist::new(["example.com".to_owned()]);
+        let allow = Allowlist::new([grant("example.com")]);
         let mut pool = Pool::new(PREFIX);
         let first = reply_summary(
             &respond(
@@ -211,7 +242,7 @@ mod tests {
 
     #[test]
     fn denied_name_is_nodata_not_nxdomain() {
-        let allow = Allowlist::new(["example.com".to_owned()]);
+        let allow = Allowlist::new([grant("example.com")]);
         let mut pool = Pool::new(PREFIX);
         let bytes = respond(
             &query("evil.test", QTYPE::TYPE(TYPE::AAAA)),
@@ -232,7 +263,7 @@ mod tests {
     #[test]
     fn allowed_a_query_is_nodata() {
         // An A query for an allowed name still gets NODATA — the shim only answers AAAA.
-        let allow = Allowlist::new(["example.com".to_owned()]);
+        let allow = Allowlist::new([grant("example.com")]);
         let mut pool = Pool::new(PREFIX);
         let bytes = respond(
             &query("example.com", QTYPE::TYPE(TYPE::A)),
@@ -245,7 +276,7 @@ mod tests {
 
     #[test]
     fn junk_is_dropped() {
-        let allow = Allowlist::new(["example.com".to_owned()]);
+        let allow = Allowlist::new([grant("example.com")]);
         let mut pool = Pool::new(PREFIX);
         assert_eq!(respond(&[], &allow, &mut pool), None);
         assert_eq!(respond(&[0xff; 5], &allow, &mut pool), None);

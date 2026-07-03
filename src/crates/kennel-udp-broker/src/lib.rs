@@ -8,15 +8,19 @@
 //! `facade-tun` channel: the **DNS naming shim** — a query is checked against the allowlist and, if
 //! approved, a `name → synthetic-IPv6` mapping is minted (persistent for the kennel's life) and
 //! answered **AAAA**; everything else (denied, or A/CNAME/…) is **NODATA**, with zero wire activity
-//! — and the **flow forwarder**, which routes an L3 datagram's synthetic dst to a `host-netproxy`
-//! UDP dial of the mapped name. Its cgroup `net.bpf` deny-first floor is the IP-layer fence that
-//! closes DNS rebinding at `connect()`.
+//! — and the **flow forwarder**, which reads an L3 datagram's synthetic dst back to its mapped name
+//! ([`forward`]) and dials it directly from the host stack over a per-flow connected socket
+//! ([`flow`]). The broker runs host-side, so it resolves and dials itself; kenneld is not on the
+//! path. Its cgroup `net.bpf` deny-first floor is the IP-layer fence that closes DNS rebinding at
+//! `connect()`, belt-and-suspenders with the [`flow`] gate's resolved-address re-check.
 //!
-//! This module currently carries the shim's query read; the mapping, forwarder, and dial land in
-//! the following slices.
+//! This module carries the shim's query read; [`shim`] mints and answers, [`forward`] reads and
+//! builds frames, and [`flow`] re-vets and dials. The event loop that binds them lands in the
+//! broker binary.
 
 #![forbid(unsafe_code)]
 
+pub mod flow;
 pub mod forward;
 pub mod shim;
 
