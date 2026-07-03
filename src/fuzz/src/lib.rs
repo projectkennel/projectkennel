@@ -54,6 +54,18 @@ pub fn fuzz_parsers(data: &[u8]) {
         let _ = kennel_facade::tun::ingress_ok(data, kennel_addr, prefix);
     }
 
+    // The UDP-egress broker's DNS naming shim (W2 Part D): `respond` parses the workload's DNS
+    // query via simple-dns and builds the AAAA/NODATA reply; `query_question` reads the question.
+    // `data` is the raw query — fully workload-controlled. Must never panic on any bytes.
+    {
+        let allow =
+            kennel_udp_broker::shim::Allowlist::new(["example.com".to_owned(), ".test".to_owned()]);
+        let mut pool =
+            kennel_udp_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
+        let _ = kennel_udp_broker::shim::respond(data, &allow, &mut pool);
+        let _ = kennel_udp_broker::query_question(data);
+    }
+
     // IPC wire formats: the kenneld control protocol and the privhelper request.
     let _ = kenneld::control::Request::decode(data);
     let _ = kenneld::control::Response::decode(data);

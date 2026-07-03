@@ -67,6 +67,7 @@ dependencies = [
  "kennel-lib-cli",
  "kennel-lib-dbus",
  "kennel-lib-scm",
+ "kennel-lib-syscall",
 ]
 
 [[package]]
@@ -81,6 +82,7 @@ dependencies = [
  "kennel-lib-spawn",
  "kennel-lib-term",
  "kennel-privhelper",
+ "kennel-udp-broker",
  "kenneld",
  "mini-sansio-dbus",
 ]
@@ -219,6 +221,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kennel-udp-broker"
+version = "0.5.0"
+dependencies = [
+ "kennel-lib-policy",
+ "simple-dns",
+]
+
+[[package]]
 name = "kenneld"
 version = "0.5.0"
 dependencies = [
@@ -340,6 +350,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "simple-dns"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
+dependencies = [
+ "bitflags",
 ]
 
 [[package]]
