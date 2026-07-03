@@ -289,6 +289,7 @@ struct RawDeployment {
     inetd: Option<PathBuf>,
     facade_client: Option<PathBuf>,
     facade_dbus: Option<PathBuf>,
+    facade_tun: Option<PathBuf>,
     host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
@@ -324,6 +325,7 @@ impl RawDeployment {
             inetd: higher.inetd.or(self.inetd),
             facade_client: higher.facade_client.or(self.facade_client),
             facade_dbus: higher.facade_dbus.or(self.facade_dbus),
+            facade_tun: higher.facade_tun.or(self.facade_tun),
             host_dbus: higher.host_dbus.or(self.host_dbus),
             init: higher.init.or(self.init),
             oci_entry: higher.oci_entry.or(self.oci_entry),
@@ -353,6 +355,7 @@ impl RawDeployment {
             inetd: self.inetd,
             facade_client: self.facade_client,
             facade_dbus: self.facade_dbus,
+            facade_tun: self.facade_tun,
             host_dbus: self.host_dbus,
             init: self.init,
             oci_entry: self.oci_entry,
@@ -379,6 +382,7 @@ pub struct Deployment {
     inetd: Option<PathBuf>,
     facade_client: Option<PathBuf>,
     facade_dbus: Option<PathBuf>,
+    facade_tun: Option<PathBuf>,
     host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
@@ -554,6 +558,13 @@ impl Deployment {
     #[must_use]
     pub fn facade_dbus(&self) -> PathBuf {
         self.resolve_facade(self.facade_dbus.as_deref(), "facade-dbus")
+    }
+
+    /// The in-kennel `facade-tun` bound into the view for a `[net.udp]` consumer: it copies L3 frames
+    /// between the tun and the tun-broker's session socket, reached over the connector mesh (W2).
+    #[must_use]
+    pub fn facade_tun(&self) -> PathBuf {
+        self.resolve_facade(self.facade_tun.as_deref(), "facade-tun")
     }
 
     /// The `host-dbus` D-Bus mediation delegate kenneld spawns in the operator's context: it holds

@@ -198,6 +198,9 @@ pub struct Identity {
     /// the workload's bus connection and frame typed transactions onto binder node 0 (§7.7.2).
     /// `None` disables the D-Bus facade path, so `[dbus]` grants go unserved.
     pub facade_dbus_bin: Option<PathBuf>,
+    /// The host path of `facade-tun`, the in-kennel L3 forwarder for a `[net.udp]` consumer of the
+    /// tun broker (W2). `None` disables the tun facade path.
+    pub facade_tun_bin: Option<PathBuf>,
     /// The host path of `host-dbus`, the operator-context D-Bus mediation delegate kenneld spawns
     /// per enabled bus (§7.7.2b). `None` disables mediation (no delegate, so the relay denies).
     pub host_dbus_bin: Option<PathBuf>,
@@ -1986,6 +1989,7 @@ pub fn run_kennel<P, L>(
         scope: id.scope.clone(),
         plan: loaded.plan,
         net: loaded.net,
+        facade_tun_bin: shared.identity.facade_tun_bin.clone(),
         proxy: id.proxy.clone(),
         etc,
         view_root: id
@@ -3034,6 +3038,7 @@ mod tests {
                 bastion: None,
                 afunix_bin: None,
                 facade_dbus_bin: None,
+                facade_tun_bin: None,
                 host_dbus_bin: None,
                 init_bin: None,
                 oci_entry_bin: None,

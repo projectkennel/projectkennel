@@ -371,6 +371,10 @@ pub struct Spec {
     /// in-view facade sockets, and the delegate/facade binaries. Empty ([`DbusPrep::default`])
     /// for a kennel with no `[dbus]` grant.
     pub dbus: DbusPrep,
+    /// The host path of `facade-tun`, spawned into the view for a `[net.udp]` consumer that also
+    /// `[[consumes]]` the tun broker (W2): it copies L3 frames between the tun and the broker's mesh
+    /// session socket. `None` disables the facade path (the tun goes unserved).
+    pub facade_tun_bin: Option<PathBuf>,
     /// The prepared binder IPC context manager (§7.1): the settled binder policy and
     /// the audit writer. `None` for a kennel with no `[binder]` grant (no context
     /// manager is run; the seal still mounts no binderfs because the plan's view
@@ -673,6 +677,7 @@ pub fn start<P: Privileged + Sync>(
         ssh,
         unix,
         dbus,
+        facade_tun_bin,
         binder,
         oci,
         mesh_mounts,
@@ -694,6 +699,7 @@ pub fn start<P: Privileged + Sync>(
         &ssh,
         &unix,
         &dbus,
+        facade_tun_bin.as_deref(),
         binder.as_ref(),
         &oci,
         &mesh_mounts,
@@ -770,6 +776,7 @@ fn bring_up<P: Privileged + Sync>(
     ssh: &SshPrep,
     unix: &UnixPrep,
     dbus: &DbusPrep,
+    facade_tun: Option<&Path>,
     binder: Option<&BinderPrep>,
     oci: &OciPrep,
     mesh_mounts: &[(std::os::fd::OwnedFd, PathBuf)],
@@ -1036,6 +1043,20 @@ fn bring_up<P: Privileged + Sync>(
     //     needs to bind them. The host-dbus delegate is launched later (after boot-sync), beside the
     //     other host delegates. Needs the constructed view, so it engages only when pivoting.
     apply_dbus(plan, dbus, command, unix_pivoting);
+
+    // 3c-tun. UDP egress (§8, W2): bind facade-tun into the view for a `[net.udp]` consumer of the
+    //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
+    //     bound into the view), so it needs the constructed view — engages only when pivoting. The
+    //     tun addr is derived the single-source way (matching the constructor and the mesh filter).
+    let consumes_tun = binder.is_some_and(|b| {
+        b.consumes
+            .iter()
+            .any(|c| c.name == "org.projectkennel.tun-broker")
+    });
+    if net.udp && consumes_tun {
+        let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
+        apply_tun(plan, facade_tun, tun_addr, unix_pivoting);
+    }
 
     // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
@@ -1652,6 +1673,57 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: shim_bin,
         args,
+    });
+}
+
+/// Bind `facade-tun` into the view for a `[net.udp]` consumer and register it as a seal aux (§8, W2).
+///
+/// `facade-tun` copies whole L3 frames between the kennel's tun (inherited at `TUN_FD`) and the tun
+/// broker's session socket, which it obtains by `SVC_CONNECT`ing the tun-broker capability over the
+/// connector mesh device bound into the view. Mirrors `apply_afunix`'s bind + Landlock + aux, minus
+/// the socket shims — its channel is the mesh, not an in-view listener.
+///
+/// A no-op unless `pivoting` (the facade needs the constructed view); when the deployment provides no
+/// binary it warns and serves nothing — fail-closed, never a silent unserved tun.
+fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, pivoting: bool) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    if !pivoting {
+        return;
+    }
+    let Some(bin) = facade_tun else {
+        eprintln!(
+            "kenneld: warning: kennel opts into [net.udp] and consumes the tun broker but no \
+             facade-tun binary is configured (deployment `facade_tun`); UDP egress is unserved."
+        );
+        return;
+    };
+    // Bind the facade binary into the view (read-only) and grant execute + its loaders.
+    if let Some(view) = plan.view.as_mut() {
+        view.binds.push(kennel_lib_spawn::BindMount {
+            source: bin.to_path_buf(),
+            target: bin.to_path_buf(),
+            writable: false,
+            exclusive: false,
+        });
+    }
+    plan.landlock_fs
+        .push((bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    let resolution =
+        kennel_lib_policy::libresolve::resolve_loaders(&[bin.to_string_lossy().into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
+    }
+    // `facade-tun <mesh-device> <kennel-tun-addr>`, run inside the sealed view. The tun fd is
+    // inherited (TUN_FD); the broker channel comes from a mesh SVC_CONNECT to the delivered device.
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
+        path: bin.to_path_buf(),
+        args: vec![
+            crate::binder::MESH_DBUS_DEVICE.to_owned(),
+            tun_addr.to_string(),
+        ],
     });
 }
 
