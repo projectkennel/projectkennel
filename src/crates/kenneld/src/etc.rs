@@ -78,6 +78,10 @@ pub struct EtcParams<'a> {
     pub v4: Option<Ipv4Addr>,
     /// The kennel's primary IPv6 address.
     pub v6: Ipv6Addr,
+    /// The tun DNS resolver address (`::2` in the tun `/64`), when the kennel opts into `[net.udp]`.
+    /// `resolv.conf` points here so a stock UDP client's `getaddrinfo` reaches the broker's naming
+    /// shim; `None` for a non-udp kennel (DNS then fail-fasts at the proxy, as before).
+    pub udp_resolver: Option<Ipv6Addr>,
 }
 
 impl EtcParams<'_> {
@@ -109,12 +113,23 @@ pub fn hosts(p: &EtcParams<'_>) -> String {
     s
 }
 
-/// `/etc/resolv.conf` — pointed at the proxy address with a fast-fail timeout.
+/// `/etc/resolv.conf` — the tun broker's naming shim for a `[net.udp]` kennel, else the proxy
+/// address with a fast-fail timeout.
 ///
-/// The kennel never resolves directly (cgroup BPF denies it); `socks5h` clients
-/// have the proxy resolve. A stray direct query fails fast instead of hanging.
+/// A non-udp kennel never resolves directly (cgroup BPF denies it); `socks5h` clients have the proxy
+/// resolve, and a stray direct query fails fast at the proxy rather than hanging. A `[net.udp]`
+/// kennel points at the tun resolver (`::2`), where the broker's shim answers AAAA with a synthetic
+/// — so a stock UDP client's `getaddrinfo` works. TCP still resolves proxy-side over `socks5h`.
 #[must_use]
 pub fn resolv_conf(p: &EtcParams<'_>) -> String {
+    if let Some(resolver) = p.udp_resolver {
+        return format!(
+            "# Project Kennel: UDP egress ([net.udp]) — names resolve through the tun broker's\n\
+             # naming shim (AAAA → a synthetic in the tun /64). TCP resolves proxy-side (socks5h).\n\
+             nameserver {resolver}\n\
+             options timeout:2 attempts:2\n",
+        );
+    }
     format!(
         "# Project Kennel: names resolve through the egress proxy (socks5h); direct\n\
          # DNS is denied by cgroup BPF. Pointed at the proxy so a stray query fails\n\
@@ -452,6 +467,7 @@ mod tests {
             shell: "/bin/sh",
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
+            udp_resolver: None,
         }
     }
 
@@ -525,6 +541,21 @@ mod tests {
             "points at the primary/proxy address"
         );
         assert!(r.contains("timeout:1"), "fails fast");
+    }
+
+    #[test]
+    fn resolv_conf_points_a_udp_kennel_at_the_tun_shim() {
+        let mut p = params();
+        p.udp_resolver = Some("fd6b:6e9c:691c:8001::2".parse().expect("resolver"));
+        let r = resolv_conf(&p);
+        assert!(
+            r.contains("nameserver fd6b:6e9c:691c:8001::2"),
+            "points at the tun broker's shim, not the proxy: {r}"
+        );
+        assert!(
+            !r.contains("127.0.144.17"),
+            "the proxy fail-fast address is not used for a udp kennel"
+        );
     }
 
     #[test]

@@ -942,6 +942,11 @@ fn bring_up<P: Privileged + Sync>(
             // maps to the kennel's per-kennel v6 address when it has one (a bind), else `::1`.
             v4: None,
             v6: state.v6.unwrap_or(std::net::Ipv6Addr::LOCALHOST),
+            // A `[net.udp]` kennel resolves through the tun broker's shim (`::2`); the tun has no
+            // default route, so a stock client's DNS can only reach the pool + resolver anyway.
+            udp_resolver: net
+                .udp
+                .then(|| kennel_privhelper::addr::tun_resolver(scope.uid(), ctx)),
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
 
