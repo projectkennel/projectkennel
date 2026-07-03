@@ -97,6 +97,8 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
         effective_policy: EffectivePolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
+                udp: false,
+                udp_allow_names: Vec::new(),
                 proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),

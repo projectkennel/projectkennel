@@ -918,6 +918,27 @@ pub struct NetSection {
     /// `[net.audit]`: per-kennel egress audit log.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<NetAudit>,
+    /// `[net.udp]`: opt-in for UDP egress on the proxied path (the tun + fenced broker, W2).
+    /// Presence enables it; destinations are `[[net.udp.allow]]` entries (hostnames only). Absent
+    /// ⇒ no UDP egress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp: Option<NetUdp>,
+}
+
+/// `[net.udp]`: the UDP-egress opt-in and its destination allowlist (W2).
+///
+/// Presence enables the tun + fenced-broker path on the proxied modes. Destinations adopt the same
+/// grammar as `[[net.proxy.allow]]` (the [`NetAllow`] shape) under their own endpoint,
+/// `[[net.udp.allow]]` — hostnames only (a bare IP/CIDR is refused; the capture-by-synthetic path
+/// has no address to match) and no per-entry `protocol` (the transport is implied UDP).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub struct NetUdp {
+    /// `[[net.udp.allow]]`: by-name UDP egress allow entries (the shared [`NetAllow`] grammar,
+    /// hostnames only). Replace (`[[net.udp.allow]]`) or increment (`[[net.udp.allow.add]]`).
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub allow: ListField<NetAllow>,
 }
 
 /// `[net.proxy]`: the user-space egress policy kenneld's proxy enforces.

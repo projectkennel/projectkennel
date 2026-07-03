@@ -914,10 +914,36 @@ fn translate_net(
             ));
         }
     }
+    // `[net.udp]` (W2): the UDP-egress opt-in. Valid only on the proxied modes; destinations live
+    // under their own `[[net.udp.allow]]` endpoint (the same `NetAllow` shape), collected below.
+    let udp_enabled = net.udp.is_some();
+    if udp_enabled && !matches!(mode, NetMode::Constrained | NetMode::Unconstrained) {
+        return Err(translation(
+            "[net.udp] enables UDP egress on the proxied path; it requires \
+             net.mode = constrained or unconstrained"
+                .to_owned(),
+        ));
+    }
     let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
 
     let (allow, allow_names, deny_invariant, deny_author) =
         translate_proxy(net.proxy.as_ref(), deferred)?;
+    // UDP destinations reuse the allow grammar under their own endpoint, name-only
+    // (`cidr_allowed = false`) and stamped UDP. They settle into their OWN `udp_allow_names` list —
+    // never `allow_names`, which the TCP-CONNECT proxy consumes protocol-blind — so the fenced
+    // broker (Part D) is their sole consumer.
+    let udp_allow_names = if let Some(udp) = &net.udp {
+        let (_, names) = collect_net_allow(
+            "net.udp.allow",
+            &udp.allow,
+            false,
+            Some(Protocol::Udp),
+            deferred,
+        )?;
+        names
+    } else {
+        Vec::new()
+    };
 
     // No implied egress is derived from `[ssh]`: the SSH destination is reached by the
     // host-side `ssh` the bastion runs as the operator, entirely outside the
@@ -982,11 +1008,13 @@ fn translate_net(
 
     Ok(NetPolicy {
         mode,
+        udp: udp_enabled,
         bind_port_min,
         bind_allowed_ports,
         proxy,
         allow,
         allow_names,
+        udp_allow_names,
         deny_invariant,
         deny_author,
         bpf_connect_allow,
@@ -1002,20 +1030,56 @@ fn translate_net(
 /// become `Protocol::Any` all-ports [`NetRule`]s. An allow with neither `name` nor `cidr` is
 /// an error.
 type ProxyLists = (Vec<NetRule>, Vec<NameRule>, Vec<NetRule>, Vec<NetRule>);
-fn translate_proxy(
-    proxy: Option<&crate::source::NetProxy>,
+
+/// The transport's `net.proxy`/`net.udp` word, for diagnostics.
+const fn protocol_label(p: Protocol) -> &'static str {
+    match p {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::Any => "any",
+    }
+}
+
+/// Parse a `NetAllow` allow list into `(cidr rules, by-name rules)` — the **one** parser shared by
+/// `[[net.proxy.allow]]` and the `[[net.<transport>.allow]]` tun endpoints (W2).
+///
+/// - `cidr_allowed` gates a `cidr =` literal. The `NetAllow` grammar allows one by **default**
+///   (`true`, the proxy case); the tun endpoints pass `false` — capture-by-synthetic has no address
+///   to match, so a bare IP/CIDR is refused there.
+/// - `fixed_protocol`: `None` reads the transport per entry (the proxy grammar: `tcp`/`udp`/`any`);
+///   `Some(t)` is a single-transport tun endpoint — it stamps `t` on every rule and forbids a
+///   per-entry `protocol` (the endpoint implies it).
+fn collect_net_allow(
+    endpoint: &str,
+    entries: &crate::source::ListField<crate::source::NetAllow>,
+    cidr_allowed: bool,
+    fixed_protocol: Option<Protocol>,
     deferred: &mut BTreeSet<String>,
-) -> Result<ProxyLists, PolicyError> {
+) -> Result<(Vec<NetRule>, Vec<NameRule>), PolicyError> {
     let mut allow: Vec<NetRule> = Vec::new();
     let mut allow_names: Vec<NameRule> = Vec::new();
-    let mut deny_invariant: Vec<NetRule> = Vec::new();
-    let mut deny_author: Vec<NetRule> = Vec::new();
-    let Some(p) = proxy else {
-        return Ok((allow, allow_names, deny_invariant, deny_author));
-    };
-    for entry in &p.allow {
-        let protocol = parse_protocol(entry.protocol.as_deref())?;
+    for entry in entries {
+        let protocol = if let Some(t) = fixed_protocol {
+            // A single-transport (tun) endpoint: the per-entry `protocol` is implied and forbidden.
+            if entry.protocol.is_some() {
+                return Err(translation(format!(
+                    "[[{endpoint}]] must not set `protocol` — the endpoint's transport is {} \
+                     by construction",
+                    protocol_label(t),
+                )));
+            }
+            t
+        } else {
+            // The proxy endpoint reads the transport per entry.
+            parse_protocol(entry.protocol.as_deref())?
+        };
         if let Some(cidr) = &entry.cidr {
+            if !cidr_allowed {
+                return Err(translation(format!(
+                    "[[{endpoint}]] `{cidr}` is a bare IP/CIDR, but this endpoint is hostname-only \
+                     (no address to match)"
+                )));
+            }
             let (addr, prefix_len) = parse_cidr(cidr)?;
             let addr = subst(&addr, deferred);
             if entry.ports.is_empty() {
@@ -1044,11 +1108,27 @@ fn translate_proxy(
                 protocol,
             });
         } else {
-            return Err(translation(
-                "net.proxy.allow entry has neither `name` nor `cidr`".to_owned(),
-            ));
+            return Err(translation(format!(
+                "[[{endpoint}]] entry has neither `name` nor `cidr`"
+            )));
         }
     }
+    Ok((allow, allow_names))
+}
+
+fn translate_proxy(
+    proxy: Option<&crate::source::NetProxy>,
+    deferred: &mut BTreeSet<String>,
+) -> Result<ProxyLists, PolicyError> {
+    let mut deny_invariant: Vec<NetRule> = Vec::new();
+    let mut deny_author: Vec<NetRule> = Vec::new();
+    let Some(p) = proxy else {
+        return Ok((Vec::new(), Vec::new(), deny_invariant, deny_author));
+    };
+    // The shared allow parser: the proxy allows CIDRs (`cidr_allowed = true`, the grammar default)
+    // and reads the transport per entry (`fixed_protocol = None`).
+    let (allow, allow_names) =
+        collect_net_allow("net.proxy.allow", &p.allow, true, None, deferred)?;
     if let Some(deny) = &p.deny {
         let any_rule = |d: &crate::source::NetDenyRule| -> Result<NetRule, PolicyError> {
             let (addr, prefix_len) = parse_cidr(&d.cidr)?;
@@ -2116,6 +2196,99 @@ mod tests {
         assert!(translate_net(&blank, &mut d).is_err());
         // A real reason → accepted.
         assert_eq!(mode_of("host"), NetMode::Host);
+    }
+
+    // ---- [net.udp] (W2 Part A): opt-in + hostnames-only ----
+
+    fn udp_allow(name: Option<&str>, cidr: Option<&str>) -> crate::source::NetAllow {
+        crate::source::NetAllow {
+            name: name.map(str::to_owned),
+            cidr: cidr.map(str::to_owned),
+            reason: Some("r".to_owned()),
+            ..Default::default()
+        }
+    }
+
+    /// A policy with `[net.udp]` present (and its `[[net.udp.allow]]` entries) on `mode`.
+    fn udp_src(mode: &str, allow: Vec<crate::source::NetAllow>) -> SourcePolicy {
+        use crate::source::{ListField, NetSection, NetUdp};
+        SourcePolicy {
+            net: Some(NetSection {
+                mode: Some(mode.to_owned()),
+                reason: Some("test".to_owned()),
+                udp: Some(NetUdp {
+                    allow: ListField::Set(allow),
+                }),
+                ..NetSection::default()
+            }),
+            ..SourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn net_udp_requires_a_proxied_mode() {
+        let mut d = BTreeSet::new();
+        assert!(translate_net(&udp_src("host", vec![]), &mut d).is_err());
+        assert!(translate_net(&udp_src("none", vec![]), &mut d).is_err());
+        for m in ["constrained", "unconstrained"] {
+            let net = translate_net(&udp_src(m, vec![]), &mut d).expect("proxied udp");
+            assert!(net.udp, "{m}: the opt-in sets net.udp");
+        }
+    }
+
+    #[test]
+    fn udp_destinations_are_hostname_only_and_stamped_udp() {
+        let mut d = BTreeSet::new();
+        // A bare-IP/CIDR entry under the UDP endpoint is refused (no address to synthesise).
+        assert!(
+            translate_net(
+                &udp_src("constrained", vec![udp_allow(None, Some("10.0.0.0/8"))]),
+                &mut d
+            )
+            .is_err(),
+            "a bare-IP/CIDR udp destination is refused"
+        );
+        // A named entry translates and lands in `udp_allow_names` as a `Protocol::Udp` rule.
+        let net = translate_net(
+            &udp_src("constrained", vec![udp_allow(Some("dns.example"), None)]),
+            &mut d,
+        )
+        .expect("named udp translates");
+        assert!(net.udp);
+        assert!(
+            net.udp_allow_names
+                .iter()
+                .any(|r| r.name == "dns.example" && r.protocol == Protocol::Udp),
+            "the udp destination is a Protocol::Udp rule in udp_allow_names"
+        );
+        assert!(
+            net.allow_names.is_empty(),
+            "a udp destination must NOT enter the TCP proxy's allow_names"
+        );
+    }
+
+    #[test]
+    fn collect_net_allow_honours_the_cidr_allowed_flag() {
+        // The shared tun-endpoint parser: a CIDR is accepted when `cidr_allowed = true` (the
+        // `NetAllow` grammar's default) and refused when `false` (what the tun endpoints pass),
+        // and every rule is stamped with the endpoint's fixed transport.
+        let mut d = BTreeSet::new();
+        let list = crate::source::ListField::Set(vec![crate::source::NetAllow {
+            cidr: Some("10.0.0.0/8".to_owned()),
+            reason: Some("r".to_owned()),
+            ..Default::default()
+        }]);
+        let (allow, names) =
+            collect_net_allow("net.udp.allow", &list, true, Some(Protocol::Udp), &mut d)
+                .expect("a CIDR is accepted when cidr_allowed");
+        assert!(names.is_empty());
+        assert!(allow
+            .iter()
+            .any(|r| r.protocol == Protocol::Udp && r.prefix_len == 8));
+        assert!(
+            collect_net_allow("net.udp.allow", &list, false, Some(Protocol::Udp), &mut d).is_err(),
+            "a CIDR is refused when the endpoint is hostname-only"
+        );
     }
 
     fn translate_template(src: &str) -> Translated {

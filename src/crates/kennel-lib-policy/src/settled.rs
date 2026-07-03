@@ -189,6 +189,11 @@ impl ProxyListen {
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
+    /// Whether UDP egress is enabled (`[net.udp]`, W2): the tun + fenced-broker path on the
+    /// proxied modes. The destination grants are [`udp_allow_names`](Self::udp_allow_names).
+    /// Omitted from the canonical form when false, so a policy without it signs unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub udp: bool,
     /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.5.7). A bind
     /// below this is denied by the cgroup `bind4`/`bind6` BPF — the privileged-port
     /// protection (T6, §7.5.9 item 17). `0` means no minimum is enforced. Carried into
@@ -221,6 +226,14 @@ pub struct NetPolicy {
     /// the per-kennel egress proxy (the BPF cannot match names); consulted in `constrained` mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_names: Vec<NameRule>,
+    /// UDP egress destinations **by name** — the grants from `[[net.udp.allow]]` (`[net.udp]`, W2),
+    /// each a `Protocol::Udp` [`NameRule`]. Carried SEPARATELY from
+    /// [`allow_names`](Self::allow_names): the egress proxy is TCP-CONNECT and protocol-blind over
+    /// `allow_names` (`inet.rs` maps every entry into a proxy rule), so a UDP name must never enter
+    /// that list. The fenced broker (the tun's flow provider) is the sole consumer; omitted from the
+    /// canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub udp_allow_names: Vec<NameRule>,
     /// Invariant deny CIDRs (cloud metadata, link-local, RFC1918). Must be
     /// present; cannot be removed by any delta.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1604,6 +1617,8 @@ pub fn sample_settled() -> SettledPolicy {
         effective_policy: EffectivePolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
+                udp: false,
+                udp_allow_names: Vec::new(),
                 proxy: ProxyListen::default(),
                 allow: vec![NetRule {
                     cidr: "93.184.216.0".to_owned(),

@@ -2842,6 +2842,8 @@ mod tests {
             };
             let net = NetPolicy {
                 mode: kennel_lib_policy::NetMode::Constrained,
+                udp: false,
+                udp_allow_names: Vec::new(),
                 proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
