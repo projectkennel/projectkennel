@@ -1,0 +1,48 @@
+# ============================================================================
+# Suite case: net-udp — the UDP-egress tun is constructed in the kennel's net-ns.
+#
+# Proves W2 Part B: a `[net.udp]` kennel comes up with a `tun` interface present in the
+# workload's OWN network namespace. The construction child created it in the in-namespace
+# CAP_NET_ADMIN window, brought it up, and addressed its ULA /64; bin-init holds the fd so
+# the interface persists. The workload reads /proc/net/dev (no external binary) and exits 0
+# iff a `tun*` interface is present — so an unreadable /proc/net/dev or a missing tun both
+# fail the case (it cannot pass trivially). Exit 0 ⇒ the tun was constructed and lives in
+# the kennel's netns.
+#
+# `/proc` (not `/proc/net/dev`) is granted: /proc/net is the per-task `/proc/self/net`
+# symlink, so a Landlock rule pinned to the specific path's inode does not match the
+# workload's — the mount-rooted `/proc` grant does.
+#
+# The facade that reads/writes the tun's frames is a later part (facade-tun); this case
+# proves only the construction, which is what Part B lands.
+# ============================================================================
+
+template_name = "net-udp"
+template_base = "base-confined"
+
+[net]
+mode = "constrained"
+
+[net.udp]
+
+[[net.udp.allow]]
+name = "example.com"
+ports = [443]
+reason = "W2 tun-construction e2e"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/proc"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    while read -r l; do case "$l" in *tun*) exit 0 ;; esac; done < /proc/net/dev
+    echo "no tun interface in /proc/net/dev" >&2
+    exit 1
+    """,
+]
