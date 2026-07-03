@@ -71,14 +71,6 @@ pub const INJECT_STDERR_FD: RawFd = 8;
 /// Absent when the policy has no `[net.udp]`. Sibling of [`WORKLOAD_FD`].
 pub const TUN_FD: RawFd = 9;
 
-/// The fixed descriptor for the **`facade-tun`↔broker channel** (`[net.udp]`, W2 Part C/D).
-///
-/// One end of a `SOCK_SEQPACKET` socketpair whose other end the fenced flow broker holds; `kenneld`
-/// creates the pair and routes this end to `facade-tun` (alongside [`TUN_FD`]) so the facade copies
-/// whole L3 frames to the broker and back. Present only with `[net.udp]`; the workload never sees
-/// it (routed to `facade-tun` alone).
-pub const BROKER_FD: RawFd = 10;
-
 /// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d; my binderfs is reachable via `/proc/<me>/root`."
 const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."

@@ -14,11 +14,13 @@
 //!
 //! # Invocation
 //!
-//! `facade-tun <kennel-tun-addr>`, spawned by `kennel-bin-init` into the kennel's view. The tun fd
-//! and the broker channel arrive at the fixed inherited slots
-//! [`TUN_FD`](kennel_lib_syscall::boot::TUN_FD) /
-//! [`BROKER_FD`](kennel_lib_syscall::boot::BROKER_FD); `<kennel-tun-addr>` is the tun's own IPv6
-//! address (its `/64` is the synthetic pool + resolver).
+//! `facade-tun <mesh-device> <kennel-tun-addr>`, spawned by `kennel-bin-init` into the kennel's
+//! view. The tun fd arrives at the fixed inherited slot [`TUN_FD`](kennel_lib_syscall::boot::TUN_FD)
+//! (placed at construction). The **broker channel is not inherited**: it is the session socket the
+//! tun broker mints and hands back over the connector mesh — `facade-tun` opens `<mesh-device>`
+//! (`/dev/binderfs-mesh/binder`, bound into the view by the `[[consumes]]`), `SVC_CONNECT`s the
+//! tun-broker capability, and uses the returned fd (the `facade-afunix` mesh-connect pattern).
+//! `<kennel-tun-addr>` is the tun's own IPv6 address (its `/64` is the synthetic pool + resolver).
 //!
 //! # Non-goals
 //!
@@ -27,34 +29,56 @@
 
 #![forbid(unsafe_code)]
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::Ipv6Addr;
 use std::os::unix::net::UnixDatagram;
 use std::process::ExitCode;
 use std::thread;
+use std::time::Duration;
 
 use kennel_facade::tun::{egress_ok, ingress_ok};
-use kennel_lib_syscall::boot::{BROKER_FD, TUN_FD};
+use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
+use kennel_lib_binder::service::{svc_connect, verb};
+use kennel_lib_syscall::boot::TUN_FD;
 use kennel_lib_syscall::fd::adopt;
 
 /// The frame buffer: the tun's MTU is 1280 (the IPv6 minimum); a little headroom over that bounds
 /// any single read without ever truncating a legal frame.
 const FRAME_CAP: usize = 2048;
 
+/// The tun-broker's mesh capability — the control name kenneld's `tun_resolver` is attached to. A
+/// `SVC_CONNECT` for it on the mesh bus returns this session's datagram socket to the broker.
+const TUN_CAPABILITY: &str = "org.projectkennel.tun-broker";
+/// The binder buffer mapping for the facade's mesh client. Only the one `SVC_CONNECT` crosses it.
+const MAP_SIZE: usize = 128 * 1024;
+/// The broker registers its control node a hair after its mesh bus is Ready; retry the connect.
+const CONNECT_ATTEMPTS: u32 = 50;
+const CONNECT_DELAY: Duration = Duration::from_millis(100);
+
 fn main() -> ExitCode {
-    let Some(addr) = std::env::args().nth(1) else {
-        eprintln!("facade-tun: usage: <kennel-tun-addr>");
+    let mut args = std::env::args().skip(1);
+    let (Some(device), Some(addr)) = (args.next(), args.next()) else {
+        eprintln!("facade-tun: usage: <mesh-device> <kennel-tun-addr>");
         return ExitCode::FAILURE;
     };
     let Ok(kennel_addr) = addr.parse::<Ipv6Addr>() else {
         eprintln!("facade-tun: `{addr}` is not an IPv6 address");
         return ExitCode::FAILURE;
     };
-    // SAFETY-contract of `adopt`: `facade-tun` is the sole owner of the two inherited slots, wrapped
-    // exactly once each here (`kennel-bin-init` routed them to this process alone).
+    // SAFETY-contract of `adopt`: `facade-tun` is the sole owner of the tun slot, wrapped exactly
+    // once here (`kennel-bin-init` routed it to this process alone at construction).
     let tun = File::from(adopt(TUN_FD));
-    let broker = UnixDatagram::from(adopt(BROKER_FD));
+    // The broker channel is not an inherited slot: it is the session socket the tun broker mints and
+    // hands back over the connector mesh (kenneld resolves this kennel's grants → ACCEPT_SESSION →
+    // the fd), reached exactly as `facade-afunix` reaches a brokered `AF_UNIX` connection.
+    let broker = match connect_broker(&device) {
+        Ok(broker) => broker,
+        Err(e) => {
+            eprintln!("facade-tun: connecting the tun broker over the mesh: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     match serve(tun, broker, kennel_addr) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -62,6 +86,29 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Open the mesh binder device and `SVC_CONNECT` the tun-broker capability, returning the session
+/// datagram socket (the broker's end of this kennel's flow channel).
+///
+/// kenneld's mesh node-0 handler resolves this kennel afresh (`sender_pid` → cgroup → ctx → grants),
+/// pushes one `ACCEPT_SESSION` to the broker, and replies with the fd the broker minted. Retries
+/// briefly, since the broker may register its control node just after the mesh bus becomes Ready.
+fn connect_broker(device: &str) -> io::Result<UnixDatagram> {
+    let fd = OpenOptions::new().read(true).write(true).open(device)?;
+    let conn = Connection::open(fd.into(), MAP_SIZE)?;
+    let request = svc_connect::encode_request(TUN_CAPABILITY);
+    let mut last = io::Error::from(io::ErrorKind::NotConnected);
+    for _ in 0..CONNECT_ATTEMPTS {
+        match conn.transact_fd(CONTEXT_MANAGER_HANDLE, verb::SVC_CONNECT, &request) {
+            Ok(session) => return Ok(UnixDatagram::from(session)),
+            Err(e) => {
+                last = e;
+                thread::sleep(CONNECT_DELAY);
+            }
+        }
+    }
+    Err(last)
 }
 
 /// Run both copy loops until either side closes: egress (tun → broker) on a worker thread, ingress
