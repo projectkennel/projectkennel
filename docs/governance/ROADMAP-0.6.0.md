@@ -153,19 +153,26 @@ tested invariant rather than an emergent property.
 
 - **Part A — schema and compile: the synthetic table.** `[net.udp]` is opt-in within `constrained`;
   the destination grammar is the existing `[[net.proxy.allow]]` `name`/`ports`/`protocol` triple with
-  `protocol = "udp"` — no second allowlist grammar (*do-less*). The compiler mints a **deterministic
-  synthetic IPv6 table** into the settled artefact: exact names assigned at compile (the table *is*
-  signed policy — auditable, diffable, restart-identical); spawn-patched match-set selections minted
-  at instantiation; wildcard matches hash-minted at first resolution so the table stays a pure
-  function of (policy, names seen). Synthetics are capability tokens shaped like addresses; nothing
-  expires, because the real resolution happens host-side at each flow's dial. Pool is a ULA /64,
+  `protocol = "udp"` — no second allowlist grammar (*do-less*). **Hostnames only — no bare IPs.** A `protocol = "udp"`
+  entry must carry a `name`; a bare-IP/CIDR destination is refused at compile — there is no name to
+  synthesize, and a literal-IP UDP datagram dies `ENETUNREACH` in-kernel anyway (Part B). The
+  mechanism maps *names* → synthetic IPv6, resolved host-side at each dial. **The compile-time table
+  is partial, not fully baked:** the allowlist may hold **wildcards** (`*.example.com`) the compiler
+  cannot enumerate, so it mints synthetics only for the **exact** names at compile (that subset *is*
+  signed policy — auditable, diffable, restart-identical), while a **wildcard-matched** name is
+  hash-minted **at first resolution** and per-instance match-set selections are patched at spawn.
+  The live table is thus a pure, deterministic function of (policy, names actually seen) — never
+  enumerable up front. Synthetics are capability tokens shaped like addresses; nothing
+  expires, because the real resolution happens host-side at each flow's dial. The pool is a **/64
+  within the Kennel ULA space W10 established** (`fd6b:6e00:<uid-subnet>::…`, uid-derived), with the
   interface address partitioned from the hashed suffix space so a mint can never collide with the
-  tun's own address. `[net.udp]` is a settled-artefact shape change, so this bumps
-  `SETTLED_SCHEMA_VERSION`; `kennel-compose` gains the corresponding capability question.
+  tun's own address. `[net.udp]` is an **additive-optional** settled field (a v3 artefact without it
+  stays valid), so it **re-pins the v3 shape** in `schema/schema-version.lock` — no
+  `SETTLED_SCHEMA_VERSION` bump; `kennel-compose` gains the corresponding capability question.
 
 - **Part B — construction: the tun.** The factory child creates `tun0` **pre-pivot, inside the
-  existing in-namespace `CAP_NET_ADMIN` window** (same moment as loopback bring-up): ULA /64, MTU
-  1280, **no default route** — the only route is the connected prefix, so a literal-IP destination
+  existing in-namespace `CAP_NET_ADMIN` window** (same moment as loopback bring-up): a /64 in the
+  same Kennel ULA space (W10), MTU 1280, **no default route** — the only route is the connected prefix, so a literal-IP destination
   dies in the kennel's own kernel with `ENETUNREACH` before any facade sees it. The routing table is
   itself the allowlist. No v4 address on the tun (suppresses `getaddrinfo` A-queries via
   `AI_ADDRCONFIG`). The tun **fd** rides `fexecve` into `bin-init` and the supervision Plan into the
@@ -244,11 +251,12 @@ other workstreams.
 - Literal-IP egress fails `ENETUNREACH` in-kernel; a crafted v4/ICMPv6/spoofed-src frame written to
   the tun is dropped and counted on the facade predicate (fuzz corpus covers all four classes).
 - Broker ceilings hold under a flow-spray test; kenneld's transaction rate is **flat** during it.
-- `gen-inventory` delta reviewed; threat entries and the §8.2 ordering test landed; the
-  `SETTLED_SCHEMA_VERSION` bump and `kennel-compose` question landed with Part A.
+- `gen-inventory` delta reviewed; threat entries and the §8.2 ordering test landed; the v3 shape
+  re-pin (additive-optional — no version bump) and `kennel-compose` question landed with Part A.
 
 **Non-goals.** PMTUD/PTB and any MTU above 1280. Workload-originated ICMPv6. Multicast/MLD. v4
-synthetics (AAAA-only is the posture; the legacy-client residual is accepted). A first-party
+synthetics (AAAA-only is the posture; the legacy-client residual is accepted). **Bare-IP/CIDR UDP
+destinations** — `[net.udp]` is hostname-only (no name ⇒ no synthetic; a literal IP dies `ENETUNREACH`). A first-party
 MASQUE/`connect-udp` endpoint — if the ecosystem brings UDP to the existing CONNECT chokepoint,
 that is a later, cheaper workstream and this one does not preempt it (backlog note).
 
@@ -429,9 +437,9 @@ the out-of-the-box pitch. Three deltas close it, each riding mechanism that alre
   siblings follow the same shape when wanted; not this workstream (and MCP-server confinement is a
   distinct shape — an endpoint the agent dials, not an agent binary — deferred to the backlog).
 
-**Schema.** `allowed_args` and the `[fs] cwd` fields are additive optionals on settled v3; they ride
-the release's **single** `SETTLED_SCHEMA_VERSION` bump (shared with W2 Part A — one bump for 0.6.0,
-not three), and are recorded under Policy schema changes. The book's policy chapter and
+**Schema.** `allowed_args` and the `[fs] cwd` fields are additive-optional on settled v3; they
+**re-pin the v3 shape** (no `SETTLED_SCHEMA_VERSION` bump — shipped that way), independent of W2
+(W11 is fully adjacent, no shared bump), and are recorded under Policy schema changes. The book's policy chapter and
 `policy.toml(5)` gain both; `kennel(1)` documents the append semantics.
 
 **Endpoints are measured, not drafted.** The `claude.toml` endpoint set (`api.anthropic.com`,
@@ -445,8 +453,7 @@ bump. The `cwd`-write authority is a W8 adversarial target (below).
 
 **Exit:** `kennel run claude -- <args>` works from a marked project root on a stock install with no
 user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
-endpoint set is confirmed by a live audit pass; the two schema fields land under the shared version
-bump; the README/website quickstart claim ships in the same release, not before.
+endpoint set is confirmed by a live audit pass; the two schema fields re-pin the v3 shape (no version bump); the README/website quickstart claim ships in the same release, not before.
 
 ### W12 · Persona hostname: `[identity].hostname` + a UTS namespace — **TENTATIVE**
 
@@ -593,7 +600,7 @@ W5 (raw-base64 removal)── XS, independent ───────────�
 W6 (enum validation)   ── S,  independent ────────────────────────────────────────►
 W7 (gen-man)           ── S,  independent ────────────────────────────────────────►
 W10 (retire subkennel) ── S–M, before/with W2's ULA addressing ───────────────────►
-W11 (kennel run claude)── S,  schema fields ride W2 Part A's version bump ─────────►
+W11 (kennel run claude)── S,  additive fields re-pin v3 (no bump); adjacent to W2 ────►
 W12 (persona hostname) ── XS–S, TENTATIVE — additive field, re-pin not bump; late/0.7 ►
 W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
 ```
@@ -602,9 +609,9 @@ W0 opened the release and is cheap insurance on the work that remains; with W1 w
 consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
 is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
-that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity; W11's two additive
-schema fields ride W2 Part A's single `SETTLED_SCHEMA_VERSION` bump rather than minting a second. W8
-blocks the tag.
+that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity. 0.6.0 makes only **additive-optional** settled changes
+(W2 `[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`), so it **re-pins the v3 shape** rather
+than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2, not coupled. W8 blocks the tag.
 
 ## Exit criteria
 
@@ -615,8 +622,8 @@ blocks the tag.
 - A constrained kennel with `[net.udp]` runs a stock QUIC client and `dig` with zero wire activity
   for denied names (packet-capture asserted); literal-IP egress dies in-kernel; the facade fuzz
   corpus covers the four crafted-frame classes; broker ceilings hold under flow-spray with kenneld's
-  transaction rate flat; the `SETTLED_SCHEMA_VERSION` bump, threat entries, §8.2 ordering test, and
-  `kennel-compose` question land with it (W2).
+  transaction rate flat; the v3 shape re-pin (additive-optional — no version bump), threat entries,
+  §8.2 ordering test, and `kennel-compose` question land with it (W2).
 - An unmodified GTK/Qt app opens and saves a host file through the portal FileChooser, receiving
   exactly the picked fd, with the deny shape covered in the policy suite (W3).
 - `[dbus.session]` alone routes over `dbus-broker@v1`, the suite and GUI cases pass with the
@@ -632,19 +639,18 @@ blocks the tag.
 - `kennel run claude -- <args>` runs from a marked project root on a stock install with no
   user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
   `claude` endpoint set is confirmed by a live egress-audit pass; `allowed_args` and the `[fs] cwd`
-  fields land under the shared `SETTLED_SCHEMA_VERSION` bump; the quickstart claim ships with it (W11).
+  fields re-pin the v3 shape (no version bump); the quickstart claim ships with it (W11).
 - The corpus cutover is complete: the book is the named corpus, the reference home carries the
   catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
   deleted with no dangling reference (W9).
 - The adversarial pass covers the UDP facade/broker, the picker path, and the W11 cwd-write grant;
   every confirmed finding is fixed before the tag (W8, ship gate).
 
-CHANGELOG records every stable-surface change — the `[net.udp]` section and the settled-schema bump,
+CHANGELOG records every stable-surface change — the `[net.udp]` section (v3 shape re-pinned, no version bump),
 the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
 raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
 bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
-derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (under the shared
-schema bump) and the `claude` reference policy, and the corpus move to the book (with the reference-home
+derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, and the corpus move to the book (with the reference-home
 relocation of the catalogue and inventory artefacts).
 
 ## Parked work
