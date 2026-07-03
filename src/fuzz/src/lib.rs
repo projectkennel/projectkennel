@@ -64,6 +64,9 @@ pub fn fuzz_parsers(data: &[u8]) {
             kennel_udp_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
         let _ = kennel_udp_broker::shim::respond(data, &allow, &mut pool);
         let _ = kennel_udp_broker::query_question(data);
+        // The flow forwarder reads an L3 frame facade-tun handed it (workload-derived bytes) to
+        // extract the routed name/ports/payload; it must never panic on any frame.
+        let _ = kennel_udp_broker::forward::route(data, &pool);
     }
 
     // IPC wire formats: the kenneld control protocol and the privhelper request.

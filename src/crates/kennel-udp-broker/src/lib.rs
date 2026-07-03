@@ -17,6 +17,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod forward;
 pub mod shim;
 
 use simple_dns::Packet;
