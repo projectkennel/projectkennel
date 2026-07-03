@@ -62,6 +62,15 @@ pub const INJECT_STDOUT_FD: RawFd = 7;
 /// See [`INJECT_STDIN_FD`].
 pub const INJECT_STDERR_FD: RawFd = 8;
 
+/// The fixed descriptor for the **UDP-egress tun** (`[net.udp]`, W2).
+///
+/// Unlike the sibling slots, this fd is *created inside* the construction child (`tun::create`
+/// in the kennel's own net-ns), not passed in over the construction channel. The factory places
+/// it here so it is inherited across the `fexecve` of `kennel-bin-init`, which hands it to the
+/// `facade-tun` aux process — the fd IS the capability (there is no `/dev/net/tun` in the view).
+/// Absent when the policy has no `[net.udp]`. Sibling of [`WORKLOAD_FD`].
+pub const TUN_FD: RawFd = 9;
+
 /// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d; my binderfs is reachable via `/proc/<me>/root`."
 const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."

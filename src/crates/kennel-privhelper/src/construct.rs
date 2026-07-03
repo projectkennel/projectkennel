@@ -313,10 +313,13 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
         // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
-        if let Err(e) = build_kennel(&half, op_uid, op_gid) {
-            eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
-            return;
-        }
+        let tun_fd = match build_kennel(&half, op_uid, op_gid) {
+            Ok(fd) => fd,
+            Err(e) => {
+                eprintln!("kennel-privhelper: construction child: build_kennel: {e}");
+                return;
+            }
+        };
         // Signal the parent that the view is built and `pivot_root`ed: the source path is now
         // detached from this view, so the parent may over-mount it operator-side (§2.7). Sent
         // before the `fexecve` (which would CLOEXEC `built_w`); best-effort.
@@ -330,12 +333,14 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         let stdio_ref = stdio_fds
             .as_ref()
             .map(|[i, o, e]| [i.as_fd(), o.as_fd(), e.as_fd()]);
+        let tun_ref = tun_fd.as_ref().map(AsFd::as_fd);
         let init_file = match place_handoff_fds(
             init_file.as_fd(),
             init_sync.as_fd(),
             pty_ref,
             workload_ref,
             stdio_ref,
+            tun_ref,
         ) {
             Ok(f) => f,
             Err(e) => {
@@ -493,14 +498,15 @@ fn place_handoff_fds(
     pty_fd: Option<BorrowedFd<'_>>,
     workload_fd: Option<BorrowedFd<'_>>,
     stdio_fds: Option<[BorrowedFd<'_>; 3]>,
+    tun_fd: Option<BorrowedFd<'_>>,
 ) -> io::Result<OwnedFd> {
     use kennel_lib_syscall::boot::{
-        INJECT_STDERR_FD, INJECT_STDIN_FD, INJECT_STDOUT_FD, WORKLOAD_FD,
+        INJECT_STDERR_FD, INJECT_STDIN_FD, INJECT_STDOUT_FD, TUN_FD, WORKLOAD_FD,
     };
     use kennel_lib_syscall::fd::dup_above;
     // Lift every fd we still need ABOVE the fixed target range first, so `dup2`-ing onto the
     // low fixed numbers cannot clobber one of them. The range spans BOOT_SYNC_FD, PTY_RETURN_FD,
-    // WORKLOAD_FD, and the three INJECT_STD* slots.
+    // WORKLOAD_FD, the three INJECT_STD* slots, and TUN_FD.
     let base = [
         PTY_RETURN_FD,
         BOOT_SYNC_FD,
@@ -508,6 +514,7 @@ fn place_handoff_fds(
         INJECT_STDIN_FD,
         INJECT_STDOUT_FD,
         INJECT_STDERR_FD,
+        TUN_FD,
     ]
     .into_iter()
     .max()
@@ -526,6 +533,7 @@ fn place_handoff_fds(
             ])
         })
         .transpose()?;
+    let tun_hi = tun_fd.map(|t| dup_above(t, base)).transpose()?;
     dup_onto(init_sync.as_fd(), BOOT_SYNC_FD)?;
     if let Some(pty) = &pty_hi {
         dup_onto(pty.as_fd(), PTY_RETURN_FD)?;
@@ -537,6 +545,9 @@ fn place_handoff_fds(
         dup_onto(i.as_fd(), INJECT_STDIN_FD)?;
         dup_onto(o.as_fd(), INJECT_STDOUT_FD)?;
         dup_onto(e.as_fd(), INJECT_STDERR_FD)?;
+    }
+    if let Some(tun) = &tun_hi {
+        dup_onto(tun.as_fd(), TUN_FD)?;
     }
     Ok(init_file)
 }
@@ -682,7 +693,7 @@ fn over_mount_exclusive_via_helper(src: &std::path::Path) {
 /// or reversible by, the workload (it precedes the `fexecve` of `kennel-bin-init`, which
 /// precedes the operator-identity drop).
 #[allow(clippy::similar_names)] // op_uid / op_gid are the domain names
-fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result<()> {
+fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result<Option<OwnedFd>> {
     use kennel_lib_syscall::mount;
 
     // The kennel cgroup is joined at birth (`clone3(CLONE_INTO_CGROUP)` in `construct`), not here —
@@ -703,6 +714,38 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
             kennel_lib_syscall::netlink::add_address(lo, lb.addr, lb.prefix)?;
         }
     }
+
+    // `[net.udp]` (W2): create the UDP-egress tun in the kennel's own net-ns — the same
+    // in-namespace `CAP_NET_ADMIN` window as `lo` above — address it, and hold its fd to hand to
+    // `kennel-bin-init`. The tun's ULA `/64` is DERIVED here from the kernel-trusted `op_uid`, on a
+    // ctx distinct from the kennel's own (`^ TUN_CTX_FLIP`) so its connected `/64` never collides
+    // with the loopback `/64`. In-namespace only (no host mirror), so — unlike the loopback adds —
+    // it needs no allocator reservation and no `kennel-privhelper-net` round-trip. No v4 address
+    // (suppresses `getaddrinfo` A-queries via `AI_ADDRCONFIG`).
+    let tun_fd = if half.tun {
+        // MTU: the IPv6 minimum, so the L3 facade never fragments.
+        const TUN_MTU: u32 = 1280;
+        // The tun `/64` uses a ctx with the kennel ctx's high bit flipped — distinct from the
+        // loopback ctx, so the two connected `/64`s never overlap in the kennel's net-ns.
+        const TUN_CTX_FLIP: u16 = 0x8000;
+        // The tun interface address's host suffix within its `/64` (`::1`); `::2` is reserved for
+        // the broker resolver and the rest for the synthetic pool (Part D).
+        const TUN_HOST: u64 = 1;
+        let (fd, name) = kennel_lib_syscall::tun::create()?;
+        let cname = std::ffi::CString::new(name).map_err(|_| io::Error::other("bad tun ifname"))?;
+        let idx = kennel_lib_syscall::netlink::if_index(&cname)?;
+        kennel_lib_syscall::netlink::set_mtu(idx, TUN_MTU)?;
+        kennel_lib_syscall::netlink::set_link_up(idx)?;
+        let addr = crate::addr::loopback_v6(op_uid, half.ctx ^ TUN_CTX_FLIP, TUN_HOST);
+        kennel_lib_syscall::netlink::add_address(
+            idx,
+            std::net::IpAddr::V6(addr),
+            crate::addr::V6_PREFIX,
+        )?;
+        Some(fd)
+    } else {
+        None
+    };
 
     // Detach mount propagation from the host before any mount in either path.
     mount::make_root_private()
@@ -743,7 +786,7 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         mount::mount_special("proc", std::path::Path::new("/proc"))?;
         mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
     }
-    Ok(())
+    Ok(tun_fd)
 }
 
 /// Hand the operator the constructed `$HOME` — and **only inodes we constructed**.

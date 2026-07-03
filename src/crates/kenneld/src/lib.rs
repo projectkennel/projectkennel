@@ -1180,6 +1180,9 @@ fn bring_up<P: Privileged + Sync>(
     // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
     // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
     let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
+    // Create the UDP-egress tun when the policy opts in (`[net.udp]`, W2). Valid only on the
+    // proxied modes, which own their net-ns — the same window `lo_up` covers.
+    let tun = net.udp;
     let (mut child, init_pid, sync, supervision_bytes, helper_stderr) = construct_via_factory(
         privileged,
         plan,
@@ -1187,6 +1190,7 @@ fn bring_up<P: Privileged + Sync>(
         ctx,
         &loopback,
         lo_up,
+        tun,
         &egress_bytes,
         tracer.level_u8(),
         state,
@@ -1381,6 +1385,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
+    tun: bool,
     egress_bytes: &[u8],
     log_level: u8,
     state: &mut Provision,
@@ -1397,7 +1402,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
-    let construction = construction_half_from(plan, ctx, loopback, lo_up);
+    let construction = construction_half_from(plan, ctx, loopback, lo_up, tun);
     let supervision = supervision_from(plan, command, drop_uid, drop_gid, log_level);
     let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
@@ -1430,6 +1435,7 @@ fn construction_half_from(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
+    tun: bool,
 ) -> kennel_lib_spawn::ConstructionHalf {
     kennel_lib_spawn::ConstructionHalf {
         namespaces: plan.namespaces,
@@ -1448,6 +1454,7 @@ fn construction_half_from(
         lo: lo_up,
         ctx,
         loopback: loopback.to_vec(),
+        tun,
         // Tell the factory which inherited fds accompany the datagram (sent pty-then-workload),
         // so it places them at the right fixed numbers. It decodes the half but forwards the
         // supervision-half (which holds the workload flag) opaquely, so the presence must be
