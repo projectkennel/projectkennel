@@ -1,0 +1,20 @@
+[package]
+name = "kennel-udp-broker"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel W2 UDP-egress fenced flow broker: a per-kennel host-mode leaf running the DNS naming shim (mint a synthetic IPv6 on allowlist approval, answer AAAA / NODATA, zero wire) and the L3 flow forwarder that drives host-netproxy's UDP dial. kenneld is absent from the per-flow path; the broker cgroup's net.bpf deny-first floor is the IP-layer fence that closes DNS rebinding at connect()."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The DNS message codec for the naming shim: parse the workload's (hostile) query, build the
+# AAAA/NODATA response. Delegated as the hostile-input parser the no-hand-roll rule targets (the
+# `vte` precedent, §5.1); the shim only mints synthetics — no resolver, no wire. Only transitive is
+# `bitflags`, already vendored via `nix`.
+simple-dns = "=0.11.3"
+
+[lints]
+workspace = true
