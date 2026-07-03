@@ -131,126 +131,160 @@ The full analysis (including what W0's probes settled, which still holds) is in
 backlogged, gated on the host-effects factoring as its named first step; PR #154 (the relay work) was
 closed and the primitive removed (unused TCB weight if the seam moves).
 
-### W2 · UDP egress in constrained mode: the naming shim, the tun facade, and the flow broker
+### W2 · UDP egress in constrained mode: the naming shim, the tun facade, and the fenced flow broker
 
 **[security, foundational] L.**
 
 **Why now.** The brokered path is CONNECT-shaped; a workload that needs UDP today has exactly one
 answer, `net.mode = "host"`, which reopens host reconnaissance (T1.6) *and* the in-kennel DNS exfil
-axis for a transport class that is becoming default (QUIC/h3). Proxy-aware clients already degrade
-correctly — with a proxy configured they never attempt QUIC — so this workstream serves the residual
-population only: raw QUIC libraries, DNS tooling, VoIP/game stacks that never honour proxy
-convention. The design fell out of the 0.5.0 mesh work and was settled in design review 2026-07-02;
-this entry records the commitment, the design corpus records the *what* (§7.x, to be written as
-Part E).
+axis for a transport class becoming default (QUIC/h3). Proxy-aware clients already degrade correctly
+(with a proxy configured they never attempt QUIC), so this serves the residual population only: raw
+QUIC libraries, DNS tooling, VoIP/game stacks that never honour proxy convention. The design was
+settled in review (2026-07-02/03); the book records the *what* (Vol 2 ch.8).
 
 **The load-bearing invariant, stated first.** Constrained mode currently makes DNS exfiltration
 *unexpressible*: no resolver, no reply, no query the workload can cause. This workstream must not
-convert that absence into interposition. Every part below preserves it — denied names are answered
-locally with **zero wire activity**, real addresses and real DNS replies never enter the kennel, and
-the check-then-resolve ordering of §8.2 (policy check *before* any resolution) is promoted to a named,
-tested invariant rather than an emergent property.
+convert that absence into interposition. Denied names are answered locally with **zero wire
+activity**, real addresses and real DNS replies never enter the kennel, and the check-then-resolve
+ordering of §8.2 (policy check *before* any resolution) becomes **structural** here — the broker
+cannot complete a dial the kernel BPF fence will not clear.
 
-- **Part A — schema and compile: the synthetic table.** `[net.udp]` is opt-in within `constrained`;
-  the destination grammar is the existing `[[net.proxy.allow]]` `name`/`ports`/`protocol` triple with
-  `protocol = "udp"` — no second allowlist grammar (*do-less*). The compiler mints a **deterministic
-  synthetic IPv6 table** into the settled artefact: exact names assigned at compile (the table *is*
-  signed policy — auditable, diffable, restart-identical); spawn-patched match-set selections minted
-  at instantiation; wildcard matches hash-minted at first resolution so the table stays a pure
-  function of (policy, names seen). Synthetics are capability tokens shaped like addresses; nothing
-  expires, because the real resolution happens host-side at each flow's dial. Pool is a ULA /64,
-  interface address partitioned from the hashed suffix space so a mint can never collide with the
-  tun's own address. `[net.udp]` is a settled-artefact shape change, so this bumps
-  `SETTLED_SCHEMA_VERSION`; `kennel-compose` gains the corresponding capability question.
+- **Part A — schema + compile: the allowlist, and nothing more.** `[net.udp]` is opt-in within the
+  proxied modes (`constrained` or `unconstrained` — the modes with an own net-ns and a broker to
+  carry it; `host` and `none` are refused). Destinations declare under their **own endpoint**,
+  `[[net.udp.allow]]`, which **adopts the shape** of `[[net.proxy.allow]]` (the `name`/`ports`
+  grammar) — the same struct and the same parser, a distinct table; *not* a `protocol = "udp"`
+  overload of the proxy list (*do-less* = reuse the shape, not the endpoint). **Hostnames only:** a
+  UDP entry carries a `name`, never a `protocol` (the transport is implied) and never a bare IP/CIDR
+  — the capture-by-synthetic mechanism has no address to match, and a literal-IP UDP datagram dies
+  `ENETUNREACH` in-kernel anyway (Part B). `[[net.proxy.allow]]` and the `[[net.<transport>.allow]]`
+  tun endpoints share **one** parser carrying a `cidr_allowed` flag: the `NetAllow` grammar allows a
+  CIDR by **default** (the proxy passes `true`), and the tun endpoints pass `false`. The proxy's
+  behaviour is unchanged — same grammar, same acceptance — it simply no longer carries its own copy
+  of the loop. UDP destinations settle into their **own** `udp_allow_names` list, kept separate from
+  the existing `allow_names` (which `kenneld` consumes protocol-blind, so a UDP name there would
+  over-grant). The fenced broker (Part D) is that list's sole consumer; fragments compose
+  `[[net.udp.allow.add]]` exactly like the proxy list.
+  **There is no compile-time table:** the allowlist may hold wildcards
+  (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
+  only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
+  (Part D). `[net.udp]` is an **additive-optional** settled field (a v3 artefact without it stays
+  valid), so it **re-pins the v3 shape** in `schema/schema-version.lock` — no `SETTLED_SCHEMA_VERSION`
+  bump; `kennel-compose` gains the capability question.
 
 - **Part B — construction: the tun.** The factory child creates `tun0` **pre-pivot, inside the
-  existing in-namespace `CAP_NET_ADMIN` window** (same moment as loopback bring-up): ULA /64, MTU
-  1280, **no default route** — the only route is the connected prefix, so a literal-IP destination
-  dies in the kennel's own kernel with `ENETUNREACH` before any facade sees it. The routing table is
-  itself the allowlist. No v4 address on the tun (suppresses `getaddrinfo` A-queries via
-  `AI_ADDRCONFIG`). The tun **fd** rides `fexecve` into `bin-init` and the supervision Plan into the
-  facade, exactly as the SOCKS listener does; `/dev/net/tun` stays **absent from the view** —
-  the fd is the capability, and absence of the node closes the `IFF_MULTI_QUEUE` second-writer path
-  even against in-namespace root. Interface config is immutable to the workload by the uid line
-  (§2.5), before any filter is consulted.
+  existing in-namespace `CAP_NET_ADMIN` window** (same moment as loopback bring-up): a `/64` in the
+  **Kennel ULA space W10 established** (`fd6b:6e00:<uid-subnet>::/64`, uid-derived), MTU 1280, **no
+  default route** — the only route is the connected prefix, so a literal-IP destination dies
+  `ENETUNREACH` in the kennel's own kernel before any facade sees it. The routing table *is* the
+  allowlist. No v4 address on the tun (suppresses `getaddrinfo` A-queries via `AI_ADDRCONFIG`). The
+  tun **fd** rides `fexecve` into `bin-init` and the Plan into the facade, as the SOCKS listener does;
+  `/dev/net/tun` stays **absent from the view** (the fd is the capability; absence closes the
+  `IFF_MULTI_QUEUE` second-writer path even against in-namespace root). Interface config is immutable
+  to the workload by the uid line (§2.5). Two addresses in the `/64` are reserved: the **broker's
+  resolver** (the kennel's `resolv.conf` nameserver) and the tun's own interface address; the rest is
+  the synthetic pool, partitioned so a mint can never collide with either.
 
-- **Part C — `facade-tun`: a stateless predicate, not a codec.** In-kennel, workload-uid, empty
+- **Part C — `facade-tun`: a stateless L3 predicate, not a codec.** In-kennel, workload-uid, empty
   bounding set, holding the tun fd and one `SOCK_SEQPACKET` socketpair to the broker. It copies
-  **whole L3 frames** in both directions behind a symmetric shape check, and originates nothing:
-  - egress: `v6 ∧ nexthdr==UDP ∧ src == kennel-addr (exact) ∧ dst ∈ pool ∧ len sane` — all
-    workload-originated ICMPv6 is dropped (MTU is pinned; there is no legitimate use, and passing it
-    hands the workload an injection primitive into the broker's parser);
-  - ingress: `(UDP ∨ ICMPv6 error, type 1, codes {1, 4}) ∧ src ∈ pool ∧ dst == kennel-addr` — a
-    compromised broker cannot spoof arbitrary sources into the workload's stack;
-  - any failure: drop + counter, never an ICMP (a predicate failure is an internal fault surfaced as
-    a metric, not network weather).
-  The facade holds no flow state — nothing to exhaust, nothing to desync. The egress path parses
-  genuinely hostile workload input and is the **fuzz target**; the ingress path is trusted-but-verified.
+  **whole L3 frames** both ways behind a symmetric shape check and originates nothing —
+  egress: `v6 ∧ nexthdr==UDP ∧ src == kennel-addr ∧ dst ∈ pool-or-resolver ∧ len sane` (workload
+  ICMPv6 dropped); ingress: `(UDP ∨ ICMPv6 error type 1, codes {1,4}) ∧ src ∈ pool ∧ dst ==
+  kennel-addr`; any failure: drop + counter, never an ICMP. **It knows nothing about DNS** — a query
+  to the resolver address is just another UDP packet it forwards. No flow state. The egress path
+  parses genuinely hostile workload input and is the **fuzz target**.
 
-- **Part D — the per-kennel flow broker.** kenneld is **absent from the per-flow path** — the
-  ACCEPT_SESSION lesson applied (a flow-request verb on node 0 is a DoS aperture; all judgment was
-  spent at compile). A per-kennel operator-context broker is spawned at construction when
-  `[net.udp]` is enabled, handed the compiled synthetic table, wildcard patterns, and invariant
-  denies **once**, and fate-shared with the kennel (cgroup kill / socketpair HUP). It owns:
-  - **the naming shim**: DNS queries arrive over the tun path addressed to a reserved pool address
-    and are answered from the table — AAAA from the synthetic table, A answered **NODATA**
-    (`NOERROR`, empty answer — never `NXDOMAIN`, which would kill the AAAA), denied names NODATA,
-    **zero wire activity in every case**. There is no `[net.dns]`; the shim is not a DNS client.
-  - **the flow table**, keyed from the packet (the tuple is never predicted, only observed): first
-    datagram to a synthetic → resolve-check-pin-dial host-side (resolution vetted against the
-    invariant denies, which can never be compiled away), one **connected** UDP socket per flow
-    (kernel-enforced return-path filtering for free), epoll loop, `recvmmsg`/`sendmmsg` if it ever
-    matters. No per-flow processes — UDP is many cheap flows, not few long conduits.
-  - **teardown**: idle expiry as the semantics (RFC 4787 posture), broker-owned; kennel death
-    propagates as HUP on the socketpair. Re-establishment is a fresh policy re-check, which gives
-    UDP a **bounded revocation latency** the TCP conduits lack — a deliberate narrowing of the
-    T1.10 residual, recorded as such.
-  - **ICMPv6, minimal**: admin-prohibited synthesized locally for policy denials (the triggering
-    packet is in hand — no retained state), port-unreachable translated from `ECONNREFUSED` via
-    `MSG_ERRQUEUE` (the quotation reconstructed from the error-queue read; the W0 P4 probe verifies
-    the recovery on the pinned kernel). Rate-capped per flow-key — never a reflection amplifier at
-    our own tun. No PTB, no PMTUD: MTU stays pinned.
-  - **ceilings**: concurrent-flow cap, new-flow token bucket, resolution concurrency bound — all
-    per-kennel by construction, so a spraying workload saturates only itself.
-  - **audit**: the broker writes its own flow records (the dbus delegate precedent for trusted-side
-    writers outside the daemon); `source` field distinguishes it.
+- **Part D — the fenced flow broker (a host-mode leaf).** kenneld is **absent from the per-flow path**
+  (the ACCEPT_SESSION lesson: no per-flow verb on node 0). The broker is a **per-kennel
+  operator-context leaf run `net.mode = host`**, spawned at construction when `[net.udp]` is enabled,
+  handed the allowlist + wildcard patterns **once**, fate-shared with the kennel (cgroup kill /
+  socketpair HUP). Its cgroup carries a `net.bpf` egress program used **deny-first as a floor over a
+  broad allow** — broad allow (the destinations are name-gated upstream, so their resolved IPs are
+  not known at compile) **plus the invariant-deny CIDRs** (cloud-metadata, link-local). That is the
+  **IP-layer fence**, kernel-enforced on the *actual dial* (`cgroup/connect6`/`sendmsg6` gate UDP).
+  The broker owns:
+  - **the naming shim (half 1):** the kennel's `resolv.conf` points at the broker's reserved ULA
+    address. A query → check the name against the allowlist → if approved, mint a `name→synthetic-IPv6`
+    mapping **if absent** (persistent for the kennel's life) and answer **AAAA** with the synthetic.
+    A / CNAME / etc → blanket **NODATA** (`NOERROR` empty — never `NXDOMAIN`, which would kill the
+    AAAA). Denied names → NODATA. **Zero wire activity in every case** — it mints, it does not
+    resolve. There is no `[net.dns]`; the shim is not a DNS client.
+  - **the flow forwarder (half 2):** an L3 packet from the facade → look up the dst synthetic in the
+    mapping. Miss → ICMP-unreach. Hit → route to the flow's socket, creating it on the first datagram
+    by handing the **name** (from the mapping) to **host-netproxy**, which gains a **UDP mode**: it
+    `getaddrinfo`s the name and opens a **connected** UDP socket to the resolved address — reusing the
+    existing dumb dialer, now for UDP (keeping a DNS client *out* of the broker: *dont-roll-your-own*).
+    **DNS rebinding is closed structurally:** an allowed name that resolves to a special-use IP is
+    refused by the broker cgroup's `net.bpf` at `connect()` — no name-based denylist, no
+    "metadata-is-TCP" assumption to lean on.
+  - **teardown:** idle expiry (RFC 4787 posture), broker-owned; kennel death → socketpair HUP.
+    Re-establishment is a fresh policy re-check → UDP gets a **bounded revocation latency** the TCP
+    conduits lack (a deliberate T1.10 narrowing, recorded).
+  - **ICMPv6, minimal:** admin-prohibited synthesised locally for denials; port-unreachable
+    translated from `ECONNREFUSED` via `MSG_ERRQUEUE` (W0 P4 verified the recovery). Rate-capped per
+    flow-key. No PTB/PMTUD: MTU stays pinned.
+  - **ceilings:** concurrent-flow cap, new-flow token bucket, resolution concurrency bound — all
+    per-kennel, so a spraying workload saturates only itself.
+  - **audit:** the broker writes its own flow records (the dbus-delegate precedent); `source`
+    distinguishes it.
 
-- **Part E — threat catalogue, inventory, and corpus.** New entries: the broker as a
-  **trusted-side adversarial parser** (hostile L3/L4 headers and DNS wire in operator context —
+- **Part E — threat catalogue, inventory, corpus.** New entries: the broker as a **host-mode,
+  `net.bpf`-fenced, trusted-side adversarial parser** (hostile L3/L4 + DNS wire in operator context —
   quarantined per-kennel, fate-shared, fuzzed; the §4.3 empty-intersection claim is *scoped to the
-  daemon*, and the inventory note says so explicitly rather than letting the daemon's cleanliness
-  read as the system's); the accepted residual that **AF_INET-only legacy clients fail**
-  (`gethostbyname` gets NODATA — recorded, not papered over); exfil inside approved UDP flows as
-  the T1.8 shape unchanged. §8.2's check-then-resolve ordering gets an explicit test pinning it.
-  Design corpus and Vol 2 chapter 8 gain the mechanism section; the `interactive`-line guidance
-  ("UDP means host mode") is revised to "UDP means `[net.udp]`; host mode remains for raw sockets
-  and packet capture."
+  daemon*, said explicitly). The **hostnames-only** posture, and the accepted residual that
+  **AF_INET-only legacy clients fail** (`gethostbyname` → NODATA — recorded, not papered over). Exfil
+  inside approved flows = the T1.8 shape unchanged. **The IP-rebinding case is closed** (by the
+  `net.bpf` fence), recorded as *closed*, not accepted. §8.2's check-then-resolve gets an explicit
+  test pinning that it is now structural. Book Vol 2 ch.8 gains the mechanism; the `interactive`
+  guidance is revised ("UDP means `[net.udp]`; host mode remains for raw sockets / packet capture").
 
-**TCB accounting.** The daemon grows two things only: the compile-time table mint and the
-construction-time broker spawn. The adversarial parsing (facade egress, broker L3/DNS) lands
-entirely outside the daemon — facade on the untrusted side, broker as a quarantined
-operator-context leaf. Measured by `gen-inventory` at landing, per the standing constraint.
+**TCB accounting.** The daemon grows one thing only — the construction-time broker spawn; kenneld
+resolves nothing on the per-flow path, so the inet host-effect stays out of the daemon here by
+construction. The adversarial parsing (facade egress, broker DNS/L3) lands entirely outside the
+daemon — facade on the untrusted side, broker a host-mode `net.bpf`-fenced leaf; host-netproxy gains
+a UDP resolve+dial mode (a host-side delegate, not the daemon). Measured by `gen-inventory` at
+landing.
 
-**Sequencing.** A → B → C/D (parallel once the socketpair contract is fixed) → E. Independent of the
-other workstreams.
+**Sequencing.** A → B → C/D (parallel once the socketpair + `resolv.conf` contracts are fixed) → E.
+Independent of the other workstreams.
 
 **Exit criteria.**
-- A `constrained` kennel with `[net.udp]` and one `protocol = "udp"` grant runs a stock QUIC client
-  (quiche/msquic example) and `dig` against the granted name; both work with **zero DNS packets on
-  the host wire for denied names** (packet-capture assertion in the test).
-- A denied name resolves NODATA and a denied flow receives admin-prohibited within the rate cap;
-  a refused port receives port-unreachable; a client in an infinite-retry loop against a dead
-  destination fails fast (the reason this workstream exists).
-- Literal-IP egress fails `ENETUNREACH` in-kernel; a crafted v4/ICMPv6/spoofed-src frame written to
-  the tun is dropped and counted on the facade predicate (fuzz corpus covers all four classes).
+- A `constrained` kennel with `[net.udp]` and one `[[net.udp.allow]]` grant runs a stock QUIC client
+  and `dig` against the granted name; both work with **zero DNS packets on the host wire for denied
+  names** (packet-capture assertion).
+- A denied name resolves NODATA; a denied flow receives admin-prohibited within the rate cap; a
+  refused port receives port-unreachable; a client in an infinite-retry loop against a dead
+  destination fails fast (the reason this exists).
+- Literal-IP egress fails `ENETUNREACH` in-kernel; a crafted v4/ICMPv6/spoofed-src frame is dropped
+  and counted on the facade predicate (fuzz corpus covers all four classes).
+- **An allowed name that rebinds to `169.254.169.254` is refused by the broker's `net.bpf` at
+  `connect()`** (rebinding closed, not accepted).
 - Broker ceilings hold under a flow-spray test; kenneld's transaction rate is **flat** during it.
-- `gen-inventory` delta reviewed; threat entries and the §8.2 ordering test landed; the
-  `SETTLED_SCHEMA_VERSION` bump and `kennel-compose` question landed with Part A.
+- `gen-inventory` delta reviewed; threat entries + the §8.2 ordering test landed; the **v3 shape
+  re-pin (additive-optional — no version bump)** and the `kennel-compose` question landed with Part A.
 
 **Non-goals.** PMTUD/PTB and any MTU above 1280. Workload-originated ICMPv6. Multicast/MLD. v4
-synthetics (AAAA-only is the posture; the legacy-client residual is accepted). A first-party
-MASQUE/`connect-udp` endpoint — if the ecosystem brings UDP to the existing CONNECT chokepoint,
-that is a later, cheaper workstream and this one does not preempt it (backlog note).
+synthetics (AAAA-only; the legacy-client residual is accepted). **Bare-IP/CIDR UDP destinations** —
+`[net.udp]` is hostname-only (no name ⇒ no synthetic; a literal IP dies `ENETUNREACH`). A first-party
+MASQUE/`connect-udp` endpoint (a later, cheaper workstream if the ecosystem brings UDP to the CONNECT
+chokepoint; W2 does not preempt it).
+
+**Future directions (adjacent, NOT W2 — recorded so the shape is on the map).** The broker +
+`net.bpf`-fence pattern generalises two ways, each its own later workstream, **complementary, not a
+fork**:
+- **A transparent slow-lane for TCP, on this tun path.** Extending the capture to TCP gives
+  non-proxy-aware **raw TCP** clients a transparent egress (the TCP sibling of the UDP residual) — at
+  userspace-L3 (per-frame memcpy) cost. It coexists **permanently** with `net.proxy`, which stays the
+  **fast lane**: the CONNECT conduit **splices** kernel-to-kernel (zero userspace copy) for
+  proxy-aware bulk TCP. Two lanes in the same kennel — the proxy on loopback, the tun owning the
+  synthetic pool — selected by whether the client honours the proxy or dials a resolved synthetic raw
+  (the same DNS shim feeds both). Additive; touches `net.proxy` nothing.
+- **Relocating `net.proxy`'s broker into a provider kennel.** Lifting the current binder/afunix
+  conversation + the INet decision out of kenneld into a mesh provider kennel (the `dbus-broker@v1`
+  pattern) moves the inet + cross-ns-binder host-effects off the daemon's per-flow path **while
+  preserving the splice datapath and the proven resolve-check-pin enforcement** — the lower-risk,
+  direct line at the W1 seam. Only a move of the *decision* (not just the plumbing) evicts inet;
+  orthogonal to the TCP slow-lane.
 
 ### W3 · The interactive file broker
 
@@ -429,9 +463,9 @@ the out-of-the-box pitch. Three deltas close it, each riding mechanism that alre
   siblings follow the same shape when wanted; not this workstream (and MCP-server confinement is a
   distinct shape — an endpoint the agent dials, not an agent binary — deferred to the backlog).
 
-**Schema.** `allowed_args` and the `[fs] cwd` fields are additive optionals on settled v3; they ride
-the release's **single** `SETTLED_SCHEMA_VERSION` bump (shared with W2 Part A — one bump for 0.6.0,
-not three), and are recorded under Policy schema changes. The book's policy chapter and
+**Schema.** `allowed_args` and the `[fs] cwd` fields are additive-optional on settled v3; they
+**re-pin the v3 shape** (no `SETTLED_SCHEMA_VERSION` bump — shipped that way), independent of W2 (W11
+is fully adjacent, no shared bump), and are recorded under Policy schema changes. The book's policy chapter and
 `policy.toml(5)` gain both; `kennel(1)` documents the append semantics.
 
 **Endpoints are measured, not drafted.** The `claude.toml` endpoint set (`api.anthropic.com`,
@@ -445,8 +479,7 @@ bump. The `cwd`-write authority is a W8 adversarial target (below).
 
 **Exit:** `kennel run claude -- <args>` works from a marked project root on a stock install with no
 user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
-endpoint set is confirmed by a live audit pass; the two schema fields land under the shared version
-bump; the README/website quickstart claim ships in the same release, not before.
+endpoint set is confirmed by a live audit pass; the two schema fields re-pin the v3 shape (no version bump); the README/website quickstart claim ships in the same release, not before.
 
 ### W12 · Persona hostname: `[identity].hostname` + a UTS namespace — **TENTATIVE**
 
@@ -593,7 +626,7 @@ W5 (raw-base64 removal)── XS, independent ───────────�
 W6 (enum validation)   ── S,  independent ────────────────────────────────────────►
 W7 (gen-man)           ── S,  independent ────────────────────────────────────────►
 W10 (retire subkennel) ── S–M, before/with W2's ULA addressing ───────────────────►
-W11 (kennel run claude)── S,  schema fields ride W2 Part A's version bump ─────────►
+W11 (kennel run claude)── S,  additive fields re-pin v3 (no bump); adjacent to W2 ────►
 W12 (persona hostname) ── XS–S, TENTATIVE — additive field, re-pin not bump; late/0.7 ►
 W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
 ```
@@ -602,9 +635,9 @@ W0 opened the release and is cheap insurance on the work that remains; with W1 w
 consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
 is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
-that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity; W11's two additive
-schema fields ride W2 Part A's single `SETTLED_SCHEMA_VERSION` bump rather than minting a second. W8
-blocks the tag.
+that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity. 0.6.0 makes only **additive-optional** settled changes (W2
+`[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`), so it **re-pins the v3 shape** rather
+than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2, not coupled. W8 blocks the tag.
 
 ## Exit criteria
 
@@ -632,19 +665,18 @@ blocks the tag.
 - `kennel run claude -- <args>` runs from a marked project root on a stock install with no
   user-authored policy; an unmarked or floor-violating cwd refuses with a naming diagnostic; the
   `claude` endpoint set is confirmed by a live egress-audit pass; `allowed_args` and the `[fs] cwd`
-  fields land under the shared `SETTLED_SCHEMA_VERSION` bump; the quickstart claim ships with it (W11).
+  fields re-pin the v3 shape (no version bump); the quickstart claim ships with it (W11).
 - The corpus cutover is complete: the book is the named corpus, the reference home carries the
   catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
   deleted with no dangling reference (W9).
 - The adversarial pass covers the UDP facade/broker, the picker path, and the W11 cwd-write grant;
   every confirmed finding is fixed before the tag (W8, ship gate).
 
-CHANGELOG records every stable-surface change — the `[net.udp]` section and the settled-schema bump,
+CHANGELOG records every stable-surface change — the `[net.udp]` section (v3 shape re-pinned, no version bump),
 the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
 raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
 bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
-derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (under the shared
-schema bump) and the `claude` reference policy, and the corpus move to the book (with the reference-home
+derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, and the corpus move to the book (with the reference-home
 relocation of the catalogue and inventory artefacts).
 
 ## Parked work
