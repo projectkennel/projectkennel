@@ -31,6 +31,10 @@
 
 use std::net::IpAddr;
 
+// The name-match dot-convention is the single source in `kennel-lib-policy` (shared with the
+// UDP-egress broker's naming shim, so the two cannot drift).
+use kennel_lib_policy::name_matches;
+
 /// Transport of an actual proxied request. A live request is always concrete TCP
 /// or UDP; the `any` wildcard exists only on rules (see [`RuleProtocol`]), never
 /// on a request.
@@ -212,7 +216,7 @@ pub enum DenyMatcher {
     /// Any address within a network. Checked against a literal-address request
     /// and against every resolved address (the rebinding defence).
     Cidr(Cidr),
-    /// A domain pattern (the dot-convention of [`name_matches`]). Checked against
+    /// A domain pattern (the dot-convention of [`name_matches`](kennel_lib_policy::name_matches)). Checked against
     /// a *name* request before resolution — a blacklisted name is refused outright
     /// in every mode, so it never reaches the resolver or the allow rules.
     Name(String),
@@ -385,7 +389,7 @@ impl Ruleset {
     }
 
     /// Whether any allow rule admits a `(name, port, transport)`. Only name
-    /// matchers apply, by the dot-convention of [`name_matches`].
+    /// matchers apply, by the dot-convention of [`name_matches`](kennel_lib_policy::name_matches).
     fn allow_name_match(&self, name: &str, port: u16, transport: Transport) -> bool {
         self.allow.iter().any(|rule| {
             matches!(&rule.matcher, Matcher::Name(pattern) if name_matches(pattern, name))
@@ -393,37 +397,6 @@ impl Ruleset {
                 && port_matches(&rule.ports, port)
         })
     }
-}
-
-/// Whether a domain `pattern` matches a requested `name`, case-insensitively
-/// (ASCII).
-///
-/// The convention follows the common no-proxy / cookie-domain form:
-///
-/// - A plain pattern (`example.com`) matches that name **exactly**.
-/// - A leading dot (`.example.com`) matches the apex **and** any subdomain
-///   (`example.com`, `api.example.com`), on a label boundary — so it does not
-///   match `notexample.com`.
-///
-/// Exact-by-default is the safe choice for a whitelist (an allow of
-/// `example.com` does not silently admit every subdomain); the leading dot is
-/// the explicit opt-in, and is the natural form for a blacklist entry.
-#[must_use]
-pub fn name_matches(pattern: &str, name: &str) -> bool {
-    pattern.strip_prefix('.').map_or_else(
-        || pattern.eq_ignore_ascii_case(name),
-        |apex| name.eq_ignore_ascii_case(apex) || ends_with_label(name, pattern),
-    )
-}
-
-/// Whether `name` ends with the dotted `suffix` (e.g. `.example.com`) on a label
-/// boundary, case-insensitively. `suffix` includes its leading dot, so the match
-/// is inherently label-aligned.
-fn ends_with_label(name: &str, suffix: &str) -> bool {
-    name.len() > suffix.len()
-        && name
-            .get(name.len().saturating_sub(suffix.len())..)
-            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
 /// Whether `port` is permitted by a rule's port set. An empty set means "any
@@ -888,37 +861,6 @@ mod tests {
             ),
             RequestDecision::Resolve
         );
-    }
-
-    // ---- name_matches (the dot-convention) ----
-
-    #[test]
-    fn plain_pattern_matches_exactly_only() {
-        assert!(name_matches("example.com", "example.com"));
-        assert!(
-            name_matches("example.com", "EXAMPLE.COM"),
-            "case-insensitive"
-        );
-        assert!(
-            !name_matches("example.com", "api.example.com"),
-            "no implicit subdomain"
-        );
-        assert!(!name_matches("example.com", "notexample.com"));
-    }
-
-    #[test]
-    fn dotted_pattern_matches_apex_and_subdomains_on_a_label_boundary() {
-        assert!(name_matches(".example.com", "example.com"), "apex");
-        assert!(name_matches(".example.com", "api.example.com"), "subdomain");
-        assert!(
-            name_matches(".example.com", "a.b.example.com"),
-            "deep subdomain"
-        );
-        assert!(
-            !name_matches(".example.com", "notexample.com"),
-            "label boundary"
-        );
-        assert!(!name_matches(".example.com", "example.com.evil.net"));
     }
 
     // ---- domain blacklist (name deny) ----

@@ -139,6 +139,69 @@ pub struct NameRule {
     pub protocol: Protocol,
 }
 
+/// Whether a policy name `pattern` matches a destination/query `name`, by the proxy's
+/// dot-convention.
+///
+/// This is the single source both the egress proxy (`kenneld`'s `NetRuntime`) and the UDP-egress
+/// broker's naming shim (`kennel-udp-broker`) match names against, so the two cannot drift:
+///
+/// - a plain pattern (`example.com`) matches that name **exactly** — the safe whitelist default, so
+///   an allow of `example.com` does not silently admit subdomains;
+/// - a leading dot (`.example.com`) matches the apex **and** any subdomain (`example.com`,
+///   `api.example.com`) on a label boundary, so it does not match `notexample.com`.
+///
+/// Case-insensitive (ASCII).
+#[must_use]
+pub fn name_matches(pattern: &str, name: &str) -> bool {
+    pattern.strip_prefix('.').map_or_else(
+        || pattern.eq_ignore_ascii_case(name),
+        |apex| name.eq_ignore_ascii_case(apex) || ends_with_label(name, pattern),
+    )
+}
+
+/// Whether `name` ends with the dotted `suffix` (e.g. `.example.com`) on a label boundary,
+/// case-insensitively. `suffix` includes its leading dot, so the match is inherently label-aligned.
+fn ends_with_label(name: &str, suffix: &str) -> bool {
+    name.len() > suffix.len()
+        && name
+            .get(name.len().saturating_sub(suffix.len())..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
+#[cfg(test)]
+mod name_match_tests {
+    use super::name_matches;
+
+    #[test]
+    fn plain_pattern_matches_exactly_only() {
+        assert!(name_matches("example.com", "example.com"));
+        assert!(
+            name_matches("example.com", "EXAMPLE.COM"),
+            "case-insensitive"
+        );
+        assert!(
+            !name_matches("example.com", "api.example.com"),
+            "no implicit subdomain"
+        );
+        assert!(!name_matches("example.com", "notexample.com"));
+    }
+
+    #[test]
+    fn dotted_pattern_matches_apex_and_subdomains_on_a_label_boundary() {
+        assert!(name_matches(".example.com", "example.com"), "apex");
+        assert!(name_matches(".example.com", "api.example.com"), "subdomain");
+        assert!(
+            name_matches(".example.com", "a.b.example.com"),
+            "deep subdomain"
+        );
+        assert!(
+            !name_matches(".example.com", "notexample.com"),
+            "label boundary"
+        );
+        assert!(!name_matches(".example.com", "example.com.evil.net"));
+    }
+}
+
 /// Where the per-kennel egress proxy listens, resolved from the source policy's
 /// `proxy_listen_*_address = "offset:port"` (Kennel book Vol 2 ch.8 (The Network)).
 ///
