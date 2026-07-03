@@ -159,9 +159,14 @@ cannot complete a dial the kernel BPF fence will not clear.
   — the capture-by-synthetic mechanism has no address to match, and a literal-IP UDP datagram dies
   `ENETUNREACH` in-kernel anyway (Part B). One parser serves both endpoints on a single flag — *is a
   CIDR allowed here?* — true for the proxy list, false for `[[net.udp.allow]]`; the proxy list in
-  turn refuses `protocol = "udp"` (wrong endpoint). UDP destinations settle into the existing
-  `allow_names` as `Protocol::Udp` rules, so the broker filters its grant-set by transport — no new
-  settled endpoint, and fragments compose `[[net.udp.allow.add]]` exactly like the proxy list.
+  turn refuses `protocol = "udp"` (wrong endpoint). UDP destinations settle into their **own**
+  `udp_allow_names` list — *not* the proxy's `allow_names`, which `kenneld`'s TCP-CONNECT proxy
+  consumes protocol-blind (every entry becomes a proxy rule), so a UDP name there would be a
+  transport-confusion over-grant. The fenced broker (Part D) is that list's sole consumer; fragments
+  compose `[[net.udp.allow.add]]` exactly like the proxy list. (When the adjacent tun-TCP path lands
+  it gains a sibling `tcp_allow_names`: the broker's DNS half mints a synthetic for a name in the
+  *union*, but admission stays per-transport against the separate lists — the too-generic proxy
+  `allow_names` is renamed only when the proxy itself folds into a broker.)
   **There is no compile-time table:** the allowlist may hold wildcards
   (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
   only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
