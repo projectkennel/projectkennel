@@ -69,6 +69,7 @@ pub mod journal;
 pub mod listenfd;
 pub mod mount;
 pub mod namespace;
+pub mod poll;
 pub mod process;
 pub mod pty;
 pub mod random;
