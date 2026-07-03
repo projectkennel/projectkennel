@@ -28,6 +28,9 @@ kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The mesh-service binder client (Connection, ADD_SERVICE, the ACCEPT_SESSION control verb): the
 # broker is a standing mesh service kennel, reached over the connector mesh bus like dbus-broker.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+# host-netproxy's UDP mode (resolve + connect_udp): the operator-context resolve-and-dial the broker
+# reuses per flow, exactly as dbus-broker reuses host-dbus::mediate. The broker never resolves.
+kennel-host-delegate = { path = "../kennel-host-delegate" }
 
 [lints]
 workspace = true

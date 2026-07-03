@@ -68,10 +68,12 @@ HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-priv
 HOST_STAT_BINS="kennel-bin-init"
 # In-cage (→ facades/): the conduit facades, the OCI launcher, the spawn execution unit
 # (`kennel-spawn` → `spawn`), the standing D-Bus broker (`dbus-broker`, the mediation service
-# kennel's workload), and the GUI compositor broker (`compositor-broker`, the confined-GUI service
+# kennel's workload), the GUI compositor broker (`compositor-broker`, the confined-GUI service
 # kennel's workload — it spawns a per-connection nested compositor and relays the consumer
-# into it) — all static, all reached by path inside a constructed view.
-FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus kennel-bin-oci-entry dbus-broker compositor-broker"
+# into it), the L3-egress facade (`facade-tun`, the in-view frame forwarder) and the standing
+# tun broker (`tun-broker`, the UDP-egress mediation service kennel's workload) — all static, all
+# reached by path inside a constructed view.
+FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-tun kennel-bin-oci-entry dbus-broker compositor-broker tun-broker"
 
 # The in-kennel SPAWN/mesh TEST drivers — `kennel-facade` builds them, but they are the TEST SUITE,
 # not part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload,

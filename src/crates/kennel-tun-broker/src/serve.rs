@@ -1,6 +1,6 @@
 //! The broker's event loop (W2 Part D): fold the facade channel and per-flow sockets into one loop.
 //!
-//! [`Broker`] holds the per-kennel state — the allowlist, the deny set, the synthetic [`Pool`], the
+//! [`Broker`] holds the per-kennel state — the allowlist, the synthetic [`Pool`], the
 //! [`FlowTable`] and its ceilings — and turns each frame from `facade-tun` into an action:
 //!
 //! - a DNS query to the reserved resolver address → the shim's AAAA/NODATA reply, sent back;
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use kennel_lib_syscall::poll::Poller;
 
-use crate::flow::{dial, DenyList, FlowError};
+use crate::flow::{dial, FlowError};
 use crate::icmp::{build_dest_unreachable, CODE_ADMIN_PROHIBITED, CODE_PORT_UNREACHABLE};
 use crate::shim::{Allowlist, Pool};
 use crate::table::{FlowKey, FlowTable};
@@ -61,7 +61,6 @@ pub struct Broker {
     /// The reserved resolver address (`::2`), where DNS queries arrive.
     resolver_addr: Ipv6Addr,
     allow: Allowlist,
-    deny: DenyList,
     pool: Pool,
     table: FlowTable,
     bucket: crate::table::TokenBucket,
@@ -108,24 +107,17 @@ pub struct Ceilings {
 }
 
 impl Broker {
-    /// Assemble a broker over the tun `kennel_addr` (`::1`), with the allowlist, deny set, and
-    /// ceilings. The synthetic pool and the reserved resolver address are derived from the address's
-    /// `/64`.
+    /// Assemble a broker over the tun `kennel_addr` (`::1`), with the allowlist and ceilings. The
+    /// synthetic pool and the reserved resolver address are derived from the address's `/64`. The
+    /// deny-CIDR floor is the delegate's cgroup BPF filter, not broker state.
     #[must_use]
-    pub fn new(
-        kennel_addr: Ipv6Addr,
-        allow: Allowlist,
-        deny: DenyList,
-        ceilings: Ceilings,
-        now: Instant,
-    ) -> Self {
+    pub fn new(kennel_addr: Ipv6Addr, allow: Allowlist, ceilings: Ceilings, now: Instant) -> Self {
         let prefix = prefix64(kennel_addr);
         let resolver_addr = suffix(prefix, RESOLVER_HOST);
         Self {
             kennel_addr,
             resolver_addr,
             allow,
-            deny,
             pool: Pool::new(prefix),
             table: FlowTable::new(ceilings.max_flows, ceilings.idle_timeout),
             bucket: crate::table::TokenBucket::new(
@@ -162,14 +154,14 @@ impl Broker {
         if !self.bucket.try_take(now) {
             return Egress::Nothing; // new-flow rate exceeded; drop
         }
-        match dial(&self.allow, &self.deny, &route.name, route.dst_port) {
+        match dial(&self.allow, &route.name, route.dst_port) {
             Ok(socket) => {
                 let _ = socket.send(route.payload);
                 Egress::NewFlow { key, socket }
             }
-            Err(FlowError::NotAllowed | FlowError::Denied | FlowError::Unresolved) => {
-                // A policy denial or a name that cannot be reached: fast-fail with admin-prohibited,
-                // quoting the frame that triggered it.
+            Err(FlowError::NotAllowed | FlowError::Unresolved | FlowError::Dial(_)) => {
+                // Not permitted, unreachable, or refused by the BPF deny floor (connect EPERM):
+                // fast-fail with admin-prohibited, quoting the frame that triggered it.
                 Egress::ToFacade(build_dest_unreachable(
                     key.synthetic,
                     self.kennel_addr,
@@ -177,7 +169,7 @@ impl Broker {
                     frame,
                 ))
             }
-            Err(FlowError::Resolve(_) | FlowError::Dial(_)) => Egress::Nothing, // transient; drop
+            Err(FlowError::Resolve(_)) => Egress::Nothing, // transient resolver failure; drop
         }
     }
 
@@ -409,7 +401,6 @@ mod tests {
         Broker::new(
             kennel(),
             Allowlist::new(grants),
-            DenyList::from_rules([].iter()),
             Ceilings {
                 max_flows: 64,
                 new_flow_burst: 32,
@@ -494,22 +485,28 @@ mod tests {
     }
 
     #[test]
-    fn an_egress_to_a_denied_flow_gets_admin_prohibited() {
-        // Mint a synthetic for an allowed *name*, but its resolved address will be denied: use a
-        // name that is a literal RFC1918 address so dial() resolves it and the deny re-check refuses
-        // it, yielding admin-prohibited.
-        let mut b = broker(vec![grant("10.0.0.1")]);
-        // First, the query mints the synthetic for "10.0.0.1".
-        let q = dns_frame(40000, &dns_query("10.0.0.1"));
+    fn an_egress_on_a_disallowed_port_gets_admin_prohibited() {
+        // A synthetic minted for an allowed name, but the flow's port is not in the grant: the flow
+        // gate refuses it (before any resolution) with admin-prohibited. The deny-CIDR floor itself
+        // is the delegate's cgroup BPF filter (a connect EPERM), exercised in e2e, not here.
+        let mut b = broker(vec![NameRule {
+            name: "example.com".to_owned(),
+            ports: vec![443],
+            protocol: Protocol::Udp,
+        }]);
+        let q = dns_frame(40000, &dns_query("example.com"));
         let reply = facade_bytes(b.on_egress(&q, Instant::now())).expect("query reply");
         let dns = reply.get(48..).expect("dns");
         let parsed = simple_dns::Packet::parse(dns).expect("parse");
-        let synth = parsed.answers.iter().find_map(|rr| match &rr.rdata {
-            simple_dns::rdata::RData::AAAA(a) => Some(Ipv6Addr::from(a.address)),
-            _ => None,
-        });
-        let synth = synth.expect("a synthetic was minted");
-        // Now an egress datagram to that synthetic dials 10.0.0.1, which the deny re-check refuses.
+        let synth = parsed
+            .answers
+            .iter()
+            .find_map(|rr| match &rr.rdata {
+                simple_dns::rdata::RData::AAAA(a) => Some(Ipv6Addr::from(a.address)),
+                _ => None,
+            })
+            .expect("a synthetic was minted");
+        // Egress to that synthetic on port 53 (not in the [443] grant) → admin-prohibited.
         let frame = udp_frame(kennel(), synth, 5000, 53, b"query");
         let icmp = facade_bytes(b.on_egress(&frame, Instant::now())).expect("admin-prohibited");
         assert_eq!(icmp.get(6), Some(&58), "ICMPv6");

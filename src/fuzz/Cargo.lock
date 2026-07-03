@@ -224,6 +224,7 @@ dependencies = [
 name = "kennel-tun-broker"
 version = "0.5.0"
 dependencies = [
+ "kennel-host-delegate",
  "kennel-lib-binder",
  "kennel-lib-policy",
  "kennel-lib-syscall",

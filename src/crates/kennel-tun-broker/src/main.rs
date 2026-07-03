@@ -34,10 +34,9 @@ use std::time::{Duration, Instant};
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::service::{status, tun_broker, verb};
-use kennel_lib_policy::settled::{NameRule, NetRule, Protocol};
+use kennel_lib_policy::settled::{NameRule, Protocol};
 use kennel_lib_syscall::poll::Poller;
 
-use kennel_tun_broker::flow::DenyList;
 use kennel_tun_broker::serve::{self, Broker, Ceilings};
 use kennel_tun_broker::shim::Allowlist;
 
@@ -48,8 +47,8 @@ const MESH_DEVICE: &str = "/dev/binderfs-mesh/binder";
 /// push `ACCEPT_SESSION`; consumers are never handed it.
 const SERVICE_NAME: &str = "org.projectkennel.tun-broker";
 
-/// The mmap size for the broker's binder connection. Control transactions are small (grants + a few
-/// CIDRs); no frame data crosses binder.
+/// The mmap size for the broker's binder connection. Control transactions are small (the grants);
+/// no frame data crosses binder.
 const MAP_SIZE: usize = 256 * 1024;
 
 /// Poll timeout for the binder serve loop (milliseconds).
@@ -82,18 +81,6 @@ fn accept_session(conn: &Connection, incoming: &Incoming) {
         ports: g.ports,
         protocol: protocol_from_ordinal(g.protocol),
     }));
-    let deny_rules: Vec<NetRule> = acc
-        .denies
-        .into_iter()
-        .map(|d| NetRule {
-            cidr: d.cidr,
-            prefix_len: d.prefix_len,
-            port_min: d.port_min,
-            port_max: d.port_max,
-            protocol: protocol_from_ordinal(d.protocol),
-        })
-        .collect();
-    let deny = DenyList::from_rules(deny_rules.iter());
 
     let (Ok((broker_end, consumer_end)), Ok(poller)) =
         (UnixDatagram::pair(), Poller::new(POLL_EVENTS))
@@ -105,7 +92,6 @@ fn accept_session(conn: &Connection, incoming: &Incoming) {
     let broker = Broker::new(
         kennel_addr,
         allow,
-        deny,
         Ceilings {
             max_flows: MAX_FLOWS,
             new_flow_burst: NEW_FLOW_BURST,

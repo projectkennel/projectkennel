@@ -23,3 +23,4 @@
 //! the egress gate; this delegate is the only path across it.
 
 pub mod conduit;
+pub mod udp;

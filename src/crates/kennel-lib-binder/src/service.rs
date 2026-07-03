@@ -1017,7 +1017,7 @@ pub mod broker {
 /// The verb `kenneld` speaks on the UDP-egress broker's control node, acquired on the connector mesh
 /// bus. One verb, [`tun_broker::ACCEPT_SESSION`]: kenneld, having identified a `[net.udp]` consumer on
 /// its per-kennel bus, tells the broker to accept one egress session with that consumer's compiled
-/// UDP grants and deny CIDRs, and the tun `/64` the consumer's synthetics live in. The broker mints
+/// UDP grants and the tun `/64` the consumer's synthetics live in. The broker mints
 /// a per-session data channel (an `AF_UNIX` fd it hands back), runs the flow mediation over it, and
 /// keys the session by the kernel-attested node — never by anything the consumer says. kenneld
 /// decides the grants; the broker applies and never relays through kenneld on the data path.
@@ -1047,25 +1047,10 @@ pub mod tun_broker {
         pub protocol: u8,
     }
 
-    /// One deny CIDR the broker re-checks each resolved address against.
+    /// A decoded UDP `ACCEPT_SESSION`: the consumer's tun `/64` address and its grants.
     ///
-    /// Mirrors the settled `NetRule`. `protocol` is the raw settled ordinal (`0` any, `1` tcp, `2`
-    /// udp) — the wire stays policy-crate-agnostic; kenneld and the broker map it to/from the enum.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct Deny {
-        /// Network base address in dotted-quad or colon form.
-        pub cidr: String,
-        /// Prefix length in bits.
-        pub prefix_len: u8,
-        /// Inclusive lower port bound.
-        pub port_min: u16,
-        /// Inclusive upper port bound.
-        pub port_max: u16,
-        /// Protocol ordinal (`0` any, `1` tcp, `2` udp).
-        pub protocol: u8,
-    }
-
-    /// A decoded UDP `ACCEPT_SESSION`: the consumer's tun `/64` address, its grants, and the deny set.
+    /// There is no deny set on the wire: the categorical deny-CIDR floor is the broker's cgroup BPF
+    /// filter (`net.bpf`, on its `net.mode = host` cgroup), not a userspace re-check.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct AcceptTunSession {
         /// The consumer's tun interface address (`::1` in its `/64`); its low 64 bits' prefix is the
@@ -1073,14 +1058,12 @@ pub mod tun_broker {
         pub tun_addr: [u8; 16],
         /// The UDP name grants (`udp_allow_names`).
         pub grants: Vec<Grant>,
-        /// The deny CIDRs (invariant + author) the broker re-vets resolved addresses against.
-        pub denies: Vec<Deny>,
     }
 
     /// Encode an `ACCEPT_SESSION` request:
-    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16, u8 proto) | denies: count·(cidr, u8, u16, u16, u8)]`.
+    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16, u8 proto)]`.
     #[must_use]
-    pub fn encode_accept(tun_addr: [u8; 16], grants: &[Grant], denies: &[Deny]) -> Vec<u8> {
+    pub fn encode_accept(tun_addr: [u8; 16], grants: &[Grant]) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&tun_addr);
         put_count(&mut out, grants.len());
@@ -1091,14 +1074,6 @@ pub mod tun_broker {
                 put_u16(&mut out, p);
             }
             put_u8(&mut out, g.protocol);
-        }
-        put_count(&mut out, denies.len());
-        for d in denies {
-            put_str(&mut out, &d.cidr);
-            put_u8(&mut out, d.prefix_len);
-            put_u16(&mut out, d.port_min);
-            put_u16(&mut out, d.port_max);
-            put_u8(&mut out, d.protocol);
         }
         out
     }
@@ -1124,30 +1099,10 @@ pub mod tun_broker {
                 protocol,
             });
         }
-        let n_denies = take_u16(&mut cur)?;
-        let mut denies = Vec::with_capacity(usize::from(n_denies));
-        for _ in 0..n_denies {
-            let cidr = take_str(&mut cur)?;
-            let prefix_len = take_u8(&mut cur)?;
-            let port_min = take_u16(&mut cur)?;
-            let port_max = take_u16(&mut cur)?;
-            let protocol = take_u8(&mut cur)?;
-            denies.push(Deny {
-                cidr,
-                prefix_len,
-                port_min,
-                port_max,
-                protocol,
-            });
-        }
         if !cur.is_empty() {
             return None; // trailing garbage
         }
-        Some(AcceptTunSession {
-            tun_addr,
-            grants,
-            denies,
-        })
+        Some(AcceptTunSession { tun_addr, grants })
     }
 
     #[cfg(test)]
@@ -1171,24 +1126,16 @@ pub mod tun_broker {
                     protocol: 2,
                 },
             ];
-            let denies = vec![Deny {
-                cidr: "169.254.169.254".to_owned(),
-                prefix_len: 32,
-                port_min: 0,
-                port_max: 65535,
-                protocol: 0,
-            }];
-            let bytes = encode_accept(tun, &grants, &denies);
+            let bytes = encode_accept(tun, &grants);
             let got = decode_accept(&bytes).expect("decode");
             assert_eq!(got.tun_addr, tun);
             assert_eq!(got.grants, grants);
-            assert_eq!(got.denies, denies);
         }
 
         #[test]
         fn accept_rejects_malformed() {
             let tun = [0u8; 16];
-            let mut bad = encode_accept(tun, &[], &[]);
+            let mut bad = encode_accept(tun, &[]);
             bad.push(0x00);
             assert!(decode_accept(&bad).is_none(), "trailing garbage");
             assert!(decode_accept(&[]).is_none(), "short (no tun addr)");

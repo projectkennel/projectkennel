@@ -314,27 +314,25 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
 
 /// A `[net.udp]` consumer's tun session config, pushed to the tun-broker over `ACCEPT_SESSION`.
 ///
-/// The kennel's tun `/64` interface address plus its compiled grants and deny CIDRs, already in the
-/// wire shape so the mesh resolver only has to encode them.
+/// The kennel's tun `/64` interface address plus its compiled grants, already in the wire shape so
+/// the mesh resolver only has to encode them. No deny set: the categorical deny-CIDR floor is the
+/// broker's own cgroup BPF filter (its `net.mode = host` `net.bpf`), not per-session state.
 #[derive(Clone, Debug)]
 pub struct TunSessionConfig {
     /// The consumer's tun interface address (`::1` in its `/64`) — sixteen octets.
     pub tun_addr: [u8; 16],
     /// The UDP name grants (`udp_allow_names`), in the wire shape.
     pub grants: Vec<kennel_lib_binder::service::tun_broker::Grant>,
-    /// The deny CIDRs (invariant + author), in the wire shape.
-    pub denies: Vec<kennel_lib_binder::service::tun_broker::Deny>,
 }
 
 /// Build a [`TunSessionConfig`] from a settled net policy: the kennel's tun `/64` address (derived
-/// the single-source way, matching the constructor) plus its UDP grants and deny CIDRs, converted to
-/// the tun-broker wire shape.
+/// the single-source way, matching the constructor) plus its UDP grants, in the tun-broker wire shape.
 fn tun_session_config(
     net: &kennel_lib_policy::NetPolicy,
     op_uid: u32,
     ctx: u16,
 ) -> TunSessionConfig {
-    use kennel_lib_binder::service::tun_broker::{Deny, Grant};
+    use kennel_lib_binder::service::tun_broker::Grant;
     let tun_addr = kennel_privhelper::addr::tun_addr(op_uid, ctx).octets();
     let grants = net
         .udp_allow_names
@@ -345,23 +343,7 @@ fn tun_session_config(
             protocol: protocol_ordinal(r.protocol),
         })
         .collect();
-    let denies = net
-        .deny_invariant
-        .iter()
-        .chain(&net.deny_author)
-        .map(|r| Deny {
-            cidr: r.cidr.clone(),
-            prefix_len: r.prefix_len,
-            port_min: r.port_min,
-            port_max: r.port_max,
-            protocol: protocol_ordinal(r.protocol),
-        })
-        .collect();
-    TunSessionConfig {
-        tun_addr,
-        grants,
-        denies,
-    }
+    TunSessionConfig { tun_addr, grants }
 }
 
 /// The settled `Protocol` as its wire ordinal (`0` any, `1` tcp, `2` udp).
@@ -977,7 +959,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             let payload = kennel_lib_binder::service::tun_broker::encode_accept(
                 config.tun_addr,
                 &config.grants,
-                &config.denies,
             );
             drop(map);
             Some(payload)
