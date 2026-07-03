@@ -1,12 +1,10 @@
-//! Level-triggered readiness multiplexing (`epoll`) for the event-loop leaves.
+//! Level-triggered readiness multiplexing (`epoll`) for the broker's per-session loop.
 //!
-//! A curated [`Poller`] over `epoll(7)`: register a file descriptor with a caller `token`, wait for
-//! any registered fd to become readable, error, or hang up, and read back the ready tokens. The
-//! UDP-egress broker uses one to fold its facade channel and its per-flow sockets into a single loop
-//! (Kennel book Vol 2 ch.8 (The Network)) without a thread per flow.
-//!
-//! The heavy lifting is `nix`'s safe `Epoll` wrapper; this presents it as the workspace's curated
-//! primitive so the leaves stay `#![forbid(unsafe_code)]` and never name `nix` directly.
+//! A small [`Poller`] over `epoll(7)`: register a file descriptor with a caller `token`, wait for any
+//! registered fd to become readable, error, or hang up, and read back the ready tokens. The broker
+//! folds its facade channel and its per-flow sockets into a single loop through it, without a thread
+//! per flow. A leaf concern — it lives here, not in the daemon's syscall crate — over `nix`'s safe
+//! `Epoll` wrapper, so the broker stays `#![forbid(unsafe_code)]`.
 
 use std::io;
 use std::os::fd::AsFd;

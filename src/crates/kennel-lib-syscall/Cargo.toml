@@ -26,7 +26,7 @@ kennel-lib-scm = { path = "../kennel-lib-scm" }
 # nix: safe, typed wrappers over the syscalls we would otherwise hand-roll
 # `unsafe` (CODING-STANDARDS.md §4 — prefer a vetted crate to our own unsafe).
 # default-features off; features added pay-as-you-go as each wrapper lands.
-nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "resource", "sched", "mount", "fs", "socket", "net", "term", "signal", "inotify", "event"] }
+nix = { version = "=0.31.3", default-features = false, features = ["user", "process", "resource", "sched", "mount", "fs", "socket", "net", "term", "signal", "inotify"] }
 # bitflags: typed flag sets for the namespace/clone bindings (the Landlock access-right sets
 # moved to kennel-lib-landlock with that module). Already vendored/approved (also a transitive of
 # nix); a direct dependency here because namespace.rs uses it directly.

@@ -25,7 +25,7 @@ use std::net::{Ipv6Addr, UdpSocket};
 use std::os::unix::net::UnixDatagram;
 use std::time::{Duration, Instant};
 
-use kennel_lib_syscall::poll::Poller;
+use crate::poll::Poller;
 
 use crate::flow::{dial, FlowError};
 use crate::icmp::{build_dest_unreachable, CODE_ADMIN_PROHIBITED, CODE_PORT_UNREACHABLE};

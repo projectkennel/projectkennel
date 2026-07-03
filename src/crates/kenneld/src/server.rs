@@ -307,52 +307,6 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// exactly as long as the kennel does. It is *not* a session/credential store: identity is the
     /// kernel's per-transaction attestation, this is only the policy to apply once identified.
     dbus_filters: std::sync::Arc<Mutex<HashMap<u16, kennel_lib_policy::DbusRuntime>>>,
-    /// Per-`ctx` tun session config for `[net.udp]` consumers, resolved by the tun-broker mesh bus's
-    /// node-0 handler. Same lifetime and non-store discipline as [`Self::dbus_filters`].
-    tun_filters: std::sync::Arc<Mutex<HashMap<u16, TunSessionConfig>>>,
-}
-
-/// A `[net.udp]` consumer's tun session config, pushed to the tun-broker over `ACCEPT_SESSION`.
-///
-/// The kennel's tun `/64` interface address plus its compiled grants, already in the wire shape so
-/// the mesh resolver only has to encode them. No deny set: the categorical deny-CIDR floor is the
-/// broker's own cgroup BPF filter (its `net.mode = host` `net.bpf`), not per-session state.
-#[derive(Clone, Debug)]
-pub struct TunSessionConfig {
-    /// The consumer's tun interface address (`::1` in its `/64`) — sixteen octets.
-    pub tun_addr: [u8; 16],
-    /// The UDP name grants (`udp_allow_names`), in the wire shape.
-    pub grants: Vec<kennel_lib_binder::service::tun_broker::Grant>,
-}
-
-/// Build a [`TunSessionConfig`] from a settled net policy: the kennel's tun `/64` address (derived
-/// the single-source way, matching the constructor) plus its UDP grants, in the tun-broker wire shape.
-fn tun_session_config(
-    net: &kennel_lib_policy::NetPolicy,
-    op_uid: u32,
-    ctx: u16,
-) -> TunSessionConfig {
-    use kennel_lib_binder::service::tun_broker::Grant;
-    let tun_addr = kennel_privhelper::addr::tun_addr(op_uid, ctx).octets();
-    let grants = net
-        .udp_allow_names
-        .iter()
-        .map(|r| Grant {
-            name: r.name.clone(),
-            ports: r.ports.clone(),
-            protocol: protocol_ordinal(r.protocol),
-        })
-        .collect();
-    TunSessionConfig { tun_addr, grants }
-}
-
-/// The settled `Protocol` as its wire ordinal (`0` any, `1` tcp, `2` udp).
-const fn protocol_ordinal(p: kennel_lib_policy::Protocol) -> u8 {
-    match p {
-        kennel_lib_policy::Protocol::Any => 0,
-        kennel_lib_policy::Protocol::Tcp => 1,
-        kennel_lib_policy::Protocol::Udp => 2,
-    }
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -378,7 +332,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
             mesh_buses: Mutex::new(HashMap::new()),
             dbus_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
-            tun_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -694,17 +647,11 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 // keyed to the bus identity (it has no per-kennel audit state dir).
                 let w =
                     std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
-                // A brokered-session connector bus gets the identity resolver for its shape: its
-                // node-0 handler mints a filtered session per consumer (a D-Bus node, or the tun
-                // session's fd). Every other connector bus resolves a consumer straight to its
-                // provider's handle (no resolver).
-                let resolver = if name == "org.projectkennel.dbus-broker" {
-                    Some(crate::mesh_bus::MeshResolver::Dbus(self.dbus_resolver()))
-                } else if name == "org.projectkennel.tun-broker" {
-                    Some(crate::mesh_bus::MeshResolver::Tun(self.tun_resolver()))
-                } else {
-                    None
-                };
+                // The D-Bus connector bus alone gets the identity resolver: its node-0 handler
+                // mints a filtered session per consumer. Every other connector bus resolves a
+                // consumer straight to its provider's handle (no resolver).
+                let dbus_resolver =
+                    (name == "org.projectkennel.dbus-broker").then(|| self.dbus_resolver());
                 // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
                 // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
                 // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
@@ -717,7 +664,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     name,
                     key,
                     &w,
-                    resolver,
+                    dbus_resolver,
                     holder_pid,
                     holder_sock,
                 )?;
@@ -876,13 +823,9 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Deregister `name` and return its context to the pool.
     fn release(&self, name: &str, ctx: u16) {
-        // Drop this kennel's D-Bus and tun filters (if brokered) — its ctx is being freed, so the
-        // mesh resolvers must no longer resolve a future caller in a reused cgroup to a stale policy.
+        // Drop this kennel's D-Bus filter (if brokered) — its ctx is being freed, so the mesh
+        // resolver must no longer resolve a future caller in a reused cgroup to a stale policy.
         self.dbus_filters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&ctx);
-        self.tun_filters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&ctx);
@@ -904,11 +847,11 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .insert(ctx, dbus);
     }
 
-    /// Build the D-Bus mesh resolver (see [`crate::mesh_bus::SessionResolver`]): map a connecting
+    /// Build the D-Bus mesh resolver (see [`crate::mesh_bus::DbusResolver`]): map a connecting
     /// consumer's `(sender_pid, capability name)` to the encoded `ACCEPT_SESSION` filter, resolving
     /// `sender_pid` → cgroup → ctx → its `[dbus]` policy *fresh* each call. Nothing is remembered;
     /// the only standing state is the ctx→policy map, keyed on a kernel-managed cgroup lifetime.
-    fn dbus_resolver(&self) -> crate::mesh_bus::SessionResolver {
+    fn dbus_resolver(&self) -> crate::mesh_bus::DbusResolver {
         let filters = std::sync::Arc::clone(&self.dbus_filters);
         std::sync::Arc::new(move |sender_pid: i32, name: &str| {
             let bus = kennel_lib_binder::service::dbus::capability_bus(name)?;
@@ -928,37 +871,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 &rules.broadcast,
                 &rules.own,
                 &rules.deny_talk,
-            );
-            drop(map);
-            Some(payload)
-        })
-    }
-
-    /// Record a `[net.udp]` consumer's tun session config (its tun `/64` address, grants, and deny
-    /// CIDRs) under its `ctx`, for the tun-broker mesh bus's node-0 handler to resolve callers
-    /// against (see [`Shared::tun_filters`]). Removed when the ctx is released ([`Shared::release`]).
-    fn register_tun_filter(&self, ctx: u16, config: TunSessionConfig) {
-        self.tun_filters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx, config);
-    }
-
-    /// Build the tun mesh resolver (see [`crate::mesh_bus::SessionResolver`]): map a connecting
-    /// `[net.udp]` consumer's `sender_pid` → cgroup → ctx → its registered [`TunSessionConfig`], and
-    /// encode the tun `ACCEPT_SESSION`. Fresh each call; the ctx is the authorization (the kennel
-    /// opted into `[net.udp]`), so the capability name it asked for is not itself trusted.
-    fn tun_resolver(&self) -> crate::mesh_bus::SessionResolver {
-        let filters = std::sync::Arc::clone(&self.tun_filters);
-        std::sync::Arc::new(move |sender_pid: i32, _name: &str| {
-            let ctx = crate::cgroup::pid_to_ctx(sender_pid)?;
-            let map = filters
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let config = map.get(&ctx)?;
-            let payload = kennel_lib_binder::service::tun_broker::encode_accept(
-                config.tun_addr,
-                &config.grants,
             );
             drop(map);
             Some(payload)
@@ -1944,25 +1856,6 @@ pub fn run_kennel<P, L>(
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
-    // Register this kennel's tun session config if it opts into `[net.udp]` and the tun broker is
-    // enabled, so the tun-broker mesh bus's node-0 handler can resolve a future facade-tun connect
-    // (sender_pid → cgroup → ctx → here) and push its grants/denies over ACCEPT_SESSION.
-    if loaded.net.udp {
-        let tun_broker_enabled = {
-            let cat = shared
-                .catalogue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            !cat.resolve("org.projectkennel.tun-broker").is_empty()
-        };
-        if tun_broker_enabled {
-            shared.register_tun_filter(
-                ctx,
-                tun_session_config(&loaded.net, shared.identity.uid, ctx),
-            );
-        }
-    }
-
     let mut spec = crate::Spec {
         id: req.kennel.clone(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),

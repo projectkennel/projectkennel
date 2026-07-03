@@ -66,10 +66,6 @@ pub const TUN_CTX_FLIP: u16 = 0x8000;
 /// and the rest is the synthetic pool.
 pub const TUN_HOST: u64 = 1;
 
-/// The tun's reserved resolver host suffix within its `/64` (`::2`): where the tun broker's DNS
-/// naming shim answers, and where a `[net.udp]` kennel's `resolv.conf` points.
-pub const TUN_RESOLVER_HOST: u64 = 2;
-
 /// The kennel's tun interface address (`::1` in its ULA `/64`), from the operator uid and kennel ctx.
 ///
 /// The single source both the privileged constructor (which addresses the tun) and kenneld (which
@@ -78,12 +74,6 @@ pub const TUN_RESOLVER_HOST: u64 = 2;
 #[must_use]
 pub fn tun_addr(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
     loopback_v6(op_uid, kennel_ctx ^ TUN_CTX_FLIP, TUN_HOST)
-}
-
-/// The tun's reserved resolver address (`::2` in the tun `/64`), where the broker's DNS shim answers.
-#[must_use]
-pub fn tun_resolver(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
-    loopback_v6(op_uid, kennel_ctx ^ TUN_CTX_FLIP, TUN_RESOLVER_HOST)
 }
 
 #[cfg(test)]

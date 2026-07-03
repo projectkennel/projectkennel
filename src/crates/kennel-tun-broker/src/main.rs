@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::service::{status, tun_broker, verb};
 use kennel_lib_policy::settled::{NameRule, Protocol};
-use kennel_lib_syscall::poll::Poller;
+use kennel_tun_broker::poll::Poller;
 
 use kennel_tun_broker::serve::{self, Broker, Ceilings};
 use kennel_tun_broker::shim::Allowlist;

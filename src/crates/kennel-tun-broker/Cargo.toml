@@ -2,7 +2,7 @@
 name = "kennel-tun-broker"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel tun-broker: the standing L3-egress mediation service kennel (§8, W2). Reached over the connector mesh bus like dbus-broker — kenneld pushes one ACCEPT_SESSION per [net.udp] consumer (grants, deny CIDRs, tun /64) and the broker replies with the session's AF_UNIX fd, then mediates whole L3 frames over it (kenneld absent from the data path). UDP is the first transport it carries: a DNS naming shim mints synthetic IPv6 on approval, and the flow forwarder resolves, re-vets, and dials each flow from the host stack. The same tun/session mechanism extends to TCP later."
+description = "Project Kennel tun-broker: the standing L3-egress mediation service kennel (Â§8, W2). Reached over the connector mesh bus like dbus-broker â kenneld pushes one ACCEPT_SESSION per [net.udp] consumer (grants, deny CIDRs, tun /64) and the broker replies with the session's AF_UNIX fd, then mediates whole L3 frames over it (kenneld absent from the data path). UDP is the first transport it carries: a DNS naming shim mints synthetic IPv6 on approval, and the flow forwarder resolves, re-vets, and dials each flow from the host stack. The same tun/session mechanism extends to TCP later."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,18 +16,17 @@ path = "src/main.rs"
 [dependencies]
 # The DNS message codec for the naming shim: parse the workload's (hostile) query, build the
 # AAAA/NODATA response. Delegated as the hostile-input parser the no-hand-roll rule targets (the
-# `vte` precedent, §5.1); the shim only mints synthetics — no resolver, no wire. Only transitive is
+# `vte` precedent, Â§5.1); the shim only mints synthetics â no resolver, no wire. Only transitive is
 # `bitflags`, already vendored via `nix`.
 simple-dns = "=0.11.3"
 # The settled allowlist grants (`udp_allow_names: Vec<NameRule>`) and the shared `name_matches`
-# dot-convention — the single source the egress proxy also uses, so the two cannot drift.
+# dot-convention â the single source the egress proxy also uses, so the two cannot drift.
 kennel-lib-policy = { path = "../kennel-lib-policy" }
-# The curated epoll `Poller` the event loop multiplexes on (facade channel + per-flow sockets),
-# keeping this leaf `#![forbid(unsafe_code)]` and never naming `nix` directly.
-kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The mesh-service binder client (Connection, ADD_SERVICE, the ACCEPT_SESSION control verb): the
 # broker is a standing mesh service kennel, reached over the connector mesh bus like dbus-broker.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+# epoll (nix, safe API) for the per-session event loop — a leaf concern, not the daemon TCB.
+nix = { version = "=0.31.3", default-features = false, features = ["event"] }
 # host-netproxy's UDP mode (resolve + connect_udp): the operator-context resolve-and-dial the broker
 # reuses per flow, exactly as dbus-broker reuses host-dbus::mediate. The broker never resolves.
 kennel-host-delegate = { path = "../kennel-host-delegate" }

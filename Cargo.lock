@@ -338,7 +338,7 @@ dependencies = [
  "kennel-host-delegate",
  "kennel-lib-binder",
  "kennel-lib-policy",
- "kennel-lib-syscall",
+ "nix",
  "simple-dns",
 ]
 
