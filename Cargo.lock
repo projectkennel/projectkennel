@@ -142,6 +142,7 @@ dependencies = [
  "kennel-lib-cli",
  "kennel-lib-dbus",
  "kennel-lib-scm",
+ "kennel-lib-syscall",
 ]
 
 [[package]]
