@@ -38,6 +38,7 @@ pub mod error;
 pub mod invariant;
 pub mod keys;
 pub mod libresolve;
+pub mod netmatch;
 pub mod openssh;
 pub mod patch;
 pub mod settled;
@@ -50,6 +51,7 @@ pub use audit::parse_audit_defaults;
 pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
+pub use netmatch::{is_special_use, Cidr, PrefixTooLong};
 pub use settled::{
     name_matches, AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, ConsumeRuntime,
     DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
