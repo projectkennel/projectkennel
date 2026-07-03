@@ -151,15 +151,18 @@ cannot complete a dial the kernel BPF fence will not clear.
 
 - **Part A — schema + compile: the allowlist, and nothing more.** `[net.udp]` is opt-in within the
   proxied modes (`constrained` or `unconstrained` — the modes with an own net-ns and a broker to
-  carry it; `host` and `none` are refused); the destination grammar is the existing
-  `[[net.proxy.allow]]` `name`/`ports`/`protocol` triple with `protocol = "udp"` — no second grammar
-  (*do-less*). **Hostnames only:** a UDP entry must carry a `name`; a bare-IP/CIDR (allow *or* deny)
-  is refused at compile — the capture-by-synthetic mechanism has no IP to match, and a literal-IP UDP
-  datagram dies `ENETUNREACH` in-kernel anyway (Part B). This rule folds into the **existing**
-  `net.proxy.allow` parser, which now takes the opt-in flag. CIDR-allowance is an **exhaustive
-  per-transport** decision (`cidr_allowed`), not `!is_udp`: a name-only transport — UDP today,
-  tun-routed TCP later — refuses a bare IP/CIDR, and adding a transport is a compile error until it
-  states its own CIDR-allowance rather than inheriting the CIDR-allowed default. No second parser. **There is no compile-time table:** the allowlist may hold wildcards
+  carry it; `host` and `none` are refused). Destinations declare under their **own endpoint**,
+  `[[net.udp.allow]]`, which **adopts the shape** of `[[net.proxy.allow]]` (the `name`/`ports`
+  grammar) — the same struct and the same parser, a distinct table; *not* a `protocol = "udp"`
+  overload of the proxy list (*do-less* = reuse the shape, not the endpoint). **Hostnames only:** a
+  UDP entry carries a `name`, never a `protocol` (the transport is implied) and never a bare IP/CIDR
+  — the capture-by-synthetic mechanism has no address to match, and a literal-IP UDP datagram dies
+  `ENETUNREACH` in-kernel anyway (Part B). One parser serves both endpoints on a single flag — *is a
+  CIDR allowed here?* — true for the proxy list, false for `[[net.udp.allow]]`; the proxy list in
+  turn refuses `protocol = "udp"` (wrong endpoint). UDP destinations settle into the existing
+  `allow_names` as `Protocol::Udp` rules, so the broker filters its grant-set by transport — no new
+  settled endpoint, and fragments compose `[[net.udp.allow.add]]` exactly like the proxy list.
+  **There is no compile-time table:** the allowlist may hold wildcards
   (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
   only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
   (Part D). `[net.udp]` is an **additive-optional** settled field (a v3 artefact without it stays
@@ -243,7 +246,7 @@ landing.
 Independent of the other workstreams.
 
 **Exit criteria.**
-- A `constrained` kennel with `[net.udp]` and one `protocol = "udp"` grant runs a stock QUIC client
+- A `constrained` kennel with `[net.udp]` and one `[[net.udp.allow]]` grant runs a stock QUIC client
   and `dig` against the granted name; both work with **zero DNS packets on the host wire for denied
   names** (packet-capture assertion).
 - A denied name resolves NODATA; a denied flow receives admin-prohibited within the rate cap; a
