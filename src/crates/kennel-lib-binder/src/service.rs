@@ -833,6 +833,71 @@ pub mod mesh {
     }
 }
 
+/// Shared big-endian byte-codec primitives for the mesh control-channel wire protocols.
+///
+/// A cursor `take`, fixed integers, and `u16`-length-prefixed strings / string-lists, shared by
+/// [`broker`] and [`udp_broker`] so the two control verbs cannot drift on their framing.
+mod codec {
+    /// Split `n` bytes off the front of the cursor, advancing it; `None` if short.
+    pub(super) fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = cur.split_at_checked(n)?;
+        *cur = tail;
+        Some(head)
+    }
+
+    pub(super) fn put_u8(out: &mut Vec<u8>, v: u8) {
+        out.push(v);
+    }
+
+    pub(super) fn take_u8(cur: &mut &[u8]) -> Option<u8> {
+        take(cur, 1)?.first().copied()
+    }
+
+    pub(super) fn put_u16(out: &mut Vec<u8>, v: u16) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+
+    pub(super) fn take_u16(cur: &mut &[u8]) -> Option<u16> {
+        let b = take(cur, 2)?;
+        Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
+    }
+
+    /// A `u16`-count for a list, saturating past `u16::MAX`.
+    pub(super) fn put_count(out: &mut Vec<u8>, n: usize) {
+        put_u16(out, u16::try_from(n).unwrap_or(u16::MAX));
+    }
+
+    /// A `u16`-length-prefixed UTF-8 string.
+    pub(super) fn put_str(out: &mut Vec<u8>, s: &str) {
+        let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
+        put_u16(out, len);
+        out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
+    }
+
+    pub(super) fn take_str(cur: &mut &[u8]) -> Option<String> {
+        let len = take_u16(cur)?;
+        let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
+        Some(s.to_owned())
+    }
+
+    /// A `u16`-count-prefixed list of strings.
+    pub(super) fn put_str_list(out: &mut Vec<u8>, list: &[String]) {
+        put_count(out, list.len());
+        for s in list {
+            put_str(out, s);
+        }
+    }
+
+    pub(super) fn take_str_list(cur: &mut &[u8]) -> Option<Vec<String>> {
+        let n = take_u16(cur)?;
+        let mut list = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            list.push(take_str(cur)?);
+        }
+        Some(list)
+    }
+}
+
 /// The `dbus-broker` control-channel wire protocol: the verb `kenneld` speaks on the
 /// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
 ///
@@ -855,6 +920,8 @@ pub mod broker {
     /// provider decides nothing — it applies kenneld's filter to the session it was handed.
     pub const ACCEPT_SESSION: u32 = 1;
 
+    use super::codec::{put_str_list, put_u8, take, take_str_list};
+
     /// Encode an `ACCEPT_SESSION` request:
     /// `[bus: u8 | talk | call | broadcast | own | deny_talk]`.
     #[must_use]
@@ -867,12 +934,12 @@ pub mod broker {
         deny_talk: &[String],
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(bus);
-        put_string_list(&mut out, talk);
-        put_string_list(&mut out, call);
-        put_string_list(&mut out, broadcast);
-        put_string_list(&mut out, own);
-        put_string_list(&mut out, deny_talk);
+        put_u8(&mut out, bus);
+        put_str_list(&mut out, talk);
+        put_str_list(&mut out, call);
+        put_str_list(&mut out, broadcast);
+        put_str_list(&mut out, own);
+        put_str_list(&mut out, deny_talk);
         out
     }
 
@@ -898,11 +965,11 @@ pub mod broker {
     pub fn decode_accept(data: &[u8]) -> Option<AcceptSession> {
         let mut cur = data;
         let &bus = take(&mut cur, 1)?.first()?;
-        let talk = take_string_list(&mut cur)?;
-        let call = take_string_list(&mut cur)?;
-        let broadcast = take_string_list(&mut cur)?;
-        let own = take_string_list(&mut cur)?;
-        let deny_talk = take_string_list(&mut cur)?;
+        let talk = take_str_list(&mut cur)?;
+        let call = take_str_list(&mut cur)?;
+        let broadcast = take_str_list(&mut cur)?;
+        let own = take_str_list(&mut cur)?;
+        let deny_talk = take_str_list(&mut cur)?;
         if !cur.is_empty() {
             return None; // trailing garbage
         }
@@ -914,39 +981,6 @@ pub mod broker {
             own,
             deny_talk,
         })
-    }
-
-    fn put_string_list(out: &mut Vec<u8>, list: &[String]) {
-        let n = u16::try_from(list.len()).unwrap_or(u16::MAX);
-        out.extend_from_slice(&n.to_be_bytes());
-        for s in list.iter().take(usize::from(n)) {
-            let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
-            out.extend_from_slice(&len.to_be_bytes());
-            out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
-        }
-    }
-
-    fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
-        let (head, tail) = cur.split_at_checked(n)?;
-        *cur = tail;
-        Some(head)
-    }
-
-    fn take_string_list(cur: &mut &[u8]) -> Option<Vec<String>> {
-        let &[n_hi, n_lo] = take(cur, 2)? else {
-            return None;
-        };
-        let n = u16::from_be_bytes([n_hi, n_lo]);
-        let mut list = Vec::with_capacity(usize::from(n));
-        for _ in 0..n {
-            let &[len_hi, len_lo] = take(cur, 2)? else {
-                return None;
-            };
-            let len = u16::from_be_bytes([len_hi, len_lo]);
-            let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
-            list.push(s.to_owned());
-        }
-        Some(list)
     }
 
     #[cfg(test)]
@@ -974,6 +1008,178 @@ pub mod broker {
             bad.push(0xFF);
             assert!(decode_accept(&bad).is_none()); // trailing garbage
             assert!(decode_accept(&[]).is_none()); // short (no bus byte)
+        }
+    }
+}
+
+/// The `udp-broker` control-channel wire protocol (§8 / W2 Part D).
+///
+/// The verb `kenneld` speaks on the UDP-egress broker's control node, acquired on the connector mesh
+/// bus. One verb, [`udp_broker::ACCEPT_SESSION`]: kenneld, having identified a `[net.udp]` consumer on
+/// its per-kennel bus, tells the broker to accept one egress session with that consumer's compiled
+/// UDP grants and deny CIDRs, and the tun `/64` the consumer's synthetics live in. The broker mints
+/// a per-session data channel (an `AF_UNIX` fd it hands back), runs the flow mediation over it, and
+/// keys the session by the kernel-attested node — never by anything the consumer says. kenneld
+/// decides the grants; the broker applies and never relays through kenneld on the data path.
+///
+/// **Wire layout (all big-endian):** see [`udp_broker::encode_accept`].
+pub mod udp_broker {
+    use super::codec::{put_count, put_str, put_u16, put_u8, take, take_str, take_u16, take_u8};
+
+    /// Tell the UDP-egress broker to accept a session kenneld has authorized.
+    ///
+    /// kenneld→provider, on the connector mesh bus's control node. The provider mints the session's
+    /// data channel and replies with its fd; kenneld forwards the fd to the consumer's `facade-tun`.
+    pub const ACCEPT_SESSION: u32 = 1;
+
+    /// One UDP name grant: a host pattern and its permitted ports (empty = any port). Mirrors the
+    /// settled `NameRule` (all UDP grants carry protocol `udp`, so it is implied, not on the wire).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Grant {
+        /// The host pattern (dot-convention: `example.com` exact, `.example.com` apex+subdomains).
+        pub name: String,
+        /// Permitted ports; empty means any port.
+        pub ports: Vec<u16>,
+    }
+
+    /// One deny CIDR the broker re-checks each resolved address against.
+    ///
+    /// Mirrors the settled `NetRule`. `protocol` is the raw settled ordinal (`0` any, `1` tcp, `2`
+    /// udp) — the wire stays policy-crate-agnostic; kenneld and the broker map it to/from the enum.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Deny {
+        /// Network base address in dotted-quad or colon form.
+        pub cidr: String,
+        /// Prefix length in bits.
+        pub prefix_len: u8,
+        /// Inclusive lower port bound.
+        pub port_min: u16,
+        /// Inclusive upper port bound.
+        pub port_max: u16,
+        /// Protocol ordinal (`0` any, `1` tcp, `2` udp).
+        pub protocol: u8,
+    }
+
+    /// A decoded UDP `ACCEPT_SESSION`: the consumer's tun `/64` address, its grants, and the deny set.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AcceptUdpSession {
+        /// The consumer's tun interface address (`::1` in its `/64`); its low 64 bits' prefix is the
+        /// synthetic pool. Sixteen octets.
+        pub tun_addr: [u8; 16],
+        /// The UDP name grants (`udp_allow_names`).
+        pub grants: Vec<Grant>,
+        /// The deny CIDRs (invariant + author) the broker re-vets resolved addresses against.
+        pub denies: Vec<Deny>,
+    }
+
+    /// Encode an `ACCEPT_SESSION` request:
+    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16) | denies: count·(cidr, u8, u16, u16, u8)]`.
+    #[must_use]
+    pub fn encode_accept(tun_addr: [u8; 16], grants: &[Grant], denies: &[Deny]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&tun_addr);
+        put_count(&mut out, grants.len());
+        for g in grants {
+            put_str(&mut out, &g.name);
+            put_count(&mut out, g.ports.len());
+            for &p in &g.ports {
+                put_u16(&mut out, p);
+            }
+        }
+        put_count(&mut out, denies.len());
+        for d in denies {
+            put_str(&mut out, &d.cidr);
+            put_u8(&mut out, d.prefix_len);
+            put_u16(&mut out, d.port_min);
+            put_u16(&mut out, d.port_max);
+            put_u8(&mut out, d.protocol);
+        }
+        out
+    }
+
+    /// Decode an `ACCEPT_SESSION` request. `None` for malformed input.
+    #[must_use]
+    pub fn decode_accept(data: &[u8]) -> Option<AcceptUdpSession> {
+        let mut cur = data;
+        let tun_addr = <[u8; 16]>::try_from(take(&mut cur, 16)?).ok()?;
+        let n_grants = take_u16(&mut cur)?;
+        let mut grants = Vec::with_capacity(usize::from(n_grants));
+        for _ in 0..n_grants {
+            let name = take_str(&mut cur)?;
+            let n_ports = take_u16(&mut cur)?;
+            let mut ports = Vec::with_capacity(usize::from(n_ports));
+            for _ in 0..n_ports {
+                ports.push(take_u16(&mut cur)?);
+            }
+            grants.push(Grant { name, ports });
+        }
+        let n_denies = take_u16(&mut cur)?;
+        let mut denies = Vec::with_capacity(usize::from(n_denies));
+        for _ in 0..n_denies {
+            let cidr = take_str(&mut cur)?;
+            let prefix_len = take_u8(&mut cur)?;
+            let port_min = take_u16(&mut cur)?;
+            let port_max = take_u16(&mut cur)?;
+            let protocol = take_u8(&mut cur)?;
+            denies.push(Deny {
+                cidr,
+                prefix_len,
+                port_min,
+                port_max,
+                protocol,
+            });
+        }
+        if !cur.is_empty() {
+            return None; // trailing garbage
+        }
+        Some(AcceptUdpSession {
+            tun_addr,
+            grants,
+            denies,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn accept_round_trips() {
+            let tun = [
+                0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01, 0, 0, 0, 0, 0, 0, 0, 1,
+            ];
+            let grants = vec![
+                Grant {
+                    name: "example.com".to_owned(),
+                    ports: vec![443, 53],
+                },
+                Grant {
+                    name: ".internal.example".to_owned(),
+                    ports: Vec::new(),
+                },
+            ];
+            let denies = vec![Deny {
+                cidr: "169.254.169.254".to_owned(),
+                prefix_len: 32,
+                port_min: 0,
+                port_max: 65535,
+                protocol: 0,
+            }];
+            let bytes = encode_accept(tun, &grants, &denies);
+            let got = decode_accept(&bytes).expect("decode");
+            assert_eq!(got.tun_addr, tun);
+            assert_eq!(got.grants, grants);
+            assert_eq!(got.denies, denies);
+        }
+
+        #[test]
+        fn accept_rejects_malformed() {
+            let tun = [0u8; 16];
+            let mut bad = encode_accept(tun, &[], &[]);
+            bad.push(0x00);
+            assert!(decode_accept(&bad).is_none(), "trailing garbage");
+            assert!(decode_accept(&[]).is_none(), "short (no tun addr)");
+            assert!(decode_accept(&[0u8; 15]).is_none(), "truncated tun addr");
         }
     }
 }
