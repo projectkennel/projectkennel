@@ -21,6 +21,9 @@ kennel-lib-policy = { path = "../kennel-lib-policy" }
 # The curated epoll `Poller` the event loop multiplexes on (facade channel + per-flow sockets),
 # keeping this leaf `#![forbid(unsafe_code)]` and never naming `nix` directly.
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# The mesh-service binder client (Connection, ADD_SERVICE, the ACCEPT_SESSION control verb): the
+# broker is a standing mesh service kennel, reached over the connector mesh bus like dbus-broker.
+kennel-lib-binder = { path = "../kennel-lib-binder" }
 
 [lints]
 workspace = true

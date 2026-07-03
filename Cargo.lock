@@ -335,6 +335,7 @@ version = "0.5.0"
 name = "kennel-udp-broker"
 version = "0.5.0"
 dependencies = [
+ "kennel-lib-binder",
  "kennel-lib-policy",
  "kennel-lib-syscall",
  "simple-dns",
