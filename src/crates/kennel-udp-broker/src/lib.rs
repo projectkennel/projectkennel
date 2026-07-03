@@ -23,6 +23,7 @@
 pub mod flow;
 pub mod forward;
 pub mod icmp;
+pub mod serve;
 pub mod shim;
 pub mod table;
 

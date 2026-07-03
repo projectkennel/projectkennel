@@ -96,13 +96,25 @@ impl FlowTable {
     }
 
     /// Drop every flow unseen for at least the idle timeout as of `now`, closing its socket. Returns
-    /// the number evicted.
-    pub fn sweep(&mut self, now: Instant) -> usize {
-        let before = self.flows.len();
+    /// the evicted keys so the caller can release any per-flow bookkeeping (epoll token, maps).
+    pub fn sweep(&mut self, now: Instant) -> Vec<FlowKey> {
         let idle = self.idle_timeout;
-        self.flows
-            .retain(|_, flow| now.saturating_duration_since(flow.last_seen) < idle);
-        before.saturating_sub(self.flows.len())
+        let expired: Vec<FlowKey> = self
+            .flows
+            .iter()
+            .filter(|(_, flow)| now.saturating_duration_since(flow.last_seen) >= idle)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in &expired {
+            self.flows.remove(key);
+        }
+        expired
+    }
+
+    /// Drop a single flow, closing its socket. Returns whether a flow was present (e.g. after a
+    /// connection-refused, the caller evicts the flow it just answered with a port-unreachable).
+    pub fn remove(&mut self, key: FlowKey) -> bool {
+        self.flows.remove(&key).is_some()
     }
 
     /// The number of live flows.
@@ -234,9 +246,19 @@ mod tests {
         table.admit(key(2), socket(), later).expect("fresh");
         // At t0+40s, key(1) is 40s idle (evicted), key(2) is 20s idle (kept).
         let evicted = table.sweep(t0 + Duration::from_secs(40));
-        assert_eq!(evicted, 1);
+        assert_eq!(evicted, vec![key(1)]);
         assert_eq!(table.len(), 1);
         assert!(table.touch(key(2), t0 + Duration::from_secs(40)).is_some());
+    }
+
+    #[test]
+    fn remove_drops_one_flow() {
+        let mut table = FlowTable::new(4, Duration::from_secs(30));
+        let now = Instant::now();
+        table.admit(key(1), socket(), now).expect("admit");
+        assert!(table.remove(key(1)), "present");
+        assert!(!table.remove(key(1)), "already gone");
+        assert!(table.is_empty());
     }
 
     #[test]

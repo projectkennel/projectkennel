@@ -18,6 +18,9 @@ simple-dns = "=0.11.3"
 # The settled allowlist grants (`udp_allow_names: Vec<NameRule>`) and the shared `name_matches`
 # dot-convention — the single source the egress proxy also uses, so the two cannot drift.
 kennel-lib-policy = { path = "../kennel-lib-policy" }
+# The curated epoll `Poller` the event loop multiplexes on (facade channel + per-flow sockets),
+# keeping this leaf `#![forbid(unsafe_code)]` and never naming `nix` directly.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 
 [lints]
 workspace = true

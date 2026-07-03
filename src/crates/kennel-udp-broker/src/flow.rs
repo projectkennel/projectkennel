@@ -50,8 +50,9 @@ impl DenyList {
     }
 
     /// The primitive [`from_settled`](Self::from_settled) builds on: parse each UDP-applicable rule
-    /// into a [`DenyCidr`].
-    fn from_rules<'r>(rules: impl Iterator<Item = &'r NetRule>) -> Self {
+    /// into a [`DenyCidr`], dropping any whose CIDR does not parse.
+    #[must_use]
+    pub fn from_rules<'r>(rules: impl Iterator<Item = &'r NetRule>) -> Self {
         let rules = rules
             .filter(|r| admits_udp(r.protocol))
             .filter_map(|r| {
