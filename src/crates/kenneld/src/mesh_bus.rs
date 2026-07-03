@@ -21,7 +21,7 @@ use std::thread::JoinHandle;
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::ctxmgr::{ContextManager, DeathHandler, Handler, Reply, Waker};
-use kennel_lib_binder::service::{broker, mesh, status, verb};
+use kennel_lib_binder::service::{broker, mesh, status, tun_broker, verb};
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
 
@@ -33,20 +33,36 @@ const MESH_MAP_SIZE: usize = 64 * 1024;
 /// The dbus-broker's control-node service name on the mesh bus (where kenneld pushes
 /// `ACCEPT_SESSION`). Consumers never resolve this — only kenneld holds it.
 const DBUS_BROKER_SERVICE: &str = "org.projectkennel.dbus-broker";
+/// The tun-broker's control-node service name on the mesh bus (the L3-egress sibling of the
+/// dbus-broker; where kenneld pushes the tun `ACCEPT_SESSION`). Consumers never resolve this.
+const TUN_BROKER_SERVICE: &str = "org.projectkennel.tun-broker";
 
 /// Maximum looper threads for a mesh bus. The D-Bus `SVC_CONNECT` blocks on an `ACCEPT_SESSION`
 /// round-trip to the broker (a separate kennel), so the pool must hold ≥2 threads: one parked on
 /// that transaction while another serves the next consumer.
 const MESH_POOL_MAX: u32 = 4;
 
-/// Resolve a mesh `SVC_CONNECT` to the per-session `ACCEPT_SESSION` filter for the caller.
+/// Resolve a mesh `SVC_CONNECT` to the per-session `ACCEPT_SESSION` payload for the caller.
 ///
 /// Given the kernel-attested `sender_pid` and the requested capability `name`, returns the encoded
-/// [`broker::encode_accept`] payload (the kennel's one D-Bus filter for the requested bus) when the
-/// name is a D-Bus capability and the pid resolves to a kennel with that bus enabled; `None`
-/// otherwise. kenneld owns this: the mesh handler stays out of identity logic and never trusts the
-/// caller. Resolved fresh per connect (`sender_pid` → cgroup → ctx → policy) — nothing remembered.
-pub type DbusResolver = Arc<dyn Fn(i32, &str) -> Option<Vec<u8>> + Send + Sync>;
+/// accept payload (the D-Bus filter, or the tun grants+denies+addr) when the pid resolves to a
+/// kennel authorized for that capability; `None` otherwise. kenneld owns this: the mesh handler
+/// stays out of identity logic and never trusts the caller. Resolved fresh per connect (`sender_pid`
+/// → cgroup → ctx → policy) — nothing remembered.
+pub type SessionResolver = Arc<dyn Fn(i32, &str) -> Option<Vec<u8>> + Send + Sync>;
+
+/// Which brokered-session shape a connector bus's `ACCEPT_SESSION` mints, and the resolver for it.
+///
+/// A mesh bus serves one connector capability, so exactly one of these is attached to it. They
+/// differ only in what the broker's `ACCEPT_SESSION` reply carries and how kenneld forwards it.
+pub enum MeshResolver {
+    /// D-Bus: the broker mints a per-session **node**; kenneld forwards it and drops its own ref
+    /// ([`Reply::HandleOnce`]).
+    Dbus(SessionResolver),
+    /// Tun (L3 egress): the broker mints the session's socket and replies with its **fd**; kenneld
+    /// forwards the fd ([`Reply::Fd`]).
+    Tun(SessionResolver),
+}
 
 /// Poll timeout (ms) for the mesh bus looper.
 const MESH_POLL_MS: i32 = 500;
@@ -102,7 +118,7 @@ impl MeshBus {
         name: &str,
         key: Option<&str>,
         writer: &Arc<Writer>,
-        dbus_resolver: Option<DbusResolver>,
+        resolver: Option<MeshResolver>,
         holder_pid: i32,
         holder_sock: std::os::fd::OwnedFd,
     ) -> io::Result<Self> {
@@ -126,7 +142,7 @@ impl MeshBus {
         let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
             mesh_handle(
                 &handles_for_handler,
-                dbus_resolver.as_ref(),
+                resolver.as_ref(),
                 incoming,
                 conn,
                 &writer_for_handler,
@@ -252,14 +268,14 @@ impl Drop for MeshBus {
 /// (consumer resolution).
 fn mesh_handle(
     handles: &Mutex<HashMap<String, u32>>,
-    dbus_resolver: Option<&DbusResolver>,
+    resolver: Option<&MeshResolver>,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
 ) -> Reply {
     match incoming.code {
         verb::ADD_SERVICE => mesh_add_service(handles, incoming, conn, writer),
-        verb::SVC_CONNECT => mesh_svc_connect(handles, dbus_resolver, incoming, conn, writer),
+        verb::SVC_CONNECT => mesh_svc_connect(handles, resolver, incoming, conn, writer),
         _ => {
             writer.emit(
                 &Event::new(
@@ -349,7 +365,7 @@ fn mesh_add_service(
 /// kernel's attestation on this transaction, never anything the consumer said.
 fn mesh_svc_connect(
     handles: &Mutex<HashMap<String, u32>>,
-    dbus_resolver: Option<&DbusResolver>,
+    resolver: Option<&MeshResolver>,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
@@ -370,15 +386,25 @@ fn mesh_svc_connect(
         return Reply::Data(vec![status::BAD_REQUEST]);
     };
 
-    // D-Bus connector bus: resolve identity fresh and mint a filtered session via the broker.
-    if let Some(resolver) = dbus_resolver {
-        if let Some(filter) = resolver(incoming.sender_pid, name) {
-            return mesh_accept_dbus_session(handles, conn, incoming, name, &filter, writer);
+    // A brokered-session connector bus: resolve identity fresh and mint a filtered session via the
+    // broker. The resolver kind selects what the broker's ACCEPT_SESSION reply carries — a session
+    // node (D-Bus) or the session socket's fd (tun egress).
+    match resolver {
+        Some(MeshResolver::Dbus(resolve)) => {
+            if let Some(filter) = resolve(incoming.sender_pid, name) {
+                return mesh_accept_dbus_session(handles, conn, incoming, name, &filter, writer);
+            }
         }
-        // A D-Bus capability the caller could not be authorized for (not under a kennel cgroup, or
-        // no filter for the requested bus) falls through to the provider map, which has no entry
-        // named for a consumer capability — so it resolves to NOT_FOUND below.
+        Some(MeshResolver::Tun(resolve)) => {
+            if let Some(payload) = resolve(incoming.sender_pid, name) {
+                return mesh_accept_tun_session(handles, conn, incoming, name, &payload, writer);
+            }
+        }
+        None => {}
     }
+    // A capability the caller could not be authorized for (not under a kennel cgroup, or no matching
+    // grant) falls through to the provider map, which has no entry named for a brokered-session
+    // consumer capability — so it resolves to NOT_FOUND below.
 
     let handle = handles
         .lock()
@@ -464,6 +490,54 @@ fn mesh_accept_dbus_session(
             // then release our ref (HandleOnce) so the broker reclaims the session when the consumer
             // disconnects — kenneld is not a persistent holder of per-session nodes.
             Reply::HandleOnce(session)
+        }
+        Err(e) => {
+            emit(Outcome::Error, &format!("ACCEPT_SESSION failed: {e}"));
+            Reply::Data(vec![status::UNAVAILABLE])
+        }
+    }
+}
+
+/// Push the tun `ACCEPT_SESSION` payload to the tun-broker's control node and hand the consumer the
+/// session **fd** the broker mints.
+///
+/// Unlike [`mesh_accept_dbus_session`] (which forwards a session node), the tun broker replies with
+/// the session socket's fd — the consumer's `facade-tun` reads L3 frames over it, kenneld absent from
+/// the data path. kenneld holds no per-session state: the socketpair close is the session's end.
+fn mesh_accept_tun_session(
+    handles: &Mutex<HashMap<String, u32>>,
+    conn: &Connection,
+    incoming: &Incoming,
+    name: &str,
+    payload: &[u8],
+    writer: &Writer,
+) -> Reply {
+    let control = handles
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(TUN_BROKER_SERVICE)
+        .copied();
+    let emit = |outcome: Outcome, reason: &str| {
+        writer.emit(
+            &Event::new(
+                "mesh.tun-session",
+                Resource::Binder,
+                outcome,
+                Source::Kenneld,
+            )
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("capability", Value::untrusted(name.to_owned()))
+            .field("detail", Value::untrusted(reason.to_owned())),
+        );
+    };
+    let Some(control) = control else {
+        emit(Outcome::Error, "tun-broker control node not registered");
+        return Reply::Data(vec![status::UNAVAILABLE]);
+    };
+    match conn.transact_fd(control, tun_broker::ACCEPT_SESSION, payload) {
+        Ok(fd) => {
+            emit(Outcome::Allow, "session accepted");
+            Reply::Fd(fd)
         }
         Err(e) => {
             emit(Outcome::Error, &format!("ACCEPT_SESSION failed: {e}"));

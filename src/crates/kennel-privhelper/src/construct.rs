@@ -725,18 +725,14 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
     let tun_fd = if half.tun {
         // MTU: the IPv6 minimum, so the L3 facade never fragments.
         const TUN_MTU: u32 = 1280;
-        // The tun `/64` uses a ctx with the kennel ctx's high bit flipped — distinct from the
-        // loopback ctx, so the two connected `/64`s never overlap in the kennel's net-ns.
-        const TUN_CTX_FLIP: u16 = 0x8000;
-        // The tun interface address's host suffix within its `/64` (`::1`); `::2` is reserved for
-        // the broker resolver and the rest for the synthetic pool (Part D).
-        const TUN_HOST: u64 = 1;
         let (fd, name) = kennel_lib_syscall::tun::create()?;
         let cname = std::ffi::CString::new(name).map_err(|_| io::Error::other("bad tun ifname"))?;
         let idx = kennel_lib_syscall::netlink::if_index(&cname)?;
         kennel_lib_syscall::netlink::set_mtu(idx, TUN_MTU)?;
         kennel_lib_syscall::netlink::set_link_up(idx)?;
-        let addr = crate::addr::loopback_v6(op_uid, half.ctx ^ TUN_CTX_FLIP, TUN_HOST);
+        // The tun's ULA `/64` addr (`::1`): the single source kenneld also derives, to tell the tun
+        // broker this kennel's synthetic-pool `/64` over `ACCEPT_SESSION` (`crate::addr::tun_addr`).
+        let addr = crate::addr::tun_addr(op_uid, half.ctx);
         kennel_lib_syscall::netlink::add_address(
             idx,
             std::net::IpAddr::V6(addr),
