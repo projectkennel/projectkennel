@@ -149,12 +149,15 @@ activity**, real addresses and real DNS replies never enter the kennel, and the 
 ordering of §8.2 (policy check *before* any resolution) becomes **structural** here — the broker
 cannot complete a dial the kernel BPF fence will not clear.
 
-- **Part A — schema + compile: the allowlist, and nothing more.** `[net.udp]` is opt-in within
-  `constrained`; the destination grammar is the existing `[[net.proxy.allow]]` `name`/`ports`/
-  `protocol` triple with `protocol = "udp"` — no second grammar (*do-less*). **Hostnames only:** a
-  UDP entry must carry a `name`; a bare-IP/CIDR (allow *or* deny) is refused at compile — the
-  capture-by-synthetic mechanism has no IP to match, and a literal-IP UDP datagram dies `ENETUNREACH`
-  in-kernel anyway (Part B). **There is no compile-time table:** the allowlist may hold wildcards
+- **Part A — schema + compile: the allowlist, and nothing more.** `[net.udp]` is opt-in within the
+  proxied modes (`constrained` or `unconstrained` — the modes with an own net-ns and a broker to
+  carry it; `host` and `none` are refused); the destination grammar is the existing
+  `[[net.proxy.allow]]` `name`/`ports`/`protocol` triple with `protocol = "udp"` — no second grammar
+  (*do-less*). **Hostnames only:** a UDP entry must carry a `name`; a bare-IP/CIDR (allow *or* deny)
+  is refused at compile — the capture-by-synthetic mechanism has no IP to match, and a literal-IP UDP
+  datagram dies `ENETUNREACH` in-kernel anyway (Part B). This rule folds into the **existing**
+  `net.proxy.allow` parser, which now takes the opt-in flag (CIDR-allowed is per-entry `!is_udp`) —
+  not a second parser. **There is no compile-time table:** the allowlist may hold wildcards
   (`*.example.com`) the compiler cannot enumerate, so nothing is baked — the settled artefact carries
   only the signed allowlist, and every synthetic address is minted **at runtime** by the broker
   (Part D). `[net.udp]` is an **additive-optional** settled field (a v3 artefact without it stays
