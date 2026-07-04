@@ -80,7 +80,7 @@ build_arch() {
 	# Host-side, dynamic (glibc). `-p kennel-cli` builds the host execution unit (`kennel-host`);
 	# `-p kennel-compose` the standalone policy-authoring tool (W9, on PATH, disjunct from the runtime).
 	KENNEL_PROFILE=release "$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
-		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus -p kennel-compose
+		-p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-compose
 	# In-kennel, static (`+crt-static`): these run inside the constructed view, which has no host
 	# ld.so. reproducible-build.sh prepends its remap to this RUSTFLAGS, so the build stays reproducible.
 	# `kennel-shim` is static too — one `kennel` artifact dispatches host-side and in-cage (W10).

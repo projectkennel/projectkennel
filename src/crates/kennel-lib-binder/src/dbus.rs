@@ -385,118 +385,11 @@ impl<'a> Cursor<'a> {
         Ok(self.len_prefixed(max)?.to_vec())
     }
 
-    /// Take all remaining bytes (used for a record's trailing inner frame).
-    fn rest(&mut self) -> &'a [u8] {
-        let r = self.buf.get(self.pos..).unwrap_or(&[]);
-        self.pos = self.buf.len();
-        r
-    }
-
     fn str(&mut self, max: usize) -> Result<String, WireError> {
         let b = self.len_prefixed(max)?;
         core::str::from_utf8(b)
             .map(str::to_owned)
             .map_err(|_| WireError::NotUtf8)
-    }
-}
-
-// Record tags on the kenneld↔host-dbus relay pipe.
-const REC_OPEN: u8 = 0x01;
-const REC_FRAME: u8 = 0x02;
-const REC_CLOSE: u8 = 0x03;
-
-/// A record on the owner-only kenneld↔host-dbus relay pipe (§7.7.2a).
-///
-/// kenneld is the membrane: it never hands the kennel a raw channel to `host-dbus`, only relays
-/// these records over its own owner-only pipe. kenneld writes [`Record::Open`] (a new connection,
-/// with its bus), [`Record::Frame`] (a workload `DBUS_SEND`, relayed opaquely — kenneld does not
-/// re-encode the inner TLV), and [`Record::Close`]; `host-dbus` writes [`Record::Frame`] back (a
-/// reply/error/signal). Each record is length-prefixed for the byte stream, with the same
-/// `[u32 len][u8 tag][payload]` shape and bounds as [`Frame`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Record {
-    /// A workload bus connection opened on `bus`; `host-dbus` allocates its delegate state.
-    Open {
-        /// The facade-allocated connection id this record concerns.
-        conn_id: u32,
-        /// The bus the connection targets.
-        bus: Bus,
-    },
-    /// One relayed `IDBus` TLV frame (the inner `frame` bytes are an encoded [`Frame`]).
-    Frame {
-        /// The connection the frame belongs to.
-        conn_id: u32,
-        /// The encoded [`Frame`] bytes, relayed verbatim.
-        frame: Vec<u8>,
-    },
-    /// A workload bus connection closed; `host-dbus` releases its serial map for it.
-    Close {
-        /// The connection torn down.
-        conn_id: u32,
-    },
-}
-
-impl Record {
-    /// Encode the record, including the outer `[u32 len]` pipe prefix.
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        let mut body = Vec::with_capacity(16);
-        match self {
-            Self::Open { conn_id, bus } => {
-                body.push(REC_OPEN);
-                body.extend_from_slice(&conn_id.to_be_bytes());
-                body.push(bus.to_u8());
-            }
-            Self::Frame { conn_id, frame } => {
-                body.push(REC_FRAME);
-                body.extend_from_slice(&conn_id.to_be_bytes());
-                body.extend_from_slice(frame);
-            }
-            Self::Close { conn_id } => {
-                body.push(REC_CLOSE);
-                body.extend_from_slice(&conn_id.to_be_bytes());
-            }
-        }
-        let mut out = Vec::with_capacity(body.len().saturating_add(4));
-        put_len(&mut out, body.len());
-        out.extend_from_slice(&body);
-        out
-    }
-
-    /// Decode one record's payload — the bytes after the outer `[u32 len]` prefix (see
-    /// [`frame_len`], which reads the prefix the same way for both records and frames).
-    ///
-    /// # Errors
-    ///
-    /// [`WireError`] for any malformed input; never panics or over-reads.
-    pub fn decode(buf: &[u8]) -> Result<Self, WireError> {
-        let mut cur = Cursor::new(buf);
-        let rec = match cur.u8()? {
-            REC_OPEN => Self::Open {
-                conn_id: cur.u32()?,
-                bus: Bus::from_u8(cur.u8()?)?,
-            },
-            REC_FRAME => Self::Frame {
-                conn_id: cur.u32()?,
-                // The remaining bytes are the inner encoded frame; bound them like a body.
-                frame: {
-                    let rest = cur.rest();
-                    if rest.len() > MAX_FRAME {
-                        return Err(WireError::TooLong);
-                    }
-                    rest.to_vec()
-                },
-            },
-            REC_CLOSE => Self::Close {
-                conn_id: cur.u32()?,
-            },
-            _ => return Err(WireError::BadTag),
-        };
-        // Frame consumed the remainder; Open/Close must have no trailing bytes.
-        if !matches!(rec, Self::Frame { .. }) && cur.remaining() != 0 {
-            return Err(WireError::Trailing);
-        }
-        Ok(rec)
     }
 }
 
@@ -605,41 +498,6 @@ mod tests {
         let mut huge = over.to_be_bytes().to_vec();
         huge.push(0);
         assert_eq!(frame_len(&huge), Err(WireError::TooLong));
-    }
-
-    #[test]
-    fn records_round_trip() {
-        let records = [
-            Record::Open {
-                conn_id: 7,
-                bus: Bus::Session,
-            },
-            Record::Frame {
-                conn_id: 42,
-                frame: Frame::Call(sample_call()).encode(),
-            },
-            Record::Close { conn_id: 7 },
-        ];
-        for r in records {
-            let bytes = r.encode();
-            let len = frame_len(&bytes).expect("len ok").expect("present");
-            assert_eq!(len, bytes.len().saturating_sub(4));
-            assert_eq!(Record::decode(payload(&bytes)).expect("decode"), r);
-        }
-    }
-
-    #[test]
-    fn record_truncations_never_panic() {
-        let bytes = Record::Frame {
-            conn_id: 1,
-            frame: Frame::Call(sample_call()).encode(),
-        }
-        .encode();
-        let body = payload(&bytes);
-        for cut in 0..body.len() {
-            let _ = Record::decode(body.get(..cut).expect("prefix"));
-        }
-        assert!(Record::decode(body).is_ok());
     }
 
     #[test]

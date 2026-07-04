@@ -22,8 +22,6 @@ use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::ctxmgr::{ContextManager, DeathHandler, Handler, Reply};
 use kennel_lib_policy::UnixRuntime;
 
-use crate::dbus::DbusRelay;
-
 /// The binder buffer mapping size per instance (ample for service-name transactions).
 const MAP_SIZE: usize = 128 * 1024;
 /// How long the looper waits per poll before re-checking the stop flag.
@@ -141,7 +139,7 @@ pub fn spawn(
     lifecycle: Lifecycle,
     net: crate::inet::NetRuntime,
     inbound: Arc<crate::inbound::InboundRuntime>,
-    dbus: Option<Arc<DbusRelay>>,
+    dbus_mesh: bool,
     writer: Arc<Writer>,
     spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
     consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
@@ -182,7 +180,7 @@ pub fn spawn(
             &net,
             &inbound,
             &lifecycle,
-            dbus.as_deref(),
+            dbus_mesh,
             spawn.as_deref(),
             &consumes,
             catalogue.as_ref(),
@@ -222,7 +220,7 @@ fn handle(
     net: &crate::inet::NetRuntime,
     inbound: &crate::inbound::InboundRuntime,
     lifecycle: &Lifecycle,
-    dbus: Option<&DbusRelay>,
+    dbus_mesh: bool,
     spawn: Option<&crate::spawn::SpawnRuntime>,
     consumes: &[kennel_lib_policy::ConsumeRuntime],
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
@@ -252,7 +250,9 @@ fn handle(
     // catalogue and broker a connector. A facade-class verb (no registry lock): the request-don't-author
     // gate is the kennel's signed [[consumes]], and the resolve is against the daemon catalogue.
     if incoming.code == verb::SVC_CONNECT {
-        return svc_connect(consumes, catalogue, activator, incoming, ctx, writer, dbus);
+        return svc_connect(
+            consumes, catalogue, activator, incoming, ctx, writer, dbus_mesh,
+        );
     }
     // The af-unix and INet facades dial host I/O (blocking) and return a descriptor, so they are
     // handled apart from the byte-reply registry verbs and **without** the registry lock — the
@@ -272,7 +272,9 @@ fn handle(
                 return tun_connect(tun, incoming, ctx, writer);
             }
             if consumes.iter().any(|c| c.name == name) {
-                return svc_connect(consumes, catalogue, activator, incoming, ctx, writer, dbus);
+                return svc_connect(
+                    consumes, catalogue, activator, incoming, ctx, writer, dbus_mesh,
+                );
             }
         }
         return af_unix_connect(unix, incoming, ctx, writer);
@@ -292,16 +294,6 @@ fn handle(
     // are different kennels) rather than per-port. No conduit is handed back here (a status byte).
     if incoming.code == verb::REGISTER_TUN_SINK {
         return register_tun_sink(tun, incoming, conn, ctx, writer);
-    }
-    // The D-Bus mediation membrane (§7.7.2a): kenneld relays opaque frames to the host-dbus
-    // delegate by connection id, lock-free (the relay owns its own state + rate cap). `DBUS_RECV`
-    // parks the looper until a frame is ready, so — like the af-unix/INet dials — it is dispatched
-    // off the registry lock; the relay bounds parked loopers to one per connection.
-    if matches!(
-        incoming.code,
-        verb::DBUS_OPEN | verb::DBUS_SEND | verb::DBUS_RECV | verb::DBUS_CLOSE
-    ) {
-        return dbus_handle(dbus, incoming, ctx, writer);
     }
     // Any other verb is unrecognised on node 0.
     let service = decode_name(&incoming.data).unwrap_or_default();
@@ -538,7 +530,7 @@ fn svc_connect(
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
-    dbus: Option<&DbusRelay>,
+    dbus_mesh: bool,
 ) -> Reply {
     use crate::broker::Decision;
     use kennel_lib_binder::service::svc_connect as wire;
@@ -569,13 +561,13 @@ fn svc_connect(
         Decision::NoProvider => (Outcome::Deny, status::NOT_FOUND),
         // A `Ready` provider is running: broker the connector now.
         Decision::Ready(sel) => {
-            return svc_connect_handoff(writer, incoming, ctx, name, &sel, dbus)
+            return svc_connect_handoff(writer, incoming, ctx, name, &sel, dbus_mesh)
         }
         // A `Pending` provider is enabled but cold: socket-activate it and consume-with-wait until it
         // is declared-and-ready (broker the connector) or the deadline fires (§7.13.4a).
         Decision::Pending(sel) => {
             return svc_connect_activate_wait(
-                consumes, catalogue, activator, incoming, ctx, name, writer, &sel, dbus,
+                consumes, catalogue, activator, incoming, ctx, name, writer, &sel, dbus_mesh,
             );
         }
         // A `NotServing` (declared-but-failed) provider cannot hand a connector — no fallback (§7.13.4).
@@ -602,7 +594,7 @@ fn svc_connect_activate_wait(
     name: &str,
     writer: &Writer,
     sel: &crate::broker::Selected,
-    dbus: Option<&DbusRelay>,
+    dbus_mesh: bool,
 ) -> Reply {
     use crate::broker::Decision;
     let unavailable = || {
@@ -637,7 +629,7 @@ fn svc_connect_activate_wait(
         match decision {
             // Construction sealed: the provider is ready — broker the connector.
             Decision::Ready(ready) => {
-                return svc_connect_handoff(writer, incoming, ctx, name, &ready, dbus)
+                return svc_connect_handoff(writer, incoming, ctx, name, &ready, dbus_mesh)
             }
             // Crash-loop-exhausted / vanished / grant lost: stop waiting, report unavailable.
             Decision::NoGrant | Decision::NoProvider | Decision::NotServing => {
@@ -663,7 +655,7 @@ fn svc_connect_handoff(
     ctx: u16,
     name: &str,
     sel: &crate::broker::Selected,
-    dbus: Option<&DbusRelay>,
+    dbus_mesh: bool,
 ) -> Reply {
     use kennel_lib_policy::settled::Shape;
 
@@ -674,20 +666,20 @@ fn svc_connect_handoff(
             // tells the facade where the dbus mesh bus is, and the facade connects THERE. It makes
             // no session and resolves no identity here — the mesh bus's node-0 handler does that,
             // resolving the connecting facade afresh (sender_pid → cgroup → ctx → filter) and
-            // minting the session. Brokered → `[OK][mesh-path]`; no broker → `[OK]` and the facade
-            // takes the legacy host-dbus route via DBUS_* on this bus (unchanged behaviour).
-            let reply = if dbus.is_some_and(DbusRelay::is_brokered) {
+            // minting the session. The standing broker is the ONE mediation home (W4): with no
+            // enabled broker there is nothing to locate, and the connect is refused (fail-closed).
+            let (reply, outcome) = if dbus_mesh {
                 let mut r = vec![status::OK];
                 r.extend_from_slice(MESH_DBUS_DEVICE.as_bytes());
-                r
+                (r, Outcome::Allow)
             } else {
-                vec![status::OK]
+                (vec![status::UNAVAILABLE], Outcome::Deny)
             };
             writer.emit(
                 &Event::new(
                     "binder.svc-connect",
                     Resource::Binder,
-                    Outcome::Allow,
+                    outcome,
                     Source::Kenneld,
                 )
                 .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
@@ -1051,83 +1043,9 @@ fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Out
     .field("ctx", Value::Uint(u64::from(ctx)))
 }
 
-/// Serve a D-Bus mediation verb (§7.7.2a). kenneld is the **membrane**, not a filter or parser:
-/// it binds each connection to its opener (the relay's per-connection owner check, on the
-/// kernel-attested sender pid), applies the token-bucket rate cap, and relays the opaque frame
-/// to/from the `host-dbus` delegate by connection id. The relay owns all of that state, so no
-/// registry lock is taken here.
-///
-/// `dbus == None` means the kennel enabled no bus (`[dbus]` absent or the delegate failed to
-/// start): every verb is denied — fail-closed, never a silent bus exposure.
-///
-/// Only the connection-lifecycle verbs (`OPEN`/`CLOSE`) are audited here: they are low-volume and
-/// security-relevant. `SEND`/`RECV` are per-message transport — auditing them at the membrane would
-/// drown the log, and the real bus decisions (the allowlist, §7.7.2a) are audited by the delegate,
-/// which owns filtering.
-fn dbus_handle(dbus: Option<&DbusRelay>, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
-    let Some(relay) = dbus else {
-        return Reply::Data(one(status::DENIED));
-    };
-    let pid = incoming.sender_pid;
-    match incoming.code {
-        verb::DBUS_OPEN => {
-            let reply = relay.open(pid, &incoming.data);
-            audit_dbus(
-                writer,
-                incoming,
-                ctx,
-                "binder.dbus-open",
-                reply.first().copied(),
-            );
-            Reply::Data(reply)
-        }
-        verb::DBUS_CLOSE => {
-            let reply = relay.close(pid, &incoming.data);
-            audit_dbus(
-                writer,
-                incoming,
-                ctx,
-                "binder.dbus-close",
-                reply.first().copied(),
-            );
-            Reply::Data(reply)
-        }
-        verb::DBUS_SEND => Reply::Data(relay.send(pid, &incoming.data)),
-        verb::DBUS_RECV => Reply::Data(relay.recv(pid, &incoming.data)),
-        // Unreachable: `handle` dispatches here only for the four DBUS_* codes.
-        _ => Reply::Data(one(status::BAD_REQUEST)),
-    }
-}
-
-/// Audit one D-Bus lifecycle verb, mapping the relay's reply status byte to an outcome (an empty
-/// reply — a denied/gone `recv` — is `Info`).
-fn audit_dbus(
-    writer: &Writer,
-    incoming: &Incoming,
-    ctx: u16,
-    action: &'static str,
-    status_byte: Option<u8>,
-) {
-    let outcome = status_byte.map_or(Outcome::Info, outcome_for);
-    writer.emit(
-        &Event::new(action, Resource::Binder, outcome, Source::Kenneld)
-            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-            .field("ctx", Value::Uint(u64::from(ctx))),
-    );
-}
-
 /// A one-byte status reply.
 fn one(status: u8) -> Vec<u8> {
     vec![status]
-}
-
-/// The audit outcome for a status byte.
-const fn outcome_for(status: u8) -> Outcome {
-    match status {
-        status::OK => Outcome::Allow,
-        status::DENIED | status::REFUSED_RESERVED => Outcome::Deny,
-        _ => Outcome::Info,
-    }
 }
 
 /// Decode a transaction's service-name payload: bounded, UTF-8, non-empty. `None`

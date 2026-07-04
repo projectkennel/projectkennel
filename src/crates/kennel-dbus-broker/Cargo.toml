@@ -21,10 +21,11 @@ kennel-lib-binder = { path = "../kennel-lib-binder" }
 # The D-Bus filter types (BusRules/Filter) carried in ACCEPT_SESSION and the conduit
 # frame length helper (`frame_len`) the inbound reader uses.
 kennel-lib-dbus = { path = "../kennel-lib-dbus" }
-# The per-connection mediation loop (`mediate`), reused once per session: it drives the
-# real bus (SASL + sans-IO) against the delegate. The broker bridges each session's frames
-# to it over a socketpair, so the bus-side I/O deps live in host-dbus, not here.
-kennel-host-dbus = { path = "../kennel-host-dbus" }
+# The bus-side D-Bus client for the in-crate mediation loop (`mediate`, one per session):
+# the sans-IO connector (SASL handshake) and connection.
+mini-sansio-dbus = "=5.0.1"
+# poll(2) over the conduit + bus fds (single-threaded event loop, no per-message threads).
+nix = { version = "=0.31.3", default-features = false, features = ["poll"] }
 
 [lints]
 workspace = true

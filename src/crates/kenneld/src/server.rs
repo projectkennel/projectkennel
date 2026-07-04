@@ -210,9 +210,6 @@ pub struct Identity {
     /// The host path of `facade-tun`, the in-kennel L3 forwarder for a `[net.udp]` consumer of the
     /// tun broker (W2). `None` disables the tun facade path.
     pub facade_tun_bin: Option<PathBuf>,
-    /// The host path of `host-dbus`, the operator-context D-Bus mediation delegate kenneld spawns
-    /// per enabled bus (§7.7.2b). `None` disables mediation (no delegate, so the relay denies).
-    pub host_dbus_bin: Option<PathBuf>,
     /// The host path of the trusted root-owned `kennel-bin-init` the privhelper factory
     /// `fexecve`s as the kennel's uid-0 PID 1 (`07-2`). `Some` selects the factory
     /// construction path (a real uid 0, binderfs chowned to the operator); `None` keeps
@@ -289,15 +286,14 @@ struct Registry {
 /// Serve a mediation broker's `GET_SESSION_POLICY` pull: the policy artifact that lets the broker
 /// police the running kennel at `ctx`'s session for the capability `name`.
 ///
-/// Generic in the only sense that matters — *name and shape from policy*. It finds the consumer's
-/// `[[consumes]]` entry for `name`, reads its declared [`Shape`], and encodes that shape's session
-/// artifact from the retained settled struct: a `dbus-name` consume yields the `IDBus` filter for the
-/// capability's bus. There is no stored filter table and no per-consumer state — the running kennel's
-/// own settled policy is the single source. `None` if there is no such running kennel, its policy is
-/// not retained, `name` is not a consume it declared, or the shape is not one a broker mediates.
+/// The artifact comes from the retained settled struct: a dbus capability yields the `IDBus`
+/// filter for that bus straight from the kennel's `[dbus]` section — the section implies the
+/// consume (W4), so its presence is the authorization and no `[[consumes]]` entry is required.
+/// There is no stored filter table and no per-consumer state — the running kennel's own settled
+/// policy is the single source. `None` if there is no such running kennel, its policy is not
+/// retained, the capability is not a dbus one, or the kennel does not enable that bus.
 fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
     use kennel_lib_binder::service::{broker, dbus};
-    use kennel_lib_policy::settled::Shape;
 
     let settled = reg
         .kennels
@@ -305,25 +301,23 @@ fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
         .find(|m| m.ctx == ctx)?
         .settled
         .as_ref()?;
-    let consume = settled.mesh.consumes.iter().find(|c| c.name == name)?;
-    match consume.shape {
-        Shape::DbusName => {
-            let bus = dbus::capability_bus(name)?;
-            let rules = match bus {
-                dbus::SYSTEM => settled.dbus.system.as_ref(),
-                _ => settled.dbus.session.as_ref(),
-            }?;
-            Some(broker::encode_accept(
-                bus,
-                &rules.talk,
-                &rules.call,
-                &rules.broadcast,
-                &rules.own,
-                &rules.deny_talk,
-            ))
-        }
-        Shape::AfUnix | Shape::BinderConnector => None,
-    }
+    // A dbus capability's session policy is the kennel's own `[dbus]` section for that bus.
+    // `[dbus]` implies the consume (W4), so the section's presence IS the authorization — the
+    // artefact need not spell a `[[consumes]]` out, and a kennel without the bus enabled gets
+    // `None` (fail-closed). No other shape has a broker-mediated session artifact.
+    let bus = dbus::capability_bus(name)?;
+    let rules = match bus {
+        dbus::SYSTEM => settled.dbus.system.as_ref(),
+        _ => settled.dbus.session.as_ref(),
+    }?;
+    Some(broker::encode_accept(
+        bus,
+        &rules.talk,
+        &rules.call,
+        &rules.broadcast,
+        &rules.own,
+        &rules.deny_talk,
+    ))
 }
 
 /// The daemon's shared state, cloned (via `Arc`) into each connection thread.
@@ -626,10 +620,11 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
     }
 
-    /// Prepare a kennel's D-Bus mediation (§7.7): for each enabled bus, pair the compiled
-    /// allow/deny table with the operator's real bus address (what `host-dbus` connects) and the
-    /// in-view socket path `facade-dbus` binds (what the workload's `DBUS_*_BUS_ADDRESS` points
-    /// at). A no-op (empty [`crate::DbusPrep`]) when the kennel enables no bus.
+    /// Prepare a kennel's D-Bus facade wiring (§7.7): the in-view socket path `facade-dbus`
+    /// binds per enabled bus (what the workload's `DBUS_*_BUS_ADDRESS` points at). Mediation
+    /// itself is the standing dbus-broker's job — the broker holds the real bus legs and pulls
+    /// this kennel's filter over the mesh. A no-op (empty [`crate::DbusPrep`]) when the kennel
+    /// enables no bus.
     ///
     /// `shim_root` is the kennel's in-view `$HOME` (a writable tmpfs); the in-view bus sockets live
     /// under it, so the facade can `bind(2)` them and the workload can connect.
@@ -640,33 +635,15 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     ) -> crate::DbusPrep {
         // The in-view directory facade-dbus binds its per-bus sockets in (it create_dir_all's it).
         let listen_dir = shim_root.join(".kennel-dbus");
-        let bus_prep = |rules: &kennel_lib_policy::DbusBusRuntime, address: String, leaf: &str| {
-            crate::DbusBusPrep {
-                rules: rules.clone(),
-                bus_address: address,
-                listen_path: listen_dir.join(leaf),
-            }
-        };
         crate::DbusPrep {
-            session: dbus
-                .session
-                .as_ref()
-                .map(|r| bus_prep(r, self.session_bus_address(), "session")),
-            system: dbus
-                .system
-                .as_ref()
-                .map(|r| bus_prep(r, system_bus_address(), "system")),
+            session: dbus.session.as_ref().map(|_| crate::DbusBusPrep {
+                listen_path: listen_dir.join("session"),
+            }),
+            system: dbus.system.as_ref().map(|_| crate::DbusBusPrep {
+                listen_path: listen_dir.join("system"),
+            }),
             facade_bin: self.identity.facade_dbus_bin.clone(),
-            host_bin: self.identity.host_dbus_bin.clone(),
-            cmd_dir: crate::socket::runtime_dir().join("dbus"),
         }
-    }
-
-    /// The operator's real session-bus address `host-dbus` connects to: the daemon's own
-    /// `DBUS_SESSION_BUS_ADDRESS`, else the well-known per-user socket.
-    fn session_bus_address(&self) -> String {
-        std::env::var("DBUS_SESSION_BUS_ADDRESS")
-            .unwrap_or_else(|_| format!("unix:path=/run/user/{}/bus", self.identity.uid))
     }
 
     /// Get or create a binder-connector mesh bus for the given capability, returning a **detached,
@@ -924,6 +901,17 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         };
         if !started {
             return Response::Error(format!("kennel `{name}` is still starting"));
+        }
+        // A supervised provider's manual stop is a deliberate operator act, not a crash: mark it
+        // through the idle-reap channel BEFORE the kill, so the supervisor reads the death as
+        // "stop supervising, back to declared-but-pending" instead of feeding it to the
+        // `[service]` restart discipline. Without this, `on-failure` restarts the stopped
+        // provider (or crash-loops it into declared-but-failed if its enablement moved), and the
+        // name stays poisoned for every later consume.
+        if self.ondemand_provider(name).is_some() {
+            if let Some(act) = self.activator() {
+                act.mark_idle_reaped(name);
+            }
         }
         // Kill via the cgroup, not the recorded pid: the unprivileged spawn makes
         // the workload PID 1 of a nested PID namespace behind a double-fork, so the
@@ -1612,6 +1600,34 @@ pub fn run_kennel<P, L>(
             )
         }
     };
+    // `[dbus]` IS the brokered path (W4): each enabled bus implies its `dbus-name` consume
+    // (`org.projectkennel.dbus` / `.dbus-system`) — one mediation home, the standing
+    // dbus-broker; the per-kennel host-dbus delegate is retired. Synthesize the consume when the
+    // policy does not spell it out, so a `[dbus.session]`-only policy (including any pre-W4 v3
+    // artefact) routes identically to one that declares the `[[consumes]]`. Synthesized before
+    // the census below, so the ondemand broker is kept alive while this kennel runs, like any
+    // declared consume.
+    {
+        use kennel_lib_binder::service::dbus as dbus_caps;
+        let implied = [
+            (loaded.dbus.session.is_some(), dbus_caps::CAPABILITY_SESSION),
+            (loaded.dbus.system.is_some(), dbus_caps::CAPABILITY_SYSTEM),
+        ];
+        for (enabled, capability) in implied {
+            if enabled && !loaded.consumes.iter().any(|c| c.name == capability) {
+                loaded
+                    .consumes
+                    .push(kennel_lib_policy::settled::ConsumeRuntime {
+                        name: capability.to_owned(),
+                        shape: kennel_lib_policy::settled::Shape::DbusName,
+                        at: None,
+                        env: Vec::new(),
+                        key: None,
+                        required: true,
+                    });
+            }
+        }
+    }
     // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
     let unix = shared.prepare_unix(&loaded.unix, &loaded.consumes, &subst, &shim_root);
@@ -1829,12 +1845,8 @@ pub fn run_kennel<P, L>(
         }
     }
 
-    // Brokered D-Bus is opt-in per the consumer's policy: a kennel routes its D-Bus over the
-    // standing broker only when it BOTH enables `[dbus]` AND declares a `[[consumes]]` of a
-    // `dbus-name` capability (the service-mesh trigger). `[dbus]` alone keeps the legacy
-    // per-consumer host-dbus delegate — so enabling the broker for one kennel does not silently
-    // strip another's delegate. (dbus-brokered's consumer.toml documents this two-declaration
-    // contract.)
+    // D-Bus is mesh-brokered, full stop (W4): the standing dbus-broker is the one mediation
+    // home. The synthesis above guarantees every `[dbus]` kennel carries a `dbus-name` consume.
     let consumes_dbus_name = loaded
         .consumes
         .iter()
@@ -1844,8 +1856,7 @@ pub fn run_kennel<P, L>(
     // connector mesh bus, so its `facade-dbus` opens the mesh device directly (the per-kennel
     // `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view — the dbus-name
     // consume is served by the facade, not the binder-connector consumer loop above, so nothing
-    // else mounts it. Only when this kennel actually consumes the broker; otherwise D-Bus takes the
-    // legacy host-dbus route and needs no mesh device.
+    // else mounts it.
     {
         let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
         // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
@@ -1881,6 +1892,15 @@ pub fn run_kennel<P, L>(
                     eprintln!("kenneld: consumer `{}`: dbus mesh bus: {e}", req.kennel);
                 }
             }
+        } else if dbus_enabled && broker_tier.is_none() {
+            // Fail-closed, loudly: with the legacy delegate retired there is no fallback — the
+            // bus(es) stay unserved until the shipped broker provider is enabled.
+            eprintln!(
+                "kenneld: kennel `{}` grants [dbus] but no `dbus-broker` provider is enabled — \
+                 the bus(es) will be unserved. install.sh enables the shipped provider at \
+                 /etc/kennel/ondemand/dbus-broker; after adding a link, run `kennel daemon-reload`.",
+                req.kennel
+            );
         }
     }
 
@@ -1990,10 +2010,9 @@ pub fn run_kennel<P, L>(
             catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
             activator: shared.activator(),
             brokered_dbus: {
-                // Brokered only when this kennel actually consumes the broker (a `dbus-name`
-                // `[[consumes]]`) AND the broker is enabled in the catalogue. `[dbus]` alone is the
-                // legacy host-dbus delegate; gating on the consume keeps enabling the broker for one
-                // kennel from stripping another's delegate (the dbus-session-allowed regression).
+                // The `dbus-name` consume (declared or implied by `[dbus]`, above) plus an
+                // enabled broker in the catalogue. There is no other mediation home: when this
+                // is false the SVC_CONNECT locator refuses and the bus goes unserved.
                 // No per-ctx filter is recorded: the mesh bus pulls this kennel's `[dbus]` from its
                 // retained settled struct (`set_settled` above) when the broker asks.
                 consumes_dbus_name && {
@@ -2335,13 +2354,6 @@ fn recv_pty_master(sock: &OwnedFd) -> io::Result<OwnedFd> {
 /// (`<kennel>`/`<ctx>`/`<uid>`/`<home>`) and expand a leading `~`/`$HOME` against
 /// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.6). `base_home` is
 /// the real home for a `real` path, the in-view shim root for a `shim` path.
-/// The operator's real system-bus address `host-dbus` connects to: `DBUS_SYSTEM_BUS_ADDRESS`, else
-/// the well-known path. (Free function: the system bus address is uid-independent.)
-fn system_bus_address() -> String {
-    std::env::var("DBUS_SYSTEM_BUS_ADDRESS")
-        .unwrap_or_else(|_| "unix:path=/run/dbus/system_bus_socket".to_owned())
-}
-
 fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> PathBuf {
     let uid = subst.uid.to_string();
     let s = raw
@@ -2949,7 +2961,6 @@ mod tests {
                 afunix_bin: None,
                 facade_dbus_bin: None,
                 facade_tun_bin: None,
-                host_dbus_bin: None,
                 init_bin: None,
                 oci_entry_bin: None,
                 tracer: kennel_lib_config::Tracer::new(

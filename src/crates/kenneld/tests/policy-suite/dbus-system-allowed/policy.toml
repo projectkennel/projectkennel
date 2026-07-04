@@ -1,0 +1,38 @@
+# ============================================================================
+# Suite case: dbus-system-allowed — the SYSTEM bus over the standing broker (§7.7 / W4).
+#
+# The system-bus twin of dbus-session-allowed: `[dbus.system]` alone implies the
+# `org.projectkennel.dbus-system` consume, and the standing dbus-broker (which holds the single
+# raw system-bus leg its template grants) mediates the session. The retired host-dbus delegate
+# served both buses, so subsumption is proven per bus — this case pins the system half.
+#
+# The workload runs `dbus-send --system GetId` against the facade's in-view system socket; it
+# exits 0 iff the call round-trips the brokered path to the real system bus and back. The
+# kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "dbus-system-allowed"
+template_base = "base-confined"
+
+[dbus.system]
+enabled = true
+
+[dbus.system.allow]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
+
+[workload]
+argv = [
+    "/usr/bin/dbus-send",
+    "--system",
+    "--print-reply",
+    "--dest=org.freedesktop.DBus",
+    "/org/freedesktop/DBus",
+    "org.freedesktop.DBus.GetId",
+]

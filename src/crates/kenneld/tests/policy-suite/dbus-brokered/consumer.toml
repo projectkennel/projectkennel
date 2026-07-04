@@ -2,10 +2,11 @@
 # dbus-brokered — the CONSUMER half + the verdict (§7.7).
 #
 # A D-Bus client kennel whose session bus is mediated by the standing broker over the connector
-# mesh, NOT the legacy per-consumer host-dbus delegate. Two declarations drive that:
+# mesh. `[dbus.session]` alone implies the `org.projectkennel.dbus` consume (W4); this case
+# spells the `[[consumes]]` out anyway, proving the explicit form and the implied form are the
+# same path:
 #   * `[dbus.session]` enables the bus + the filter (talk to the bus driver). kenneld seals
-#     facade-dbus into the view and, because the broker is enabled, marks the relay brokered and
-#     binds the mesh device into the view.
+#     facade-dbus into the view, marks the relay brokered, and binds the mesh device into the view.
 #   * `[[consumes]] org.projectkennel.dbus` is the service-mesh trigger: the facade's per-kennel
 #     `SVC_CONNECT` resolves the broker in the catalogue, socket-activates it (W6), and waits until
 #     Ready — then gets the mesh path back. The facade connects there; kenneld resolves THIS
@@ -32,7 +33,7 @@ read = ["/usr/**", "/lib/**", "/lib64/**", "/bin/**"]
 shell = "/bin/sh"
 allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
 
-# The mesh trigger: resolving this activates the broker and yields the brokered mesh path.
+# The mesh trigger, spelled out (a bare [dbus.session] would imply exactly this consume).
 [[consumes]]
 name = "org.projectkennel.dbus"
 shape = "dbus-name"

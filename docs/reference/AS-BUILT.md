@@ -26,6 +26,27 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-07-04 — D-Bus mediation has ONE home: the standing dbus-broker (host-dbus retired)
+
+- **Bears-on:** Kennel book Vol 2, the D-Bus mediation chapter (§7.7 in the pre-book numbering)
+- **Change:** the legacy per-kennel `host-dbus` operator delegate, its two-declaration contract,
+  and kenneld's routing split are **gone** (W4). `[dbus.session]` / `[dbus.system]` alone routes
+  over `dbus-broker@v1`: kenneld synthesizes the per-bus `dbus-name` consume
+  (`org.projectkennel.dbus` / `.dbus-system`) when the policy does not spell it out, so the
+  section IS the brokered path. The node-0 `DBUS_OPEN` verb and the per-kennel D-Bus relay
+  membrane are deleted (`DBUS_SEND`/`RECV`/`CLOSE` survive as the facade↔broker per-session-node
+  wire); with no enabled broker the `SVC_CONNECT(dbus-name)` locator refuses and the bus is
+  unserved, fail-closed. The broker template gains the system-bus leg + the
+  `org.projectkennel.dbus-system` provide (the delegate served both buses; subsumption had to
+  too), and `install.sh` enables the broker ondemand at the per-host layer
+  (`/etc/kennel/ondemand/dbus-broker`). The `mediate` engine moved into `kennel-dbus-broker`
+  (its one consumer); the `kennel-host-dbus` crate, the `host_dbus` system.toml key, and the
+  daemon's bus-address knowledge are deleted. Measured: TCB 22,851 → 22,300 SLOC.
+- **Why:** the 0.5.0 gate ("until the broker has demonstrably subsumed it") is met — the policy
+  suite's dbus cases pass with every consumer brokered and the delegate deleted; one auditable
+  mediation home.
+- **Source:** the W4 PR.
+
 ## 2026-07-01 — the policy JSON Schema is *derived* from the parser structs, not a hand-kept table
 
 - **Target:** docs/archive/architecture/02-2-config-schema.md §intro (the "It is **generated**, not

@@ -2,16 +2,18 @@
 # Suite case: dbus-session-allowed — the full D-Bus mediation path, allow side (§7.7).
 #
 # `[dbus.session]` enables the session bus and grants `talk` to the bus driver
-# `org.freedesktop.DBus`. At bring-up kenneld seals facade-dbus into the view (the workload's
-# DBUS_SESSION_BUS_ADDRESS points at its in-view socket) and spawns the host-dbus delegate in the
-# operator's context, handing it the compiled allow table; kenneld is the membrane between them.
+# `org.freedesktop.DBus` — and that section alone IS the brokered path (W4): kenneld implies the
+# `org.projectkennel.dbus` consume, seals facade-dbus into the view (the workload's
+# DBUS_SESSION_BUS_ADDRESS points at its in-view socket), and the facade reaches the standing
+# dbus-broker over the connector mesh. No `[[consumes]]` is spelled out here on purpose — this
+# case is the proof that a bare `[dbus.session]` policy routes over the broker.
 #
 # The workload runs a real D-Bus client (`dbus-send --print-reply`) against the facade and calls
 # `org.freedesktop.DBus.GetId`. That exercises the whole round trip: SASL + the locally-answered
-# Hello at the facade, a typed DBUS_SEND transacted to node 0, kenneld's owner-checked relay to
-# host-dbus over the owner-only pipe, the delegate's allowlist pass + reconstruction onto the real
-# bus, and the reply demultiplexed back via DBUS_RECV. `dbus-send` exits 0 iff it received the
-# reply — so the kennel's exit code IS the verdict that the allowed call completed end to end.
+# Hello at the facade, the SVC_CONNECT locator + mesh session mint, the broker's allowlist pass +
+# reconstruction onto the real bus, and the reply demultiplexed back via DBUS_RECV. `dbus-send`
+# exits 0 iff it received the reply — so the kennel's exit code IS the verdict that the allowed
+# call completed end to end (and that the ondemand broker socket-activated).
 # ============================================================================
 
 template_name = "dbus-session-allowed"

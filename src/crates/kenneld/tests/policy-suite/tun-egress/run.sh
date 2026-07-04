@@ -61,4 +61,7 @@ BROKER_PID=$!
 
 # 3. Run the consumer: its tun is constructed, `facade-tun` connects the broker (grants delivered,
 #    session minted), and the workload confirms its tun. The consumer's exit code is the verdict.
-exec "$KENNEL" run "$CASE_DIR/consumer.toml" tun-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
+# the shell and leak the enabled provider link into the user tier for later cases).
+"$KENNEL" run "$CASE_DIR/consumer.toml" tun-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+exit "$?"

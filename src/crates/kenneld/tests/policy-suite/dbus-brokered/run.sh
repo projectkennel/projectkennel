@@ -31,6 +31,11 @@ VENDOR_KEYS="/usr/lib/kennel/keys"
 VENDOR_SUITE_PUB="$VENDOR_KEYS/kennel-suite.pub"
 
 cleanup() {
+    # Stop the activated broker BEFORE unlinking: a still-running instance would sit on the
+    # provider name with its supervision thread alive, so later cases (which enable the same
+    # name at another tier) could never re-activate it — and a daemon-reload resets a running
+    # provider's readiness to pending, starving every later consume.
+    "$KENNEL" stop dbus-broker >/dev/null 2>&1 || true
     rm -f "$BROKER_LINK"
     sudo rm -f "$VENDOR_SUITE_PUB" 2>/dev/null || true
     "$KENNEL" daemon-reload >/dev/null 2>&1 || true
@@ -62,4 +67,7 @@ sed "s#__REAL_BUS__#$REAL_BUS#" "$CASE_DIR/provider.toml" >"$PROVIDER_SRC"
 "$KENNEL" daemon-reload
 
 # 3. Run the consumer: its workload's dbus-send drives the brokered round trip. Exit code is verdict.
-exec "$KENNEL" run "$CASE_DIR/consumer.toml" dbus-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
+# the shell and leak the enabled provider link into the user tier for later cases).
+"$KENNEL" run "$CASE_DIR/consumer.toml" dbus-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+exit "$?"

@@ -97,7 +97,7 @@ if [ "$DO_INSTALL" = 1 ]; then
     # binaries (launcher, init, facades) must be static to run inside an arbitrary OCI image root.
     HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
     cargo build --release --offline --frozen --locked \
-        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus -p kennel-compose \
+        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-compose \
         || { echo "build failed" >&2; exit 1; }
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" \

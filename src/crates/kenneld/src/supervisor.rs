@@ -119,16 +119,21 @@ pub trait ProviderActivator: Send + Sync {
 /// The daemon-backed [`ProviderActivator`]: starts a provider's supervision thread, deduped.
 pub struct Activator<P: Privileged, L: PolicyLoader> {
     shared: Arc<Shared<P, L>>,
-    started: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    /// Providers whose supervision thread is LIVE — the double-start guard. An entry lasts
+    /// exactly as long as its thread: the thread removes itself on return, so a provider whose
+    /// supervision ended (manual `kennel stop`, crash-loop exhaustion, idle-reap) is
+    /// re-activatable by the next consume. A for-the-daemon's-life dedup here left a manually
+    /// stopped ondemand provider permanently cold (the consume-wait then always timed out).
+    started: Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>,
 }
 
 impl<P: Privileged, L: PolicyLoader> Activator<P, L> {
     /// An activator bound to the daemon state.
     #[must_use]
-    pub const fn new(shared: Arc<Shared<P, L>>) -> Self {
+    pub fn new(shared: Arc<Shared<P, L>>) -> Self {
         Self {
             shared,
-            started: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            started: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
         }
     }
 }
@@ -139,8 +144,9 @@ where
     L: PolicyLoader + Send + Sync + 'static,
 {
     fn activate(&self, provider: &str) {
-        // Dedup: start each provider's supervision at most once for the daemon's life (the
-        // consume-with-wait poll handles the window between activation and ready).
+        // Dedup: at most one live supervision thread per provider (the consume-with-wait poll
+        // handles the window between activation and ready). The entry is removed when the
+        // thread returns, so a stopped/exhausted provider can be activated afresh.
         {
             let mut started = self
                 .started
@@ -154,7 +160,21 @@ where
         // brought up by `autostart`, and an unknown name resolves to nothing.
         if let Some(prov) = self.shared.ondemand_provider(provider) {
             let shared = Arc::clone(&self.shared);
-            std::thread::spawn(move || supervise_provider(&shared, prov));
+            let started = Arc::clone(&self.started);
+            let name = provider.to_owned();
+            std::thread::spawn(move || {
+                supervise_provider(&shared, prov);
+                started
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&name);
+            });
+        } else {
+            // Nothing to supervise (unknown / not ondemand): release the guard entry.
+            self.started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(provider);
         }
     }
 

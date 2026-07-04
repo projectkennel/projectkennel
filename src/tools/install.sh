@@ -363,6 +363,17 @@ install_reference_policies() {
 		fi
 	done
 	echo "install.sh: compiled $count reference policies into /etc/kennel/policies"
+	# Enable the standing D-Bus broker ondemand at the per-host layer (W4): with the legacy
+	# per-kennel host-dbus delegate retired, the broker is the ONE mediation home — a `[dbus]`
+	# kennel's bus is unserved without it. `ondemand/` is lazy (socket-activated on first
+	# consume), so a host with no D-Bus consumer still pays nothing. Installing IS the admin's
+	# act, and the link is the admin-tier enablement (§7.13.6); a per-user link overrides it.
+	local broker_settled="/etc/kennel/policies/providers/dbus-broker/dbus-broker.settled.toml"
+	if [ -f "$broker_settled" ]; then
+		install -d -m 0755 /etc/kennel/ondemand
+		ln -sf "$broker_settled" /etc/kennel/ondemand/dbus-broker
+		echo "install.sh: enabled the dbus-broker provider (ondemand, per-host)"
+	fi
 }
 
 # The signed reference templates and fragments are MAINTAINER content: they ship to the vendor

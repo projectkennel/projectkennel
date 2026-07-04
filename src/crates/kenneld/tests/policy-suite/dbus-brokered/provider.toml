@@ -31,9 +31,10 @@ allow = ["/usr/libexec/kennel-facades/dbus-broker", "/bin/sh"]
 argv = ["/usr/libexec/kennel-facades/dbus-broker"]
 pinned = true
 
-# The broker connects to the real bus at the in-view shim path the unix leg binds.
+# The broker connects to the real buses at the in-view shim paths the unix legs bind.
 [env.set]
 DBUS_SESSION_BUS_ADDRESS = "unix:path=/tmp/kennel-broker-bus.sock"
+DBUS_SYSTEM_BUS_ADDRESS = "unix:path=/tmp/kennel-broker-system-bus.sock"
 
 # Raw access to the operator's real session bus: the broker mediates + filters itself, so it needs
 # the bus the way host-dbus has it. facade-afunix binds the shim; kenneld brokers to the real socket.
@@ -44,6 +45,12 @@ real = "__REAL_BUS__"
 shim = "/tmp/kennel-broker-bus.sock"
 reason = "the dbus-broker is the mediator and needs raw access to the operator's session bus"
 
+[[unix.allow]]
+name = "system-bus"
+real = "/run/dbus/system_bus_socket"
+shim = "/tmp/kennel-broker-system-bus.sock"
+reason = "the broker mediates [dbus.system] consumers too (mirrors the shipped template)"
+
 # The control node kenneld reaches with ACCEPT_SESSION (endpoint = the mesh binder device).
 [[provides]]
 name = "org.projectkennel.dbus-broker"
@@ -51,9 +58,18 @@ shape = "binder-connector"
 endpoint = "/dev/binderfs-mesh/binder"
 reason = "kenneld pushes per-session ACCEPT_SESSION to the broker's control node on the mesh bus"
 
-# The D-Bus mediation capability consumers reach — resolving this activates the broker.
+# The D-Bus mediation capabilities consumers reach — resolving one activates the broker. Both
+# buses are offered, mirroring the shipped template: this fixture is enabled at the USER tier,
+# which shadows the installed per-host provider, so an offer it lacked would vanish from the
+# catalogue for every later suite case (the dbus-system-allowed lesson).
 [[provides]]
 name = "org.projectkennel.dbus"
 shape = "dbus-name"
 endpoint = "org.freedesktop.DBus"
-reason = "D-Bus mediation capability for consumer kennels"
+reason = "D-Bus session-bus mediation capability for consumer kennels"
+
+[[provides]]
+name = "org.projectkennel.dbus-system"
+shape = "dbus-name"
+endpoint = "org.freedesktop.DBus"
+reason = "D-Bus system-bus mediation capability for consumer kennels"

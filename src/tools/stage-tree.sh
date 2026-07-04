@@ -64,7 +64,7 @@ done
 # Host-side (→ bin/): the daemon, the AKC, the host delegates, the privhelper + its capability-split
 # sub-helpers (all dynamic), the trusted init (static, `fexecve`'d from an fd — needs no view path),
 # and the host execution unit (`kennel-host` → `host`, dynamic).
-HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd host-dbus kennel-privhelper kennel-privhelper-net kennel-privhelper-bpf kennel-privhelper-mounts"
+HOST_REL_BINS="kenneld kennel-akc host-netproxy host-inetd kennel-privhelper kennel-privhelper-net kennel-privhelper-bpf kennel-privhelper-mounts"
 HOST_STAT_BINS="kennel-bin-init"
 # In-cage (→ facades/): the conduit facades, the OCI launcher, the spawn execution unit
 # (`kennel-spawn` → `spawn`), the standing D-Bus broker (`dbus-broker`, the mediation service

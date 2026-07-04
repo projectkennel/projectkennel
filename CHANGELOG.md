@@ -31,6 +31,32 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   tiers (`/etc/kennel/keys`, `~/.config/kennel/keys`) — the CLI refuses with the file named
   until each is converted or removed; the daemon skips them with a warning.
 
+### D-Bus mediation
+
+- **The per-kennel `host-dbus` delegate is retired** (W4) — the 0.5.0 gate ("until the broker has
+  demonstrably subsumed it") is met, and the standing `dbus-broker@v1` service kennel is now the
+  ONE mediation home. `[dbus.session]` / `[dbus.system]` **alone** routes over the broker: the
+  section implies the per-bus `dbus-name` consume (`org.projectkennel.dbus` / `.dbus-system`),
+  synthesized by the daemon when the policy does not spell it out — pre-W4 v3 artefacts route
+  identically, and an explicit `[[consumes]]` remains valid and equivalent. The two-declaration
+  contract and the routing split are gone. With no enabled broker the bus is unserved,
+  fail-closed (a loud daemon diagnostic; no fallback). The broker gains the **system-bus leg**
+  and the `org.projectkennel.dbus-system` provide (the delegate served both buses, so subsumption
+  had to too), and **`install.sh` enables the broker ondemand at the per-host layer**
+  (`/etc/kennel/ondemand/dbus-broker`) — lazy, so a host with no D-Bus consumer pays nothing.
+  Deleted: the `kennel-host-dbus` crate (its `mediate` engine moved into `kennel-dbus-broker`,
+  its one consumer), kenneld's D-Bus relay membrane and delegate spawn path, and the `host_dbus`
+  `system.toml` key (remove a stale override from an admin `system.toml` after upgrading). The
+  daemon no longer knows any bus address. Measured shrink: TCB 22,851 → 22,300 SLOC.
+
+### IPC protocol changes
+
+- **The node-0 `DBUS_OPEN` verb (code 8) and its `conn-id` request codec are removed** with the
+  legacy relay; the code is not reused. `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE` remain as the
+  facade↔broker wire on the per-session mesh node (bare TLV frame / empty payloads — the session
+  node is the connection). The `binder.dbus-open`/`binder.dbus-close` audit events go with the
+  verbs; broker-side session mediation is audited by the broker, as before.
+
 ### Policy schema changes
 
 - **Two additive-optional settled fields (schema stays v3).** Both are backward-compatible — a

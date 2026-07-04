@@ -84,7 +84,7 @@ if [ "$DO_INSTALL" = 1 ]; then
     echo "== building + installing release (sudo install.sh) =="
     HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
     cargo build --release --offline --frozen --locked \
-        -p kenneld -p kennel-cli -p kennel-host-delegate -p kennel-host-dbus >/dev/null
+        -p kenneld -p kennel-cli -p kennel-host-delegate >/dev/null
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
         --target "$HOST_TRIPLE" -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade >/dev/null
     cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress >/dev/null

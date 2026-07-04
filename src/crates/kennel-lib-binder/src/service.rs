@@ -33,31 +33,26 @@ pub mod verb {
     /// Register a workload bus connection for D-Bus mediation (the `IDBus` facade, §7.7.2).
     ///
     /// `facade-dbus` transacts `[conn-id: u32 | bus: u8]` (see [`crate::service::dbus`]) once
-    /// per accepted workload connection. kenneld binds the `conn-id` to the `host-dbus` delegate
-    /// for that bus and replies [`crate::service::status::OK`], or
-    /// [`crate::service::status::DENIED`] if the policy did not enable the bus. kenneld is the
-    /// **membrane**: the kennel reaches `host-dbus` only by transacting these verbs to node 0
-    /// (§7.7.2a) — never a raw conduit fd.
-    pub const DBUS_OPEN: u32 = 8;
     /// Send one mediated D-Bus message (the `IDBus` facade, §7.7.2). **`oneway`.**
     ///
-    /// `facade-dbus` transacts `[conn-id: u32 | frame: IDBus TLV]` (see [`crate::dbus`]); kenneld
-    /// rate-limits it at the membrane (§7.7.2c), then relays the frame to the bound `host-dbus`
-    /// over the owner-only pipe. No reply — the bus reply returns asynchronously via
-    /// [`DBUS_RECV`], so no kenneld thread is held per call.
+    /// `facade-dbus` transacts the bare `IDBus` TLV frame (see [`crate::dbus`]) against the
+    /// broker's **per-session node** on the mesh bus — the session is the connection, so no
+    /// `conn-id` rides the wire. The broker rate-limits and filters it (§7.7.2c); the bus reply
+    /// returns asynchronously via [`DBUS_RECV`], so no thread is held per call. (Code 8 was the
+    /// retired legacy `DBUS_OPEN`; the gap is deliberate.)
     pub const DBUS_SEND: u32 = 9;
-    /// Long-poll for the next inbound D-Bus frame on a connection (the `IDBus` facade, §7.7.2).
+    /// Long-poll for the next inbound D-Bus frame on a session (the `IDBus` facade, §7.7.2).
     ///
-    /// `facade-dbus` keeps one `[conn-id: u32]` transaction outstanding; kenneld parks it and
-    /// replies with the next inbound TLV frame `host-dbus` pushes for that connection — a reply
+    /// `facade-dbus` keeps one empty-payload transaction outstanding against the broker's
+    /// per-session node; the broker parks it and replies the next inbound TLV frame — a reply
     /// or error to a prior [`DBUS_SEND`], or an allowlisted signal (§7.7.4) — or the
     /// [`crate::service::status::AGAIN`] byte to re-arm. The facade demultiplexes replies to
     /// calls by `reply_serial` itself.
     pub const DBUS_RECV: u32 = 10;
-    /// Tear down a workload bus connection (the `IDBus` facade, §7.7.2). **`oneway`.**
+    /// Tear down a mediated bus session (the `IDBus` facade, §7.7.2). **`oneway`.**
     ///
-    /// `facade-dbus` transacts `[conn-id: u32]` when the workload's connection closes; kenneld
-    /// drops the connection state and tells `host-dbus` to release its serial map for it.
+    /// `facade-dbus` transacts an empty payload against the per-session node when the workload's
+    /// connection closes; the broker releases the session's mediation loop and serial map.
     pub const DBUS_CLOSE: u32 = 11;
     /// Register a callback node for a policy-mirrored bind port (the inbound mirror, §7.5.7).
     ///
@@ -276,13 +271,11 @@ pub mod inet {
     }
 }
 
-/// The request wire for the D-Bus mediation verbs ([`verb::DBUS_OPEN`]/[`verb::DBUS_SEND`]/
-/// [`verb::DBUS_RECV`]/[`verb::DBUS_CLOSE`]).
+/// The D-Bus mesh capability names and bus selector bytes (§7.7).
 ///
-/// Every request leads with a 4-byte big-endian **connection id** the facade allocates per
-/// workload bus connection; kenneld routes by it and never interprets it. `DBUS_OPEN` adds a
-/// bus selector byte; `DBUS_SEND` appends the [`crate::dbus`] TLV frame; `DBUS_RECV`/`DBUS_CLOSE`
-/// are the id alone. The wire is internal-stable (both ends ship from one release).
+/// The mediation verbs ([`verb::DBUS_SEND`]/[`verb::DBUS_RECV`]/[`verb::DBUS_CLOSE`]) ride the
+/// broker's per-session node, so their wire is the bare frame (or empty) — no codec lives here.
+/// The wire is internal-stable (both ends ship from one release).
 pub mod dbus {
     /// The session bus selector byte (mirrors `crate::dbus::Bus::Session`).
     pub const SESSION: u8 = 0;
@@ -317,86 +310,6 @@ pub mod dbus {
             CAPABILITY_SYSTEM
         } else {
             CAPABILITY_SESSION
-        }
-    }
-
-    /// Encode a [`super::verb::DBUS_OPEN`] request: `[conn_id: u32 be | bus: u8]`.
-    #[must_use]
-    pub fn encode_open(conn_id: u32, bus: u8) -> Vec<u8> {
-        let mut out = Vec::with_capacity(5);
-        out.extend_from_slice(&conn_id.to_be_bytes());
-        out.push(bus);
-        out
-    }
-
-    /// Decode a `DBUS_OPEN` request into `(conn_id, bus)`. `None` for any payload that is not
-    /// exactly 5 bytes (untrusted; the bus byte's validity is the caller's concern).
-    #[must_use]
-    pub fn decode_open(data: &[u8]) -> Option<(u32, u8)> {
-        let [a, b, c, d, bus] = data else {
-            return None;
-        };
-        Some((u32::from_be_bytes([*a, *b, *c, *d]), *bus))
-    }
-
-    /// Encode a [`super::verb::DBUS_SEND`] request: `[conn_id: u32 be | frame bytes]`.
-    #[must_use]
-    pub fn encode_send(conn_id: u32, frame: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(frame.len().saturating_add(4));
-        out.extend_from_slice(&conn_id.to_be_bytes());
-        out.extend_from_slice(frame);
-        out
-    }
-
-    /// Decode a `DBUS_SEND` request into `(conn_id, frame bytes)`. `None` for a payload shorter
-    /// than the 4-byte id.
-    #[must_use]
-    pub fn decode_send(data: &[u8]) -> Option<(u32, &[u8])> {
-        let [a, b, c, d, frame @ ..] = data else {
-            return None;
-        };
-        Some((u32::from_be_bytes([*a, *b, *c, *d]), frame))
-    }
-
-    /// Encode a bare `[conn_id: u32 be]` request ([`super::verb::DBUS_RECV`]/[`super::verb::DBUS_CLOSE`]).
-    #[must_use]
-    pub fn encode_conn(conn_id: u32) -> Vec<u8> {
-        conn_id.to_be_bytes().to_vec()
-    }
-
-    /// Decode a bare connection-id request. `None` unless the payload is exactly 4 bytes.
-    #[must_use]
-    pub fn decode_conn(data: &[u8]) -> Option<u32> {
-        let [a, b, c, d] = data else { return None };
-        Some(u32::from_be_bytes([*a, *b, *c, *d]))
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::{
-            decode_conn, decode_open, decode_send, encode_conn, encode_open, encode_send, SESSION,
-        };
-
-        #[test]
-        fn open_round_trips() {
-            assert_eq!(decode_open(&encode_open(7, SESSION)), Some((7, SESSION)));
-            assert!(decode_open(&[0, 0, 0, 1]).is_none()); // too short
-        }
-
-        #[test]
-        fn send_round_trips_with_frame() {
-            let bytes = encode_send(42, &[0xAA, 0xBB]);
-            let (id, frame) = decode_send(&bytes).expect("decode");
-            assert_eq!(id, 42);
-            assert_eq!(frame, &[0xAA, 0xBB]);
-            assert!(decode_send(&[0, 0, 1]).is_none()); // shorter than the id
-        }
-
-        #[test]
-        fn conn_round_trips() {
-            assert_eq!(decode_conn(&encode_conn(0xDEAD_BEEF)), Some(0xDEAD_BEEF));
-            assert!(decode_conn(&[0, 0, 0]).is_none());
-            assert!(decode_conn(&[0, 0, 0, 0, 0]).is_none());
         }
     }
 }

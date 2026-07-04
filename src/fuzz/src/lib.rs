@@ -118,7 +118,7 @@ pub fn fuzz_parsers(data: &[u8]) {
     let mut sasl = kennel_lib_dbus::sasl::SaslServer::new();
     let _ = sasl.push(data);
 
-    // The typed IDBus conduit frame (07-7 §7.7.2): `host-dbus` (trusted) decodes frames
+    // The typed IDBus conduit frame (07-7 §7.7.2): the dbus-broker (trusted) decodes frames
     // the in-kennel (untrusted) facade produced, so the small flat frame decoder reads
     // untrusted input. `data` is the frame payload after the length prefix.
     let _ = kennel_lib_dbus::wire::Frame::decode(data);
