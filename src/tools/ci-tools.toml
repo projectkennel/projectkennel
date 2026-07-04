@@ -15,27 +15,43 @@
 # GitHub release asset therefore cannot change what CI runs: the on-disk hash
 # here is authoritative.
 #
-# §5.5 STATUS — maintainer-ratified (2026-06-03, remco).
-#   Each `archive-sha256` was verified by an independent second download (fresh
-#   fetch, re-hashed, byte-equal to the recorded value) and, where upstream
-#   publishes a per-asset `.sha256`, confirmed byte-equal to that too. Residual,
-#   knowingly accepted: both legs share the GitHub-release origin, so a
-#   release-account compromise serving identical bytes to every fetch is not
-#   excluded — the fully-independent leg (signed git tag / third-party mirror) is
-#   not performed for these CI-only tools. cargo-audit is the weakest of the
-#   three (no upstream per-asset checksum at all; see its `notes`).
+# LAYOUT — one `[tool."<name>"]` block per tool (the pinned `version`), then one
+# `[tool."<name>".artifact."<arch>"]` block per pinned artifact, keyed by
+# `uname -m` (x86_64, aarch64, …). The installer picks the artifact matching the
+# host arch, so the gate runs identically on the x86_64 CI runners and on an
+# aarch64 dev host. Where upstream publishes NO binary for an arch (cargo-vet has
+# never shipped an aarch64 Linux asset), the fallback is an `artifact."source"`
+# block: the pinned, hash-verified release SOURCE tarball, built at install time
+# with `cargo install --locked`. Its integrity chain is the same shape — this
+# manifest pins the tarball's SHA-256, the tarball's committed Cargo.lock pins
+# every dependency's SHA-256, and cargo enforces the latter during the build —
+# and it covers any arch the binary pins do not.
 #
-#   The CI `supply-chain` job remains `continue-on-error` until it has been
-#   observed to run green at least once; flipping it to a required check (branch
-#   protection + dropping that line) is a separate, deliberate maintainer step.
+# §5.5 STATUS
+#   x86_64 artifacts: maintainer-ratified (2026-06-03, remco). Each
+#   `archive-sha256` was verified by an independent second download (fresh
+#   fetch, re-hashed, byte-equal to the recorded value) and, where upstream
+#   publishes a per-asset `.sha256`, confirmed byte-equal to that too.
+#   aarch64 + source artifacts (added 2026-07-04): the same two verification
+#   legs were performed (second download via the GitHub API asset endpoint,
+#   byte-equal; upstream `.sha256` byte-equal where published) — `audited-by`
+#   stays PENDING until a maintainer ratifies the recorded hashes.
+#   Residual, knowingly accepted for all entries: both legs share the
+#   GitHub-release origin, so a release-account compromise serving identical
+#   bytes to every fetch is not excluded — the fully-independent leg (signed git
+#   tag / third-party mirror) is not performed for these CI-only tools.
+#   cargo-audit is the weakest of the three (no upstream per-asset checksum at
+#   all; see its `notes`).
 #
 # Adding or bumping a tool follows the CHECKSUMS.toml procedure (tools/README.md
-# §"CI tool binaries"): pin the exact release tag, fetch the asset and its
-# upstream `.sha256`, confirm equality, cross-check the release tag/signature,
-# record the value, and obtain the second approval.
+# §"CI tool binaries"): pin the exact release tag, fetch each arch's asset and
+# its upstream `.sha256`, confirm equality, cross-check the release
+# tag/signature, record the value, and obtain the second approval.
 
 [tool."cargo-deny"]
-version          = "0.19.8"
+version = "0.19.8"
+
+[tool."cargo-deny".artifact."x86_64"]
 target           = "x86_64-unknown-linux-musl"
 url              = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/cargo-deny-0.19.8-x86_64-unknown-linux-musl.tar.gz"
 archive-sha256   = "70e769ae3872e34d45132b17040859175e11401dc12dddb0303e0b8c7d088f3f"
@@ -48,8 +64,23 @@ verified-against = [
 ]
 notes = "statically-linked musl build. Residual: both verification legs share the GitHub-release origin (§5.5 STATUS)"
 
+[tool."cargo-deny".artifact."aarch64"]
+target           = "aarch64-unknown-linux-musl"
+url              = "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.8/cargo-deny-0.19.8-aarch64-unknown-linux-musl.tar.gz"
+archive-sha256   = "67ef48056523d27f58a527c5e49172bc24758f7b8147998d47219d45b181c354"
+bin-path         = "cargo-deny-0.19.8-aarch64-unknown-linux-musl/cargo-deny"
+audited-by       = "PENDING"
+audited-on       = "2026-07-04"
+verified-against = [
+    "independent second download (GitHub API asset endpoint), re-hashed — byte-equal to archive-sha256",
+    "upstream release asset .sha256 (EmbarkStudios/cargo-deny tag 0.19.8) — byte-equal",
+]
+notes = "statically-linked musl build. Residual: both verification legs share the GitHub-release origin (§5.5 STATUS)"
+
 [tool."cargo-audit"]
-version          = "0.22.1"
+version = "0.22.1"
+
+[tool."cargo-audit".artifact."x86_64"]
 target           = "x86_64-unknown-linux-musl"
 url              = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.1/cargo-audit-x86_64-unknown-linux-musl-v0.22.1.tgz"
 archive-sha256   = "c32506f338bdcdaef5a17fb9f33abb6ecf9561324cfd34237fd335f9283a1eab"
@@ -61,8 +92,22 @@ verified-against = [
 ]
 notes = "WEAKEST of the three: rustsec publishes no per-asset .sha256, so provenance rests only on two independent downloads agreeing. Re-pin to a release that ships a checksum/signature when one is available"
 
+[tool."cargo-audit".artifact."aarch64"]
+target           = "aarch64-unknown-linux-gnu"
+url              = "https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.1/cargo-audit-aarch64-unknown-linux-gnu-v0.22.1.tgz"
+archive-sha256   = "4c8df835ee484441bd2c8c6bcac28c4ce4b4058ba9e7477cb9e0012fe7769f66"
+bin-path         = "cargo-audit-aarch64-unknown-linux-gnu-v0.22.1/cargo-audit"
+audited-by       = "PENDING"
+audited-on       = "2026-07-04"
+verified-against = [
+    "independent second download (GitHub API asset endpoint), re-hashed — byte-equal to archive-sha256",
+]
+notes = "gnu build — upstream publishes no aarch64 musl asset (fine for a host-side CI tool). Same WEAKEST caveat as the x86_64 entry: no upstream per-asset checksum"
+
 [tool."cargo-vet"]
-version          = "0.10.0"
+version = "0.10.0"
+
+[tool."cargo-vet".artifact."x86_64"]
 target           = "x86_64-unknown-linux-gnu"
 url              = "https://github.com/mozilla/cargo-vet/releases/download/v0.10.0/cargo-vet-x86_64-unknown-linux-gnu.tar.xz"
 archive-sha256   = "c7664d9db5dd2ff813f20303650ac8253fa712ff2a1ea9ce12bed71e346f1744"
@@ -74,3 +119,16 @@ verified-against = [
     "upstream release asset .sha256 (mozilla/cargo-vet tag v0.10.0) — byte-equal",
 ]
 notes = "Residual: both verification legs share the GitHub-release origin (§5.5 STATUS). The cargo-vet audit corpus (supply-chain/) is itself owed — see tools/README.md"
+
+[tool."cargo-vet".artifact."source"]
+target           = "any — built from the pinned source with `cargo install --locked`"
+url              = "https://github.com/mozilla/cargo-vet/releases/download/v0.10.0/source.tar.gz"
+archive-sha256   = "6ea308eb97df6356d76335fadf9cd0ab47c49208351ee7c500fc6c47ce204507"
+src-path         = "cargo-vet-0.10.0"
+audited-by       = "PENDING"
+audited-on       = "2026-07-04"
+verified-against = [
+    "independent second download (GitHub API asset endpoint), re-hashed — byte-equal to archive-sha256",
+    "upstream release asset .sha256 (mozilla/cargo-vet tag v0.10.0) — byte-equal",
+]
+notes = "mozilla/cargo-vet has never shipped an aarch64 Linux binary, so every non-x86_64 arch builds from this pinned tarball. Integrity chain: this SHA-256 pins the source; the source's committed Cargo.lock pins every dependency; cargo enforces the lock during the --locked build"

@@ -48,13 +48,15 @@ record the SHA-256 we verified, and refuse anything that does not match.
 
 | Tool | What it does |
 |---|---|
-| `ci-tools.toml` | The integrity ground truth for the tool binaries (what `CHECKSUMS.toml` is for `.crate`s): per-tool version, download `url`, `archive-sha256`, in-archive `bin-path`, and the §5.5 audit fields. Entries start `audited-by = "PENDING"`. |
-| `install-ci-tools.sh` | Downloads each pinned `url`, verifies its SHA-256 against `ci-tools.toml` **before** extracting the binary, and refuses on any mismatch or on an empty/`PENDING` `archive-sha256`. Prints the bindir on stdout (`PATH="$(tools/install-ci-tools.sh):$PATH"`). Runs in the CI `supply-chain` job. |
+| `ci-tools.toml` | The integrity ground truth for the tool binaries (what `CHECKSUMS.toml` is for `.crate`s): per-tool `version`, then one `artifact."<arch>"` block per pinned asset (keyed by `uname -m`) carrying its `url`, `archive-sha256`, in-archive `bin-path`, and the §5.5 audit fields. A tool whose upstream ships no binary for an arch (cargo-vet has no aarch64 Linux asset) pins an `artifact."source"` fallback: the release source tarball, built at install time with `cargo install --locked` — the tarball's committed `Cargo.lock` pins every dependency, so the hash chain is the same shape. Entries start `audited-by = "PENDING"`. |
+| `install-ci-tools.sh` | Selects each tool's artifact for the host arch (`uname -m`; `CI_TOOLS_ARCH` overrides), falling back to `artifact."source"` and refusing when neither is pinned; downloads the `url` and verifies its SHA-256 against `ci-tools.toml` **before** extracting (or building) the binary, refusing on any mismatch or on an empty/`PENDING` `archive-sha256`. Prints the bindir on stdout (`PATH="$(tools/install-ci-tools.sh):$PATH"`). Runs in the CI `supply-chain` job. |
 
 Pinning or bumping a CI tool (same shape as adding a dependency):
 
-1. Pick the exact upstream release tag; note the linux x86_64 asset and its
-   in-archive binary path.
+1. Pick the exact upstream release tag; note each supported arch's linux asset
+   (x86_64 and aarch64 today) and its in-archive binary path. Where upstream
+   publishes no binary for an arch, pin the release source tarball as the
+   `artifact."source"` fallback instead.
 2. Download the asset **and** its upstream-published `.sha256` (where one
    exists); confirm the computed hash equals the published one. For tools that
    publish no per-asset checksum (cargo-audit today), this is a single source —
@@ -62,12 +64,13 @@ Pinning or bumping a CI tool (same shape as adding a dependency):
 3. **Cross-verify** independently of the download: confirm the release tag and,
    where the project signs releases, the tag signature against `KEYS.md`. This
    is the §5.5 "one source is not enough" rule applied to a binary.
-4. Record `url` / `archive-sha256` / `bin-path` in `ci-tools.toml`; fill
-   `audited-by` / `audited-on` and the `verified-against` lines.
+4. Record `url` / `archive-sha256` / `bin-path` (`src-path` for a source
+   artifact) in `ci-tools.toml`; fill `audited-by` / `audited-on` and the
+   `verified-against` lines.
 5. `tools/install-ci-tools.sh` must succeed (it re-verifies the hash).
-6. Two maintainer approvals. Until the second approval lands, the entry stays
-   `PENDING` and the CI `supply-chain` job is `continue-on-error` (advisory, not
-   a required check). A maintainer flips it to required once ratified.
+6. Two maintainer approvals. Until the second approval lands, the artifact
+   stays `audited-by = "PENDING"` — the hash is the integrity gate, so the
+   installer still installs it, but warns on every run.
 
 ### The `cargo vet` store (`supply-chain/`)
 
