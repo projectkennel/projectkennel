@@ -269,7 +269,7 @@ fn handle(
             // kenneld resolves this consumer's grants and has the broker mint a per-session mediator
             // (§8 / W2), so it is special-cased ahead of the generic mesh / host-socket dispatch.
             if name == kennel_lib_binder::service::tun_broker::CAPABILITY {
-                return tun_connect(tun, incoming, ctx, writer);
+                return tun_connect(tun, catalogue, activator, incoming, ctx, writer);
             }
             if consumes.iter().any(|c| c.name == name) {
                 return svc_connect(
@@ -995,30 +995,89 @@ fn register_tun_sink(
     Reply::Data(one(status::OK))
 }
 
-/// Serve a `[net.udp]` consumer's `CONNECT_AFUNIX` for the tun capability (§8 / W2): deliver its
-/// pre-resolved grants + tun `/64` to the registered sink and hand back the broker's minted
-/// per-session fd as the consumer's af-unix connection.
+/// Socket-activate the enabled provider that offers `capability`, if it is a cold `ondemand` one
+/// (§7.13.4a) — the generic af-unix activation trigger, shared across mesh capabilities rather than
+/// reimplemented per provider.
 ///
-/// `session == None` means this kennel signed no `[net.udp]` grant (nothing to deliver, so it is not
-/// really a tun consumer) → `DENIED`. A delivery failure — no broker registered yet, or an
-/// unreachable/dead one — → `UNAVAILABLE`, never a wedged looper. The deliver is a synchronous
-/// cross-connection transact to the broker's connection; safe because the broker is a different
-/// process, so this thread's outgoing transaction only draws its own reply back.
-fn tun_connect(tun: &TunCtx<'_>, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
+/// Resolves the offering provider against the live catalogue and asks the [`ProviderActivator`] to
+/// start it. Idempotent (a second consume does not double-start it — the activator dedups a live
+/// supervision thread) and a no-op with no catalogue/activator (a test path), an unoffered name, or
+/// a provider that is not `ondemand` (an `autorun` one is already supervised; an activate is a
+/// harmless no-op there).
+fn activate_for_capability(
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
+    capability: &str,
+) {
+    let (Some(cat), Some(act)) = (catalogue, activator) else {
+        return;
+    };
+    let provider = {
+        let guard = cat
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .resolve(capability)
+            .first()
+            .map(|c| c.provider.to_owned())
+    };
+    if let Some(p) = provider {
+        act.activate(&p);
+    }
+}
+
+/// Serve a `[net.udp]` consumer's `CONNECT_AFUNIX` for the tun capability (§8 / W2): deliver its
+/// pre-resolved grants + tun `/64` to the tun-broker's registered sink and hand back the broker's
+/// minted per-session fd as the consumer's af-unix connection.
+///
+/// Activation is the generic af-unix mesh mechanism ([`activate_for_capability`]): the first
+/// consumer's connect socket-activates a cold `ondemand` tun-broker, exactly as an `svc_connect`
+/// consume activates a cold mesh provider. Only the *delivery* is role-specific — a per-session sink
+/// mint, not a rendezvous connector handoff — so the consume-with-wait polls the sink becoming
+/// **deliverable** (the tun delivery's own readiness, which the broker reaches on `REGISTER_TUN_SINK`
+/// a beat after its construction seals) rather than the catalogue's construction-readiness, up to the
+/// same broker deadline (§7.13.4a). The bounded wait is the dependency-cycle safety valve.
+///
+/// `session == None` means this kennel signed no `[net.udp]` grant → `DENIED`. A sink that never
+/// becomes deliverable within the deadline → `UNAVAILABLE`, never a wedged looper. The deliver is a
+/// synchronous cross-connection transact to the broker's connection; safe because the broker is a
+/// different process, so this thread's outgoing transaction only draws its own reply back.
+fn tun_connect(
+    tun: &TunCtx<'_>,
+    catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
+    activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
+    incoming: &Incoming,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
     let Some(payload) = tun.session else {
         writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
         return Reply::Data(one(status::DENIED));
     };
-    tun.sink.deliver(payload).map_or_else(
-        |_| {
-            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
-            Reply::Data(one(status::UNAVAILABLE))
-        },
-        |fd| {
+    // Fast path: a warm sink (the standing/already-activated broker) delivers now.
+    if let Ok(fd) = tun.sink.deliver(payload) {
+        writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+        return Reply::Fd(fd);
+    }
+    // Cold: socket-activate the tun-broker generically, then consume-with-wait until its sink is
+    // deliverable (the delivery's readiness) or the broker deadline fires.
+    activate_for_capability(
+        catalogue,
+        activator,
+        kennel_lib_binder::service::tun_broker::CAPABILITY,
+    );
+    let start = std::time::Instant::now();
+    loop {
+        std::thread::sleep(CONSUME_WAIT_POLL);
+        if let Ok(fd) = tun.sink.deliver(payload) {
             writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-            Reply::Fd(fd)
-        },
-    )
+            return Reply::Fd(fd);
+        }
+        if start.elapsed() >= CONSUME_WAIT_DEADLINE {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
+            return Reply::Data(one(status::UNAVAILABLE));
+        }
+    }
 }
 
 /// The audit event for a tun-egress node-0 decision (sink registration / consumer connect).
@@ -1074,6 +1133,79 @@ mod tests {
         assert!(!lifecycle_authorized(Some(4242), 4242, 65534));
         // Lifecycle disabled (no init pid registered) — everything denied.
         assert!(!lifecycle_authorized(None, 4242, 0));
+    }
+
+    /// A `ProviderActivator` that records the providers it was asked to start.
+    #[derive(Default)]
+    struct RecordingActivator {
+        started: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::supervisor::ProviderActivator for RecordingActivator {
+        fn activate(&self, provider: &str) {
+            self.started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(provider.to_owned());
+        }
+        fn has_running_consumer(&self, _capabilities: &[String]) -> bool {
+            false
+        }
+        fn mark_idle_reaped(&self, _provider: &str) {}
+    }
+
+    /// A one-provider catalogue offering `capability` (af-unix, ondemand).
+    fn catalogue_offering(
+        provider: &str,
+        capability: &str,
+    ) -> Arc<Mutex<crate::catalogue::Catalogue>> {
+        use kennel_lib_policy::settled::{RestartPolicy, ServiceRuntime};
+        let ep = crate::catalogue::EnabledProvider {
+            provider: provider.to_owned(),
+            signing_key_id: "k".to_owned(),
+            tier: crate::catalogue::Tier::Host,
+            enablement: crate::catalogue::Enablement::Ondemand,
+            provides: vec![kennel_lib_policy::settled::ProvideRuntime {
+                name: capability.to_owned(),
+                shape: kennel_lib_policy::settled::Shape::AfUnix,
+                endpoint: "/run/mesh/tun.sock".to_owned(),
+                key: None,
+            }],
+            policy_path: std::path::PathBuf::new(),
+            service: ServiceRuntime {
+                restart: RestartPolicy::OnFailure,
+                backoff_ms: 500,
+                max_attempts: 5,
+            },
+        };
+        Arc::new(Mutex::new(crate::catalogue::Catalogue::project(&[ep])))
+    }
+
+    #[test]
+    fn activate_for_capability_starts_the_offering_provider_generically() {
+        let cap = kennel_lib_binder::service::tun_broker::CAPABILITY;
+        let cat = catalogue_offering("tun-broker", cap);
+        let rec = Arc::new(RecordingActivator::default());
+        let act: Arc<dyn crate::supervisor::ProviderActivator> = rec.clone();
+        // The provider offering the capability is resolved from the catalogue and started.
+        activate_for_capability(Some(&cat), Some(&act), cap);
+        // An unoffered capability starts nothing.
+        activate_for_capability(Some(&cat), Some(&act), "org.projectkennel.nope");
+        // No activator / no catalogue is a clean no-op (a test/construction path).
+        activate_for_capability(Some(&cat), None, cap);
+        activate_for_capability(None, Some(&act), cap);
+
+        let started = {
+            let guard = rec
+                .started
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.clone()
+        };
+        assert_eq!(
+            started,
+            ["tun-broker".to_owned()],
+            "only the offering capability's provider is started, exactly once"
+        );
     }
 
     #[test]
