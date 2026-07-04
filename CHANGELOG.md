@@ -48,7 +48,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   its one consumer), kenneld's D-Bus relay membrane and delegate spawn path, and the `host_dbus`
   `system.toml` key (remove a stale override from an admin `system.toml` after upgrading). The
   daemon no longer knows any bus address. Measured shrink: TCB 22,851 → 22,300 SLOC.
-- **`[net.udp]` implies the tun consume too.**
+- **A `[net.udp]` kennel's resolver now reaches the broker naming shim** (W2 tail). Part D
+  specifies the kennel's `resolv.conf` points at the tun broker's `::2` resolver so `getaddrinfo`
+  reaches the naming shim over the tun — but the wiring was never shipped: a `[net.udp]` kennel's
+  `resolv.conf` pointed at the proxy (a TCP SOCKS/HTTP endpoint that answers no UDP DNS), so an
+  allowed name never resolved to a synthetic and UDP name resolution did not work end to end. The
+  daemon now points a `[net.udp]` kennel's stub resolver at the tun broker's resolver address (the
+  single source the broker also derives, `kennel_privhelper::addr`); an allowed name mints a
+  synthetic AAAA, a denied name is NODATA, zero wire either way. The tun-egress suite case is now
+  a real naming verdict (allowed → synthetic in the tun ULA, denied → NODATA), not just a
+  tun-existence check. Non-`[net.udp]` kennels are unchanged (the proxy fast-fail line).
 - **The tun-broker reference provider gains its `[net.bpf.connect]` broad IP allow** (W2 Part D):
   its `net.mode = "host"` policy had no `[net.bpf]` allow, so the deny-first cgroup ACL denied
   every flow on fallthrough (an empty allow trie). The deny floor was never missing —
@@ -60,6 +69,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
   (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
   bare form). A future `[net.tcp]` slow-lane rides the same table.
+- **`fs.read` of a specific host `/etc` file overlays the real file over the synthetic floor**
+  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a
+  `resolv.conf` pointed at the proxy), built not bound — so a `net.mode = "host"` service that must
+  resolve real names could not see the host resolver. A policy that `fs.read`s a specific, safe
+  host `/etc` file (e.g. `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) now gets the REAL
+  file mounted read-only over the synthetic one (an OCI image gets it copied into the top overlay
+  lower). Restricted to exact files — no glob, no bare `/etc`, no `..` — and the identity-mask and
+  credential files (`passwd`, `group`, `shadow`, `gshadow`, `hostname`, `sudoers`, `machine-id`)
+  are never overlaid, so a grant cannot re-leak the masked host user list (T1.1) or a secret. The
+  synthetic `/etc` stays the floor for every path not explicitly granted.
 
 ### IPC protocol changes
 
@@ -157,6 +176,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the writable project root via `[fs.cwd]` — runnable with no user-authored policy. Ships with an
   in-view discovery launcher and the **`agent-tools`** fragment (the coding-agent toolset:
   `rg`/`fd`/`jq`/`patch`/own-tree process management/binary inspection/`sqlite3`).
+
+### Threat catalogue
+
+- **Catalogue version 0.5 → 0.6, two W2 entries added.** `T1.15` (UDP egress channel: DNS
+  rebinding, exfiltration, and the naming shim) records the hostnames-only capture-by-synthetic
+  posture, DNS rebinding **closed** by the broker's `net.bpf` floor at `connect()` (not accepted),
+  and the two accepted residuals (in-band exfil in an approved flow = the T1.8 shape;
+  AF_INET-only legacy clients fail). `T5.5` (UDP-egress broker: hostile L3 and DNS wire parsed in
+  operator context) records `facade-tun` + the broker as trusted-side adversarial parsers kept
+  **outside** the daemon — quarantined per-kennel, fate-shared, `net.bpf`-fenced, fuzzed — so the
+  §4.3 empty-intersection claim stays scoped to the daemon. Mirrored into
+  `dist/threats/catalogue.toml`; the sync guard passes.
 
 ## [0.5.0] — 2026-06-29
 

@@ -437,6 +437,14 @@ pub struct ShimView {
     /// choosing the upper; the host system closure is *not* mirrored (the image carries its
     /// own `/usr` layout) and `/etc` wins by layer precedence, not by a synthesised copy.
     pub image: Option<ImageRoot>,
+    /// Host `/etc` files the policy grants (`fs.read`) that are bind-mounted **read-only over the
+    /// synthetic `/etc` floor** (the real file, not the scrubbed synthetic one). The synthetic
+    /// `/etc` is a floor; an explicit grant layers the real host file on top — e.g. a
+    /// `net.mode = host` service that must resolve real names grants `/etc/resolv.conf` +
+    /// `/etc/hosts`. Restricted to a safe set: the identity-mask files (`passwd`/`group`/
+    /// `hostname`) and credential files (`shadow`/…) are never overlayable, so a grant cannot
+    /// re-leak the host user list or secrets. Each path is the same on the host and in the view.
+    pub etc_overlays: Vec<PathBuf>,
 }
 
 /// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
@@ -508,6 +516,40 @@ fn remap_target(path: &Path, home: &Path, shim_root: &Path) -> PathBuf {
 /// Matches on a component boundary (`/etcfoo` / `/procfoo` do not match).
 fn is_special_mount(path: &Path) -> bool {
     path.starts_with("/etc") || path.starts_with("/proc")
+}
+
+/// The synthetic-`/etc` files a host overlay must **never** replace: the identity mask
+/// (`passwd`/`group`/`hostname` — real ones re-leak the host user list, defeating T1.1) and the
+/// credential/privilege files. A grant for any of these is ignored for overlay purposes (it still
+/// Landlock-grants the synthetic file, which is the safe floor).
+const NON_OVERLAYABLE_ETC: &[&str] = &[
+    "passwd",
+    "group",
+    "shadow",
+    "gshadow",
+    "hostname",
+    "sudoers",
+    "machine-id",
+];
+
+/// Whether `path` is a specific host `/etc` **file** a policy may bind-mount over the synthetic
+/// `/etc` floor (the resolver/hosts/NSS config a `net.mode = host` service needs to resolve real
+/// names). Requires an exact path under `/etc` (no glob, not bare `/etc`, no `..`) whose file name
+/// is not in [`NON_OVERLAYABLE_ETC`]. Everything else stays the synthetic floor.
+fn is_overlayable_etc_file(path: &Path) -> bool {
+    if !path.starts_with("/etc") || path == Path::new("/etc") {
+        return false;
+    }
+    if path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    let s = path.to_string_lossy();
+    if s.contains('*') {
+        return false; // a glob could pull in a whole host /etc subtree; overlays are file-exact
+    }
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| !NON_OVERLAYABLE_ETC.contains(&name))
 }
 
 /// Whether `path` is a device node safe to bind into the constructed `/dev`:
@@ -1134,6 +1176,21 @@ impl Plan {
         // absence for the entire subtree, not per-binary. A no-op when the view does not bind `/usr`.
         mask_dir_paths.push(PathBuf::from(HOST_LIBEXEC_DIR));
 
+        // `/etc` overlays (the synthetic `/etc` is a floor, real host files bind on top): a
+        // policy that `fs.read`s a specific, safe host `/etc` file gets the REAL file mounted
+        // read-only over the synthetic one. `is_special_mount` keeps `/etc` grants out of the
+        // ordinary bind set (the synthetic `/etc` owns the directory); these are the explicit
+        // exceptions, layered after the synthetic copy. Restricted to specific files (no glob)
+        // that are not identity-mask or credential files, so a grant can expose the host
+        // resolver/hosts without re-leaking the masked user list or a secret.
+        let etc_overlays: Vec<PathBuf> = ep
+            .fs
+            .read
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| is_overlayable_etc_file(p))
+            .collect();
+
         let view = Some(ShimView {
             shim_root,
             binds,
@@ -1166,6 +1223,7 @@ impl Plan {
                     .map(|p| glob_root(p))
                     .collect(),
             }),
+            etc_overlays,
         });
 
         // Landlock net expresses per-port CONNECT_TCP allow only (no CIDR, no deny — BPF is the
@@ -1323,5 +1381,52 @@ mod tests {
         // The ctx/magic head and the proxy region around it are untouched.
         assert_eq!(&meta[6..8], &7u16.to_ne_bytes(), "ctx preserved");
         assert_eq!(&meta[8..14], &[0u8; 6], "proxy v4/port slots still zero");
+    }
+
+    #[test]
+    fn overlayable_etc_admits_only_safe_specific_files() {
+        // The resolver/hosts/NSS config a `net.mode = host` service needs — overlayable.
+        for ok in [
+            "/etc/resolv.conf",
+            "/etc/hosts",
+            "/etc/nsswitch.conf",
+            "/etc/host.conf",
+        ] {
+            assert!(
+                is_overlayable_etc_file(Path::new(ok)),
+                "{ok} should be overlayable"
+            );
+        }
+        // The identity mask (re-leaks the host user list, defeating T1.1) and the
+        // credential/privilege files must NEVER be overlaid — the synthetic floor stands.
+        for masked in [
+            "/etc/passwd",
+            "/etc/group",
+            "/etc/shadow",
+            "/etc/gshadow",
+            "/etc/hostname",
+            "/etc/sudoers",
+            "/etc/machine-id",
+        ] {
+            assert!(
+                !is_overlayable_etc_file(Path::new(masked)),
+                "{masked} must not be overlayable (identity/credential floor)"
+            );
+        }
+        // Structural refusals: not under /etc, the bare dir, a `..` escape, and any glob (a glob
+        // could pull a whole host /etc subtree over the floor — overlays are file-exact).
+        for bad in [
+            "/usr/bin/env",
+            "/etc",
+            "/etc/../etc/passwd",
+            "/etc/../shadow",
+            "/etc/*",
+            "/etc/ssh/*",
+        ] {
+            assert!(
+                !is_overlayable_etc_file(Path::new(bad)),
+                "{bad} must not be overlayable"
+            );
+        }
     }
 }

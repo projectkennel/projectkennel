@@ -81,6 +81,11 @@ pub struct EtcParams<'a> {
     pub v4: Option<Ipv4Addr>,
     /// The kennel's primary IPv6 address.
     pub v6: Ipv6Addr,
+    /// The tun-broker resolver address (`::2` in the tun `/64`), for a `[net.udp]` kennel (W2).
+    /// `Some` ⇒ `resolv.conf` points the stub resolver here so `getaddrinfo` reaches the broker's
+    /// naming shim (allowed name → synthetic AAAA, denied → NODATA, zero wire). `None` ⇒ the
+    /// proxy-address fast-fail line (no UDP egress; direct DNS is denied by the cgroup BPF).
+    pub udp_resolver: Option<Ipv6Addr>,
 }
 
 impl EtcParams<'_> {
@@ -112,12 +117,25 @@ pub fn hosts(p: &EtcParams<'_>) -> String {
     s
 }
 
-/// `/etc/resolv.conf` — pointed at the proxy address with a fast-fail timeout.
+/// `/etc/resolv.conf` — the tun-broker resolver for a `[net.udp]` kennel, else the proxy fast-fail.
 ///
-/// The kennel never resolves directly (cgroup BPF denies it); `socks5h` clients
-/// have the proxy resolve. A stray direct query fails fast instead of hanging.
+/// Under `[net.udp]` (W2) the stub resolver points at the broker's `::2` resolver in the tun `/64`:
+/// `getaddrinfo` sends its query over the tun to the naming shim, which mints a synthetic AAAA for
+/// an allowed name and answers NODATA for a denied one — zero wire activity either way, the query
+/// never leaves the kennel's own stack. Without `[net.udp]` the kennel never resolves directly
+/// (cgroup BPF denies it) and `socks5h` proxy clients resolve at the proxy; the nameserver is the
+/// proxy address with a fast-fail timeout so a stray direct query fails fast instead of hanging.
 #[must_use]
 pub fn resolv_conf(p: &EtcParams<'_>) -> String {
+    if let Some(resolver) = p.udp_resolver {
+        return format!(
+            "# Project Kennel: UDP egress ([net.udp]) — names resolve at the tun broker's naming\n\
+             # shim (allowed → synthetic AAAA, denied → NODATA, zero wire); direct DNS off the tun\n\
+             # is denied by the cgroup BPF.\n\
+             nameserver {resolver}\n\
+             options timeout:1 attempts:1\n",
+        );
+    }
     format!(
         "# Project Kennel: names resolve through the egress proxy (socks5h); direct\n\
          # DNS is denied by cgroup BPF. Pointed at the proxy so a stray query fails\n\
@@ -456,6 +474,7 @@ mod tests {
             shell: "/bin/sh",
             v4: Some(Ipv4Addr::new(127, 0, 144, 17)),
             v6: "fd00:0:1:1::1".parse().expect("v6"),
+            udp_resolver: None,
         }
     }
 
@@ -527,6 +546,24 @@ mod tests {
         assert!(
             r.contains("nameserver 127.0.144.17"),
             "points at the primary/proxy address"
+        );
+        assert!(r.contains("timeout:1"), "fails fast");
+    }
+
+    /// W2: a `[net.udp]` kennel's resolv.conf points at the tun broker's `::2` resolver (not the
+    /// proxy), so `getaddrinfo` reaches the naming shim over the tun.
+    #[test]
+    fn resolv_conf_points_at_the_tun_resolver_under_net_udp() {
+        let mut p = params();
+        p.udp_resolver = Some("fd6b:6e9c:691c:8002::2".parse().expect("resolver"));
+        let r = resolv_conf(&p);
+        assert!(
+            r.contains("nameserver fd6b:6e9c:691c:8002::2"),
+            "points at the tun broker resolver: {r}"
+        );
+        assert!(
+            !r.contains("127.0.144.17"),
+            "not the proxy address when udp is active: {r}"
         );
         assert!(r.contains("timeout:1"), "fails fast");
     }
