@@ -1,0 +1,40 @@
+# ============================================================================
+# Suite case: hostname-mask — the opt-in persona hostname (W12).
+#
+# `[identity].hostname` gives the kennel its own UTS namespace with a coherent, policy-set
+# identity: `uname -n` and the synthetic /etc/hostname must BOTH report the policy name (not the
+# host's, not the kennel's runtime name). The workload also proves the namespace boundary the
+# cheap way: an unprivileged `hostname` write inside the kennel must fail (EPERM — the workload
+# uid holds no CAP_SYS_ADMIN over the UTS namespace), and could not reach the host UTS even if it
+# succeeded. The kennel's exit code IS the verdict.
+#
+# (No hostname set ⇒ no UTS namespace and the host name shows through — that unmasked default is
+# every OTHER suite case, so it needs no case of its own.)
+# ============================================================================
+
+template_name = "hostname-mask"
+template_base = "base-confined"
+
+[identity]
+hostname = "caged"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/etc/hostname", "/proc"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/uname", "/bin/hostname", "/usr/bin/hostname"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    u="$(uname -n)"
+    [ "$u" = caged ] || { echo "uname -n is '$u', wanted 'caged'" >&2; exit 1; }
+    e="$(cat /etc/hostname)"
+    [ "$e" = caged ] || { echo "/etc/hostname is '$e', wanted 'caged'" >&2; exit 1; }
+    if hostname evil 2>/dev/null; then echo "unprivileged sethostname unexpectedly succeeded" >&2; exit 1; fi
+    [ "$(uname -n)" = caged ] || { echo "hostname changed after failed set" >&2; exit 1; }
+    exit 0
+    """,
+]

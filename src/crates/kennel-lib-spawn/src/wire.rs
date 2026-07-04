@@ -238,6 +238,28 @@ fn get_action(r: &mut Reader<'_>) -> Result<Action, PlanWireError> {
 
 /// Encode a [`Plan`] to its wire bytes. The `interactive_return_fd` is encoded only as
 /// a presence flag (the fd itself rides out of band).
+/// Write an optional UTF-8 string as `[present: bool][bytes]`.
+fn put_opt_str(w: &mut Writer, v: Option<&str>) {
+    match v {
+        None => w.bool(false),
+        Some(x) => {
+            w.bool(true);
+            w.bytes(x.as_bytes());
+        }
+    }
+}
+
+/// Read an optional UTF-8 string (the inverse of [`put_opt_str`]).
+fn get_opt_str(r: &mut Reader<'_>) -> Result<Option<String>, PlanWireError> {
+    if r.bool()? {
+        Ok(Some(
+            String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 #[must_use]
 pub fn encode_plan(p: &Plan) -> Vec<u8> {
     let mut w = Writer::new();
@@ -351,6 +373,7 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
         }
     }
     w.u8(ttl_action_byte(p.ttl_action));
+    put_opt_str(&mut w, p.hostname.as_deref());
 
     w.buf
 }
@@ -515,6 +538,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
 
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
     let ttl_action = ttl_action_from_byte(r.u8()?);
+    let hostname = get_opt_str(&mut r)?;
 
     if r.pos != buf.len() {
         return Err(PlanWireError::TooLarge); // trailing garbage
@@ -549,6 +573,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         aux,
         ttl_seconds,
         ttl_action,
+        hostname,
     };
     Ok((plan, interactive))
 }
@@ -951,6 +976,7 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
         w.u8(lb.prefix);
     }
     w.bool(c.tun);
+    put_opt_str(&mut w, c.hostname.as_deref());
     w.bool(c.pty_fd_present);
     w.bool(c.workload_fd_present);
     w.bool(c.stdio_present);
@@ -1002,6 +1028,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         loopback.push(crate::plan::LoopbackAddr { addr, prefix });
     }
     let tun = r.bool()?;
+    let hostname = get_opt_str(&mut r)?;
     let pty_fd_present = r.bool()?;
     let workload_fd_present = r.bool()?;
     let stdio_present = r.bool()?;
@@ -1020,6 +1047,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         ctx,
         loopback,
         tun,
+        hostname,
         pty_fd_present,
         workload_fd_present,
         stdio_present,
@@ -1129,6 +1157,7 @@ mod tests {
             }],
             ttl_seconds: Some(3600),
             ttl_action: kennel_lib_policy::TtlAction::Warn,
+            hostname: Some("caged".to_owned()),
         }
     }
 
@@ -1171,6 +1200,7 @@ mod tests {
             aux: Vec::new(),
             ttl_seconds: None,
             ttl_action: kennel_lib_policy::TtlAction::Exit,
+            hostname: None,
         };
         let (back, _) = decode_plan(&encode_plan(&p)).expect("decode");
         assert_eq!(back, p);
@@ -1304,6 +1334,7 @@ mod tests {
                 },
             ],
             tun: true,
+            hostname: Some("caged".to_owned()),
             pty_fd_present: true,
             workload_fd_present: true,
             stdio_present: true,
@@ -1334,6 +1365,7 @@ mod tests {
             ctx: 0,
             loopback: Vec::new(),
             tun: false,
+            hostname: None,
             pty_fd_present: false,
             workload_fd_present: false,
             stdio_present: false,

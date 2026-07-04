@@ -219,6 +219,27 @@ where
     }
 }
 
+/// Set this UTS namespace's hostname (`sethostname(2)`).
+///
+/// The construction child calls this after its UTS unshare; it holds `CAP_SYS_ADMIN`
+/// over the new namespace via the identity-mapped user namespace, so no host
+/// privilege is involved (`[identity].hostname`, W12).
+///
+/// # Errors
+///
+/// The OS error (`EPERM` without `CAP_SYS_ADMIN` over the UTS namespace,
+/// `EINVAL`/`ENAMETOOLONG` for a bad length).
+pub fn set_hostname(name: &str) -> io::Result<()> {
+    // SAFETY: the pointer/length pair describes the borrowed `name` bytes for the
+    // duration of the call; sethostname reads them and holds no reference after.
+    let rc = unsafe { libc::sethostname(name.as_ptr().cast::<libc::c_char>(), name.len()) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// `open_tree(path, OPEN_TREE_CLONE)` → a detached, movable mount (the §7.13.4a mesh handoff).
 ///
 /// Clones the mount subtree at `path` into a new anonymous mount, returned as an fd that can be

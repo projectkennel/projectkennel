@@ -269,8 +269,12 @@ pub struct EtcSetup {
     /// The workload's masked primary-group name (`[identity].group`, default
     /// `kennel`): the synthetic `/etc/group` name for the primary gid.
     pub account_group: String,
-    /// The kennel's hostname (its runtime name).
+    /// The kennel's hostname: the masked `[identity].hostname` when set (W12), else
+    /// the runtime name.
     pub hostname: String,
+    /// Whether `[identity].hostname` is set (W12): only then does the synthetic
+    /// `/etc` include an `/etc/hostname`.
+    pub hostname_file: bool,
     /// The workload's uid.
     pub uid: u32,
     /// The workload's gid.
@@ -915,6 +919,7 @@ fn bring_up<P: Privileged + Sync>(
     if let Some(etc) = etc {
         let params = crate::etc::EtcParams {
             hostname: &etc.hostname,
+            hostname_file: etc.hostname_file,
             user: &etc.account,
             group: &etc.account_group,
             uid: etc.uid,
@@ -1445,6 +1450,7 @@ fn construction_half_from(
         ctx,
         loopback: loopback.to_vec(),
         tun,
+        hostname: plan.hostname.clone(),
         // Tell the factory which inherited fds accompany the datagram (sent pty-then-workload),
         // so it places them at the right fixed numbers. It decodes the half but forwards the
         // supervision-half (which holds the workload flag) opaquely, so the presence must be

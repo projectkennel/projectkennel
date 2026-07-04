@@ -748,10 +748,11 @@ fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
 
 fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
     // Bare-set: a child's non-empty group list replaces the parent's; the child's
-    // `user` overrides the parent's when set.
+    // `user`/`hostname` override the parent's when set.
     IdentitySection {
         user: or(&c.user, &p.user),
         group: or(&c.group, &p.group),
+        hostname: or(&c.hostname, &p.hostname),
         groups: if c.groups.is_empty() {
             p.groups.clone()
         } else {

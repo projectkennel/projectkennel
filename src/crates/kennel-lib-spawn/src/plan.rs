@@ -643,6 +643,11 @@ pub struct Plan {
     /// (resume) or terminate. Decided kenneld-side (it owns the cgroup), so it rides the binder
     /// lifecycle, not the supervision-half.
     pub ttl_action: kennel_lib_policy::TtlAction,
+    /// The kennel's masked hostname (`[identity].hostname`, W12). `Some` ⇒
+    /// [`namespaces`](Self::namespaces) carries [`Namespaces::UTS`] and the factory
+    /// `sethostname`s this inside the new namespace. `None` ⇒ no UTS namespace, the
+    /// host name shows through (no masking, the default).
+    pub hostname: Option<String>,
 }
 
 /// An auxiliary in-kennel process launched by the seal (a binary path in the view and
@@ -801,6 +806,10 @@ pub struct ConstructionHalf {
     /// tun. Distinct from the `_fd_present` flags: the tun fd is *created* by the factory, not
     /// passed in.
     pub tun: bool,
+    /// The masked hostname to `sethostname(2)` inside the new UTS namespace
+    /// (`[identity].hostname`, W12). `Some` only when [`namespaces`](Self::namespaces)
+    /// carries [`Namespaces::UTS`]; `None` ⇒ no masking.
+    pub hostname: Option<String>,
     /// Whether an interactive controlling-pty return socket accompanies the construction
     /// datagram as an `SCM_RIGHTS` fd (placed at [`PTY_RETURN_FD`]). The factory needs
     /// this — it decodes the half but forwards the supervision-half (which holds the workload
@@ -897,6 +906,11 @@ impl Plan {
             Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
         if ep.net.mode != NetMode::Host {
             namespaces |= Namespaces::NET;
+        }
+        // `[identity].hostname` (W12): a masked hostname needs its own UTS namespace —
+        // unset means NO masking and no UTS unshare (the host name shows through).
+        if policy.identity.hostname.is_some() {
+            namespaces |= Namespaces::UTS;
         }
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
@@ -1228,6 +1242,7 @@ impl Plan {
             aux: Vec::new(),
             ttl_seconds: ep.lifecycle.ttl_seconds,
             ttl_action: ep.lifecycle.ttl_action,
+            hostname: policy.identity.hostname.clone(),
         })
     }
 

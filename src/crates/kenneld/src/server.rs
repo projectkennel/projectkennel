@@ -1723,7 +1723,15 @@ pub fn run_kennel<P, L>(
         staging_dir: base.join(format!("etc-{ctx}")),
         account: loaded.account.clone(),
         account_group: loaded.account_group.clone(),
-        hostname: req.kennel.clone(),
+        // `[identity].hostname` (W12) wins over the default (the kennel's runtime name), so
+        // the synthetic /etc agrees with the `sethostname`'d UTS namespace when masking is on.
+        hostname: loaded
+            .settled
+            .identity
+            .hostname
+            .clone()
+            .unwrap_or_else(|| req.kennel.clone()),
+        hostname_file: loaded.settled.identity.hostname.is_some(),
         uid: id.uid,
         gid: id.gid,
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
@@ -2873,6 +2881,7 @@ mod tests {
                 namespaces: Namespaces::empty(),
                 cgroup: PathBuf::new(),
                 cgroup_join: false,
+                hostname: None,
                 view: None,
                 new_root: None,
                 landlock_fs: vec![(
