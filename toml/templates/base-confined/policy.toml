@@ -232,6 +232,14 @@ deny = [
     "swapon", "swapoff", "reboot",
     "init_module", "finit_module", "delete_module",
     "personality",
+    # io_uring: a large async-submission surface. Enforced anyway (its cap-gated features are
+    # unreachable at the workload's non-zero in-ns uid); the deny removes complex unaudited surface.
+    "io_uring_setup", "io_uring_enter", "io_uring_register",
+    # The new mount API — the modern path to what `mount` (denied above) does. Cap-gated, so
+    # already closed; the deny makes intent match enforcement against a future uid-map regression.
+    "fsopen", "fsconfig", "fsmount", "move_mount", "open_tree", "mount_setattr",
+    # Handle-based open: resolves a file handle, bypassing path-based access checks.
+    "open_by_handle_at", "name_to_handle_at",
 ]
 
 # --- Resource limits (off by default) ---------------------------------------
@@ -247,4 +255,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIur22OvGew49DENhnrWf6nVowaEjYmkD1\nRWq+5Jz3MYGILEp0o/pCFoF4jFOkPae6CAbo6Na1kso6u0H7vVUQQ=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGIPqycWdMbCNFEGd2Kb5lXyAYdMdV/IiE\nzhDAgVFaxviJiI2D+phb5+7AurPAaUdFK65hHbjtvZAOb4ckl0GQo=\n-----END SSH SIGNATURE-----\n"

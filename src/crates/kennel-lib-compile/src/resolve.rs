@@ -23,10 +23,10 @@
 //!   field to a `Set`, so the effective policy carries concrete lists.
 //! - **Object sub-tables** (`fs.home`, `net.bind`, `dbus`, …): merged shallowly,
 //!   field-by-field, with the child overriding.
-//! - **Invariant denies** (`net.proxy.deny.invariant`): *unioned*, never replaced —
-//!   invariants propagate down the chain and a child can only add to them. This is the one
-//!   list field that does not follow the bare-set rule, precisely because its
-//!   non-removability is the point.
+//! - **Union floors** (`net.proxy.deny.invariant`, `[seccomp] deny`): *unioned*, never replaced —
+//!   a child can only add to them. These do not follow the bare-set rule precisely because their
+//!   non-removability is the point: the invariant metadata deny and base-confined's seccomp
+//!   hardening are floors a leaf must not be able to narrow (W14).
 //!
 //! # Threat bearing
 //!
@@ -806,9 +806,30 @@ fn fold_env(p: &EnvSection, c: &EnvSection) -> EnvSection {
 fn fold_seccomp(p: &SeccompSection, c: &SeccompSection) -> SeccompSection {
     SeccompSection {
         profile: or(&c.profile, &p.profile),
-        deny: or(&c.deny, &p.deny),
+        // Seccomp deny is a **floor**: a child ADDS to the resolved base, never replaces it (W14).
+        // A bare `deny = [...]` on a leaf previously clobbered base-confined's hardening via the
+        // scalar `or`-fold; now it unions, so a leaf can only strengthen the denylist. There is no
+        // remove form — that is the point (base-confined's deny is not a leaf's to weaken).
+        deny: union_names(p.deny.as_deref(), c.deny.as_deref()),
         allow: or(&c.allow, &p.allow),
     }
+}
+
+/// Union two optional name lists, order-preserving and de-duplicated (parent first).
+///
+/// `None ∪ None = None`; either present yields `Some(union)`. Backs the additive `[seccomp]`
+/// deny floor (W14) — a child may add names, never remove the parent's.
+fn union_names(p: Option<&[String]>, c: Option<&[String]>) -> Option<Vec<String>> {
+    if p.is_none() && c.is_none() {
+        return None;
+    }
+    let mut out: Vec<String> = p.unwrap_or_default().to_vec();
+    for name in c.unwrap_or_default() {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    Some(out)
 }
 
 fn fold_lifecycle(p: &LifecycleSection, c: &LifecycleSection) -> LifecycleSection {
@@ -1184,5 +1205,27 @@ mod tests {
         let entry = parse(b"template_name = \"p\"\n").expect("parse");
         let r = resolve(&entry, &MapSource::new()).expect("resolve");
         assert_eq!(r.provides_origin, ProvidesOrigin::Absent);
+    }
+
+    /// W14: `[seccomp] deny` is a floor — a child's `deny` ADDS to the base, it does not replace
+    /// it. A leaf writing a bare `deny = [...]` can only strengthen the inherited denylist.
+    #[test]
+    fn seccomp_deny_composes_additively_a_child_cannot_drop_a_base_deny() {
+        let parent = "template_name = \"p\"\n[seccomp]\ndeny = [\"mount\", \"bpf\"]\n";
+        // The child denies only `ptrace` — under the old scalar fold this would have dropped the
+        // parent's mount/bpf hardening.
+        let child = "name = \"c\"\ntemplate_base = \"p\"\n[seccomp]\ndeny = [\"ptrace\"]\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let r = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        let deny = r.effective.seccomp.expect("seccomp").deny.expect("deny");
+        assert!(
+            deny.contains(&"mount".to_owned()),
+            "base deny kept: {deny:?}"
+        );
+        assert!(deny.contains(&"bpf".to_owned()), "base deny kept: {deny:?}");
+        assert!(
+            deny.contains(&"ptrace".to_owned()),
+            "child deny added: {deny:?}"
+        );
     }
 }

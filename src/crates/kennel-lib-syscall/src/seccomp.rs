@@ -133,6 +133,22 @@ pub fn syscall_number(name: &str) -> Option<i64> {
         "finit_module" => libc::SYS_finit_module,
         "delete_module" => libc::SYS_delete_module,
         "personality" => libc::SYS_personality,
+        // io_uring (W14): a large async-submission surface; cap-gated features are already
+        // unreachable at non-zero uid, so the deny removes complexity, not a live hole.
+        "io_uring_setup" => libc::SYS_io_uring_setup,
+        "io_uring_enter" => libc::SYS_io_uring_enter,
+        "io_uring_register" => libc::SYS_io_uring_register,
+        // The new mount API (W14): the fsopen/fsconfig/fsmount/move_mount/open_tree family plus
+        // mount_setattr — the modern path to what `mount` does, closed for the same reason.
+        "fsopen" => libc::SYS_fsopen,
+        "fsconfig" => libc::SYS_fsconfig,
+        "fsmount" => libc::SYS_fsmount,
+        "move_mount" => libc::SYS_move_mount,
+        "open_tree" => libc::SYS_open_tree,
+        "mount_setattr" => libc::SYS_mount_setattr,
+        // Handle-based open (W14): resolves a file handle bypassing path-based access checks.
+        "open_by_handle_at" => libc::SYS_open_by_handle_at,
+        "name_to_handle_at" => libc::SYS_name_to_handle_at,
         "ptrace" => libc::SYS_ptrace,
         "add_key" => libc::SYS_add_key,
         "keyctl" => libc::SYS_keyctl,
@@ -158,6 +174,31 @@ mod tests {
         );
         assert_eq!(syscall_number("umount2"), Some(libc::SYS_umount2));
         assert_eq!(syscall_number("definitely_not_a_syscall"), None);
+    }
+
+    /// W14: the `io_uring`, new-mount-API, and handle-open families `base-confined` denies must
+    /// resolve — an unresolved name is silently skipped at plan time, so a typo would make the
+    /// deny a no-op.
+    #[test]
+    fn w14_hardening_families_resolve() {
+        for name in [
+            "io_uring_setup",
+            "io_uring_enter",
+            "io_uring_register",
+            "fsopen",
+            "fsconfig",
+            "fsmount",
+            "move_mount",
+            "open_tree",
+            "mount_setattr",
+            "open_by_handle_at",
+            "name_to_handle_at",
+        ] {
+            assert!(
+                syscall_number(name).is_some(),
+                "{name} must resolve or its base-confined deny is a silent no-op"
+            );
+        }
     }
 
     #[test]
