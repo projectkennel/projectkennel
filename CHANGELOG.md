@@ -79,6 +79,20 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   credential files (`passwd`, `group`, `shadow`, `gshadow`, `hostname`, `sudoers`, `machine-id`)
   are never overlaid, so a grant cannot re-leak the masked host user list (T1.1) or a secret. The
   synthetic `/etc` stays the floor for every path not explicitly granted.
+- **The standing UDP-egress broker ships as a maintainer-signed `tun-broker` template + provider,
+  enabled ondemand** (W2 Part D) — the dbus-broker pattern applied to UDP egress. A `[net.udp]`
+  kennel's egress is unserved without a running broker; `install.sh` now keys the reference
+  provider into `/etc/kennel/policies/providers/tun-broker/` and links it into `ondemand/`, so the
+  broker is socket-activated on the first `[net.udp]` consume and a host with no UDP consumer pays
+  nothing. The template carries the reserved `org.projectkennel.tun-udp` provide, `net.mode = host`
+  with the broad connect allow, and the resolver-config overlays; a host key compiles + signs the
+  thin leaf at install (no maintainer private key on the target).
+- **The generic af-unix ondemand activation now covers the tun capability.** The `CONNECT_AFUNIX`
+  path that serves a `[net.udp]` consumer previously delivered only to an already-registered sink
+  (assuming a standing broker); it now socket-activates a cold `ondemand` tun-broker through the
+  same activator the mesh connector uses (`activate_for_capability`), then consume-with-waits until
+  the broker's sink is deliverable. Only the delivery stays role-specific (a per-session sink mint,
+  not a rendezvous connector); activation and readiness are the shared af-unix mechanism.
 
 ### IPC protocol changes
 
