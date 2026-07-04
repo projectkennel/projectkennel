@@ -1,12 +1,12 @@
 {
   "crate_count": 30,
-  "total_sloc": 36937,
+  "total_sloc": 36947,
   "tcb_crate_count": 16,
-  "tcb_sloc": 22296,
+  "tcb_sloc": 22306,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7800,
+      "sloc": 7810,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],

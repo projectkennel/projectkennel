@@ -1600,26 +1600,37 @@ pub fn run_kennel<P, L>(
             )
         }
     };
-    // `[dbus]` IS the brokered path (W4): each enabled bus implies its `dbus-name` consume
-    // (`org.projectkennel.dbus` / `.dbus-system`) — one mediation home, the standing
-    // dbus-broker; the per-kennel host-dbus delegate is retired. Synthesize the consume when the
-    // policy does not spell it out, so a `[dbus.session]`-only policy (including any pre-W4 v3
-    // artefact) routes identically to one that declares the `[[consumes]]`. Synthesized before
-    // the census below, so the ondemand broker is kept alive while this kennel runs, like any
-    // declared consume.
+    // A mediated section IS the brokered path: each enabled section implies its capability
+    // consume, synthesized when the policy does not spell it out — so a section-only policy
+    // (including any pre-W4 v3 artefact) routes identically to one that declares the
+    // `[[consumes]]`. `[dbus.session]`/`[dbus.system]` imply the per-bus `dbus-name`
+    // capabilities (W4, one mediation home: the standing dbus-broker); `[net.udp]` implies the
+    // tun-broker's af-unix capability (§8 / W2 — and a future `[net.tcp]` slow-lane implies its
+    // transport capability the same way). Synthesized before the census below, so an ondemand
+    // provider is kept alive while this kennel runs, like any declared consume.
     {
-        use kennel_lib_binder::service::dbus as dbus_caps;
+        use kennel_lib_binder::service::{dbus as dbus_caps, tun_broker};
+        use kennel_lib_policy::settled::Shape;
         let implied = [
-            (loaded.dbus.session.is_some(), dbus_caps::CAPABILITY_SESSION),
-            (loaded.dbus.system.is_some(), dbus_caps::CAPABILITY_SYSTEM),
+            (
+                loaded.dbus.session.is_some(),
+                dbus_caps::CAPABILITY_SESSION,
+                Shape::DbusName,
+            ),
+            (
+                loaded.dbus.system.is_some(),
+                dbus_caps::CAPABILITY_SYSTEM,
+                Shape::DbusName,
+            ),
+            (loaded.net.udp, tun_broker::CAPABILITY, Shape::AfUnix),
         ];
-        for (enabled, capability) in implied {
+        for (enabled, capability, shape) in implied {
             if enabled && !loaded.consumes.iter().any(|c| c.name == capability) {
                 loaded
                     .consumes
                     .push(kennel_lib_policy::settled::ConsumeRuntime {
                         name: capability.to_owned(),
-                        shape: kennel_lib_policy::settled::Shape::DbusName,
+                        shape,
                         at: None,
                         env: Vec::new(),
                         key: None,

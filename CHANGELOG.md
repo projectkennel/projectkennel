@@ -31,7 +31,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   tiers (`/etc/kennel/keys`, `~/.config/kennel/keys`) — the CLI refuses with the file named
   until each is converted or removed; the daemon skips them with a warning.
 
-### D-Bus mediation
+### Mediated sections imply their consume
 
 - **The per-kennel `host-dbus` delegate is retired** (W4) — the 0.5.0 gate ("until the broker has
   demonstrably subsumed it") is met, and the standing `dbus-broker@v1` service kennel is now the
@@ -48,6 +48,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   its one consumer), kenneld's D-Bus relay membrane and delegate spawn path, and the `host_dbus`
   `system.toml` key (remove a stale override from an admin `system.toml` after upgrading). The
   daemon no longer knows any bus address. Measured shrink: TCB 22,851 → 22,300 SLOC.
+- **`[net.udp]` implies the tun consume too.** The W4 mechanism generalizes: a `[net.udp]` policy
+  no longer needs to spell out `[[consumes]] org.projectkennel.tun-udp` — the section implies the
+  af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
+  (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
+  bare form). A future `[net.tcp]` slow-lane rides the same table.
 
 ### IPC protocol changes
 
