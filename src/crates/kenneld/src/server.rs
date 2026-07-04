@@ -1731,7 +1731,6 @@ pub fn run_kennel<P, L>(
             .hostname
             .clone()
             .unwrap_or_else(|| req.kennel.clone()),
-        hostname_file: loaded.settled.identity.hostname.is_some(),
         uid: id.uid,
         gid: id.gid,
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the

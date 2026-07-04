@@ -89,8 +89,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   v3, shape re-pinned).** Setting it gives the kennel its own **UTS namespace** with one coherent,
   policy-set identity: `uname -n`, the synthetic `/etc/hostname`, and `/etc/hosts` all agree (the
   factory `sethostname`s inside the new namespace — unprivileged, via the identity-mapped userns).
-  **Unset means no masking**: no UTS namespace, the host name shows through — the current
-  behaviour, byte-identical signatures. This is persona *coherence*, not anti-reconnaissance
+  **Unset means no masking**: no UTS namespace, `uname -n` shows the host name — the current
+  behaviour, byte-identical signatures. The synthetic `/etc/hostname` is now part of the
+  construction **floor** for every kennel (it carries the kennel's runtime name, the same name
+  `/etc/hosts` maps to loopback; `[identity].hostname` overrides both). This is persona *coherence*, not anti-reconnaissance
   (masking the hostname while the workload holds the operator's login token would be theatre);
   it also gives the operator the knob to close the accepted hostname-leak residual.
 - **`[[fs.read/write/deny.add]]` and `[[exec.allow.add]]` now accept an array `path`** (a list of

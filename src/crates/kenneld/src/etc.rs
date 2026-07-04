@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 /// The files this module renders, in a stable order. The spawn binds each over
 /// `/etc/<name>` in the kennel's mount namespace.
 pub const FILES: &[&str] = &[
+    "hostname",
     "hosts",
     "resolv.conf",
     "nsswitch.conf",
@@ -52,12 +53,9 @@ pub const FILES: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct EtcParams<'a> {
     /// The kennel's hostname: the masked `[identity].hostname` when set (W12), else
-    /// the kennel's runtime name (the unmasked default, as before).
+    /// the kennel's runtime name — the same name `/etc/hosts` maps to loopback, and
+    /// the content of the synthetic `/etc/hostname` (part of the construction floor).
     pub hostname: &'a str,
-    /// Whether `[identity].hostname` is set (W12). Only then is an `/etc/hostname`
-    /// rendered — the file exists exactly when the UTS namespace carries the same
-    /// name, so masked kennels are coherent and unmasked kennels are unchanged.
-    pub hostname_file: bool,
     /// The workload's masked user name (`[identity].user`, default `kennel`): the
     /// `passwd` account name and the member of each supplementary `/etc/group` line.
     pub user: &'a str,
@@ -265,8 +263,7 @@ pub fn render(name: &str, p: &EtcParams<'_>) -> Option<String> {
         "host.conf" => host_conf().to_owned(),
         "profile" => profile().to_owned(),
         "bash.bashrc" => bash_bashrc(p),
-        // Only a masked kennel gets an /etc/hostname (see `EtcParams::hostname_file`).
-        "hostname" if p.hostname_file => format!("{}\n", p.hostname),
+        "hostname" => format!("{}\n", p.hostname),
         _ => return None,
     };
     Some(body)
@@ -309,20 +306,13 @@ pub fn bash_bashrc(p: &EtcParams<'_>) -> String {
 /// An OS error if `dir` cannot be created or a file cannot be written.
 pub fn materialize(dir: &Path, p: &EtcParams<'_>) -> io::Result<Vec<(PathBuf, PathBuf)>> {
     std::fs::create_dir_all(dir)?;
-    let mut binds = Vec::with_capacity(FILES.len().saturating_add(1));
+    let mut binds = Vec::with_capacity(FILES.len());
     for name in FILES {
         let body =
             render(name, p).ok_or_else(|| io::Error::other(format!("no renderer for {name}")))?;
         let source = dir.join(name);
         std::fs::write(&source, body)?;
         binds.push((source, Path::new("/etc").join(name)));
-    }
-    // `/etc/hostname` is conditional (masked kennels only, W12), so it rides outside
-    // the unconditional [`FILES`] loop.
-    if let Some(body) = render("hostname", p) {
-        let source = dir.join("hostname");
-        std::fs::write(&source, body)?;
-        binds.push((source, Path::new("/etc").join("hostname")));
     }
     Ok(binds)
 }
@@ -457,7 +447,6 @@ mod tests {
     fn params() -> EtcParams<'static> {
         EtcParams {
             hostname: "agent",
-            hostname_file: false,
             user: "kennel",
             group: "kennel",
             uid: 1000,
@@ -613,23 +602,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// W12: a masked kennel's synthetic /etc gains `/etc/hostname` (agreeing with the
-    /// UTS name); an unmasked one does not (the test above pins `FILES.len()` exactly).
+    /// `/etc/hostname` is part of the floor: rendered for every kennel, carrying the
+    /// same name `/etc/hosts` maps (the runtime name, or the W12 `[identity].hostname`
+    /// override — the caller resolves which into `EtcParams::hostname`).
     #[test]
-    fn masked_kennel_gets_an_etc_hostname() {
-        let dir = std::env::temp_dir().join(format!("kennel-etc-mask-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let mut p = params();
-        p.hostname = "caged";
-        p.hostname_file = true;
-        let binds = materialize(&dir, &p).expect("materialize");
-        assert_eq!(binds.len(), FILES.len() + 1);
-        let hostname = dir.join("hostname");
-        assert_eq!(std::fs::read_to_string(&hostname).expect("read"), "caged\n");
-        assert!(binds
-            .iter()
-            .any(|(_, target)| target == Path::new("/etc/hostname")));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn etc_hostname_is_rendered_for_every_kennel() {
+        assert_eq!(render("hostname", &params()).as_deref(), Some("agent\n"));
+        let mut masked = params();
+        masked.hostname = "caged";
+        assert_eq!(render("hostname", &masked).as_deref(), Some("caged\n"));
+        assert!(FILES.contains(&"hostname"));
     }
 
     #[test]
