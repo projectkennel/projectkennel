@@ -236,8 +236,6 @@ fn get_action(r: &mut Reader<'_>) -> Result<Action, PlanWireError> {
 
 // ---- Plan codec -----------------------------------------------------------
 
-/// Encode a [`Plan`] to its wire bytes. The `interactive_return_fd` is encoded only as
-/// a presence flag (the fd itself rides out of band).
 /// Write an optional UTF-8 string as `[present: bool][bytes]`.
 fn put_opt_str(w: &mut Writer, v: Option<&str>) {
     match v {
@@ -260,6 +258,8 @@ fn get_opt_str(r: &mut Reader<'_>) -> Result<Option<String>, PlanWireError> {
     }
 }
 
+/// Encode a [`Plan`] to its wire bytes. The `interactive_return_fd` is encoded only as
+/// a presence flag (the fd itself rides out of band).
 #[must_use]
 pub fn encode_plan(p: &Plan) -> Vec<u8> {
     let mut w = Writer::new();
