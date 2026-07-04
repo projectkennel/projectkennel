@@ -85,9 +85,7 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
 #[cfg(test)]
 mod tests {
     use kennel_cli::policy::{is_source_policy, policy_kind, TempSettled};
-    use kennel_cli::{
-        is_valid_policy_name, policy_name_from_path, resolve_policy, COMMANDS, POLICY_VERBS,
-    };
+    use kennel_cli::{is_valid_policy_name, policy_name_from_path, resolve_policy};
     use std::path::Path;
 
     const BASE_CONFINED: &[u8] =
