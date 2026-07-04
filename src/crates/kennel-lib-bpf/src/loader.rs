@@ -1090,6 +1090,49 @@ mod root_tests {
     }
 
     #[test]
+    fn bind4_allows_ephemeral_port_zero_unconditionally() {
+        if skip_if_unprivileged("bind4_allows_ephemeral_port_zero_unconditionally") {
+            return;
+        }
+        let loaded = load_bind4();
+        loaded
+            .update_map(
+                "bind_subnet_map",
+                &0u32.to_ne_bytes(),
+                &bind_subnet_loopback(&[]),
+                sys::BPF_ANY,
+            )
+            .expect("populate bind_subnet");
+        // The hostile config for a `:0` bind: a floor at 1024 (which rejects any port below it,
+        // 0 included) AND an EMPTY `bind_allow_v4` (default-deny, refusing every address). The
+        // ephemeral exemption must clear BOTH — a port-0 bind is a kernel-allocated source port,
+        // not a listening surface, so it is allowed regardless. A nonzero port under the same
+        // config stays denied, proving the exemption is port-0-specific, not a blanket allow.
+        loaded
+            .update_map(
+                "kennel_meta_map",
+                &0u32.to_ne_bytes(),
+                &meta_with_bind_floor(1024),
+                sys::BPF_ANY,
+            )
+            .expect("populate meta (floor 1024)");
+        let cg = Path::new("/sys/fs/cgroup/kennel-lib-bpf-test-bind-ephemeral");
+        let (mut zero_denied, mut nonzero_denied) = (true, false);
+        with_attached_bind4(cg, &loaded, || {
+            zero_denied = wildcard_bind_denied_in_cgroup(cg, 0);
+            nonzero_denied = wildcard_bind_denied_in_cgroup(cg, 8080);
+        });
+        assert!(
+            !zero_denied,
+            "an ephemeral :0 bind must be allowed even with a floor and an empty allow set"
+        );
+        assert!(
+            nonzero_denied,
+            "a nonzero port with an empty allow set must still be denied (the exemption is :0-only)"
+        );
+    }
+
+    #[test]
     fn bind4_enforces_the_allowed_ports_allowlist() {
         if skip_if_unprivileged("bind4_enforces_the_allowed_ports_allowlist") {
             return;

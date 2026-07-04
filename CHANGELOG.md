@@ -108,6 +108,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Runtime & enforcement
 
+- **Ephemeral (`:0`) binds are always permitted by the cgroup bind ACL (W13).** A bind to port 0
+  is a kernel-allocated ephemeral **source** port, not a reachable listening surface — so the
+  `bind4`/`bind6` programs now allow it unconditionally, ahead of the port floor, the port
+  allowlist, and the address ACL, and **without** the wildcard-address rewrite (an outbound socket
+  needs `0.0.0.0` / `::` to stay unspecified so the kernel picks the source per route). Only port-0
+  binds are affected; every explicit port is gated exactly as before, and egress from the resulting
+  socket still passes the connect ACL. This is what lets a `net.mode = "host"` delegate's outbound
+  UDP dial work (it binds `:0` before `connect()`); no policy needs a `[[net.bpf.bind.allow]]` for
+  it. No BPF ABI or schema change; no catalogued threat is affected (T3.3 is about explicit
+  *published* ports).
 - **Seccomp hardening (W14).** Three pieces of defence-in-depth debt, no fail-open (the
   [seccomp mediation audit](docs/governance/audits/2026-07-seccomp-mediation.md) refuted the
   io_uring egress-bypass hypothesis — the cgroup connect fence sits at the proto-op layer io_uring

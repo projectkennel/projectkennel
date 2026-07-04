@@ -9,8 +9,10 @@
  *          floor/allowlist, two LPM lookups, one ringbuf emit).
  * Maps used: kennel_meta_map, bind_subnet_map, bind_deny_v6, bind_allow_v6,
  *          audit_ringbuf.
- * Failure mode: rewrite wildcard, then ALLOW iff the address misses bind_deny and
- *          hits bind_allow; deny otherwise. Fails closed.
+ * Failure mode: a port-0 (ephemeral) bind is ALLOWed unconditionally (a
+ *          kernel-allocated source port is not a listening surface), mirroring
+ *          bind4. Otherwise rewrite wildcard, then ALLOW iff the address misses
+ *          bind_deny and hits bind_allow; deny otherwise. Fails closed.
  * Threat bearing: T6 (confines wildcard dev-server binds to the kennel).
  *
  * STATUS: verifier-clean on Linux 6.8.0 (2026-05-30). See bpf/README.md.
@@ -51,6 +53,15 @@ int kennel_bind6(struct bpf_sock_addr *ctx)
 	__u16 port_be = (__u16)ctx->user_port; /* be16 port in low 16 bits; see connect4 */
 
 	__u8 rewritten[16] = {};
+
+	/* Ephemeral bind (port 0): a kernel-allocated source port, not a reachable listening
+	 * surface — mirroring bind4. Allow it unconditionally (no floor, no port allowlist, no
+	 * address ACL, no wildcard rewrite: an outbound socket needs `::` to stay unspecified so
+	 * the kernel picks the source per route). Lets host-mode's outbound UDP dial bind `:0`. */
+	if (port_be == 0) {
+		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET6, port_be, addr, rewritten, meta);
+		return KENNEL_ALLOW;
+	}
 
 	/* The bind floor (§7.3.7): deny a bind below `bind_port_min` before the address
 	 * logic — the privileged-port protection (T6), mirroring bind4. 0 = no floor. */
