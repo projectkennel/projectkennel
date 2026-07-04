@@ -290,7 +290,6 @@ struct RawDeployment {
     facade_client: Option<PathBuf>,
     facade_dbus: Option<PathBuf>,
     facade_tun: Option<PathBuf>,
-    host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
     log_level: Option<LogLevel>,
@@ -326,7 +325,6 @@ impl RawDeployment {
             facade_client: higher.facade_client.or(self.facade_client),
             facade_dbus: higher.facade_dbus.or(self.facade_dbus),
             facade_tun: higher.facade_tun.or(self.facade_tun),
-            host_dbus: higher.host_dbus.or(self.host_dbus),
             init: higher.init.or(self.init),
             oci_entry: higher.oci_entry.or(self.oci_entry),
             log_level: higher.log_level.or(self.log_level),
@@ -356,7 +354,6 @@ impl RawDeployment {
             facade_client: self.facade_client,
             facade_dbus: self.facade_dbus,
             facade_tun: self.facade_tun,
-            host_dbus: self.host_dbus,
             init: self.init,
             oci_entry: self.oci_entry,
             log_level: self.log_level.unwrap_or_default(),
@@ -383,7 +380,6 @@ pub struct Deployment {
     facade_client: Option<PathBuf>,
     facade_dbus: Option<PathBuf>,
     facade_tun: Option<PathBuf>,
-    host_dbus: Option<PathBuf>,
     init: Option<PathBuf>,
     oci_entry: Option<PathBuf>,
     log_level: LogLevel,
@@ -565,13 +561,6 @@ impl Deployment {
     #[must_use]
     pub fn facade_tun(&self) -> PathBuf {
         self.resolve_facade(self.facade_tun.as_deref(), "facade-tun")
-    }
-
-    /// The `host-dbus` D-Bus mediation delegate kenneld spawns in the operator's context: it holds
-    /// the real bus connection and applies the compiled `[dbus]` filter table (§7.7.2b).
-    #[must_use]
-    pub fn host_dbus(&self) -> PathBuf {
-        self.resolve_bin(self.host_dbus.as_deref(), "host-dbus")
     }
 
     /// The trusted root-owned `kennel-bin-init` the privhelper factory `fexecve`s as the

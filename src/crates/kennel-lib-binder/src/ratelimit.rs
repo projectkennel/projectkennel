@@ -10,7 +10,7 @@
 //! *rate*.
 //!
 //! The cap is enforced at the **membrane** — kenneld spends a token per control/data verb
-//! (`DBUS_OPEN`/`DBUS_SEND`/`DBUS_CLOSE`) and sheds a flood at the gateway before it reaches
+//! (`DBUS_SEND`/`DBUS_CLOSE` at the broker's session gateway) and sheds a flood before it reaches
 //! `host-dbus` at all. It can also be applied at the delegate (defence in depth: `host-dbus` runs
 //! in the operator's context, off the kennel's cgroup, so an unbounded flood there would amplify
 //! into operator CPU/memory and **real-bus traffic**).

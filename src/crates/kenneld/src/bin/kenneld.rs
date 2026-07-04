@@ -141,7 +141,6 @@ fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity
         afunix_bin: Some(deployment.afunix()),
         facade_dbus_bin: Some(deployment.facade_dbus()),
         facade_tun_bin: Some(deployment.facade_tun()),
-        host_dbus_bin: Some(deployment.host_dbus()),
         init_bin: Some(deployment.kennel_bin_init()),
         oci_entry_bin: Some(deployment.oci_entry()),
         tracer: kennel_lib_config::Tracer::new("kenneld", deployment.log_level()),

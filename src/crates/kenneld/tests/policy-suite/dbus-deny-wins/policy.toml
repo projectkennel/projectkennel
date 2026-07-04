@@ -2,9 +2,10 @@
 # Suite case: dbus-deny-wins — an explicit `[dbus.session.deny]` overrides the allow (§7.7.6).
 #
 # The session bus is enabled and `talk` GRANTS the bus driver `org.freedesktop.DBus`, but the
-# belt-and-braces `deny.talk` names the same destination. Deny wins: the host-dbus delegate refuses
-# the call with `org.freedesktop.DBus.Error.AccessDenied` before it ever reaches the real bus, even
-# though the allow list admits it. (The facade still answers the local Hello, so the connection
+# belt-and-braces `deny.talk` names the same destination. Deny wins: the standing dbus-broker
+# (which pulls this kennel's filter over the mesh) refuses the call with
+# `org.freedesktop.DBus.Error.AccessDenied` before it ever reaches the real bus, even though the
+# allow list admits it. (The facade still answers the local Hello, so the connection
 # itself establishes — only the brokered call is denied; this is the mediated path, not a missing
 # bus.)
 #

@@ -1,12 +1,12 @@
 {
-  "crate_count": 31,
-  "total_sloc": 37724,
+  "crate_count": 30,
+  "total_sloc": 36937,
   "tcb_crate_count": 16,
-  "tcb_sloc": 22851,
+  "tcb_sloc": 22296,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 8234,
+      "sloc": 7800,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -46,7 +46,7 @@
     },
     {
       "name": "kennel-lib-binder",
-      "sloc": 2357,
+      "sloc": 2244,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -76,7 +76,7 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1523,
+      "sloc": 1469,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["compositor-broker", "facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh", "facade-tun", "kennel-spawn"],
@@ -130,7 +130,7 @@
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
-      "consumers": ["dbus-broker", "facade", "host-dbus"],
+      "consumers": ["dbus-broker", "facade"],
       "first_party_deps": ["kennel-lib-binder"],
       "external_deps": ["mini-sansio-dbus"]
     },
@@ -155,6 +155,16 @@
       "external_deps": ["basic-toml", "termion"]
     },
     {
+      "name": "kennel-dbus-broker",
+      "sloc": 588,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["dbus-broker"],
+      "consumers": [],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-dbus"],
+      "external_deps": ["mini-sansio-dbus", "nix"]
+    },
+    {
       "name": "kennel-lib-manifest",
       "sloc": 553,
       "uses_unsafe": false,
@@ -166,23 +176,13 @@
     },
     {
       "name": "kennel-lib-config",
-      "sloc": 499,
+      "sloc": 491,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
       "consumers": ["bin-init", "cli", "compile", "compose", "kenneld", "privhelper"],
       "first_party_deps": [],
       "external_deps": ["basic-toml", "serde"]
-    },
-    {
-      "name": "kennel-host-dbus",
-      "sloc": 496,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": ["host-dbus"],
-      "consumers": ["dbus-broker"],
-      "first_party_deps": ["kennel-lib-dbus"],
-      "external_deps": ["mini-sansio-dbus", "nix"]
     },
     {
       "name": "kennel-bin-init",
@@ -212,16 +212,6 @@
       "bins": ["host-inetd", "host-netproxy"],
       "consumers": ["kenneld", "tun-broker"],
       "first_party_deps": ["kennel-lib-scm"],
-      "external_deps": []
-    },
-    {
-      "name": "kennel-dbus-broker",
-      "sloc": 270,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": ["dbus-broker"],
-      "consumers": [],
-      "first_party_deps": ["kennel-host-dbus", "kennel-lib-binder", "kennel-lib-dbus"],
       "external_deps": []
     },
     {

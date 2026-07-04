@@ -26,6 +26,8 @@ ONDEMAND="$CFG/ondemand"
 PROVIDER_LINK="$ONDEMAND/gui-provider"
 
 cleanup() {
+    # Stop the activated provider before unlinking (leave the daemon cold for later cases).
+    "$KENNEL" stop gui-provider >/dev/null 2>&1 || true
     rm -f "$PROVIDER_LINK"
     "$KENNEL" daemon-reload >/dev/null 2>&1 || true
 }
@@ -43,4 +45,7 @@ mkdir -p "$ONDEMAND"
 # 3. Run the consumer: its workload connects to the `at` socket; kenneld activates the GUI-service
 #    provider, the compositor-broker spawns this connection's compositor, and the round-trip is brokered.
 #    The consumer's exit code is the verdict (the broker relay reached a spawned compositor iff 0).
-exec "$KENNEL" run "$CASE_DIR/consumer.toml" gui-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
+# the shell and leak the enabled provider link into the user tier for later cases).
+"$KENNEL" run "$CASE_DIR/consumer.toml" gui-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+exit "$?"

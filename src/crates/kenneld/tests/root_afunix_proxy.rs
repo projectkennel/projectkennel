@@ -78,7 +78,7 @@ fn run_manager() {
         binder::Lifecycle::default(),
         kenneld::inet::NetRuntime::denied(),
         std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
-        None,
+        false,
         writer,
         None,
         Vec::new(),

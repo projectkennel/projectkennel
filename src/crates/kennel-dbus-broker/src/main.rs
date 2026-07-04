@@ -17,7 +17,7 @@
 //! **pulls** the session's filter from kenneld (`GET_SESSION_POLICY`, echoing `(ctx, capability)`)
 //! and applies it before any byte reaches the bus. It keys the session by the kernel-attested
 //! **target node cookie** (never by the sender — a confined broker cannot resolve sibling-namespace
-//! pids) and mediates each frame through the reused `host-dbus::mediate` engine against the real
+//! pids) and mediates each frame through the in-crate `mediate` engine against the real
 //! bus. When the consumer's kennel exits, its last reference to the session node drops, the broker
 //! is told via `Br::Release`, and the session is reclaimed — no teardown verb.
 //!
@@ -38,6 +38,8 @@ use std::sync::{Arc, Mutex};
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::dbus::{frame_len, Bus};
 use kennel_lib_binder::service::{broker, dbus as dbus_svc, session, status, verb};
+
+mod mediate;
 use kennel_lib_dbus::filter::{BusRules, Filter};
 
 /// The mesh binder device path — the `[[provides]]` endpoint, bind-mounted by `kenneld`.
@@ -155,7 +157,7 @@ impl Broker {
 
     /// Establish a session's mediation on first use: **pull** its filter from kenneld
     /// ([`verb::GET_SESSION_POLICY`], echoing the session's `(ctx, capability)`), apply it, and start
-    /// the reused `host-dbus::mediate` over a socketpair. Idempotent — a no-op once the conduit
+    /// the in-crate `mediate` loop over a socketpair. Idempotent — a no-op once the conduit
     /// exists. Returns `false` if the session is unknown, the pull fails or is refused, or the
     /// mediation cannot be started, so the caller reports the session unavailable.
     ///
@@ -207,7 +209,7 @@ impl Broker {
             }
         };
 
-        // Bridge the consumer's frames to a reused `host-dbus::mediate` over a socketpair:
+        // Bridge the consumer's frames to the in-crate `mediate` loop over a socketpair:
         // the broker keeps one end (and a clone for the inbound reader); the mediation owns
         // the other and drives the real bus.
         let Ok((broker_end, mediate_end)) = UnixStream::pair() else {
@@ -218,7 +220,7 @@ impl Broker {
         };
 
         std::thread::spawn(move || {
-            let _ = kennel_host_dbus::mediate(mediate_end, bus, &bus_addr, filter);
+            let _ = crate::mediate::mediate(mediate_end, bus, &bus_addr, filter);
         });
         let inbound = Arc::new(Inbound::default());
         let inbound_reader = Arc::clone(&inbound);

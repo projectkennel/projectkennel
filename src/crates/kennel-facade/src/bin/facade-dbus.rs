@@ -6,12 +6,12 @@
 //! D-Bus is never granted as a direct socket (§7.7.1). The kennel's `DBUS_SESSION_BUS_ADDRESS`
 //! points here; this process terminates the workload's bus connection in the kennel, parses the
 //! adversarial D-Bus wire (the sole such parser, [`kennel_lib_dbus::server::Facade`]), and emits
-//! **typed** transactions. Those transactions ride the binder gateway: kenneld is the membrane
-//! (§7.7.2a), so the facade reaches `host-dbus` only by transacting node 0 — never a raw conduit.
-//! Per accepted connection it `DBUS_OPEN`s a connection id, fires each typed call as a oneway
-//! `DBUS_SEND`, and keeps one `DBUS_RECV` outstanding to receive replies/signals; `DBUS_CLOSE` on
-//! teardown. `Hello` is answered locally and the refuse-to-broker set (§7.7.5) is refused at the
-//! facade; everything else is decided by the delegate against the compiled `[dbus]` table.
+//! **typed** transactions. Mediation is the standing dbus-broker's (§7.7): the per-kennel
+//! `SVC_CONNECT` is the locator (kenneld replies the mesh device path), the facade connects the
+//! broker's per-session node there, then fires each typed call as a `DBUS_SEND` and keeps one
+//! `DBUS_RECV` outstanding for replies/signals; `DBUS_CLOSE` on teardown. `Hello` is answered
+//! locally and the refuse-to-broker set (§7.7.5) is refused at the facade; everything else is
+//! decided by the broker against this kennel's compiled `[dbus]` table (pulled over the mesh).
 //!
 //! # Invocation
 //!
@@ -30,7 +30,6 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -43,9 +42,6 @@ use kennel_lib_dbus::wire::{self, Bus, Frame};
 const MAP_SIZE: usize = 128 * 1024;
 /// The read chunk for the workload connection.
 const CHUNK: usize = 16 * 1024;
-
-/// Per-process connection-id allocator (the facade serves one kennel; ids are unique within it).
-static NEXT_CONN_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Bounded retry for the mesh-bus session connect, covering the brief window between the broker
 /// being reported Ready and its control node being registered (§7.7).
@@ -120,9 +116,9 @@ fn serve(device: &str, path: &str, bus: Bus) -> io::Result<()> {
 /// path (the brokered locator). The facade opens *that* bus and `SVC_CONNECT`s the same capability
 /// for a per-session node; kenneld resolves this facade's identity there by its cgroup and mints
 /// the session via the broker, after which consumer↔broker is direct (kenneld out of the byte
-/// path). With no broker the reply names no path and D-Bus falls back to the legacy host-dbus path:
-/// `DBUS_OPEN`/`SEND`/`RECV` against kenneld on the per-kennel bus. The per-kennel bus is the mesh
-/// *trigger* and *locator*, never the identity mechanism — identity is the cgroup the mesh reads.
+/// path). With no enabled broker the locator refuses and the bus goes unserved (fail-closed).
+/// The per-kennel bus is the mesh *trigger* and *locator*, never the identity mechanism —
+/// identity is the cgroup the mesh reads.
 fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
     let binder = Arc::new(open_binder(device)?);
     // The bus-qualified capability name: kenneld's mesh handler reads it to pick this bus's filter.
@@ -130,72 +126,20 @@ fn mediate(device: &str, workload: UnixStream, bus: Bus) -> io::Result<()> {
         Bus::Session => dbus::SESSION,
         Bus::System => dbus::SYSTEM,
     });
-    if let Some(mesh_device) = locate_mesh_bus(&binder, capability)? {
-        return mediate_brokered(&mesh_device, capability, workload, bus);
-    }
-
-    let conn_id = NEXT_CONN_ID.fetch_add(1, Ordering::Relaxed);
-    let bus_byte = match bus {
-        Bus::Session => dbus::SESSION,
-        Bus::System => dbus::SYSTEM,
-    };
-    let reply = binder.transact(
-        CONTEXT_MANAGER_HANDLE,
-        verb::DBUS_OPEN,
-        &dbus::encode_open(conn_id, bus_byte),
-    )?;
-    if reply.first() != Some(&status::OK) {
-        // The bus is not enabled (or refused): drop, the client sees "cannot connect to bus".
-        return Ok(());
-    }
-
-    let facade = Arc::new(Mutex::new(Facade::new(bus)));
-    let Ok(writer) = workload.try_clone() else {
+    let Some(mesh_device) = locate_mesh_bus(&binder, capability)? else {
+        // No enabled broker: fail closed — the client sees "cannot connect to bus". The standing
+        // dbus-broker is the one mediation home; there is no legacy delegate to fall back to.
+        eprintln!("facade-dbus: no dbus-broker provider is enabled; bus unserved");
         return Ok(());
     };
-    let workload_w = Arc::new(Mutex::new(writer));
-
-    // Inbound: one DBUS_RECV outstanding; each reply is a frame (or AGAIN to re-arm).
-    let inbound = {
-        let binder = Arc::clone(&binder);
-        let facade = Arc::clone(&facade);
-        let workload_w = Arc::clone(&workload_w);
-        thread::spawn(move || {
-            recv_loop(
-                &binder,
-                CONTEXT_MANAGER_HANDLE,
-                Some(conn_id),
-                &facade,
-                &workload_w,
-            );
-        })
-    };
-
-    // Outbound: read the workload, drive the engine, fire ToDelegate frames as oneway sends.
-    workload_to_binder(
-        &binder,
-        CONTEXT_MANAGER_HANDLE,
-        Some(conn_id),
-        workload,
-        &facade,
-        &workload_w,
-    );
-
-    // Teardown: close the connection at kenneld (also unblocks the parked DBUS_RECV).
-    let _ = binder.transact(
-        CONTEXT_MANAGER_HANDLE,
-        verb::DBUS_CLOSE,
-        &dbus::encode_conn(conn_id),
-    );
-    let _ = inbound.join();
-    Ok(())
+    mediate_brokered(&mesh_device, capability, workload, bus)
 }
 
 /// Ask kenneld, on the per-kennel bus, where the dbus mesh bus is — the service-mesh trigger.
-/// `Ok(Some(path))` is the brokered path (the broker was resolved/activated and is Ready: open that
-/// bus and `SVC_CONNECT` there). `Ok(None)` means no broker — use the legacy host-dbus path. The
-/// reply is `[status]` (legacy) or `[status][mesh-device-path]` (brokered). No identity rides back:
-/// the mesh handler resolves this facade afresh by its cgroup.
+/// `Ok(Some(path))` means the broker was resolved/activated and is Ready: open that bus and
+/// `SVC_CONNECT` there. `Ok(None)` means no enabled broker — the bus goes unserved (fail-closed).
+/// The reply is `[OK][mesh-device-path]`, or a refusal status. No identity rides back: the mesh
+/// handler resolves this facade afresh by its cgroup.
 fn locate_mesh_bus(binder: &Connection, capability: &str) -> io::Result<Option<String>> {
     let reply = binder.transact(
         CONTEXT_MANAGER_HANDLE,
@@ -254,9 +198,9 @@ fn mediate_brokered(
         let binder = Arc::clone(&binder);
         let facade = Arc::clone(&facade);
         let workload_w = Arc::clone(&workload_w);
-        thread::spawn(move || recv_loop(&binder, session, None, &facade, &workload_w))
+        thread::spawn(move || recv_loop(&binder, session, &facade, &workload_w))
     };
-    workload_to_binder(&binder, session, None, workload, &facade, &workload_w);
+    workload_to_binder(&binder, session, workload, &facade, &workload_w);
     let _ = binder.transact(session, verb::DBUS_CLOSE, &[]);
     let _ = inbound.join();
     Ok(())
@@ -264,13 +208,11 @@ fn mediate_brokered(
 
 /// Drive the engine over workload bytes; fire each `ToDelegate` frame as a oneway `DBUS_SEND`.
 ///
-/// `handle` is the transaction target and `conn_id` selects the encoding: `Some` is the legacy
-/// per-kennel path (kenneld demultiplexes by `conn_id`); `None` is the brokered path (the target
-/// session node *is* the connection, so the frame rides alone).
+/// `handle` is the broker's per-session node — the session *is* the connection, so each frame
+/// rides alone (no `conn_id`).
 fn workload_to_binder(
     binder: &Connection,
     handle: u32,
-    conn_id: Option<u32>,
     mut workload: UnixStream,
     facade: &Mutex<Facade>,
     workload_w: &Mutex<UnixStream>,
@@ -303,11 +245,7 @@ fn workload_to_binder(
                     // writes the frame onward and acks immediately — the bus reply returns on
                     // DBUS_RECV, so no thread is held per call. The ack carries the rate-limit
                     // verdict; a non-OK status means shed/over-rate, drop.
-                    let req = conn_id.map_or_else(
-                        || frame.encode(),
-                        |id| dbus::encode_send(id, &frame.encode()),
-                    );
-                    match binder.transact(handle, verb::DBUS_SEND, &req) {
+                    match binder.transact(handle, verb::DBUS_SEND, &frame.encode()) {
                         Ok(reply) if reply.first() == Some(&status::OK) => {}
                         _ => return,
                     }
@@ -317,19 +255,16 @@ fn workload_to_binder(
     }
 }
 
-/// Keep one `DBUS_RECV` outstanding; reconstruct each inbound frame to the workload. `handle`
-/// and `conn_id` mirror [`workload_to_binder`]: `Some` is legacy (kenneld, demuxed by `conn_id`),
-/// `None` is brokered (the session node identifies the connection).
+/// Keep one `DBUS_RECV` outstanding; reconstruct each inbound frame to the workload. `handle` is
+/// the broker's per-session node, which identifies the connection.
 fn recv_loop(
     binder: &Connection,
     handle: u32,
-    conn_id: Option<u32>,
     facade: &Mutex<Facade>,
     workload_w: &Mutex<UnixStream>,
 ) {
     loop {
-        let data = conn_id.map(dbus::encode_conn).unwrap_or_default();
-        let Ok(reply) = binder.transact(handle, verb::DBUS_RECV, &data) else {
+        let Ok(reply) = binder.transact(handle, verb::DBUS_RECV, &[]) else {
             return; // the gateway closed the connection (or a fatal error): stop.
         };
         match parse_recv(&reply) {
