@@ -373,10 +373,16 @@ mod tests {
         }
     }
 
-    /// Write a signer's public key as a `<key_id>.pub` base64 file in `dir`.
+    /// Write a signer's public key as a `<key_id>.pub` OpenSSH line in `dir`.
     fn write_pubkey(dir: &Path, key: &SigningKey) {
-        let b64 = kennel_lib_policy::b64::encode(&key.public_key_bytes());
-        std::fs::write(dir.join(format!("{}.pub", key.key_id())), b64).expect("write pubkey");
+        let pubkey = key.public_key_bytes();
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&11u32.to_be_bytes());
+        blob.extend_from_slice(b"ssh-ed25519");
+        blob.extend_from_slice(&32u32.to_be_bytes());
+        blob.extend_from_slice(&pubkey);
+        let line = format!("ssh-ed25519 {} test", kennel_lib_policy::b64::encode(&blob));
+        std::fs::write(dir.join(format!("{}.pub", key.key_id())), line).expect("write pubkey");
     }
 
     #[test]

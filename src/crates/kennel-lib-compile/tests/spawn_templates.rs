@@ -77,8 +77,9 @@ fn maintainer_keys() -> KeySet {
                 .expect("stem")
                 .to_string_lossy()
                 .into_owned();
-            let b64 = std::fs::read_to_string(&path).expect("read pub");
-            ks.insert_b64(&key_id, b64.trim()).expect("insert pub key");
+            let line = std::fs::read_to_string(&path).expect("read pub");
+            ks.insert_pub_line(&key_id, line.trim())
+                .expect("insert pub key");
         }
     }
     ks

@@ -4,7 +4,6 @@
 //! exit-code mapping, lexopt helpers, and the command tables.
 
 use std::collections::BTreeSet;
-use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -330,21 +329,26 @@ pub fn add_system_trust_dirs(dirs: &mut Vec<PathBuf>) {
     );
 }
 
+/// Whether `text` is the removed legacy key format: bare base64 of 32 raw bytes.
+///
+/// Both halves of the legacy pair were that shape (`.pub` = public key, `.key` =
+/// seed), so one detector serves every refusal diagnostic.
+fn is_legacy_raw_b64(text: &str) -> bool {
+    kennel_lib_policy::b64::decode(text.trim().as_bytes()).is_some_and(|b| b.len() == 32)
+}
+
 /// Load a trust store: every `<key_id>.pub` under each directory.
 ///
-/// Accepts two formats per file:
-/// - **OpenSSH**: `ssh-ed25519 <base64-blob> [comment]` — the standard format
-///   produced by `ssh-keygen`. The key id is the file stem; the comment is
-///   informational.
-/// - **Legacy**: raw base64 of the 32-byte Ed25519 public key.
-///
-/// Detection: if the file starts with `ssh-ed25519 `, parse OpenSSH; else try
-/// raw base64.
+/// Each file must be an OpenSSH public-key line — `ssh-ed25519 <base64-blob>
+/// [comment]`, the format `ssh-keygen` and `kennel keygen` write. The key id is
+/// the file stem; the comment is informational. The raw-base64 legacy format was
+/// removed in 0.6.0; a file still in it is refused with a diagnostic naming the
+/// migration.
 ///
 /// # Errors
 ///
-/// Returns a message if a `.pub` file cannot be read, fails to parse as either
-/// an OpenSSH or legacy public key, or cannot be inserted into the key set.
+/// Returns a message if a `.pub` file cannot be read, is not an OpenSSH
+/// Ed25519 public key, or cannot be inserted into the key set.
 pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
     let mut keys = kennel_lib_policy::KeySet::new();
     for dir in dirs {
@@ -367,10 +371,18 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
                         .map_err(|e| format!("key {}: {e}", path.display()))?;
                 keys.insert(key_id, &pubkey_bytes)
                     .map_err(|e| format!("key {}: {e}", path.display()))?;
+            } else if is_legacy_raw_b64(&contents) {
+                return Err(format!(
+                    "key {}: legacy raw-base64 public key (format removed in 0.6.0) — \
+                     regenerate with `kennel keygen`, or convert the pair once with \
+                     0.5.x's `kennel keygen migrate`",
+                    path.display()
+                ));
             } else {
-                // Legacy raw base64 format.
-                keys.insert_b64(key_id, contents.trim())
-                    .map_err(|e| format!("key {}: {e}", path.display()))?;
+                return Err(format!(
+                    "key {}: not an OpenSSH ed25519 public key",
+                    path.display()
+                ));
             }
         }
     }
@@ -465,46 +477,17 @@ impl TrustContext {
 }
 
 // ─── Signing keys ────────────────────────────────────────────────────────────
-
-/// Load a signing key from a file.
-///
-/// Accepts two formats:
-/// - **OpenSSH**: `-----BEGIN OPENSSH PRIVATE KEY-----` PEM envelope (the standard
-///   format produced by `ssh-keygen -t ed25519`). Must be unencrypted.
-/// - **Legacy**: raw base64 of the 32-byte Ed25519 seed.
-///
-/// The key id is derived from the file stem in both cases.
-///
-/// # Errors
-///
-/// Returns a message if the file cannot be read, a key id cannot be derived
-/// from its stem, the key fails to parse (OpenSSH or legacy base64), or the
-/// seed cannot be loaded into a signing key.
-pub fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, String> {
-    let shown = path.display();
-    let text = std::fs::read_to_string(path).map_err(|e| format!("reading key {shown}: {e}"))?;
-    let key_id = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("cannot derive a key id from {shown}"))?;
-    if kennel_lib_policy::openssh::is_openssh_private(&text) {
-        let (seed, _comment) = kennel_lib_policy::openssh::parse_private_key(&text)
-            .map_err(|e| format!("key {shown}: {e}"))?;
-        kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
-            .map_err(|e| format!("loading key {shown}: {e}"))
-    } else {
-        // Legacy raw base64 format.
-        let seed = kennel_lib_policy::b64::decode(text.trim().as_bytes())
-            .ok_or_else(|| format!("key {shown} is not valid base64"))?;
-        kennel_lib_policy::SigningKey::from_seed(key_id, &seed)
-            .map_err(|e| format!("loading key {shown}: {e}"))
-    }
-}
+//
+// Signing itself shells out to `ssh-keygen -Y sign` (sshsig_sign below), which
+// reads the private key — so a legacy raw-base64 seed already fails there, in
+// ssh-keygen's own words. The CLI's only key-file parsing is the trust store
+// (`.pub`, above) and the default-key discovery here.
 
 /// The signing key to use when `--key` was omitted.
 ///
-/// The sole signing key in the user key dir. Searches for both OpenSSH private
-/// keys (no extension, PEM content) and legacy `*.key` files (raw base64 seed).
+/// The sole OpenSSH private key in the user key dir (no extension, PEM
+/// content). Legacy `<id>.key` files (the raw-base64 layout removed in 0.6.0)
+/// are never selected; if only those exist, the error names the migration.
 ///
 /// # Errors
 ///
@@ -512,31 +495,37 @@ pub fn load_signing_key(path: &Path) -> Result<kennel_lib_policy::SigningKey, St
 /// one (the caller must then pass `--key` to disambiguate).
 pub fn default_signing_key() -> Result<PathBuf, String> {
     let dir = default_key_dir();
-    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir).map_or_else(
-        |_| Vec::new(),
-        |entries| {
-            entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    // Legacy: *.key files.
-                    if p.extension().and_then(|x| x.to_str()) == Some("key") {
-                        return true;
-                    }
-                    // OpenSSH: files with no extension that are not .pub and are files.
-                    if p.extension().is_none() && p.is_file() {
-                        // Quick content check: must start with the PEM marker.
-                        if let Ok(head) = std::fs::read_to_string(p) {
-                            return kennel_lib_policy::openssh::is_openssh_private(&head);
-                        }
-                    }
-                    false
-                })
-                .collect()
-        },
-    );
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut legacy: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for p in entries.flatten().map(|e| e.path()) {
+            if p.extension().and_then(|x| x.to_str()) == Some("key") {
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    legacy.push(name.to_owned());
+                }
+                continue;
+            }
+            // OpenSSH: files with no extension that are not .pub and are files.
+            // Quick content check: must start with the PEM marker.
+            if p.extension().is_none()
+                && p.is_file()
+                && std::fs::read_to_string(&p)
+                    .is_ok_and(|head| kennel_lib_policy::openssh::is_openssh_private(&head))
+            {
+                found.push(p);
+            }
+        }
+    }
     found.sort();
+    legacy.sort();
     match found.as_slice() {
+        [] if !legacy.is_empty() => Err(format!(
+            "no OpenSSH signing key in {}, only legacy raw-base64 key(s) ({}) — the format \
+             was removed in 0.6.0: regenerate with `kennel keygen <key-id>`, or convert \
+             once with 0.5.x's `kennel keygen migrate`",
+            dir.display(),
+            legacy.join(", ")
+        )),
         [] => Err(format!(
             "no signing key in {} — generate one with `kennel keygen <key-id>`, or pass --key <path>",
             dir.display()
@@ -589,14 +578,11 @@ pub fn resolve_key_id(dirs: &[PathBuf], pubkey: &[u8; 32]) -> Option<String> {
             let Ok(contents) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let bytes = if kennel_lib_policy::openssh::is_openssh_public(&contents) {
-                kennel_lib_policy::openssh::parse_public_key(&contents)
-                    .ok()
-                    .map(|(b, _)| b)
-            } else {
-                kennel_lib_policy::b64::decode(contents.trim().as_bytes())
-                    .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
-            };
+            // A `.pub` that is not an OpenSSH line (e.g. the removed legacy raw-base64
+            // format) simply never matches — this is a search, not a loader.
+            let bytes = kennel_lib_policy::openssh::parse_public_key(&contents)
+                .ok()
+                .map(|(b, _)| b);
             if bytes.as_ref() == Some(pubkey) {
                 return Some(stem.to_owned());
             }
@@ -766,28 +752,6 @@ pub fn is_valid_key_id(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
-/// Write base64 `text` (plus a trailing newline) to `path`, creating it with `mode`.
-///
-/// # Errors
-///
-/// Returns an [`io::Error`] if the file cannot be opened/created, written, or
-/// have its permissions set.
-pub fn write_secret(path: &Path, text: &str, mode: u32) -> io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    use std::os::unix::fs::PermissionsExt as _;
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(path)?;
-    f.write_all(text.as_bytes())?;
-    f.write_all(b"\n")?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod signer_tests {
     use super::*;
@@ -832,13 +796,13 @@ mod signer_tests {
     }
 
     #[test]
-    fn resolve_key_id_matches_openssh_and_legacy() {
+    fn resolve_key_id_matches_openssh_only() {
         let scratch = Scratch::new("resolve");
         let key = signing_key(1);
         let pubkey = key.public_key_bytes();
         // OpenSSH-format public key, trusted under the stem `maintainer`.
         scratch.write("maintainer.pub", &openssh_pub_line(&pubkey, "person@host"));
-        // Legacy raw-base64 public key for a *different* key, trusted as `legacy`.
+        // A `.pub` in the removed legacy raw-base64 format never matches.
         let other = signing_key(2).public_key_bytes();
         scratch.write("legacy.pub", &kennel_lib_policy::b64::encode(&other));
 
@@ -847,11 +811,39 @@ mod signer_tests {
             resolve_key_id(&dirs, &pubkey).as_deref(),
             Some("maintainer")
         );
-        assert_eq!(resolve_key_id(&dirs, &other).as_deref(), Some("legacy"));
+        assert_eq!(resolve_key_id(&dirs, &other), None);
         // A key with no `.pub` present resolves to nothing.
         assert_eq!(
             resolve_key_id(&dirs, &signing_key(3).public_key_bytes()),
             None
+        );
+    }
+
+    /// A trust-store `.pub` still in the removed raw-base64 format is refused, and
+    /// the diagnostic points at the migration (the W5 exit criterion).
+    #[test]
+    fn legacy_pub_refused_with_migration_pointer() {
+        let scratch = Scratch::new("legacy-pub");
+        let pubkey = signing_key(4).public_key_bytes();
+        scratch.write("old.pub", &kennel_lib_policy::b64::encode(&pubkey));
+
+        let err = load_trust_store(std::slice::from_ref(&scratch.0))
+            .map_or_else(|e| e, |_| "load unexpectedly succeeded".to_owned());
+        assert!(err.contains("raw-base64"), "names the format: {err}");
+        assert!(err.contains("kennel keygen"), "names the migration: {err}");
+    }
+
+    /// A `.pub` that is neither OpenSSH nor the legacy shape gets the plain parse error.
+    #[test]
+    fn garbage_pub_refused_without_migration_pointer() {
+        let scratch = Scratch::new("garbage-pub");
+        scratch.write("junk.pub", "not a key at all");
+        let err = load_trust_store(std::slice::from_ref(&scratch.0))
+            .map_or_else(|e| e, |_| "load unexpectedly succeeded".to_owned());
+        assert!(err.contains("not an OpenSSH"), "plain parse error: {err}");
+        assert!(
+            !err.contains("raw-base64"),
+            "no false migration hint: {err}"
         );
     }
 
