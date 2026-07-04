@@ -734,6 +734,10 @@
           },
           "type": "array"
         },
+        "hostname": {
+          "description": "The kennel's masked hostname (opt-in persona coherence, W12).",
+          "type": "string"
+        },
         "user": {
           "description": "The workload's masked user name, `$USER`/`$LOGNAME` and the synthetic",
           "type": "string"

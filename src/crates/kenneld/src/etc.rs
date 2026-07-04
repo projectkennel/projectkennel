@@ -35,6 +35,7 @@ use std::path::{Path, PathBuf};
 /// The files this module renders, in a stable order. The spawn binds each over
 /// `/etc/<name>` in the kennel's mount namespace.
 pub const FILES: &[&str] = &[
+    "hostname",
     "hosts",
     "resolv.conf",
     "nsswitch.conf",
@@ -51,7 +52,9 @@ pub const FILES: &[&str] = &[
 /// the workload's credentials.
 #[derive(Debug, Clone)]
 pub struct EtcParams<'a> {
-    /// The kennel's hostname (its runtime name).
+    /// The kennel's hostname: the masked `[identity].hostname` when set (W12), else
+    /// the kennel's runtime name — the same name `/etc/hosts` maps to loopback, and
+    /// the content of the synthetic `/etc/hostname` (part of the construction floor).
     pub hostname: &'a str,
     /// The workload's masked user name (`[identity].user`, default `kennel`): the
     /// `passwd` account name and the member of each supplementary `/etc/group` line.
@@ -260,6 +263,7 @@ pub fn render(name: &str, p: &EtcParams<'_>) -> Option<String> {
         "host.conf" => host_conf().to_owned(),
         "profile" => profile().to_owned(),
         "bash.bashrc" => bash_bashrc(p),
+        "hostname" => format!("{}\n", p.hostname),
         _ => return None,
     };
     Some(body)
@@ -596,6 +600,18 @@ mod tests {
         let hosts = std::fs::read_to_string(dir.join("hosts")).expect("read hosts");
         assert!(hosts.contains("localhost"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `/etc/hostname` is part of the floor: rendered for every kennel, carrying the
+    /// same name `/etc/hosts` maps (the runtime name, or the W12 `[identity].hostname`
+    /// override — the caller resolves which into `EtcParams::hostname`).
+    #[test]
+    fn etc_hostname_is_rendered_for_every_kennel() {
+        assert_eq!(render("hostname", &params()).as_deref(), Some("agent\n"));
+        let mut masked = params();
+        masked.hostname = "caged";
+        assert_eq!(render("hostname", &masked).as_deref(), Some("caged\n"));
+        assert!(FILES.contains(&"hostname"));
     }
 
     #[test]

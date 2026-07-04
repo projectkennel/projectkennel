@@ -1326,6 +1326,14 @@ pub struct IdentitySection {
     /// *supplementary* groups).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// The kennel's masked hostname (opt-in persona coherence, W12).
+    ///
+    /// When set, the kennel gets its own UTS namespace and this name — `uname -n`,
+    /// `/etc/hostname`, and `/etc/hosts` agree. Unset (the default) means no masking:
+    /// no UTS namespace, the host's name shows through. Validated as a portable
+    /// hostname label at translation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     /// Supplementary group names to retain (e.g. `["dialout", "plugdev"]`). The user
     /// must be a member of each; resolved to GIDs at spawn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

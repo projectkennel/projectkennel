@@ -497,11 +497,37 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
         .and_then(|i| i.group.clone())
         .unwrap_or_else(|| kennel_lib_policy::settled::DEFAULT_GROUP.to_owned());
     validate_name("identity.group", &group)?;
+    let hostname = id.and_then(|i| i.hostname.clone());
+    if let Some(h) = &hostname {
+        validate_hostname(h)?;
+    }
     Ok(IdentityRuntime {
         user,
         group,
         groups,
+        hostname,
     })
+}
+
+/// Reject anything that is not a portable hostname label (RFC 952/1123 shape).
+///
+/// 1–63 ASCII letters/digits/hyphens, not starting or ending with a hyphen. The name is
+/// written by `sethostname(2)` and into the synthetic `/etc/hostname`/`/etc/hosts`; a
+/// stricter-than-necessary charset here beats sanitising downstream.
+fn validate_hostname(h: &str) -> Result<(), PolicyError> {
+    let ok = !h.is_empty()
+        && h.len() <= 63
+        && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !h.starts_with('-')
+        && !h.ends_with('-');
+    if ok {
+        Ok(())
+    } else {
+        Err(PolicyError::Translation(format!(
+            "identity.hostname `{h}` is not a valid hostname label \
+             (1-63 ASCII letters/digits/hyphens, no leading/trailing hyphen)"
+        )))
+    }
 }
 
 /// Reject anything that is not a portable, non-system Unix user/group name. The
@@ -2820,6 +2846,7 @@ mod tests {
             identity: Some(IdentitySection {
                 user: Some("dev".to_owned()),
                 group: Some("staff".to_owned()),
+                hostname: None,
                 groups: Vec::new(),
             }),
             ..SourcePolicy::default()

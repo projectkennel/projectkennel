@@ -356,6 +356,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 fields: &[
                     Field { name: "user / group", kind: "string", desc: "Masked user and primary group names (default kennel)." },
                     Field { name: "groups", kind: "array", desc: "Supplementary groups to retain; the operator must be a member of each." },
+                    Field { name: "hostname", kind: "string", desc: "Opt-in masked hostname: the kennel gets its own UTS namespace and this name (uname -n, /etc/hostname, /etc/hosts agree). Unset: no masking, the host name shows through." },
                 ],
             },
             FieldGroup {

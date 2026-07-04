@@ -1129,6 +1129,14 @@ pub struct IdentityRuntime {
     /// groups named by `[[fs.dev.passthrough]]` (merged at translation).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// The kennel's masked hostname (`[identity].hostname`, W12).
+    ///
+    /// `Some` opts into a coherent masked identity: the spawn unshares UTS and sets this
+    /// name, so `uname -n`, `/etc/hostname`, and `/etc/hosts` all agree. `None` (the
+    /// default) means **no masking** — no UTS namespace, the host name shows through —
+    /// and is omitted from the canonical form, so a policy without it signs unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
 }
 
 /// The default masked user name: a non-system, non-privileged account.
@@ -1158,16 +1166,20 @@ impl Default for IdentityRuntime {
             user: default_user(),
             group: default_group(),
             groups: Vec::new(),
+            hostname: None,
         }
     }
 }
 
 impl IdentityRuntime {
     /// Whether there is nothing to realise (the default user and group, no
-    /// supplementary group).
+    /// supplementary group, no masked hostname).
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        is_default_user(&self.user) && is_default_group(&self.group) && self.groups.is_empty()
+        is_default_user(&self.user)
+            && is_default_group(&self.group)
+            && self.groups.is_empty()
+            && self.hostname.is_none()
     }
 }
 

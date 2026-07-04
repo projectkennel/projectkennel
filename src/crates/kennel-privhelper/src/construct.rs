@@ -715,6 +715,14 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         }
     }
 
+    // `[identity].hostname` (W12): name the kennel's own UTS namespace. The plan unshared UTS
+    // iff the policy set a hostname (`Some` here implies the flag); the construction child holds
+    // CAP_SYS_ADMIN over the new UTS via the identity-mapped userns, so this is unprivileged and
+    // invisible to the host. `uname -n` in the kennel then agrees with the synthetic /etc.
+    if let Some(hostname) = &half.hostname {
+        kennel_lib_syscall::namespace::set_hostname(hostname)?;
+    }
+
     // `[net.udp]` (W2): create the UDP-egress tun in the kennel's own net-ns — the same
     // in-namespace `CAP_NET_ADMIN` window as `lo` above — address it, and hold its fd to hand to
     // `kennel-bin-init`. The tun's ULA `/64` is DERIVED here from the kernel-trusted `op_uid`, on a
