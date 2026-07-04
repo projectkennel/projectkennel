@@ -1107,19 +1107,16 @@ pub struct NetDenyRule {
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct NetBind {
     /// What to do with a wildcard IPv4 bind (`"rewrite"` / `"deny"`).
+    ///
+    /// Typed: an invalid value is a compile (deserialize) error, not a silent
+    /// pass-through (§10.2 — parsing is the validation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(
-        feature = "schema",
-        schema(values_from = "kennel_lib_policy::settled::WildcardBindPolicy")
-    )]
-    pub inaddr_any_policy: Option<String>,
-    /// What to do with a wildcard IPv6 bind.
+    pub inaddr_any_policy: Option<kennel_lib_policy::settled::WildcardBindPolicy>,
+    /// What to do with a wildcard IPv6 bind (`"rewrite"` / `"deny"`).
+    ///
+    /// Typed like [`inaddr_any_policy`](Self::inaddr_any_policy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(
-        feature = "schema",
-        schema(values_from = "kennel_lib_policy::settled::WildcardBindPolicy")
-    )]
-    pub in6addr_any_policy: Option<String>,
+    pub in6addr_any_policy: Option<kennel_lib_policy::settled::WildcardBindPolicy>,
     /// Whether binding the host IPv4 loopback is permitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_host_loopback_v4: Option<bool>,
@@ -1156,12 +1153,11 @@ pub struct NetAudit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_path: Option<String>,
     /// Audit verbosity (`"summary"`, `"full"`).
+    ///
+    /// Typed: an invalid value is a compile (deserialize) error, not a silent
+    /// pass-through (§10.2 — parsing is the validation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(
-        feature = "schema",
-        schema(values_from = "kennel_lib_policy::settled::NetAuditLevel")
-    )]
-    pub level: Option<String>,
+    pub level: Option<kennel_lib_policy::settled::NetAuditLevel>,
 }
 
 /// `[unix]`: `AF_UNIX` policy.
@@ -1621,12 +1617,11 @@ pub struct DbusRules {
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
 pub struct DbusAudit {
     /// Verbosity (`"off"`, `"summary"`, `"full"`).
+    ///
+    /// Typed: an invalid value is a compile (deserialize) error, not a silent
+    /// pass-through (§10.2 — parsing is the validation).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(
-        feature = "schema",
-        schema(values_from = "kennel_lib_policy::settled::DbusAuditLevel")
-    )]
-    pub level: Option<String>,
+    pub level: Option<kennel_lib_policy::settled::DbusAuditLevel>,
 }
 
 /// Destinations that cannot be brokered to a kennel at all.
@@ -2095,6 +2090,60 @@ mod dbus_tests {
         let p = parse(toml.as_bytes()).expect("parse");
         p.validate().expect("validate");
         p
+    }
+
+    /// W6: the four schema-enum'd fields validate at parse — an invalid value is a
+    /// typed error naming the accepted set, not a silent pass-through (§10.2).
+    #[test]
+    fn enum_valued_fields_reject_invalid_values_at_parse() {
+        for (label, toml) in [
+            (
+                "[net.bind] inaddr_any_policy",
+                "name = \"k\"\n[net.bind]\ninaddr_any_policy = \"loud\"\n",
+            ),
+            (
+                "[net.bind] in6addr_any_policy",
+                "name = \"k\"\n[net.bind]\nin6addr_any_policy = \"loud\"\n",
+            ),
+            (
+                "[net.audit] level",
+                "name = \"k\"\n[net.audit]\nlevel = \"loud\"\n",
+            ),
+            (
+                "[dbus.audit] level",
+                "name = \"k\"\n[dbus.audit]\nlevel = \"loud\"\n",
+            ),
+        ] {
+            let err = parse(toml.as_bytes()).map_or_else(|e| e.to_string(), |_| String::new());
+            assert!(
+                err.contains("unknown variant"),
+                "{label}: wanted a typed unknown-variant parse error, got: `{err}`"
+            );
+        }
+    }
+
+    /// The documented values of the four fields still parse, into their enums.
+    #[test]
+    fn enum_valued_fields_accept_their_documented_values() {
+        use kennel_lib_policy::settled::{DbusAuditLevel, NetAuditLevel, WildcardBindPolicy};
+        let p = parse_ok(
+            "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+             [net.bind]\ninaddr_any_policy = \"rewrite\"\nin6addr_any_policy = \"deny\"\n\
+             [net.audit]\nlevel = \"full\"\n\
+             [dbus.audit]\nlevel = \"off\"\n",
+        );
+        let net = p.net.expect("net");
+        let bind = net.bind.expect("bind");
+        assert_eq!(bind.inaddr_any_policy, Some(WildcardBindPolicy::Rewrite));
+        assert_eq!(bind.in6addr_any_policy, Some(WildcardBindPolicy::Deny));
+        assert_eq!(
+            net.audit.expect("net.audit").level,
+            Some(NetAuditLevel::Full)
+        );
+        assert_eq!(
+            p.dbus.expect("dbus").audit.expect("dbus.audit").level,
+            Some(DbusAuditLevel::Off)
+        );
     }
 
     #[test]

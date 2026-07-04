@@ -350,7 +350,16 @@ fn translate_dbus(src: &SourcePolicy) -> DbusRuntime {
     DbusRuntime {
         session: bus(&dbus.session),
         system: bus(&dbus.system),
-        audit_level: dbus.audit.as_ref().and_then(|a| a.level.clone()),
+        // The settled field carries the string form; the exhaustive match keeps
+        // this mapping honest if the enum ever grows a variant.
+        audit_level: dbus.audit.as_ref().and_then(|a| a.level).map(|l| {
+            match l {
+                kennel_lib_policy::settled::DbusAuditLevel::Off => "off",
+                kennel_lib_policy::settled::DbusAuditLevel::Summary => "summary",
+                kennel_lib_policy::settled::DbusAuditLevel::Full => "full",
+            }
+            .to_owned()
+        }),
     }
 }
 

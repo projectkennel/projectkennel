@@ -1,6 +1,6 @@
 {
   "crate_count": 31,
-  "total_sloc": 37732,
+  "total_sloc": 37723,
   "tcb_crate_count": 16,
   "tcb_sloc": 22851,
   "crates": [
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5042,
+      "sloc": 5033,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
