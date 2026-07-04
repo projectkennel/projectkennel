@@ -12,8 +12,11 @@
  *          floor/allowlist, two LPM lookups, one ringbuf emit).
  * Maps used: kennel_meta_map, bind_subnet_map, bind_deny_v4, bind_allow_v4,
  *          audit_ringbuf.
- * Failure mode: rewrite wildcard, then ALLOW iff the address misses bind_deny and
- *          hits bind_allow; deny (return 0, bind fails) otherwise. Fails closed if
+ * Failure mode: a port-0 (ephemeral) bind is ALLOWed unconditionally — a
+ *          kernel-allocated source port is not a listening surface — so an
+ *          outbound dial's `:0` source bind is not gated as a listener. Otherwise
+ *          rewrite wildcard, then ALLOW iff the address misses bind_deny and hits
+ *          bind_allow; deny (return 0, bind fails) otherwise. Fails closed if
  *          metadata or the bind subnet is missing.
  * Threat bearing: T6 (a dev server bound to 0.0.0.0 would otherwise be exposed
  *          to the LAN/host; rewriting confines it to the kennel).
@@ -47,6 +50,19 @@ int kennel_bind4(struct bpf_sock_addr *ctx)
 	__u8 requested[16] = {};
 	__u8 rewritten[16] = {};
 	__builtin_memcpy(requested, &addr, 4);
+
+	/* Ephemeral bind (port 0): a kernel-allocated source port, not a reachable listening
+	 * surface. T6 (the bind ACL) gates predictable *listening* ports; a `:0` bind yields an
+	 * unpredictable high port the kernel chooses, and any egress from the resulting socket
+	 * still passes the connect ACL. Allow it unconditionally — no floor, no port allowlist,
+	 * no address ACL (those gate explicit ports), and NO wildcard rewrite (an outbound socket
+	 * needs 0.0.0.0 to stay unspecified so the kernel picks the source per route; pinning it to
+	 * the loopback would break the dial). This is what lets host-mode's outbound UDP dial work
+	 * (`connect_udp` binds `:0` before `connect()`). */
+	if (port_be == 0) {
+		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET, port_be, requested, rewritten, meta);
+		return KENNEL_ALLOW;
+	}
 
 	/* The bind floor (§7.3.7): a bind below `bind_port_min` is denied — the
 	 * privileged-port protection (T6). Checked before the address logic, since a
