@@ -2,13 +2,14 @@
 # tun-egress — the CONSUMER half + the verdict (§8 / W2 Part C+D).
 #
 # A `[net.udp]` kennel whose UDP egress is mediated by the standing tun-broker over a plain af-unix
-# session (the compositor-broker pattern, NOT binder message passing). Two declarations drive that:
-#   * `[net.udp]` + `[[net.udp.allow]]` opts into the tun path: kenneld constructs a `tun` in the
-#     kennel's netns and seals `facade-tun` into the view to forward its L3 frames.
-#   * `[[consumes]] org.projectkennel.tun-udp shape = "af-unix"` is the service-mesh pair with the
-#     tun-broker's `[[provides]]`. On the per-kennel bus `facade-tun` `CONNECT_AFUNIX`es this name;
-#     kenneld resolves THIS consumer's grants + tun `/64`, delivers them to the broker's sink, and
-#     hands back the broker's minted per-session socket — the af-unix channel frames flow over.
+# session (the compositor-broker pattern, NOT binder message passing). `[net.udp]` alone drives it
+# (the W4 mechanism, applied to W2): the section implies the `org.projectkennel.tun-udp` af-unix
+# consume — kenneld synthesizes it, so no `[[consumes]]` is spelled out here ON PURPOSE; this case
+# is the proof that a bare `[net.udp]` policy reaches the broker (an explicit consume remains
+# valid and equivalent). kenneld constructs a `tun` in the kennel's netns, seals `facade-tun` into
+# the view; on the per-kennel bus the facade `CONNECT_AFUNIX`es the capability, kenneld resolves
+# THIS consumer's grants + tun `/64`, delivers them to the broker's sink, and hands back the
+# broker's minted per-session socket — the af-unix channel frames flow over.
 #
 # The workload proves the tun is present in the kennel's own netns (the construction half, Part B); the
 # facade↔broker frame path (Part C/D) is exercised by `facade-tun` connecting the broker on bring-up —
@@ -27,15 +28,6 @@ mode = "constrained"
 name = "example.com"
 ports = [443]
 reason = "W2 tun-egress e2e: an allowed UDP destination the broker's naming shim mints a synthetic for"
-
-# The service-mesh pair with the tun-broker's `[[provides]]`: reaching the standing UDP-egress
-# mediation. `facade-tun` connects this by name on the per-kennel bus; kenneld delivers this
-# consumer's grants to the broker and returns the session socket.
-[[consumes]]
-name = "org.projectkennel.tun-udp"
-shape = "af-unix"
-required = true
-reason = "reach the standing tun-broker's UDP-egress mediation over its per-session af-unix socket"
 
 # `/proc` (not `/proc/net/dev`): /proc/net is the per-task `/proc/self/net` symlink, so a Landlock
 # rule pinned to the specific inode does not match the workload's — the mount-rooted `/proc` grant does.
