@@ -33,6 +33,38 @@ use simple_dns::Packet;
 /// The `AAAA` record type number (RFC 3596) — the only type the shim answers with an address.
 pub const QTYPE_AAAA: u16 = 28;
 
+/// Lowercase-hex encode `bytes`.
+///
+/// The tun-broker passes the small `DELIVER_TUN_SESSION` grant payload to each per-session mediator
+/// process on its argv; argv is text and the payload is binary, so it rides as hex.
+#[must_use]
+pub fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len().saturating_mul(2));
+    for &b in bytes {
+        // `b >> 4` and `b & 0x0f` are each 0..=15, so `from_digit(_, 16)` is always `Some`.
+        s.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
+        s.push(char::from_digit(u32::from(b & 0x0f), 16).unwrap_or('0'));
+    }
+    s
+}
+
+/// Decode a hex string produced by [`to_hex`], or `None` if it is malformed (odd length or a
+/// non-hex digit).
+#[must_use]
+pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+    let bytes = s.as_bytes();
+    if (bytes.len() & 1) == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() >> 1);
+    for pair in bytes.chunks_exact(2) {
+        let hi = char::from(*pair.first()?).to_digit(16)?;
+        let lo = char::from(*pair.get(1)?).to_digit(16)?;
+        out.push(u8::try_from(hi.checked_shl(4)?.checked_add(lo)?).ok()?);
+    }
+    Some(out)
+}
+
 /// The queried name and record type of a DNS query's first question, or `None` if the packet does
 /// not parse or carries no question.
 ///

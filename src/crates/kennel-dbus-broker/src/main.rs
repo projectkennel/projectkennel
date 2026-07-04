@@ -6,24 +6,24 @@
 //!
 //! **Control plane (kenneld → broker):** kenneld owns node 0 of the mesh bus and reaches
 //! the broker's **control node** (the cookie it registered via `ADD_SERVICE`). When a
-//! consumer asks to connect, kenneld resolves the consumer's identity and filter *in its
-//! own namespace* and sends one `ACCEPT_SESSION(bus, filter)` to the control node. The
-//! broker mints a fresh **per-session node**, stores the filter against that node's cookie,
-//! and replies with the node — which kenneld forwards to the consumer. The broker honors the
-//! control verb only on its control node, which consumers are never handed; the auth is
-//! structural, not a check on anything the consumer says.
+//! consumer asks to connect, kenneld sends the generic `NEW_SESSION(ctx, capability)` — no
+//! policy — to the control node. The broker mints a fresh **per-session node**, records
+//! `(ctx, capability)` against its cookie, and replies with the node — which kenneld forwards
+//! to the consumer. The broker honors the control verb only on its control node, which
+//! consumers are never handed; the auth is structural, not a check on anything the consumer says.
 //!
 //! **Data plane (consumer → broker, kenneld absent):** the consumer transacts its session
-//! node directly with `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE`. The broker keys the session by
-//! the kernel-attested **target node cookie** (never by the sender — a confined broker
-//! cannot resolve sibling-namespace pids) and mediates each frame through the reused
-//! `host-dbus::mediate` engine against the real bus. When the consumer's kennel exits, its
-//! last reference to the session node drops, the broker is told via `Br::Release`, and the
-//! session is reclaimed — no teardown verb.
+//! node directly with `DBUS_SEND`/`DBUS_RECV`/`DBUS_CLOSE`. On the first frame the broker
+//! **pulls** the session's filter from kenneld (`GET_SESSION_POLICY`, echoing `(ctx, capability)`)
+//! and applies it before any byte reaches the bus. It keys the session by the kernel-attested
+//! **target node cookie** (never by the sender — a confined broker cannot resolve sibling-namespace
+//! pids) and mediates each frame through the reused `host-dbus::mediate` engine against the real
+//! bus. When the consumer's kennel exits, its last reference to the session node drops, the broker
+//! is told via `Br::Release`, and the session is reclaimed — no teardown verb.
 //!
 //! ```text
-//! kenneld(node 0) ──ACCEPT_SESSION──▶ broker control node ──mints──▶ session node
-//!        │                                                               ▲
+//! kenneld(node 0) ──NEW_SESSION(ctx,cap)──▶ broker control node ──mints──▶ session node
+//!        │                                            ▲ first frame pulls: GET_SESSION_POLICY
 //!        └──forwards session node──▶ consumer ──DBUS_SEND/RECV──────────┘──▶ real bus
 //! ```
 
@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::dbus::{frame_len, Bus};
-use kennel_lib_binder::service::{broker, dbus as dbus_svc, status, verb};
+use kennel_lib_binder::service::{broker, dbus as dbus_svc, session, status, verb};
 use kennel_lib_dbus::filter::{BusRules, Filter};
 
 /// The mesh binder device path — the `[[provides]]` endpoint, bind-mounted by `kenneld`.
@@ -66,8 +66,19 @@ struct Inbound {
     queue: Mutex<VecDeque<Vec<u8>>>,
 }
 
-/// One active D-Bus session: the mediation running over a socketpair, keyed by node cookie.
+/// One D-Bus session, keyed by node cookie. Minted policy-less by `NEW_SESSION`; its mediation is
+/// established lazily on first use, once the broker has **pulled** the session's filter from kenneld.
 struct Session {
+    /// The consumer kennel's ctx, echoed to kenneld on the [`verb::GET_SESSION_POLICY`] pull.
+    ctx: u16,
+    /// The capability the consumer connected (selects the bus), echoed on the pull.
+    capability: String,
+    /// The mediation conduit, established on first use after the policy pull. `None` until then.
+    conduit: Option<Conduit>,
+}
+
+/// A session's live mediation over a socketpair — established once its filter is pulled and applied.
+struct Conduit {
     /// The broker's end of the conduit to the mediation; consumer frames are written here.
     to_mediate: UnixStream,
     /// Mediated inbound frames, drained from the conduit by this session's reader thread.
@@ -104,24 +115,74 @@ impl Broker {
         }
     }
 
-    /// The control node: kenneld pushes `ACCEPT_SESSION` here. Consumers never hold this
-    /// node, so reaching it is itself the authorization.
+    /// The control node: kenneld sends the generic [`session::NEW_SESSION`] here. Consumers never
+    /// hold this node, so reaching it is itself the authorization.
     fn handle_control(&mut self, conn: &Connection, incoming: &Incoming) {
-        if incoming.code == broker::ACCEPT_SESSION {
-            self.accept_session(conn, incoming);
+        if incoming.code == session::NEW_SESSION {
+            self.new_session(conn, incoming);
         } else {
             let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
         }
     }
 
-    /// Mint a per-session node for a session kenneld has authorized, start its mediation
-    /// against the real bus with the supplied filter, and reply with the node so kenneld can
-    /// forward it to the consumer.
-    fn accept_session(&mut self, conn: &Connection, incoming: &Incoming) {
-        let Some(acc) = broker::decode_accept(&incoming.data) else {
+    /// Mint a policy-less per-session node for the consumer `(ctx, capability)` kenneld authorized,
+    /// and reply with the node so kenneld can forward it to the consumer. No filter or mediation is
+    /// established here — the broker pulls the session's policy lazily on first use
+    /// ([`Self::ensure_conduit`]), keeping this handshake generic and never calling back into kenneld
+    /// while it is blocked sending `NEW_SESSION`.
+    fn new_session(&mut self, conn: &Connection, incoming: &Incoming) {
+        let Some((ctx, capability)) = session::decode_ref(&incoming.data) else {
             let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
             return;
         };
+        let cookie = self.next_cookie;
+        self.next_cookie = self.next_cookie.saturating_add(1);
+        self.sessions.insert(
+            cookie,
+            Session {
+                ctx,
+                capability,
+                conduit: None,
+            },
+        );
+
+        // Hand kenneld the freshly-minted session node (ptr == cookie); it forwards the
+        // handle to the consumer, which then transacts the session directly.
+        if conn.reply_with_node(incoming, cookie, cookie, 0).is_err() {
+            self.sessions.remove(&cookie); // mint failed → tear the half-built session down
+        }
+    }
+
+    /// Establish a session's mediation on first use: **pull** its filter from kenneld
+    /// ([`verb::GET_SESSION_POLICY`], echoing the session's `(ctx, capability)`), apply it, and start
+    /// the reused `host-dbus::mediate` over a socketpair. Idempotent — a no-op once the conduit
+    /// exists. Returns `false` if the session is unknown, the pull fails or is refused, or the
+    /// mediation cannot be started, so the caller reports the session unavailable.
+    ///
+    /// The pull is a fresh transaction to node 0 (kenneld), issued while the broker services the
+    /// consumer's first frame — never nested inside a kenneld-initiated transaction, so kenneld is
+    /// free to answer it and there is no deadlock.
+    fn ensure_conduit(&mut self, conn: &Connection, cookie: u64) -> bool {
+        let Some(session) = self.sessions.get(&cookie) else {
+            return false;
+        };
+        if session.conduit.is_some() {
+            return true;
+        }
+        let (ctx, capability) = (session.ctx, session.capability.clone());
+
+        let Ok(reply) = conn.transact(
+            0,
+            verb::GET_SESSION_POLICY,
+            &session::encode_ref(ctx, &capability),
+        ) else {
+            return false;
+        };
+        // A refusal comes back as a bare status byte, which is not a well-formed filter artifact.
+        let Some(acc) = broker::decode_accept(&reply) else {
+            return false;
+        };
+
         let (bus, bus_addr) = if acc.bus == dbus_svc::SESSION {
             (Bus::Session, self.session_bus_addr.clone())
         } else {
@@ -150,12 +211,10 @@ impl Broker {
         // the broker keeps one end (and a clone for the inbound reader); the mediation owns
         // the other and drives the real bus.
         let Ok((broker_end, mediate_end)) = UnixStream::pair() else {
-            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
-            return;
+            return false;
         };
         let Ok(reader_end) = broker_end.try_clone() else {
-            let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
-            return;
+            return false;
         };
 
         std::thread::spawn(move || {
@@ -165,20 +224,14 @@ impl Broker {
         let inbound_reader = Arc::clone(&inbound);
         std::thread::spawn(move || drain_inbound(reader_end, &inbound_reader));
 
-        let cookie = self.next_cookie;
-        self.next_cookie = self.next_cookie.saturating_add(1);
-        self.sessions.insert(
-            cookie,
-            Session {
+        if let Some(session) = self.sessions.get_mut(&cookie) {
+            session.conduit = Some(Conduit {
                 to_mediate: broker_end,
                 inbound,
-            },
-        );
-
-        // Hand kenneld the freshly-minted session node (ptr == cookie); it forwards the
-        // handle to the consumer, which then transacts the session directly.
-        if conn.reply_with_node(incoming, cookie, cookie, 0).is_err() {
-            self.sessions.remove(&cookie); // mint failed → tear the half-built session down
+            });
+            true
+        } else {
+            false // released while we pulled
         }
     }
 
@@ -187,26 +240,36 @@ impl Broker {
         let cookie = incoming.node_cookie;
         match incoming.code {
             verb::DBUS_SEND => {
-                let wrote = self
-                    .sessions
-                    .get_mut(&cookie)
-                    .map(|s| s.to_mediate.write_all(&incoming.data).is_ok());
-                let reply = match wrote {
-                    Some(true) => vec![status::OK],
-                    Some(false) => {
-                        // The mediation is gone — drop the session and report it closed.
-                        self.sessions.remove(&cookie);
-                        vec![status::NOT_FOUND]
+                // First frame establishes the mediation: pull the session's filter from kenneld and
+                // apply it before any byte reaches the bus.
+                let reply = if self.ensure_conduit(conn, cookie) {
+                    match self
+                        .sessions
+                        .get_mut(&cookie)
+                        .and_then(|s| s.conduit.as_mut())
+                    {
+                        Some(c) => {
+                            if c.to_mediate.write_all(&incoming.data).is_ok() {
+                                vec![status::OK]
+                            } else {
+                                // The mediation is gone — drop the session and report it closed.
+                                self.sessions.remove(&cookie);
+                                vec![status::NOT_FOUND]
+                            }
+                        }
+                        None => vec![status::NOT_FOUND],
                     }
-                    None => vec![status::NOT_FOUND],
+                } else {
+                    vec![status::NOT_FOUND]
                 };
                 let _ = conn.reply_and_free(incoming, &reply);
             }
             verb::DBUS_RECV => {
-                let reply = self.sessions.get(&cookie).map_or_else(
-                    || vec![status::NOT_FOUND],
-                    |s| {
-                        let mut q = s
+                let reply = match self.sessions.get(&cookie).map(|s| s.conduit.as_ref()) {
+                    None => vec![status::NOT_FOUND],   // no such session
+                    Some(None) => vec![status::AGAIN], // minted, nothing sent/received yet
+                    Some(Some(c)) => {
+                        let mut q = c
                             .inbound
                             .queue
                             .lock()
@@ -220,8 +283,8 @@ impl Broker {
                                 out
                             },
                         )
-                    },
-                );
+                    }
+                };
                 let _ = conn.reply_and_free(incoming, &reply);
             }
             verb::DBUS_CLOSE => {

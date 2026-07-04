@@ -119,6 +119,35 @@ pub mod verb {
     /// declared-and-ready or the broker's deadline fires, returning
     /// [`crate::service::status::UNAVAILABLE`] on timeout (§7.13.4a).
     pub const SVC_CONNECT: u32 = 16;
+
+    /// A mediation broker → kenneld (mesh node 0): **pull** the policy artifact for a session.
+    ///
+    /// The broker echoes the session's `(ctx, capability name)` (which kenneld handed it at
+    /// [`crate::service::session::NEW_SESSION`]); kenneld selects the artifact by the consume's *shape
+    /// from policy* from the running kennel's retained settled struct (the `dbus-name` `IDBus`
+    /// filter). This is how a broker learns *what to allow* without kenneld holding a filter table.
+    pub const GET_SESSION_POLICY: u32 = 17;
+
+    /// The tun-broker → kenneld (its own **per-kennel bus**): register the sink node kenneld pushes
+    /// egress sessions to.
+    ///
+    /// The `REGISTER_MIRROR` move for L3 egress: the standing tun-broker hands kenneld its callback
+    /// node once at startup; kenneld acquires it, watches its death, and records it against the
+    /// broker's ctx. Every `[net.udp]` consumer's session is then delivered to this one node
+    /// ([`DELIVER_TUN_SESSION`]). The reply is a status byte.
+    pub const REGISTER_TUN_SINK: u32 = 18;
+
+    /// kenneld → the tun-broker (its per-kennel bus, the registered [`REGISTER_TUN_SINK`] node):
+    /// mint one egress session for a `[net.udp]` consumer.
+    ///
+    /// The `DELIVER_INET` move: kenneld resolves the consumer's grants + tun `/64` in its own
+    /// namespace and pushes them here (the [`tun_broker::encode_accept`](super::tun_broker::encode_accept)
+    /// payload). The broker mints a
+    /// fresh connected `SOCK_DGRAM` socketpair (frame boundaries preserved — no length prefix), spawns
+    /// a per-session flow-mediator process on one end with those grants, and replies with the **other
+    /// end's fd** — which kenneld hands to the consumer's `facade-tun` as its af-unix `[[consumes]]`
+    /// connection. One socketpair + one mediator per consumer: separation, never a shared listener.
+    pub const DELIVER_TUN_SESSION: u32 = 19;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -898,28 +927,83 @@ mod codec {
     }
 }
 
-/// The `dbus-broker` control-channel wire protocol: the verb `kenneld` speaks on the
-/// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
+/// The generic mediation-session verbs — the shape-agnostic mesh handshake every mediation broker
+/// (dbus, tun, …) shares (§7.13.4c).
 ///
-/// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its
-/// per-kennel bus, tells the broker to accept one D-Bus session and apply the given filter set.
-/// The broker mints a per-session node and enforces the filter on every frame it mediates for
-/// that session. kenneld decides; the broker applies and never relays through kenneld.
-///
-/// **Wire layout (all big-endian):** see [`broker::encode_accept`]. The `bus` byte selects session (0)
-/// or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
-pub mod broker {
-    /// Tell the provider to accept a D-Bus session kenneld has authorized, applying the
-    /// given filter. kenneld→provider, on the connector mesh bus's control node.
-    ///
-    /// The provider mints a fresh session node, stores the filter against that node's
-    /// cookie, and replies with the node (a `BINDER_TYPE_BINDER` object). kenneld forwards
-    /// that node to the consumer, which transacts it directly; the provider keys the session
-    /// by the kernel-attested **target node**, never by anything the consumer says, and
-    /// reclaims it on the node's `Br::Release` (the consumer's last ref dropping). The
-    /// provider decides nothing — it applies kenneld's filter to the session it was handed.
-    pub const ACCEPT_SESSION: u32 = 1;
+/// A consumer's `SVC_CONNECT` to a mediated capability drives two generic transactions and no
+/// shape-specific payload: kenneld sends [`NEW_SESSION`](session::NEW_SESSION) (ctx + capability
+/// name, *no policy*) to the broker's control node, which mints a per-session node and replies with
+/// it; kenneld forwards the
+/// node to the consumer. The broker then **pulls** its policy lazily — on the session's first use it
+/// transacts [`crate::service::verb::GET_SESSION_POLICY`] (the same ctx + name) to kenneld's node 0,
+/// which selects the artifact by the consume's *shape from policy*. The artifact bytes are
+/// shape-specific (a [`crate::service::broker`] filter, a [`crate::service::tun_broker`] grant set)
+/// but the handshake is not.
+pub mod session {
+    use super::codec::{put_str, put_u16, take_str, take_u16};
 
+    /// kenneld → a mediation broker (control node): mint a session for a consumer.
+    ///
+    /// Carries the consumer kennel's `ctx` and the `capability name` it connected — no policy. The
+    /// broker mints a fresh per-session node, records `(ctx, name)` against it, replies with the node,
+    /// and pulls the session's policy lazily ([`super::verb::GET_SESSION_POLICY`]) on first use.
+    pub const NEW_SESSION: u32 = 1;
+
+    /// Encode a session reference `[ctx: u16 be | name]`.
+    ///
+    /// The body of both [`NEW_SESSION`] (kenneld→broker) and [`super::verb::GET_SESSION_POLICY`]
+    /// (broker→kenneld): the same `(ctx, name)` names the session on the way out and identifies it on
+    /// the pull back.
+    #[must_use]
+    pub fn encode_ref(ctx: u16, name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_u16(&mut out, ctx);
+        put_str(&mut out, name);
+        out
+    }
+
+    /// Decode a session reference `[ctx: u16 be | name]`. `None` for malformed or trailing input.
+    #[must_use]
+    pub fn decode_ref(data: &[u8]) -> Option<(u16, String)> {
+        let mut cur = data;
+        let ctx = take_u16(&mut cur)?;
+        let name = take_str(&mut cur)?;
+        if !cur.is_empty() {
+            return None;
+        }
+        Some((ctx, name))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ref_round_trips() {
+            let bytes = encode_ref(0x0042, "org.projectkennel.dbus");
+            assert_eq!(
+                decode_ref(&bytes),
+                Some((0x0042, "org.projectkennel.dbus".to_owned()))
+            );
+        }
+
+        #[test]
+        fn ref_rejects_trailing_and_short() {
+            let mut bytes = encode_ref(1, "x");
+            bytes.push(0);
+            assert!(decode_ref(&bytes).is_none(), "trailing garbage");
+            assert!(decode_ref(&[]).is_none(), "short (no ctx)");
+        }
+    }
+}
+
+/// The D-Bus session-policy artifact: the compiled `IDBus` filter a `dbus-name` session is policed by.
+///
+/// Not a verb — the bytes kenneld returns from a broker's [`crate::service::verb::GET_SESSION_POLICY`] pull
+/// (encoded from the consumer's retained `[dbus]` runtime) and the dbus-broker decodes to police the
+/// session's traffic. The wire layout is unchanged from when kenneld pushed it; only the direction
+/// (pull, not push) and the trigger (first use, not setup) moved.
+pub mod broker {
     use super::codec::{put_str_list, put_u8, take, take_str_list};
 
     /// Encode an `ACCEPT_SESSION` request:
@@ -1012,25 +1096,27 @@ pub mod broker {
     }
 }
 
-/// The `tun-broker` control-channel wire protocol (§8 / W2 Part D).
+/// The UDP-egress session artifact (§8 / W2 Part D): the tun `/64` + compiled UDP grants for one
+/// egress session.
 ///
-/// The verb `kenneld` speaks on the UDP-egress broker's control node, acquired on the connector mesh
-/// bus. One verb, [`tun_broker::ACCEPT_SESSION`]: kenneld, having identified a `[net.udp]` consumer on
-/// its per-kennel bus, tells the broker to accept one egress session with that consumer's compiled
-/// UDP grants and the tun `/64` the consumer's synthetics live in. The broker mints
-/// a per-session data channel (an `AF_UNIX` fd it hands back), runs the flow mediation over it, and
-/// keys the session by the kernel-attested node — never by anything the consumer says. kenneld
-/// decides the grants; the broker applies and never relays through kenneld on the data path.
+/// The payload of [`crate::service::verb::DELIVER_TUN_SESSION`] — kenneld resolves a `[net.udp]`
+/// consumer's grants + tun `/64` in its own namespace and pushes them to the tun-broker over the
+/// broker's per-kennel bus. The broker decodes them, spawns a per-session flow mediator with them,
+/// and never relays through kenneld on the data path. The categorical deny-CIDR floor is the broker's
+/// own cgroup BPF filter, not on this wire.
 ///
 /// **Wire layout (all big-endian):** see [`tun_broker::encode_accept`].
 pub mod tun_broker {
     use super::codec::{put_count, put_str, put_u16, put_u8, take, take_str, take_u16, take_u8};
 
-    /// Tell the UDP-egress broker to accept a session kenneld has authorized.
+    /// The af-unix capability a `[net.udp]` consumer `[[consumes]]` (shape `af-unix`).
     ///
-    /// kenneld→provider, on the connector mesh bus's control node. The provider mints the session's
-    /// data channel and replies with its fd; kenneld forwards the fd to the consumer's `facade-tun`.
-    pub const ACCEPT_SESSION: u32 = 1;
+    /// The tun-broker's egress service: `facade-tun` `CONNECT_AFUNIX`es this on its per-kennel bus,
+    /// and kenneld special-cases the name to the [`DELIVER_TUN_SESSION`](super::verb::DELIVER_TUN_SESSION)
+    /// dance (resolve grants, deliver to the sink, hand back the minted session fd) rather than the
+    /// generic rendezvous connect. The single source both `facade-tun` and kenneld reference, so the
+    /// consume name cannot drift.
+    pub const CAPABILITY: &str = "org.projectkennel.tun-udp";
 
     /// One name grant: a host pattern, its permitted ports (empty = any), and its transport.
     ///

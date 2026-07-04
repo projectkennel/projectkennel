@@ -84,6 +84,20 @@ pub struct Lifecycle {
     pub prompt: Option<crate::prompt::PromptPort>,
 }
 
+/// The tun-egress inputs threaded into the node-0 handler (§8 / W2).
+///
+/// `sink` is the daemon-global [`crate::tun_sink::TunSink`] this kennel's manager either **registers**
+/// (when it is the tun-broker, on [`verb::REGISTER_TUN_SINK`]) or **delivers to** (when it is a
+/// `[net.udp]` consumer, on a [`verb::CONNECT_AFUNIX`] for the tun capability). `cm` is this manager's
+/// own context manager, recorded against the sink so the cross-connection deliver can reach the
+/// broker. `session` is this kennel's own pre-resolved [`verb::DELIVER_TUN_SESSION`] payload —
+/// `Some` iff it is a `[net.udp]` tun consumer (its presence is the grant).
+struct TunCtx<'a> {
+    sink: &'a crate::tun_sink::TunSink,
+    session: Option<&'a [u8]>,
+    cm: &'a Arc<ContextManager>,
+}
+
 /// A running per-kennel binder context manager: the looper pool plus its stop flag.
 #[derive(Debug)]
 pub struct Manager {
@@ -133,6 +147,8 @@ pub fn spawn(
     consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
     catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
+    tun_sink: crate::tun_sink::TunSink,
+    tun_session: Option<Vec<u8>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
@@ -150,7 +166,17 @@ pub fn spawn(
     // floor) and the daemon's live catalogue (resolved against on SVC_CONNECT), shared across loopers.
     let consumes = Arc::new(consumes);
     let inbound_for_death = Arc::clone(&inbound);
+    // Tun egress (§8 / W2): the handler records the broker's sink against THIS manager's context
+    // manager (not the borrowed serve connection), so it captures a clone; the death closure keeps
+    // its own clone of the daemon-global sink to clear on the broker's death.
+    let cm_for_handler = Arc::clone(&cm);
+    let tun_sink_for_death = tun_sink.clone();
     let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
+        let tun = TunCtx {
+            sink: &tun_sink,
+            session: tun_session.as_deref(),
+            cm: &cm_for_handler,
+        };
         handle(
             &unix,
             &net,
@@ -161,14 +187,21 @@ pub fn spawn(
             &consumes,
             catalogue.as_ref(),
             activator.as_ref(),
+            &tun,
             incoming,
             conn,
             ctx,
             &writer,
         )
     });
-    // A watched mirror node died: drop its stale handle (§7.5.7, guard 1).
+    // A watched node died: the tun-broker's sink (clear it) or an inbound mirror handle (drop it,
+    // §7.5.7 guard 1). The sink is keyed by a sentinel cookie distinct from every mirror cookie.
     let death: DeathHandler = Arc::new(move |cookie: u64, conn: &Connection| {
+        if cookie == crate::tun_sink::SINK_DEATH_COOKIE {
+            tun_sink_for_death.clear();
+            let _ = conn.dead_binder_done(cookie);
+            return;
+        }
         inbound_for_death.drop_dead(conn, cookie);
     });
 
@@ -194,6 +227,7 @@ fn handle(
     consumes: &[kennel_lib_policy::ConsumeRuntime],
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
+    tun: &TunCtx<'_>,
     incoming: &Incoming,
     conn: &Connection,
     ctx: u16,
@@ -231,6 +265,12 @@ fn handle(
         // the reply (a connected fd in the binder object table) is identical, so the facade is unaware.
         if let Some(name) = kennel_lib_binder::service::svc_connect::decode_request(&incoming.data)
         {
+            // The tun-broker's egress capability is af-unix-shaped but NOT a plain rendezvous connect:
+            // kenneld resolves this consumer's grants and has the broker mint a per-session mediator
+            // (§8 / W2), so it is special-cased ahead of the generic mesh / host-socket dispatch.
+            if name == kennel_lib_binder::service::tun_broker::CAPABILITY {
+                return tun_connect(tun, incoming, ctx, writer);
+            }
             if consumes.iter().any(|c| c.name == name) {
                 return svc_connect(consumes, catalogue, activator, incoming, ctx, writer, dbus);
             }
@@ -245,6 +285,13 @@ fn handle(
     // is handed back here (the reply is a status byte) — kenneld pushes DELIVER_INET on accept.
     if incoming.code == verb::REGISTER_MIRROR {
         return register_mirror(inbound, incoming, conn, ctx, writer);
+    }
+    // Tun-egress sink registration (§8 / W2): the standing tun-broker hands kenneld its sink node so
+    // kenneld can deliver each `[net.udp]` consumer's session to it. Modelled on REGISTER_MIRROR —
+    // acquire the handle, watch its death, record it — but daemon-global (the broker and consumers
+    // are different kennels) rather than per-port. No conduit is handed back here (a status byte).
+    if incoming.code == verb::REGISTER_TUN_SINK {
+        return register_tun_sink(tun, incoming, conn, ctx, writer);
     }
     // The D-Bus mediation membrane (§7.7.2a): kenneld relays opaque frames to the host-dbus
     // delegate by connection id, lock-free (the relay owns its own state + rate cap). `DBUS_RECV`
@@ -894,6 +941,100 @@ fn register_mirror(
         Outcome::Allow,
     ));
     Reply::Data(one(status::OK))
+}
+
+/// Serve `REGISTER_TUN_SINK`: bind the standing tun-broker's sink node so kenneld can deliver egress
+/// sessions to it (§8 / W2).
+///
+/// The [`register_mirror`] move for L3 egress: parse the translated handle from the trailing node
+/// object, **acquire** it (so it survives this transaction's buffer free), request its **death
+/// notification** under the [`crate::tun_sink::SINK_DEATH_COOKIE`] sentinel, and record `(this
+/// manager's context manager, handle)` in the daemon-global [`crate::tun_sink::TunSink`]. The record
+/// is daemon-global — not per-kennel — because the broker and its consumers run in different kennels
+/// (different binder instances), so a consumer's deliver reaches the broker over *its* connection.
+///
+/// Only the tun-broker's own per-kennel bus ever carries this verb (a consumer never holds the sink
+/// node), so reaching the handler is the authorization. The reply is a status byte.
+fn register_tun_sink(
+    tun: &TunCtx<'_>,
+    incoming: &Incoming,
+    conn: &Connection,
+    ctx: u16,
+    writer: &Writer,
+) -> Reply {
+    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+
+    // The node object the broker sent is the trailing flat_binder_object (the driver translated it to
+    // a handle for us); REGISTER_TUN_SINK carries no data before it.
+    let handle = incoming
+        .data
+        .len()
+        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
+        .and_then(|off| incoming.data.get(off..))
+        .and_then(flat_binder_object_handle_value);
+    let Some(handle) = handle else {
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::BAD_REQUEST));
+    };
+    // Keep the handle past this transaction's buffer free, and learn when the broker dies — both ride
+    // `conn` here, before the reply (and its BC_FREE_BUFFER) drops the transaction's temporary ref.
+    if conn.acquire_handle(handle).is_err() {
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::BAD_REQUEST));
+    }
+    let _ = conn.request_death(handle, crate::tun_sink::SINK_DEATH_COOKIE);
+    tun.sink.set(Arc::clone(tun.cm), handle);
+    writer.emit(&tun_event(
+        incoming,
+        ctx,
+        "tun-sink-register",
+        Outcome::Allow,
+    ));
+    Reply::Data(one(status::OK))
+}
+
+/// Serve a `[net.udp]` consumer's `CONNECT_AFUNIX` for the tun capability (§8 / W2): deliver its
+/// pre-resolved grants + tun `/64` to the registered sink and hand back the broker's minted
+/// per-session fd as the consumer's af-unix connection.
+///
+/// `session == None` means this kennel signed no `[net.udp]` grant (nothing to deliver, so it is not
+/// really a tun consumer) → `DENIED`. A delivery failure — no broker registered yet, or an
+/// unreachable/dead one — → `UNAVAILABLE`, never a wedged looper. The deliver is a synchronous
+/// cross-connection transact to the broker's connection; safe because the broker is a different
+/// process, so this thread's outgoing transaction only draws its own reply back.
+fn tun_connect(tun: &TunCtx<'_>, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
+    let Some(payload) = tun.session else {
+        writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
+        return Reply::Data(one(status::DENIED));
+    };
+    tun.sink.deliver(payload).map_or_else(
+        |_| {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
+            Reply::Data(one(status::UNAVAILABLE))
+        },
+        |fd| {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+            Reply::Fd(fd)
+        },
+    )
+}
+
+/// The audit event for a tun-egress node-0 decision (sink registration / consumer connect).
+fn tun_event(incoming: &Incoming, ctx: u16, op: &str, outcome: Outcome) -> Event {
+    Event::new("binder.tun", Resource::Binder, outcome, Source::Kenneld)
+        .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+        .field("op", Value::untrusted(op.to_owned()))
+        .field("ctx", Value::Uint(u64::from(ctx)))
 }
 
 /// The audit event for an `INet` CONNECT decision.

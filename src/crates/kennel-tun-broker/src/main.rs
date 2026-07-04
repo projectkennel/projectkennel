@@ -1,145 +1,68 @@
-//! `tun-broker`: the standing L3-egress mediation service kennel (§8 / W2 Part D).
+//! `tun-broker`: the standing UDP-egress mediation service kennel (§8 / W2 Part D).
 //!
-//! A long-running service on the connector mesh bus — the host-side, kenneld-absent half of tun
-//! egress. It runs inside its own kennel and decides nothing: kenneld is the only authority. UDP is
-//! the first transport it mediates; the same session mechanism carries TCP later.
+//! A long-running service that `[[provides]]` the af-unix capability `org.projectkennel.tun-udp`. It
+//! decides nothing — kenneld is the only authority — and does almost nothing itself: it is a dumb
+//! router that hands each consumer's egress session to a fresh per-session mediator.
 //!
-//! **Control plane (kenneld → broker):** kenneld owns node 0 of the mesh bus and reaches the
-//! broker's **control node** (registered via `ADD_SERVICE`). When a `[net.udp]` consumer connects,
-//! kenneld resolves that consumer's grants + deny CIDRs + tun `/64` *in its own namespace* and sends
-//! one [`tun_broker::ACCEPT_SESSION`] to the control node. The broker mints the session's data
-//! channel — a connected `AF_UNIX` datagram pair — spawns the flow mediation ([`serve::run`]) on the
-//! broker end, and **replies with the consumer end's fd**, which kenneld forwards to the consumer's
-//! `facade-tun`.
+//! **Control (kenneld → broker, per-kennel bus):** the broker registers one **sink node** with
+//! kenneld ([`verb::REGISTER_TUN_SINK`]) at startup. When a `[net.udp]` consumer connects its
+//! `[[consumes]]`, kenneld resolves that consumer's grants + tun `/64` *in its own namespace* and
+//! pushes them to the sink ([`verb::DELIVER_TUN_SESSION`], the [`tun_broker`] payload). The broker
+//! mints a fresh connected `SOCK_DGRAM` socketpair, spawns a [`tun-flow`](../bin/tun-flow.rs)
+//! mediator process on one end with those grants, and **replies with the other end's fd** — which
+//! kenneld hands to the consumer's `facade-tun` as its af-unix connection.
 //!
-//! **Data plane (facade-tun → broker, kenneld absent):** whole L3 frames flow over that datagram
-//! channel. The broker's per-session [`Broker`] runs the DNS naming shim, the flow forwarder, the
-//! resolve-check-dial, and the `ICMPv6` synthesis — all already built. There is **no session table
-//! and no teardown verb**: the socketpair close (the consumer's kennel exiting) ends the session's
-//! `recv`, so its mediation thread returns and every flow socket it held closes with it.
+//! **Data (facade-tun ↔ mediator, kenneld absent):** whole L3 frames flow over that socketpair,
+//! datagram-framed (one frame per packet, no length prefix). The mediator runs the DNS naming shim,
+//! the flow forwarder, the resolve-check-dial, and the `ICMPv6` synthesis. One socketpair + one
+//! mediator per consumer: separation, never a shared listener to multiplex.
 //!
 //! ```text
-//! kenneld(node 0) ──ACCEPT_SESSION(grants,denies,tun)──▶ broker control node
-//!        │                                                    │ mints socketpair, spawns serve::run
-//!        └──forwards session fd──▶ facade-tun ◀──datagram L3 frames──▶ broker end
+//! kenneld ──REGISTER_TUN_SINK◀── broker (once, per-kennel bus)
+//! kenneld ──DELIVER_TUN_SESSION(grants,tun/64)──▶ broker ──mints socketpair, spawns tun-flow──┐
+//!        ◀────────────── reply: consumer-end fd ──────────────────────────────────────────────┘
+//!        └──forwards fd──▶ facade-tun ◀──datagram L3 frames──▶ tun-flow mediator
 //! ```
 
 #![forbid(unsafe_code)]
 
-use std::net::Ipv6Addr;
-use std::os::fd::AsFd;
+use std::fs::OpenOptions;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixDatagram;
-use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::process::{Command, ExitCode, Stdio};
+use std::thread;
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::service::{status, tun_broker, verb};
-use kennel_lib_policy::settled::{NameRule, Protocol};
-use kennel_tun_broker::poll::Poller;
 
-use kennel_tun_broker::serve::{self, Broker, Ceilings};
-use kennel_tun_broker::shim::Allowlist;
+/// The sink node's local pointer and cookie on the per-kennel bus.
+const SINK_NODE_PTR: u64 = 1;
+const SINK_NODE_COOKIE: u64 = 1;
 
-/// The mesh binder device path — the `[[provides]]` endpoint, bind-mounted by `kenneld`.
-const MESH_DEVICE: &str = "/dev/binderfs-mesh/binder";
-
-/// The control service registered on the mesh bus via `ADD_SERVICE`. kenneld reaches this node to
-/// push `ACCEPT_SESSION`; consumers are never handed it.
-const SERVICE_NAME: &str = "org.projectkennel.tun-broker";
-
-/// The mmap size for the broker's binder connection. Control transactions are small (the grants);
-/// no frame data crosses binder.
+/// The mmap size for the broker's per-kennel-bus connection. Control transactions are small (the
+/// grants); no frame data crosses binder.
 const MAP_SIZE: usize = 256 * 1024;
 
 /// Poll timeout for the binder serve loop (milliseconds).
 const POLL_MS: i32 = 5000;
 
-/// The control node's local pointer and cookie on the mesh bus.
-const CONTROL_NODE_PTR: u64 = 1;
-const CONTROL_NODE_COOKIE: u64 = 1;
-
-/// Per-session ceilings (all bound the consuming kennel itself). A spray saturates only that
-/// session's flows.
-const MAX_FLOWS: usize = 512;
-const NEW_FLOW_BURST: u32 = 64;
-const NEW_FLOW_PER_SEC: u32 = 32;
-const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The epoll readiness capacity per session loop (the facade channel plus in-flight flow sockets).
-const POLL_EVENTS: usize = 64;
-
-/// Accept one session kenneld has authorized: mint the data channel, start its mediation, and reply
-/// with the consumer's end.
-fn accept_session(conn: &Connection, incoming: &Incoming) {
-    let Some(acc) = tun_broker::decode_accept(&incoming.data) else {
-        let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
-        return;
-    };
-    let kennel_addr = Ipv6Addr::from(acc.tun_addr);
-    let allow = Allowlist::new(acc.grants.into_iter().map(|g| NameRule {
-        name: g.name,
-        ports: g.ports,
-        protocol: protocol_from_ordinal(g.protocol),
-    }));
-
-    let (Ok((broker_end, consumer_end)), Ok(poller)) =
-        (UnixDatagram::pair(), Poller::new(POLL_EVENTS))
-    else {
-        let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
-        return;
-    };
-
-    let broker = Broker::new(
-        kennel_addr,
-        allow,
-        Ceilings {
-            max_flows: MAX_FLOWS,
-            new_flow_burst: NEW_FLOW_BURST,
-            new_flow_per_sec: NEW_FLOW_PER_SEC,
-            idle_timeout: IDLE_TIMEOUT,
-        },
-        Instant::now(),
-    );
-    // The mediation owns the broker end; the session lives exactly as long as the consumer holds the
-    // other end. A dropped consumer end closes this recv, the thread returns, and its flows close.
-    std::thread::spawn(move || {
-        let _ = serve::run(broker, &broker_end, poller);
-    });
-
-    if conn.reply_with_fd(incoming, consumer_end.as_fd()).is_err() {
-        // The consumer end never left; dropping it here HUPs the mediation, which unwinds cleanly.
-        eprintln!("tun-broker: failed to hand back session fd; session torn down");
-    }
-}
-
-/// Map the settled protocol ordinal on the wire (`0` any, `1` tcp, `2` udp) back to the enum.
-const fn protocol_from_ordinal(ordinal: u8) -> Protocol {
-    match ordinal {
-        1 => Protocol::Tcp,
-        2 => Protocol::Udp,
-        _ => Protocol::Any,
-    }
-}
-
-fn run() -> std::io::Result<()> {
+fn run(device: &str, mediator: &str) -> std::io::Result<()> {
     eprintln!("tun-broker: starting");
 
-    let device_fd = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(MESH_DEVICE)?;
+    let device_fd = OpenOptions::new().read(true).write(true).open(device)?;
     let conn = Connection::open(device_fd.into(), MAP_SIZE)?;
 
-    let name_bytes = kennel_lib_binder::service::mesh::encode_add_service(SERVICE_NAME);
+    // Register the egress sink node on node 0 (kenneld) of the per-kennel bus. Every consumer's
+    // session is delivered here.
     conn.transact_node(
         0,
-        verb::ADD_SERVICE,
-        &name_bytes,
-        CONTROL_NODE_PTR,
-        CONTROL_NODE_COOKIE,
+        verb::REGISTER_TUN_SINK,
+        &[],
+        SINK_NODE_PTR,
+        SINK_NODE_COOKIE,
         0,
     )?;
-    eprintln!("tun-broker: registered control service `{SERVICE_NAME}` on mesh bus");
+    eprintln!("tun-broker: registered egress sink on the per-kennel bus");
 
     conn.enter_looper()?;
     loop {
@@ -147,10 +70,10 @@ fn run() -> std::io::Result<()> {
             continue;
         }
         for incoming in conn.recv_batch()?.transactions {
-            // The control node honours only ACCEPT_SESSION; consumers never hold this node, so
-            // reaching it is itself the authorization.
-            if incoming.code == tun_broker::ACCEPT_SESSION {
-                accept_session(&conn, &incoming);
+            // The sink node honours only DELIVER_TUN_SESSION; consumers never hold it (it is
+            // kenneld-only), so reaching it is itself the authorization.
+            if incoming.code == verb::DELIVER_TUN_SESSION {
+                deliver(&conn, &incoming, mediator);
             } else {
                 let _ = conn.reply_and_free(&incoming, &[status::BAD_REQUEST]);
             }
@@ -158,8 +81,54 @@ fn run() -> std::io::Result<()> {
     }
 }
 
+/// Mint one egress session: a `SOCK_DGRAM` socketpair, a fresh `tun-flow` mediator on the broker end
+/// with the delivered grants, and a reply carrying the consumer end's fd for kenneld to forward.
+fn deliver(conn: &Connection, incoming: &Incoming, mediator: &str) {
+    // Fail closed on a payload that does not decode (kenneld built it, but the broker never trusts a
+    // shape it cannot read).
+    if tun_broker::decode_accept(&incoming.data).is_none() {
+        let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
+        return;
+    }
+    let Ok((broker_end, consumer_end)) = UnixDatagram::pair() else {
+        let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
+        return;
+    };
+
+    // Spawn the per-session mediator: the broker-end socket as its stdin (fd 0), the grants payload
+    // hex-encoded on its argv. `stdout`/`stderr` are left to the broker's own so a stray write can
+    // never reach the frame socket.
+    let grants_hex = kennel_tun_broker::to_hex(&incoming.data);
+    match Command::new(mediator)
+        .arg(&grants_hex)
+        .stdin(Stdio::from(OwnedFd::from(broker_end)))
+        .spawn()
+    {
+        Ok(mut child) => {
+            // Reap the mediator when its session ends (the consumer drops the peer end), so a
+            // finished session leaves no zombie under the standing broker.
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+            if conn.reply_with_fd(incoming, consumer_end.as_fd()).is_err() {
+                // The consumer end never left; dropping it here HUPs the mediator, which unwinds.
+                eprintln!("tun-broker: failed to hand back session fd; session torn down");
+            }
+        }
+        Err(e) => {
+            eprintln!("tun-broker: spawning mediator `{mediator}`: {e}");
+            let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    match run() {
+    let mut args = std::env::args().skip(1);
+    let (Some(device), Some(mediator)) = (args.next(), args.next()) else {
+        eprintln!("tun-broker: usage: <binder-device> <mediator-path>");
+        return ExitCode::FAILURE;
+    };
+    match run(&device, &mediator) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("tun-broker: fatal: {e}");

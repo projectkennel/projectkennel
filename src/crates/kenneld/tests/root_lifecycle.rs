@@ -90,6 +90,8 @@ fn run_manager() {
         Vec::new(),
         None,
         None,
+        kenneld::tun_sink::TunSink::new(),
+        None,
     )
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");

@@ -30,6 +30,9 @@ nix = { version = "=0.31.3", default-features = false, features = ["event"] }
 # host-netproxy's UDP mode (resolve + connect_udp): the operator-context resolve-and-dial the broker
 # reuses per flow, exactly as dbus-broker reuses host-dbus::mediate. The broker never resolves.
 kennel-host-delegate = { path = "../kennel-host-delegate" }
+# Safe fd adoption (`fd::adopt`) for the `tun-flow` mediator, which receives its broker-end socket as
+# an inherited stdin slot — the `facade-tun` pattern, so the mediator stays `#![forbid(unsafe_code)]`.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 
 [lints]
 workspace = true

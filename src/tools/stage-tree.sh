@@ -70,10 +70,11 @@ HOST_STAT_BINS="kennel-bin-init"
 # (`kennel-spawn` → `spawn`), the standing D-Bus broker (`dbus-broker`, the mediation service
 # kennel's workload), the GUI compositor broker (`compositor-broker`, the confined-GUI service
 # kennel's workload — it spawns a per-connection nested compositor and relays the consumer
-# into it), the L3-egress facade (`facade-tun`, the in-view frame forwarder) and the standing
-# tun broker (`tun-broker`, the UDP-egress mediation service kennel's workload) — all static, all
-# reached by path inside a constructed view.
-FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-tun kennel-bin-oci-entry dbus-broker compositor-broker tun-broker"
+# into it), the L3-egress facade (`facade-tun`, the in-view frame forwarder), the standing tun broker
+# (`tun-broker`, the UDP-egress mediation service kennel's workload) and its per-session mediator
+# (`tun-flow`, spawned fresh by `tun-broker` for each egress session with that session's grants) —
+# all static, all reached by path inside a constructed view.
+FACADE_STAT_BINS="facade-afunix facade-socks5 facade-client facade-ssh facade-dbus facade-tun kennel-bin-oci-entry dbus-broker compositor-broker tun-broker tun-flow"
 
 # The in-kennel SPAWN/mesh TEST drivers — `kennel-facade` builds them, but they are the TEST SUITE,
 # not part of a release: `facade-spawn-probe` is the spawn-roundtrip policy-suite's workload,

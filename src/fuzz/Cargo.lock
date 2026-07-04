@@ -228,6 +228,7 @@ dependencies = [
  "kennel-lib-binder",
  "kennel-lib-policy",
  "kennel-lib-syscall",
+ "nix",
  "simple-dns",
 ]
 

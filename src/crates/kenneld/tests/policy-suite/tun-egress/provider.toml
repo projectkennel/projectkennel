@@ -1,0 +1,56 @@
+# ============================================================================
+# tun-egress — the PROVIDER half: the standing tun-broker (§8 / W2 Part D).
+#
+# A standing service kennel whose workload IS `tun-broker` (the kennel-shipped UDP-egress mediation
+# binary, staged to the facades dir). It:
+#   * [[provides]] the `org.projectkennel.tun-udp` af-unix capability consumers `[[consumes]]` — the
+#     pair that names the mediation. The connection is NOT a rendezvous connect: on a consumer's
+#     `CONNECT_AFUNIX` for this name kenneld resolves that consumer's grants + tun `/64` and delivers
+#     them to the broker's sink (`DELIVER_TUN_SESSION` over the broker's per-kennel bus); the broker
+#     mints a per-session `SOCK_DGRAM` socketpair, spawns a fresh `tun-flow` mediator on one end with
+#     those grants, and replies the other end — which kenneld hands to the consumer's `facade-tun`.
+#   * registers its sink on startup (`REGISTER_TUN_SINK` on its own per-kennel bus), so it must be
+#     RUNNING before any consumer — the standing (always-up) service model, not ondemand.
+#   * runs `net.mode = "host"`: the broker dials each approved flow from the host stack itself
+#     (kenneld is off the data path), fenced by the invariant deny-CIDR floor host mode carries.
+# ============================================================================
+
+name = "tun-broker"
+template_base = "base-confined"
+
+# Host egress: the broker resolves and dials each approved flow itself, off the kennel netns. The
+# invariant deny-CIDR floor (cloud metadata, link-local, RFC1918) is the IP-layer fence at connect.
+[net]
+mode = "host"
+reason = "the tun-broker dials each approved UDP flow from the host stack; kenneld is off the data path"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = [
+    "/bin/sh",
+    "/usr/libexec/kennel-facades/tun-broker",
+    "/usr/libexec/kennel-facades/tun-flow",
+]
+
+# The workload IS the service: open the per-kennel bus, register the egress sink, and route each
+# delivered session to a fresh `tun-flow` mediator. argv[1] = the per-kennel binder device (its own
+# bus); argv[2] = the per-session mediator binary it spawns for each session.
+[workload]
+argv = [
+    "/usr/libexec/kennel-facades/tun-broker",
+    "/dev/binderfs/binder",
+    "/usr/libexec/kennel-facades/tun-flow",
+]
+pinned = true
+
+# The offered capability consumers reach. af-unix-shaped (the frame channel is a plain af-unix
+# socket), but kenneld special-cases the name to the per-session sink delivery, so the `endpoint` is
+# the pairing identifier, not a rendezvous the broker binds.
+[[provides]]
+name = "org.projectkennel.tun-udp"
+shape = "af-unix"
+endpoint = "/run/mesh/tun.sock"
+reason = "the standing UDP-egress mediation: kenneld delivers each consumer's session to the broker's sink"
