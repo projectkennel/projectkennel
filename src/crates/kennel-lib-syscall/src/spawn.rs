@@ -114,9 +114,18 @@ where
         -1 => Err(io::Error::last_os_error()),
         0 => {
             // Child. Drop, then seal — short-circuit on the first failure.
+            //
+            // The `effective_uid() != 0` check is the W14 uid-0-unreachable invariant, asserted at
+            // the one point it is enforced: the confined **workload** must never run as uid 0 in
+            // its user namespace. A non-zero in-ns uid is not the userns root, so it holds no
+            // capabilities — which is what makes the cap-gated syscalls (mount API, bpf, kexec,
+            // module load) structurally unreachable, so the seccomp layer needs no floor over them.
+            // Checking the *effective* uid (not `uid != 0`) also catches a drop that silently did
+            // not take. Fail-closed: a uid-0 result ends the child `_exit(126)`, never execs.
             let dropped = crate::unistd::set_gid(gid).is_ok()
                 && groups.is_none_or(|g| crate::unistd::set_supplementary_groups(g).is_ok())
                 && crate::unistd::set_uid(uid).is_ok()
+                && crate::unistd::effective_uid() != 0
                 && seal().is_ok();
             if !dropped {
                 // SAFETY: _exit ends the child fail-closed without unwinding the

@@ -106,6 +106,26 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
   still serialises as a bare string, so existing signed artefacts verify unchanged.
 
+### Runtime & enforcement
+
+- **Seccomp hardening (W14).** Three pieces of defence-in-depth debt, no fail-open (the
+  [seccomp mediation audit](docs/governance/audits/2026-07-seccomp-mediation.md) refuted the
+  io_uring egress-bypass hypothesis — the cgroup connect fence sits at the proto-op layer io_uring
+  also traverses — and confirmed the cap-gated set is closed by the workload's non-zero in-ns uid):
+  - **`[seccomp] deny` composes additively.** A leaf's `deny` list now **unions** with the
+    resolved base instead of replacing it, so a bare `deny = [...]` can only strengthen
+    `base-confined`'s hardening, never silently drop it (the one real defect; consistent with the
+    `net.*.add` / `exec.*.add` increment model). No remove form — the base deny is a floor.
+  - **`base-confined` denies the io_uring, new-mount-API, and handle-open families**
+    (`io_uring_{setup,enter,register}`, `fsopen`/`fsconfig`/`fsmount`/`move_mount`/`open_tree`/
+    `mount_setattr`, `open_by_handle_at`/`name_to_handle_at`). All cap-gated or otherwise closed
+    today; the deny makes intent match enforcement. Content-only — the `base-confined` reference
+    template is re-signed; no schema change.
+  - **The confined workload's non-zero in-ns uid is now asserted, not just enforced.** The final
+    drop before `execve` fails closed if the effective uid is 0 — a defensive check (no policy can
+    request a uid-0 drop today) at the point the cap-gated set's structural closure is established.
+    No code-level seccomp syscall invariant is introduced.
+
 ### Docs & tooling
 
 - **The man pages derive from the CLI definition** (W7). The `kennel(1)` / `kennel-policy(1)`
