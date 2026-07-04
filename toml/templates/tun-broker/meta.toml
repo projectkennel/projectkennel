@@ -1,0 +1,7 @@
+# Template identity + signing metadata.
+name = "tun-broker"
+template_base = "base-confined"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.6"
+last_reviewed = "2026-07-04"
+description = "The standing UDP-egress mediation service kennel."

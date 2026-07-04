@@ -1,0 +1,103 @@
+# ============================================================================
+# Template: tun-broker
+# Inherits: base-confined
+# Threat catalogue: THREATS.md v0.6
+#
+# The standing UDP-egress mediation service kennel (§8 / W2 Part D): a `net.mode = host` service
+# that resolves and dials each approved UDP flow on behalf of constrained `[net.udp]` consumers,
+# off their netns. A consumer's `[net.udp]` section implies the matching consume
+# (`org.projectkennel.tun-udp`); on connect, kenneld resolves that consumer's grants + tun `/64`
+# and delivers a session to the broker's sink, which mints a per-session `tun-flow` mediator on a
+# fresh socketpair. No consumer ever holds host network — it reaches only its own tun.
+#
+# This is the service-kennel multi-leg exemption's worked instance: a maintainer-signed service may
+# run `net.mode = host` (which an ordinary workload may not without surfacing the T1.6 host-recon
+# residual) and hold the reserved `org.projectkennel.tun-udp` provide. A reserved
+# `org.projectkennel.*` provide is vendor-tier material, so THIS template carries the maintainer
+# signature; a leaf that derives it inherits the authority and need only pick the [workload].
+#
+# Shape (a leaf adds only the [workload] — the tun-broker facade argv):
+#   * inherit base-confined's read floor + overlay the host resolver config (/etc/resolv.conf,
+#     /etc/hosts): the REAL files the broker resolves approved names against. The synthetic /etc is
+#     a proxy-pointed floor built not bound; a granted /etc file is overlaid read-only on top
+#     (is_overlayable_etc_file refuses the identity mask + credentials, so only the resolver/hosts
+#     config is exposed).
+#   * net.mode = host with a broad `[net.bpf.connect]` allow: the kernel egress gate on every dial
+#     the broker makes (kenneld is off the data path), deny-first over base-confined's inherited
+#     invariant floor (cloud-metadata v4/v6, link-local). Destinations are name-gated per-consumer
+#     upstream, so their resolved addresses are unknowable at compile — the ACL can only be
+#     broad-allow + deny-floor. An allowed name that rebinds to a special-use address still dies at
+#     connect() with EPERM (DNS rebinding closed structurally, no name-based denylist).
+#   * exec.allow the broker facade + the per-session `tun-flow` mediator it spawns, plus a shell.
+#   * [[provides]] org.projectkennel.tun-udp — the mediation capability consumers reach.
+#
+# Threat bearing: net.mode = host reinstates the T1.6 host-network-recon residual (surfaced by
+# `kennel policy risks`, derived from the mode); the /etc overlays expose ONLY the resolver/hosts
+# config, never the masked user list (T1.1) or a credential.
+# ============================================================================
+
+template_name = "tun-broker"
+template_base = "base-confined"
+
+
+# --- Service lifecycle -------------------------------------------------------
+[service]
+restart = "on-failure"
+
+
+# --- Network: the host egress leg -------------------------------------------
+# The broker resolves and dials each approved flow itself, from the host stack, off the kennel
+# netns. This is the reinstated-T1.6 leg the multi-leg exemption sanctions for a signed service.
+[net]
+mode = "host"
+reason = "the tun-broker dials each approved UDP flow from the host stack; kenneld is off the data path"
+
+# The IP-layer fence: a broad allow that the deny-first cgroup BPF gates on every dial. Without it
+# the deny-first ACL denies on fallthrough and NO flow dials. protocol = "any" so the broker's UDP
+# resolution (to the host stub resolver) and UDP dials both pass; the deny floor (base-confined's
+# non-removable invariant CIDRs) is merged ahead of it in every mode.
+[[net.bpf.connect.allow]]
+cidr = "*"
+protocol = "any"
+reason = "broad IP allow for the broker's UDP resolution + dials: destinations are name-gated per-consumer upstream; the deny floor is base-confined's inherited invariant CIDRs"
+
+
+# --- The host resolver config (overlaid over the synthetic /etc floor) -------
+# The broker resolves real names via the host resolver, so it needs the REAL resolv.conf/hosts, not
+# the synthetic proxy-pointed floor. A granted /etc file is bound read-only over the synthetic one
+# (is_overlayable_etc_file gates this to non-identity, non-credential files).
+[[fs.read.add]]
+path = "/etc/resolv.conf"
+reason = "the REAL host resolver config the broker resolves approved names against; overlaid read-only over the synthetic floor"
+
+[[fs.read.add]]
+path = "/etc/hosts"
+reason = "the REAL host hosts file for name resolution; overlaid read-only over the synthetic floor"
+
+
+# --- Execution: the broker facade + the per-session mediator -----------------
+# base-confined denies all exec; these are the genuine grants. Both facades are statically linked
+# and reached by absolute path under /usr/libexec/** (already in the inherited read floor).
+[exec]
+allow = [
+    "/usr/libexec/kennel-facades/tun-broker",
+    "/usr/libexec/kennel-facades/tun-flow",
+    "/bin/sh",
+]
+path = ["/usr/bin", "/bin"]
+
+
+# --- Capability provided (reserved → vendor-tier; this template is maintainer-signed) -----------
+# af-unix-shaped (the frame channel is a plain af-unix socket), but kenneld special-cases the name
+# to the per-session sink delivery, so the endpoint is the pairing identifier, not a rendezvous the
+# broker binds.
+[[provides]]
+name = "org.projectkennel.tun-udp"
+shape = "af-unix"
+endpoint = "/run/mesh/tun.sock"
+reason = "the standing UDP-egress mediation: kenneld delivers each consumer's session to the broker's sink"
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKhGFYLo0otkAQveDelteKuJA7sH2E0yLi\nduQSY4CgbFxv0WW+ssI96n8rmgr599GnsOi2SizMQwfnmengqnSgc=\n-----END SSH SIGNATURE-----\n"

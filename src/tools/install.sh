@@ -374,6 +374,17 @@ install_reference_policies() {
 		ln -sf "$broker_settled" /etc/kennel/ondemand/dbus-broker
 		echo "install.sh: enabled the dbus-broker provider (ondemand, per-host)"
 	fi
+
+	# Enable the standing UDP-egress broker ondemand at the per-host layer (W2): a `[net.udp]`
+	# kennel's egress is unserved without it — the section implies the `org.projectkennel.tun-udp`
+	# consume, socket-activated on first consume (a host with no UDP consumer pays nothing). Same
+	# admin-tier enablement as the D-Bus broker; a per-user link overrides it.
+	local tun_settled="/etc/kennel/policies/providers/tun-broker/tun-broker.settled.toml"
+	if [ -f "$tun_settled" ]; then
+		install -d -m 0755 /etc/kennel/ondemand
+		ln -sf "$tun_settled" /etc/kennel/ondemand/tun-broker
+		echo "install.sh: enabled the tun-broker provider (ondemand, per-host)"
+	fi
 }
 
 # The signed reference templates and fragments are MAINTAINER content: they ship to the vendor

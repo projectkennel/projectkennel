@@ -1,0 +1,29 @@
+# ============================================================================
+# Provider policy: tun-broker — the standing UDP-egress mediation service kennel.
+#
+# Thin leaf: it derives the maintainer-signed tun-broker template (which carries the whole shape —
+# the host egress leg, the broad connect allow, the resolver-config overlays, the exec grants, the
+# `org.projectkennel.tun-udp` provide) and adds only the [workload]: the broker facade to run, plus
+# the per-kennel binder device (its own bus) and the per-session mediator binary it spawns. The
+# reserved provide's authority is inherited from the vendor-signed template, so a host key may
+# compile and sign this at install with no maintainer private key on the target.
+# ============================================================================
+
+name = "tun-broker"
+template_base = "tun-broker"
+
+# The workload IS the service: open the per-kennel bus, register the egress sink, and route each
+# delivered session to a fresh `tun-flow` mediator. argv[1] = the per-kennel binder device (its own
+# bus); argv[2] = the per-session mediator binary it spawns for each session.
+[workload]
+argv = [
+    "/usr/libexec/kennel-facades/tun-broker",
+    "/dev/binderfs/binder",
+    "/usr/libexec/kennel-facades/tun-flow",
+]
+pinned = true
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDMbvF7SG5pd+AUd1pbch/P9PsZ2akp5Oh\n+ur88i7XJ0caghcxCEr6c2cg+1u7ordhsV4koJqcqigJRKoh0Zugs=\n-----END SSH SIGNATURE-----\n"
