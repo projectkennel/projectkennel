@@ -534,6 +534,190 @@ unbumped); a test asserts the UTS isolation when set (a workload `sethostname` c
 UTS). Gives the operator an opt-in knob to close the persona-recon hostname residual, without making
 masking (theatre) the default.
 
+### W13 · `[net.bind.ingress]`: ephemeral host-reachable loopback ports — ephemeral-bind exemption SHIPPED (#175); `[net.bind.ingress]` pending
+
+**[quality] M. The inbound leg the factory doesn't have: a policy-declared block of ephemeral
+loopback ports, bound eagerly by host-inetd, steered into by BPF, reachable from the host.
+Unblocks interactive OAuth in confined agents; dev-server preview rides the same mechanism later.**
+
+**Status: the ephemeral-bind fix SHIPPED (#175); the `[net.bind.ingress]` ingress table is the
+pending remainder.** What landed both unblocks W2 and corrects the "default flip" framing below:
+rather than a constrained/unconstrained-*only* flip, `bind4`/`bind6` now **exempt a port-0
+(ephemeral) bind unconditionally in every mode** — a kernel-allocated ephemeral *source* port is not
+a T6 *listening* surface, so it clears the floor, the port allowlist, and the address ACL, and is
+not wildcard-rewritten (an outbound socket keeps `0.0.0.0` / `::` so the kernel picks the source per
+route). That is exactly what let the host-mode tun-broker's outbound UDP dial bind its `:0` source
+port (the "missing byte" below), so **W2's live UDP round-trip now completes end-to-end** — verified
+against the installed service (#174 resolver + `/etc` overlays, #175 the bind exemption, #176 the
+shipped ondemand tun-broker). The **inbound** leg — the `[net.bind.ingress]` grant, the host-inetd
+allocation inversion, BPF steering, and the OAuth loopback-callback receipt — is unbuilt and remains
+W13's scope; the design below stands for it.
+
+The receipt: `kennel run claude` without a pre-seeded token dies at
+`OAuth error: Failed to start OAuth callback server: permission denied 127.0.0.1:0` — the
+RFC 8252 native-app flow binds an ephemeral loopback listener and advertises
+`localhost:<port>` to a host-side browser. Two walls, both by design: the bind ACL refuses
+`:0` on loopback, and the kennel's loopback is not the host's, so even a granted bind would
+listen where no browser can reach. Host-seeded tokens are the current documented answer;
+this workstream makes login (and any loopback-callback flow) work confined.
+
+**The generic case is a default flip, not schema.** Today the bind ACL refuses ephemeral
+binds even on the kennel's own loopback, inside its own netns. That deny was never
+load-bearing: the workload already has pipes, filesystem unix sockets in any writable path,
+and abstract-namespace unix sockets free in its own netns — denying TCP loopback closes no
+channel an adversary needs and only breaks legitimate software (test harnesses, debuggers,
+the OAuth listener). The posture ladder covers the real cases: `none` kills local TCP
+structurally (no interfaces), `host` keeps the full ACL because binds there are
+boundary-visible. So: **constrained and unconstrained modes permit in-netns binds by
+default** — loopback + the kennel's private address, kernel-allocated `:0` included;
+wildcard rewrite and the kernel's per-netns privileged-port floor untouched; `host`
+unchanged; no new field. The flip gets a CHANGELOG line as a QoL change, not a
+policy-surface event: the deny it removes was theatre (see above — no channel closed), so
+its removal carries no security semantics and no migration note. If a counter-case ever
+materialises, the gate is cgroup-BPF, which (unlike Landlock) can express a deny — a knob
+can be added then.
+
+**This default flip is also W2's missing byte.** The tun-broker's outbound UDP dial
+([`connect_udp`](../../src/crates/kennel-host-delegate/src/netproxy/udp.rs)) binds `::` /
+`0.0.0.0` port 0 for an ephemeral **source** port before `connect()`; under today's
+default-deny bind ACL ([`bind4`](../../src/bpf/bind4.bpf.c) / [`bind6`](../../src/bpf/bind6.bpf.c),
+wildcard-rewrite then default-deny) that ephemeral bind is refused (`net.bind-deny`), so a
+constrained `[net.udp]` flow resolves the name and is `connect`-allowed to the destination yet
+never gets a source port — the datagram never leaves and the round-trip times out. The flip —
+in-netns `:0` permitted by default in constrained/unconstrained modes — is exactly what lets
+that dial complete, so **W2's live UDP round-trip is gated on W13** (sequence W13 before W2's
+exit validation). TCP dodges this: `connect()` auto-binds in-kernel with no `bind4` hook; only
+UDP surfaces the explicit bind.
+
+The ingress case is the actual grant — a sub-table of `[net.bind]`, since the trigger is
+`bind()` semantics and the forwarder is factory detail behind it. Declare-only: absent
+means no ingress leg exists, no silent surface.
+
+```
+[net.bind.ingress]
+count  = 4             # block size; framework ceiling caps it
+reason = "..."         # required
+threats.exposed = ["T-XX"]   # required — the new inbound entry, see below
+```
+
+**Precedence:** under an ingress grant a `:0` bind steers into the block first; on
+exhaustion it falls back to plain kernel allocation (now the mode default), and the
+steering decision (block vs fallback) is an audit event — an app that needed reachability
+gets an unforwarded listener with no way to signal intent, so the audit trail must show
+which it got.
+
+**Allocation — the host-inetd protocol inversion.** host-inetd is already bind-and-hold, but
+today kenneld hands it the addresses and ports. This adds the inverse request variant:
+`allocate { addr: 127.0.0.1, count: N }` — host-inetd binds N sockets on `127.0.0.1:0`, reads
+the real ports via `getsockname()`, reports them back, and keeps those very sockets as the
+serving listeners (the reporter and the server are the same socket; no TOCTOU, and eager
+construction falls out for free — the listeners predate the kennel). All-or-nothing: a partial
+block is closed out and reported as failure; kenneld treats it as construction refusal, like
+any unsatisfiable grant. Non-contiguous: nothing downstream needs adjacency, and requiring it
+manufactures failures on a busy loopback. kenneld validates on report-back — non-privileged,
+count matches, disjoint from every live kennel's block — because `:0` draws from the
+admin-mutable `ip_local_port_range`: assert, don't assume. The settled block lands in the
+run audit event before seal.
+
+**Steering.** BPF `bind4/6`: a workload bind to <kennel-loopback>`:0` rewrites to the next
+unused block port — `getsockname()` is then truthful for free. Explicit binds to a block port
+are allowed; any other explicit port falls through to the existing `allowed_ports`/`min_port`
+rules. Block exhausted ⇒ `EADDRINUSE` — app-comprehensible, never a silent fallback to an
+unforwarded port (that reproduces the OAuth hang one layer deeper). Wildcard rewrite is
+untouched: `0.0.0.0` still lands on the kennel loopback; only there does steering apply.
+
+**The invariant: port identity across the boundary.** The flow advertises
+`localhost:<port>` to the host browser; host-side listener and kennel-side bind carry the
+same number, 1:1, no remap — a remap breaks every advertised redirect URI.
+
+**Forwarding.** host-inetd's held listeners tunnel inbound accepts over a binder connector to
+the kennel loopback, same port — the mirror image of host-netproxy's egress leg. kenneld
+stays control-plane. Each accept is an audit event (host peer addr:port; TCP loopback offers
+no reliable peer creds — do not pretend otherwise). Teardown is symmetric: the sockets die
+with host-inetd's kennel-scoped instance, releasing the block with no bookkeeping.
+
+**The residual — a new catalogue entry, not a T1.6 reuse.** While the block lives, ANY host
+process, any uid, can connect into the kennel through it: the inverse-direction cousin of
+T1.6's host-recon. Mandatory `reason` and threat tag, same discipline as `net.mode = "host"`.
+For the OAuth case the practical exposure is a host process racing to catch an auth code —
+the host is already the operator's TCB, but the entry records it.
+
+**Consumers.** The default flip serves every constrained/unconstrained template with no
+policy change — `ai-coding-strict` needs nothing. The `claude` leaf gains
+`[net.bind.ingress]` plus the RW overmount of `~/.claude/.credentials.json` inside the RO
+`.claude` (depth-sorted bind materialisation already stacks it; token material is a
+different threat class from the config-as-code surface, which stays RO). Dev-server *host
+preview* is explicitly NOT this workstream: a fixed app-chosen port wants a `ports = [...]`
+arm the ingress table can grow later.
+
+**Validation before exit:** the receipt's layer two has never run — one live interactive
+`kennel run claude` login on a host with no seeded token, end-to-end through steering,
+forwarder, and browser; plus a token-refresh rewrite landing in the host file and a write
+attempt elsewhere under `.claude` refusing (confirms the RO/RW stack behaves as reasoned).
+
+**Exit.** _Shipped (#175):_ a port-0 (ephemeral) bind is exempt from the bind ACL in every mode, so
+W2's constrained `[net.udp]` round-trip completes (the host-mode broker's outbound source-port bind
+no longer dies at `bind()`) — verified against the installed service. _Pending (the inbound leg):_
+under an ingress grant a loopback `:0` bind yields a host-reachable listener within the declared
+block; block allocation failure refuses construction; the block and every inbound accept appear in
+the audit stream; the catalogue carries the inbound entry; `kennel run claude` completes interactive
+OAuth with nothing pre-seeded.
+
+### W14 · Seccomp hardening: uid-0-unreachable invariant, additive deny composition, denylist completeness — SHIPPED (#173)
+
+**[debt] S. Shipped (`22350ce`, PR #173). No security hole — see
+[`governance/audits/2026-07-seccomp-mediation.md`](audits/2026-07-seccomp-mediation.md).
+The seccomp layer is defence-in-depth whose every gap is independently closed
+(egress by the proto-layer cgroup hook, mount/bpf/kexec by the
+uid-0-unreachable property, fs by Landlock LSM hooks). This item hardens the
+layer and closes a composition defect; it does not fix a fail-open.**
+
+The audit refuted the io_uring egress-bypass hypothesis: `cgroup/connect4` fires
+from `->pre_connect` at the proto-op layer, which io_uring's `io_connect` also
+traverses. The mount-API / bpf / kexec / module gaps are closed because the
+workload is never uid-0-in-ns. Three pieces of debt remain.
+
+**1. Assert uid-0-unreachable, don't proxy it with a syscall floor.** The
+cap-gated set (mount API, bpf, kexec, module) is safe *because* bin-init drops
+the workload to the masked non-zero operator uid before `execve` and
+`deny_setuid`+`no_new_privs` (both already hard invariants in
+`kennel-lib-policy::invariant`) prevent re-acquisition. The drop itself is
+enforced by construction but not checked. Add a construction-time invariant:
+the workload's effective uid in-ns is non-zero. This closes the entire cap-gated
+set structurally and makes a seccomp floor over those syscalls redundant — which
+is why W14 defines **no code-level seccomp invariant**.
+
+**2. Additive-only seccomp deny composition.** `[seccomp] deny` is `or()`-folded
+for the flag fields, but the deny *list* can be replaced by a leaf writing a
+bare `deny = [...]`, silently dropping the base-confined hardening. Make the
+list additive over the resolved base (a leaf may add, not remove), or warn on
+narrowing — consistent with the `net.allow.add`/`exec.allow.add` increment
+model. This is the one real defect; everything else here is hardening.
+
+**3. Complete the base-confined denylist.** Not a floor — declared hardening in
+`base-confined`, weakenable in principle but now protected by (2). Add the
+families the audit found absent: `io_uring_{setup,enter,register}` (enforced
+anyway; removes a complex unaudited surface), the new mount API (`fsopen`,
+`fsconfig`, `fsmount`, `move_mount`, `open_tree`, `mount_setattr`), and
+`open_by_handle_at`/`name_to_handle_at`. All cap-gated or otherwise closed
+today; the deny makes intent match enforcement and defends against a future
+uid-map or hook-placement regression. Keep the existing entries. See the audit's
+disposition table.
+
+**Out of scope:** io_uring egress *audit-record parity* (whether an
+io_uring-issued connect emits the same egress event as the syscall path).
+Enforcement is confirmed; audit parity is not investigated.
+
+**Record the findings.** [`governance/audits/2026-07-seccomp-mediation.md`](audits/2026-07-seccomp-mediation.md)
+landed with this workstream — the negative result (no bypass, and *why*) is the
+durable artefact; a future kernel bump or uid-model change re-opens exactly the
+questions it answers.
+
+**Exit (met):** a settled policy whose workload would run uid-0-in-ns is rejected at
+construction; `[seccomp] deny` cannot be narrowed by a leaf (added-to or warned);
+`base-confined` denies the io_uring, new-mount-API, and handle-open families; the
+audit record is committed; no code-level seccomp syscall invariant is introduced.
+
 ### W8 · Pre-ship adversarial pass on the new boundaries
 
 **[security, ship-gate] S.**
@@ -628,6 +812,9 @@ W7 (gen-man)           ── S,  independent ───────────�
 W10 (retire subkennel) ── S–M, before/with W2's ULA addressing ───────────────────►
 W11 (kennel run claude)── S,  additive fields re-pin v3 (no bump); adjacent to W2 ────►
 W12 (persona hostname) ── XS–S, TENTATIVE — additive field, re-pin not bump; late/0.7 ►
+W13 (bind exemption)   ── ephemeral :0 exemption SHIPPED (#175), unblocked W2's byte ─────►
+W13 (net.bind.ingress) ── M,  the pending inbound leg: OAuth loopback (host-inetd + steering) ►
+W14 (seccomp hardening)── S,  SHIPPED (#173); defence-in-depth hardening, no fail-open ►
 W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
 ```
 
@@ -636,8 +823,10 @@ consequence is P4 → W2 (the other probes are recorded for a future W1). W9 run
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
 is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
 that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity. 0.6.0 makes only **additive-optional** settled changes (W2
-`[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`), so it **re-pins the v3 shape** rather
-than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2, not coupled. W8 blocks the tag.
+`[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`, W13 `[net.bind.ingress]`), so it
+**re-pins the v3 shape** rather than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2,
+not coupled. W13's bind default-flip is the gate on W2's live UDP round-trip (its ephemeral
+source-port bind); its `[net.bind.ingress]` grant is the separable inbound leg. W8 blocks the tag.
 
 ## Exit criteria
 
@@ -669,6 +858,16 @@ than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2, not coupled. 
 - The corpus cutover is complete: the book is the named corpus, the reference home carries the
   catalogue/inventory/as-built artefacts, the patch-log queue is drained, and the frozen trees are
   deleted with no dangling reference (W9).
+- A port-0 (ephemeral) bind is exempt from the bind ACL in every mode, so W2's constrained
+  `[net.udp]` round-trip completes on the unblocked source-port bind — **shipped (#175)**. The
+  pending inbound leg: under a `[net.bind.ingress]` grant a loopback `:0` bind yields a
+  host-reachable listener in the declared block, block-allocation failure refuses construction, the
+  block plus every inbound accept appear in the audit stream, the catalogue carries the inbound
+  entry, and `kennel run claude` completes interactive OAuth with nothing pre-seeded (W13).
+- The seccomp layer is hardened and its composition defect closed: a uid-0-in-ns workload is rejected
+  at construction, `[seccomp] deny` cannot be narrowed by a leaf, `base-confined` denies the io_uring /
+  new-mount-API / handle-open families, and the mediation audit record is committed — no code-level
+  seccomp syscall invariant introduced (W14, shipped #173).
 - The adversarial pass covers the UDP facade/broker, the picker path, and the W11 cwd-write grant;
   every confirmed finding is fixed before the tag (W8, ship gate).
 
@@ -676,7 +875,10 @@ CHANGELOG records every stable-surface change — the `[net.udp]` section (v3 sh
 the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
 raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
 bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
-derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, and the corpus move to the book (with the reference-home
+derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, the in-netns loopback bind default-flip and the new
+`[net.bind.ingress]` grant (v3 shape re-pinned, no version bump — W13), the seccomp hardening
+(uid-0-in-ns construction refusal, additive-only `[seccomp] deny`, the completed base-confined
+denylist — W14), and the corpus move to the book (with the reference-home
 relocation of the catalogue and inventory artefacts).
 
 ## Parked work
