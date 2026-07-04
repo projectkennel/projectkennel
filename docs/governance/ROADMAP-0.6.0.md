@@ -625,6 +625,84 @@ construction; `[seccomp] deny` cannot be narrowed by a leaf (added-to or warned)
 `base-confined` denies the io_uring, new-mount-API, and handle-open families; the
 audit record is committed; no code-level seccomp syscall invariant is introduced.
 
+### W15 · Asymmetric `source` on fs grants: view path decoupled from host origin
+
+**[quality] S. An optional `source` on `[[fs.read.add]]`/`[[fs.write.add]]` so a view path may be
+backed by a different host path — per-workload credential/state redirection without reparenting the
+whole home.**
+
+Today the fs mapping is symmetric: the host inode at `path` appears at `path` in the view. `source`
+breaks the symmetry deliberately for the case where an operator wants a view path served from an
+operator-held per-workload store:
+
+```
+[[fs.read.add]]
+path   = "~/.claude/.credentials.json"
+source = "~/workloads/acme/claude-creds.json"
+```
+
+Granularity (single file vs whole dir) is the operator's choice; the mechanism is a bind with a
+distinct source either way — a dir source reparents the subtree, a file source redirects one inode.
+
+**Schema — two carriers, both additive.** In the source form, `source: Option<String>` on
+[`PathEntry`](../../src/crates/kennel-lib-compile/src/source.rs) (`skip_serializing_if =
+"Option::is_none"`), so entries without it keep their canonical form and every existing signature is
+unchanged. `PathEntry.path` is `Vec<String>` (multi-path under one `reason`); `source` against N
+paths has no coherent meaning, so **`source` present with `path.len() > 1` is a compile error** —
+as is `source` on `remove` deltas or `fs.deny`. In the **settled** form there is no per-entry
+struct to hang it on — `FsPolicy.read`/`write` are plain path lists
+([`settled.rs`](../../src/crates/kennel-lib-policy/src/settled.rs)) — so the fold emits the
+divergences into a new `redirect` list (`{ path, source }` pairs, omitted when empty). Both
+additions are additive-optional: **re-pin the v3 shape, no `SETTLED_SCHEMA_VERSION` bump**, and
+every existing settled artefact signs byte-identical.
+
+**The floor — a cross-grant self-consistency check, not an ownership check.** Signing authenticates
+the redirect's author, not its correctness: a maintainer-signed leaf whose `source` points at a
+workload-writable path is a valid signature over a confused-deputy hole (workload writes the source,
+reads it back at `path` as operator-provided content — the asserted-identity failure, one altitude
+down). So:
+
+- **At settle**, `source` must not be covered by any workload-writable surface in the resolved
+  policy — the intersection runs against `fs.write` ∪ `fs.exclusive` ∪ `home_persist` (persist
+  paths are host-side state the workload writes across runs). Intersecting is a compile error,
+  decidable post-resolution, and lives in
+  [`invariant::validate`](../../src/crates/kennel-lib-policy/src/invariant.rs) beside
+  `deny_setuid`.
+- **At spawn**, the one writable surface settle cannot see: the `[fs.cwd]` grant is a slot the
+  invocation fills, so a host-side floor check refuses a run whose resolved cwd covers a redirect
+  source — same altitude as the existing cwd floors (realpath-normalised, operator-owned,
+  never-`$HOME`).
+- `source` resolves host-side with `RESOLVE_NO_MAGICLINKS` (blocks procfs/sysfs magic-link escape;
+  ordinary symlinks in an operator-owned path are permitted — credential stores are commonly
+  symlink farms: stow/chezmoi/home-manager). The existing *writable-bind* guard
+  ([`materialize_binds`](../../src/crates/kennel-lib-spawn/src/lib.rs) resolves writable sources
+  with `RESOLVE_NO_SYMLINKS`) **keeps its stricter flag**: that asymmetry is the 0.4.0 F1
+  writable-source symlink-swap residual, documented at the call site, and is not relaxed here. The
+  inherited consequence: a redirected **RW** grant whose source path traverses a symlink is refused
+  at materialisation.
+- Normal home-relative (`~`) expansion applies; `source` is operator-authored like any grant.
+
+**Materialisation is already built.** [`BindMount`](../../src/crates/kennel-lib-spawn/src/plan.rs)
+carries separate `source`/`target`; today the planner sets them equal for fs grants, and a redirect
+just sets them apart. Depth-sorted bind materialisation (grants sorted by path length) means a
+redirected file grant inside an RO parent lands after the parent and overmounts it — the RO/RW
+stack composes with no new mechanism. The write-set floor and an RO parent are orthogonal: a
+redirected RO grant is fine; a redirected RW grant is fine iff its *source* is outside the write
+set, which for a credential store the workload cannot write holds by construction.
+
+**Audit — the provenance the symmetric case gave for free.** With symmetric mapping, a view path
+*is* its origin; the audit account relies on that. A redirected grant must record `source → path`
+wherever they diverge, or the account asserts a false origin. There is no per-bind runtime audit
+event today; the divergence surfaces in the settled-policy account (`kennel policy audit` / the
+diff surface) and in the spawn's error strings. Symmetric grants render exactly as before.
+
+**Exit:** an fs grant may carry `source`; a divergent grant materialises the source inode at the
+view path; `source` intersecting the resolved write set (`write` ∪ `exclusive` ∪ `home_persist`),
+carrying `path.len() > 1`, resolving through a magic-link, or appearing on `remove`/`fs.deny` is a
+compile error; a run whose resolved `[fs.cwd]` covers a redirect source is refused at spawn; the
+policy account records `source → path` on divergence; the v3 shape is re-pinned (no bump); existing
+symmetric policies and their signatures are byte-unchanged.
+
 ### W8 · Pre-ship adversarial pass on the new boundaries
 
 **[security, ship-gate] S.**
@@ -641,9 +719,13 @@ is not proven safe — and none has been driven from the hostile seat. Drive eac
 - the **picker path** for consent bypass, fd-scope widening, and confused-deputy shapes (a kennel
   inducing a picker it should not reach);
 - the **cwd-write grant** for floor escape — symlink/bind-mount races against the `RESOLVE_NO_SYMLINKS`
-  resolution, marker spoofing, and any path to a `$HOME`-or-unowned target slipping past the floor.
+  resolution, marker spoofing, and any path to a `$HOME`-or-unowned target slipping past the floor;
+- the **fs-redirect floor (W15, if landed by then)** for write-set escape — a redirect source
+  reached through `[fs.cwd]`, `home_persist`, or a symlink/magic-link at resolution time; the
+  confused-deputy shape (workload-authored content read back at `path` as operator-provided) driven
+  live.
 
-**Exit:** a dated `audits/` note covers all three boundaries; every confirmed finding is fixed before
+**Exit:** a dated `audits/` note covers each boundary above; every confirmed finding is fixed before
 the tag.
 
 (The parent-child relay boundary this pass was also to cover is gone with the withdrawn W1.)
@@ -721,6 +803,7 @@ W11 (kennel run claude)── S,  additive fields re-pin v3 (no bump); adjacent 
 W12 (persona hostname) ── XS–S, TENTATIVE — additive field, re-pin not bump; late/0.7 ►
 W13 (bind exemption)   ── ephemeral :0 exemption SHIPPED (#175); ingress leg declined → BACKLOG ►
 W14 (seccomp hardening)── S,  SHIPPED (#173); defence-in-depth hardening, no fail-open ►
+W15 (fs source redirect)── S, independent; additive re-pin (no bump); before W8 ──────►
 W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
 ```
 
@@ -728,8 +811,10 @@ W0 opened the release and is cheap insurance on the work that remains; with W1 w
 consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
 is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
-that W4's subsumption gate wants as evidence. W5–W7 and W11 slot against capacity. 0.6.0 makes only **additive-optional** settled changes (W2
-`[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`), so it **re-pins the v3 shape** rather
+that W4's subsumption gate wants as evidence. W5–W7, W11, and W15 slot against capacity, with W15 landing before W8 so the pass can cover its
+floor. 0.6.0 makes only **additive-optional** settled changes (W2
+`[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`, W15 `source`/`redirect`), so it
+**re-pins the v3 shape** rather
 than bumping `SETTLED_SCHEMA_VERSION`; W11/W12 are adjacent to W2, not coupled. W13 shipped as a pure
 BPF change (the ephemeral-bind exemption, no schema); its `[net.bind.ingress]` grant was declined
 (→ BACKLOG), so it adds no settled surface. W8 blocks the tag.
@@ -772,8 +857,14 @@ BPF change (the ephemeral-bind exemption, no schema); its `[net.bind.ingress]` g
   at construction, `[seccomp] deny` cannot be narrowed by a leaf, `base-confined` denies the io_uring /
   new-mount-API / handle-open families, and the mediation audit record is committed — no code-level
   seccomp syscall invariant introduced (W14, shipped #173).
-- The adversarial pass covers the UDP facade/broker, the picker path, and the W11 cwd-write grant;
-  every confirmed finding is fixed before the tag (W8, ship gate).
+- An fs grant may carry `source`: the divergent grant materialises the source inode at the view
+  path; a source inside the resolved write set (`write` ∪ `exclusive` ∪ `home_persist`), a
+  multi-path entry, a magic-link resolution, or `source` on `remove`/`fs.deny` refuses at compile;
+  a resolved `[fs.cwd]` covering a redirect source refuses at spawn; the policy account records
+  `source → path` on divergence; the v3 shape is re-pinned (no bump) and existing signatures are
+  byte-unchanged (W15).
+- The adversarial pass covers the UDP facade/broker, the picker path, the W11 cwd-write grant, and
+  the W15 redirect floor; every confirmed finding is fixed before the tag (W8, ship gate).
 
 CHANGELOG records every stable-surface change — the `[net.udp]` section (v3 shape re-pinned, no version bump),
 the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
@@ -782,7 +873,8 @@ bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-u
 derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, the port-0 ephemeral-bind exemption (a QoL BPF change, no
 schema surface — W13; the `[net.bind.ingress]` grant was declined, → BACKLOG), the seccomp hardening
 (uid-0-in-ns construction refusal, additive-only `[seccomp] deny`, the completed base-confined
-denylist — W14), and the corpus move to the book (with the reference-home
+denylist — W14), the asymmetric `source` on fs grants and the settled `redirect` list (v3 shape
+re-pinned — W15), and the corpus move to the book (with the reference-home
 relocation of the catalogue and inventory artefacts).
 
 ## Parked work
