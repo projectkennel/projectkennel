@@ -11,18 +11,33 @@
 #     those grants, and replies the other end — which kenneld hands to the consumer's `facade-tun`.
 #   * registers its sink on startup (`REGISTER_TUN_SINK` on its own per-kennel bus), so it must be
 #     RUNNING before any consumer — the standing (always-up) service model, not ondemand.
-#   * runs `net.mode = "host"`: the broker dials each approved flow from the host stack itself
-#     (kenneld is off the data path), fenced by the invariant deny-CIDR floor host mode carries.
+#   * runs `net.mode = "host"` with a `[net.bpf.connect]` broad IP allow: the kernel-enforced gate
+#     on every dial the broker makes (kenneld is off the data path), deny-first over base-confined's
+#     inherited invariant floor (cloud-metadata / link-local), which host mode carries into the BPF
+#     deny map.
 # ============================================================================
 
 name = "tun-broker"
 template_base = "base-confined"
 
-# Host egress: the broker resolves and dials each approved flow itself, off the kennel netns. The
-# invariant deny-CIDR floor (cloud metadata, link-local, RFC1918) is the IP-layer fence at connect.
+# Host egress: the broker resolves and dials each approved flow itself, off the kennel netns.
 [net]
 mode = "host"
 reason = "the tun-broker dials each approved UDP flow from the host stack; kenneld is off the data path"
+
+# The IP-layer fence (§8 / W2 Part D): a BROAD IP allow. The destinations are name-gated upstream
+# (the broker vets (name, port) against the consumer's grant before any dial), so their resolved
+# addresses are unknowable at compile — the kernel ACL can only be broad-allow + deny-floor. The
+# deny FLOOR is not restated here: base-confined's non-removable `[net.proxy.deny.invariant]`
+# (cloud-metadata v4/v6, link-local) is merged into the cgroup BPF deny map in every mode
+# (`Plan::from_policy` seeds the deny trie from `deny_invariant` first), so it is already the
+# floor under this allow. Deny-first (kennel.bpf.h) means an allowed name that rebinds to a
+# special-use address still dies at connect() with EPERM — DNS rebinding closed structurally, no
+# name-based denylist. The ONE thing the kernel ACL needs from this policy is the broad allow:
+# without it the deny-first ACL denies on fallthrough and NO flow dials.
+[[net.bpf.connect.allow]]
+cidr = "*"
+reason = "broad IP allow: destinations are name-gated per-consumer upstream; the deny floor is base-confined's inherited invariant CIDRs"
 
 [fs]
 read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]

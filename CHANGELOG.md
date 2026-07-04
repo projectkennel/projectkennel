@@ -48,7 +48,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   its one consumer), kenneld's D-Bus relay membrane and delegate spawn path, and the `host_dbus`
   `system.toml` key (remove a stale override from an admin `system.toml` after upgrading). The
   daemon no longer knows any bus address. Measured shrink: TCB 22,851 → 22,300 SLOC.
-- **`[net.udp]` implies the tun consume too.** The W4 mechanism generalizes: a `[net.udp]` policy
+- **`[net.udp]` implies the tun consume too.**
+- **The tun-broker reference provider gains its `[net.bpf.connect]` broad IP allow** (W2 Part D):
+  its `net.mode = "host"` policy had no `[net.bpf]` allow, so the deny-first cgroup ACL denied
+  every flow on fallthrough (an empty allow trie). The deny floor was never missing —
+  base-confined's non-removable `[net.proxy.deny.invariant]` (cloud-metadata v4/v6, link-local)
+  is merged into the BPF deny map in every mode — so only the broad `allow = "*"` was owed. With
+  it, deny-first closes DNS rebinding structurally at `connect()`: an allowed name that rebinds to
+  a special-use address dies `EPERM`, no name-based denylist. The W4 mechanism generalizes: a `[net.udp]` policy
   no longer needs to spell out `[[consumes]] org.projectkennel.tun-udp` — the section implies the
   af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
   (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
