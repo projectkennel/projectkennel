@@ -911,6 +911,17 @@ fn bring_up<P: Privileged + Sync>(
     let inbound_runtime = std::sync::Arc::new(crate::inbound::InboundRuntime::new());
     inbound_runtime.allow_ports(mirror_ports.iter().copied());
 
+    // Whether this kennel has a UDP-egress tun: `[net.udp]` AND it consumes the tun broker (the
+    // synthesis in server.rs makes `[net.udp]` imply the consume, so these move together). The tun
+    // is constructed on this condition below (3c-tun); its resolver address (the broker's `::2`)
+    // is also what `resolv.conf` must point at, so it is computed once here and reused.
+    let tun_active = net.udp
+        && binder.is_some_and(|b| {
+            b.consumes
+                .iter()
+                .any(|c| c.name == kennel_lib_binder::service::tun_broker::CAPABILITY)
+        });
+
     // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
     //     binds that shadow them over the kennel's view. Built here because it
     //     needs the kennel's just-computed primary addresses.
@@ -929,6 +940,11 @@ fn bring_up<P: Privileged + Sync>(
             // maps to the kennel's per-kennel v6 address when it has one (a bind), else `::1`.
             v4: None,
             v6: state.v6.unwrap_or(std::net::Ipv6Addr::LOCALHOST),
+            // A `[net.udp]` kennel resolves through the tun broker's `::2` shim (W2), so
+            // `getaddrinfo` reaches it over the tun — the single source the broker also derives
+            // its resolver address from (`kennel_privhelper::addr`).
+            udp_resolver: tun_active
+                .then(|| kennel_privhelper::addr::tun_resolver_addr(scope.uid(), ctx)),
         };
         plan.file_binds = crate::etc::materialize(&etc.staging_dir, &params)?;
 
@@ -1035,15 +1051,11 @@ fn bring_up<P: Privileged + Sync>(
     //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
     //     bound into the view), so it needs the constructed view — engages only when pivoting. The
     //     tun addr is derived the single-source way (matching the constructor and the mesh filter).
-    let consumes_tun = binder.is_some_and(|b| {
-        b.consumes
-            .iter()
-            .any(|c| c.name == kennel_lib_binder::service::tun_broker::CAPABILITY)
-    });
     // The DELIVER_TUN_SESSION payload kenneld hands the tun-broker when this consumer connects
     // (§8 / W2): its grants + tun `/64`, resolved here in kenneld's own namespace. `Some` iff this is
-    // a `[net.udp]` tun consumer — its presence is the grant the node-0 handler gates the connect on.
-    let tun_session: Option<Vec<u8>> = if net.udp && consumes_tun {
+    // a `[net.udp]` tun consumer (`tun_active`, computed above) — its presence is the grant the
+    // node-0 handler gates the connect on.
+    let tun_session: Option<Vec<u8>> = if tun_active {
         let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
         apply_tun(plan, facade_tun, tun_addr, unix_pivoting);
         Some(encode_tun_session(tun_addr, &net.udp_allow_names))

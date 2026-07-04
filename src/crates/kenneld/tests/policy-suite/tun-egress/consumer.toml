@@ -32,18 +32,36 @@ reason = "W2 tun-egress e2e: an allowed UDP destination the broker's naming shim
 # `/proc` (not `/proc/net/dev`): /proc/net is the per-task `/proc/self/net` symlink, so a Landlock
 # rule pinned to the specific inode does not match the workload's — the mount-rooted `/proc` grant does.
 [fs]
-read = ["/usr/**", "/lib/**", "/lib64/**", "/proc"]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/proc", "/etc/**"]
 
 [exec]
 shell = "/bin/sh"
-allow = ["/bin/sh", "/bin/dash"]
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/getent"]
 
+# The verdict drives the WHOLE naming path, not just tun existence (W2 exit criteria):
+#   1. the tun interface is present (construction, Part B);
+#   2. the ALLOWED name resolves — via glibc getaddrinfo through the kennel's resolv.conf, which
+#      now points at the tun broker's ::2 shim — to a SYNTHETIC address in the tun ULA `/64`
+#      (fd6b:6e...). That proves the shim minted it AND that no real resolution happened (a real
+#      example.com AAAA would be 2606:2800:.../global unicast; a synthetic is the ULA). Zero wire.
+#   3. a DENIED name is NODATA: getaddrinfo fails, no synthetic, no answer.
+# The kennel's exit code IS the verdict; a broken resolver path (the old proxy-pointed resolv.conf)
+# fails at step 2 with no synthetic.
 [workload]
 argv = [
     "/bin/sh", "-c",
     """
-    while read -r l; do case "$l" in *tun*) exit 0 ;; esac; done < /proc/net/dev
-    echo "no tun interface in /proc/net/dev" >&2
-    exit 1
+    tun=no; while read -r l; do case "$l" in *tun*) tun=yes ;; esac; done < /proc/net/dev
+    [ "$tun" = yes ] || { echo "no tun interface" >&2; exit 1; }
+    set -- $(getent ahostsv6 example.com 2>/dev/null); syn=$1
+    case "$syn" in
+        fd6b:6e*) ;;
+        *) echo "allowed name did not mint a tun synthetic (got '$syn') - resolver path broken" >&2; exit 1 ;;
+    esac
+    echo "tun-egress: example.com resolved to synthetic $syn (via the broker shim)" >&2
+    if getent ahostsv6 blocked.example.org >/dev/null 2>&1; then
+        echo "denied name unexpectedly resolved (shim should NODATA it)" >&2; exit 1
+    fi
+    exit 0
     """,
 ]

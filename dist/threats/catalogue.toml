@@ -13,7 +13,7 @@
 # scope = "in"  : a threat Project Kennel addresses (Families 1/2/3/5).
 # scope = "out" : deliberately out of scope (the X-series, THREATS.md "Family 4").
 
-catalogue_version = "0.5"
+catalogue_version = "0.6"
 
 # ── Family 1 — Reconnaissance and exfiltration ──────────────────────────────
 
@@ -114,6 +114,13 @@ family = 1
 scope = "in"
 title = "Host rootfs visibility: the unnarrowed /usr tree"
 residual = "The curated base binds only /usr/bin, /usr/sbin, /usr/lib, /usr/lib64, /usr/libexec, /usr/share — construction-by-absence (§4.2). /usr/local, /usr/src, /usr/include, /opt are absent by default. The accepted residual is the flatpak runtime surface: shared libraries, terminfo, zoneinfo, CAs, and the binary search path. Enforcement is at exec.allow|deny (Landlock FS_EXECUTE), not the view."
+
+[[threat]]
+id = "T1.15"
+family = 1
+scope = "in"
+title = "UDP egress channel: DNS rebinding, exfiltration, and the naming shim"
+residual = "Two accepted residuals: exfiltration inside an approved UDP flow (the T1.8 in-band shape — the framework constrains where, not what), and AF_INET-only legacy clients fail (the naming shim is AAAA-only, so a gethostbyname/A-record client gets NODATA). DNS rebinding is CLOSED, not accepted: an allowed name resolving to a special-use address is refused by the broker's net.bpf floor at connect(). Hostnames-only, capture-by-synthetic, zero wire on every DNS answer."
 
 # ── Family 2 — Posture degradation ──────────────────────────────────────────
 
@@ -274,6 +281,13 @@ family = 5
 scope = "in"
 title = "Host uid 0 mapped into the kennel user namespace"
 residual = "The factory child is the only transient uid-0 actor and never runs with the host root visible; a construction-half decoder bug is a host-root bug (X7 for the kernel)."
+
+[[threat]]
+id = "T5.5"
+family = 5
+scope = "in"
+title = "UDP-egress broker: hostile L3 and DNS wire parsed in operator context"
+residual = "facade-tun (workload context) and the tun-broker (operator context, per-kennel, fate-shared, net.bpf-fenced) parse workload-controlled L3/DNS bytes — hardened by a stateless shape predicate and fuzzing, not proven. Deliberately outside the daemon (the §4.3 empty-intersection claim is scoped to kenneld, which parses none of the flow path). A novel decoder bug's blast radius is the one kennel's egress. Kernel tun/netfilter is X7."
 
 # ── Family 4 — Out of scope (X-series) ──────────────────────────────────────
 

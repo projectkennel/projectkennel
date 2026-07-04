@@ -2,7 +2,7 @@
 
 Companion artefact to Project Kennel. Standalone, citable, intended to be referenced independently of any specific runtime.
 
-Version 0.5 · 2026-06-26
+Version 0.6 · 2026-07-04
 
 Threat IDs are family-prefixed as of 0.3: `T<family>.<index>` within each in-scope family (e.g. T1.1, T2.8, T3.7), so a family's threats carry a self-contained sequence rather than one consecutive run across all families (the former T1–T26). Out-of-scope threats keep their `X1`–`X11` numbering. The mapping from the former IDs: T1–T11→T1.1–T1.11, T12–T18→T2.1–T2.7, T26→T2.8, T19–T25→T3.1–T3.7.
 
@@ -31,17 +31,17 @@ The catalogue is organised into four in-scope families plus a set of out-of-scop
 
 | Family | IDs | Theme |
 |---|---|---|
-| Reconnaissance and exfiltration | T1.1–T1.12 | What the workload reads, where it connects, what it leaks |
+| Reconnaissance and exfiltration | T1.1–T1.15 | What the workload reads, where it connects, what it leaks |
 | Posture degradation | T2.1–T2.8 | What the workload does to the user's host configuration and to the artefacts it produces |
 | Workload-class-specific | T3.1–T3.10 | Threats whose realisation is distinctive to a specific workload class (containers, MCP servers, build environments) |
-| Framework attack surface | T5.1–T5.4 | Threats against the framework's own boundary-crossing mechanism — the binder gateway, the inter-kennel relay, and kennel construction |
+| Framework attack surface | T5.1–T5.5 | Threats against the framework's own boundary-crossing mechanism — the binder gateway, the inter-kennel relay, and kennel construction |
 | Out of scope | X1–X11 | Threats Project Kennel deliberately does not address |
 
 A workload is "unsigned" if it arrived via paths the operating system's package manager does not validate — npm/pypi/cargo packages, container images from public registries, AI agent binaries, MCP servers, `curl | sh` installers, AI-generated code being executed locally. The catalogue uses "workload" generically. Where a threat's realisation differs significantly between workload classes, the entry notes the variants.
 
 ---
 
-# Family 1 — Reconnaissance and exfiltration (T1.1–T1.12)
+# Family 1 — Reconnaissance and exfiltration (T1.1–T1.15)
 
 ## T1.1 — Credential, history, and configuration reconnaissance
 
@@ -270,6 +270,18 @@ Within typically-granted project trees:
 **Residuals.** The curated base is visible — the workload can read shared libraries, terminfo, zoneinfo, CA certificates, and the binary search path. This is the accepted, precedent-backed residual (flatpak's runtime exposes the same surface). The filesystem floor prevents data leakage; the real enforcement is at `exec.allow|deny` (Landlock `FS_EXECUTE` determines what can actually run). Locally-installed software under `/usr/local` and `/opt` is absent by default (opt-in via template delta).
 
 **MITRE ATT&CK.** T1083 (File and Directory Discovery), T1518 (Software Discovery).
+
+## T1.15 — UDP egress channel: DNS rebinding, exfiltration, and the naming shim
+
+**Definition.** A confined workload with `[net.udp]` reaches UDP destinations (QUIC/HTTP-3, DNS tooling, VoIP/game stacks). The channel could be abused three ways: to reach a destination the policy did not grant (including special-use addresses via DNS rebinding), to exfiltrate data inside an allowed flow, or to turn the broker's naming shim into a covert DNS resolver.
+
+**Attack pattern.** The workload is granted `[[net.udp.allow]] name = "api.example"`. It attempts to widen that: (1) it makes the allowed name resolve to `169.254.169.254` (cloud metadata) or a link-local/RFC1918 target — a DNS-rebinding move, where the name passes the allowlist but the resolved address is a special-use one; (2) it encodes data into datagrams sent to the granted destination (the UDP analogue of T1.8); (3) it sends crafted DNS queries to the broker's resolver hoping the shim forwards them to an attacker nameserver (the T1.7 shape).
+
+**Mitigation in Project Kennel.** The channel is **hostnames-only and capture-by-synthetic**. A UDP grant carries a `name`, never a bare IP/CIDR — there is no address to rebind *to* at the allowlist layer, and a literal-IP datagram dies `ENETUNREACH` in the kennel's own kernel (the tun carries only its connected `/64`, no default route). Name resolution goes to the broker's **naming shim**, not a real resolver: the shim checks the name against the signed allowlist and, for an allowed name, mints a stable `name → synthetic-IPv6` mapping in the tun `/64` and answers **AAAA with the synthetic**; a denied name, or an A/CNAME/other query, is **NODATA** — with **zero wire activity in every case** (the shim mints, it never resolves, so it cannot be a covert forwarder). **DNS rebinding is closed structurally, not accepted:** the broker dials each flow from a `net.mode = host` cgroup fenced by a `net.bpf` deny floor (cloud-metadata v4/v6, link-local), so an allowed name that resolves to a special-use address is refused by the kernel at `connect()` with `EPERM` — there is no name-based denylist and no "metadata-is-TCP" assumption to lean on. The check-then-resolve ordering (§8.2) is structural here: the broker allow-checks `(name, port)` **before** handing the name to the host resolver, so a denied destination is never resolved.
+
+**Residuals.** Two, both recorded rather than papered over: (1) **exfiltration inside an approved flow** — a workload granted `api.example:443` can encode data into its datagrams, the same in-band shape as T1.8 (the framework constrains *where* it connects, not *what* it says); (2) **AF_INET-only legacy clients fail** — a client that calls `gethostbyname`/`getaddrinfo` for an A record gets NODATA (the shim is AAAA-only), so a UDP client that cannot use IPv6 does not work under `[net.udp]`. Both accepted; proxy-aware clients are unaffected (they never attempt raw UDP), so the channel serves only the raw-QUIC / DNS-tooling / VoIP residual population it was built for.
+
+**MITRE ATT&CK.** T1071.004 (Application Layer Protocol: DNS), T1041 (Exfiltration Over C2 Channel), T1090 (Proxy — analogue: the synthetic-capture broker).
 
 ---
 
@@ -591,7 +603,7 @@ For stricter enforcement, the framework's setup step can install nftables rules 
 
 ---
 
-# Family 5 — Framework attack surface (T5.1–T5.4)
+# Family 5 — Framework attack surface (T5.1–T5.5)
 
 Families 1–3 catalogue what a confined workload does to the host. This family catalogues threats against the framework's *own* boundary-crossing mechanism. The mechanism is load-bearing by construction: every kennel runs a per-instance binderfs bus with `kenneld` as its context manager (node 0), and that bus is the kennel's single kernel-mediated gateway — the one place anything crosses the kennel boundary, carrying the construction/lifecycle control plane (`kennel-bin-init` ⇄ `kenneld`), the protocol facades that replace raw socket grants (`org.projectkennel.IAfUnix/default`, future `IDBus`), the service registry and inter-kennel calls, and the network crossing (`org.projectkennel.INet/default`). Because every crossing funnels through `kenneld`, `kenneld` is the workload's primary reachable attack surface and the framework's trust anchor; this family documents the threats that follow from that centrality. (Design §7.1 develops the gateway; §7.5 the network crossing; §7.2 the construction model.)
 
@@ -649,6 +661,18 @@ The escalation-window analysis is therefore: the single transient userns-0 actor
 **Residuals.** Construction shifts the framework's largest *root-parses-operator-input* surface into the privhelper: it parses the construction half of the `Plan` host-side (before any namespace exists, so there is no sandbox to manipulate it) and holds `CAP_SETUID`/`CAP_NET_ADMIN`/`CAP_SETFCAP`. A bug in the construction-half decoder is a host-root bug; it is mitigated by parsing host-side, by the bounded/fuzzed construction-half codec (design §10.6), and by splitting the `Plan` so the privhelper sees only the construction half. The supervision half is parsed post-pivot by `kennel-bin-init` (contained). Compromise of the kernel's user-namespace or binderfs implementation is out of scope (X7).
 
 **MITRE ATT&CK.** T1068 (Exploitation for Privilege Escalation), T1548 (Abuse Elevation Control Mechanism).
+
+## T5.5 — UDP-egress broker: hostile L3 and DNS wire parsed in operator context
+
+**Definition.** The `[net.udp]` path adds two parsers of workload-controlled bytes outside the daemon: `facade-tun` (in-kennel, workload-uid) copies whole L3 frames off the tun, and the standing **tun-broker** (a per-kennel `net.mode = host` leaf, operator context) parses the DNS query wire and the L3/L4 frames the facade forwards. A bug in either is reachable from inside every `[net.udp]` kennel; the broker's is in *operator* context, not the daemon's.
+
+**Attack pattern.** The workload crafts adversarial input at both parsers: malformed or oversized IPv6 frames, a spoofed source address, a v4 or ICMPv6 frame where UDP is expected, a length field that lies about the payload (the four crafted-frame classes); and malformed DNS query wire aimed at the broker's naming shim. The goal is a decoder bug in `facade-tun` or the broker that crashes or confuses the operator-context process, or a logic gap that lets a frame reach a destination the grant does not cover.
+
+**Mitigation in Project Kennel.** The daemon parses none of it — the §4.3 empty-intersection claim (kenneld is absent from the per-flow byte path) is **scoped to the daemon** and holds: kenneld resolves nothing on the flow path and hands the session to the broker, then steps aside. `facade-tun` is a **stateless L3 predicate**, not a codec: it copies whole frames behind a symmetric shape check (`v6 ∧ nexthdr==UDP ∧ src == kennel-addr ∧ dst ∈ pool-or-resolver ∧ len sane` on egress; a mirror check on ingress), originates nothing, holds no flow state, and drops-and-counts anything that fails — it is the **fuzz target** (design §10.6). The broker is **quarantined**: a per-kennel leaf, fate-shared with its consumer (cgroup kill / socketpair HUP), running `net.mode = host` under a `net.bpf` deny floor, so a broker compromise is bounded to one kennel's egress and cannot reach the daemon or a sibling. Its DNS shim never resolves (it mints synthetics), so there is no upstream resolver to confuse; the frame path is the reused facade predicate plus the flow gate's allow-check-before-resolve.
+
+**Residuals.** The two parsers are hardened by the shape predicate and fuzzing, not proven: a novel bug in `facade-tun` (workload context — blast radius the kennel) or the broker (operator context — blast radius that one kennel's egress, fate-shared) would be reachable from inside a `[net.udp]` kennel. This is the same *hardened-not-proven* posture as T5.1's binder decoder, deliberately kept **outside** the daemon (facade untrusted-side, broker a quarantined per-kennel leaf) so the daemon's empty-intersection claim is unaffected. Compromise of the kernel's tun or netfilter implementation is out of scope (X7).
+
+**MITRE ATT&CK.** T1190 (Exploit Public-Facing Application — analogue: the in-kennel/broker parser endpoints), T1499 (Endpoint Denial of Service — a malformed-frame flood, bounded by the broker's per-kennel ceilings).
 
 ---
 
@@ -841,21 +865,21 @@ This section is intended for security teams who need to map the catalogue to com
 
 | T-ID | Relevant Article 21 measure |
 |---|---|
-| T1.1–T1.12 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
+| T1.1–T1.15 | Article 21(2)(d): supply chain security; Article 21(2)(e): security in acquisition, development, and maintenance |
 | T2.1–T2.8 | Article 21(2)(a): policies on risk analysis and information system security; Article 21(2)(g): basic cyber hygiene practices and training |
 | T3.1–T3.7 | Article 21(2)(d): supply chain security; Article 21(2)(j): use of multi-factor authentication and secured communications |
 | T3.8, T3.9, T3.10 | Article 21(2)(i): access control policies and least privilege; Article 21(2)(d): supply chain security (third-party images and templates) |
-| T5.1–T5.4 | Article 21(2)(e): security in acquisition, development, and maintenance; Article 21(2)(i): human resources security, access control policies and asset management |
+| T5.1–T5.5 | Article 21(2)(e): security in acquisition, development, and maintenance; Article 21(2)(i): human resources security, access control policies and asset management |
 
 ## DORA (Regulation (EU) 2022/2554, for financial entities)
 
 | T-ID | Relevant DORA article |
 |---|---|
-| T1.1–T1.12 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
+| T1.1–T1.15 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
 | T2.1–T2.8 | Article 9; Article 16 (ICT-related incidents); Article 17 (ICT-related incident reporting) |
 | T3.1–T3.7 | Article 9; Article 28 (third-party risk) |
 | T3.8, T3.9, T3.10 | Article 9 (ICT risk management framework); Article 28 (third-party risk) |
-| T5.1–T5.4 | Article 9 (ICT risk management framework); Article 16 (ICT-related incidents) |
+| T5.1–T5.5 | Article 9 (ICT risk management framework); Article 16 (ICT-related incidents) |
 
 These mappings are first-pass starting points for compliance teams. Specific control-objective mapping requires organisation-specific analysis.
 
