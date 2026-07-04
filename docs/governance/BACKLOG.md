@@ -1,6 +1,6 @@
 # Project Kennel — backlog / parking lot
 
-Status: **standing** · Last touched: 2026-07-02
+Status: **standing** · Last touched: 2026-07-04
 
 > The parking lot for work that is **not on any release roadmap** and should not be carried from one to
 > the next. Three kinds live here: items **declined on principle** (mostly risk, little reward — re-open
@@ -79,6 +79,23 @@ documentation sweep.
   and carries **no Kennel-authored Wayland parser** — strictly better on every axis the proxy was meant to
   buy. Recorded here only so the idea is not re-proposed: the nested compositor *is* the cross-host render
   mechanism; there is no filtering-proxy fallback to build.
+
+- **Settled-schema list-field consistency: which sections offer `.add`/`.remove` deltas, and why.**
+  List-shaped policy fields do not compose uniformly. Some are `ListField` — a bare `[[…]]` **set**
+  (replace-on-inherit) *or* an `[[….add]]`/`[[….remove]]` **delta** carrying a required `reason`
+  (`[[net.proxy.allow]]`, `[[net.udp.allow]]`, `[[net.bpf.connect.allow/deny]]`, `[[unix.allow]]`,
+  `[[fs.read/write/deny]]`, `[[exec.allow]]`). Others are plain `Vec` with **bare-set fold** semantics
+  and no delta form at all — a child's non-empty list replaces the parent's, silently
+  (`[identity].groups`, `[[provides]]`/`[[consumes]]`). Nothing documents *which* fields are which,
+  or the rule for when a section should be delta-capable. Two live consequences seen in 0.6.0: a leaf
+  can silently drop an inherited `[seccomp] deny` list by writing a bare set (the W14 defect), and the
+  tun-broker fence work surfaced that `[[net.bpf.connect.deny]]`'s set-vs-`.add` distinction is
+  invisible until you compile and diff the artefact. Promote as a **deliberate schema pass**: decide
+  the rule (default to `ListField` for any inheritable list where a base contributes a floor; keep plain
+  `Vec` only where replace-is-the-contract and document why), apply it uniformly, and document the
+  set/delta/fold semantics in one place. Touches the settled schema shape ⇒ a `SETTLED_SCHEMA_VERSION`
+  bump, so it wants its own release slot, not a ride-along. (Parked 2026-07-04; overlaps W14 #2, which
+  fixes the one *security-bearing* instance — `[seccomp] deny` narrowing — independently.)
 
 ## Fenced to a later release
 
