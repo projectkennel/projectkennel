@@ -45,12 +45,24 @@ reattach a terminal to a running kennel (Ctrl\-\ d to detach)
 \fBkennel review <policy> [\-\-yes] [\-\-revert]\fR
 review a workspace's trust manifest: re\-pin legitimate edits, or \-\-revert tampering
 .TP
-\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]\fR
+\fBkennel release <policy>\fR
+release a leaked exclusive over\-mount (fs.exclusive crash recovery)
+.TP
+\fBkennel stop <name>\fR
+stop a running kennel
+.TP
+\fBkennel list\fR
+list running kennels and the cross\-kennel service mesh
+.TP
+\fBkennel daemon\-reload\fR
+re\-derive the service catalogue from the enablement links
+.TP
+\fBkennel policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|inspect> [...]\fR
 author, inspect, sign, and check policies
 .RS
 .TP
 \fB(sub\-verbs)\fR
-See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint.
+See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign, lint, risks, diff, inspect.
 .RE
 .TP
 \fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR

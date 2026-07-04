@@ -229,7 +229,8 @@ jobs:
           packages: groff
           no-install-recommends: "true"
       # Regenerate the committed pages; a non-empty diff means man/ is stale
-      # relative to the page data (or the CLI tables the sync-test guards).
+      # relative to the page data or the live CLI tables it derives from
+      # (kennel-lib-cli — there is no hand-kept mirror).
       - name: Regenerate man pages
         run: cargo run --offline --locked -p gen-man -- --out man
       - name: No drift (man/ matches the generator)

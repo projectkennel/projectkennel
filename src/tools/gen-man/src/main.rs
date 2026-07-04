@@ -19,6 +19,11 @@ use gen_man::pages::PAGES;
 use gen_man::render;
 
 fn main() -> ExitCode {
+    // Refuse to emit anything if the curated OPTIONS drifted from the live CLI
+    // tables (a renamed/removed verb with stale curation in pages.rs).
+    if let Err(e) = gen_man::check_pages() {
+        return fail(&e);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--out") => args.get(1).map_or_else(

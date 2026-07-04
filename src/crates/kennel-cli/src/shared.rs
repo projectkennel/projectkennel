@@ -9,129 +9,13 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kennel_lib_cli::{render_commands, CommandSpec, RUN, RUN_SUMMARY};
+// The command tables live with the surface grammar in `kennel-lib-cli` (one
+// definition for dispatch, `--help`, and the generated man pages); re-exported
+// so the verb modules keep addressing them through `shared`.
+use kennel_lib_cli::{render_commands, CommandSpec};
+pub use kennel_lib_cli::{COMMANDS, POLICY_VERBS};
 use kennel_lib_control::control::{self, Request};
 use kennel_lib_control::socket;
-
-// ─── Command tables ──────────────────────────────────────────────────────────
-
-/// Top-level commands (the unified help surface).
-pub const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: RUN,
-        summary: RUN_SUMMARY,
-        usage: "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
-    },
-    CommandSpec {
-        name: "attach",
-        summary: "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
-        usage: "attach <name>",
-    },
-    CommandSpec {
-        name: "review",
-        summary: "review a workspace's trust manifest: re-pin legitimate edits, or --revert tampering",
-        usage: "review <policy> [--yes] [--revert]",
-    },
-    CommandSpec {
-        name: "release",
-        summary: "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
-        usage: "release <policy>",
-    },
-    CommandSpec {
-        name: "stop",
-        summary: "stop a running kennel",
-        usage: "stop <name>",
-    },
-    CommandSpec {
-        name: "list",
-        summary: "list running kennels and the cross-kennel service mesh",
-        usage: "list",
-    },
-    CommandSpec {
-        name: "daemon-reload",
-        summary: "re-derive the service catalogue from the enablement links",
-        usage: "daemon-reload",
-    },
-    CommandSpec {
-        name: "policy",
-        summary: "author, inspect, sign, and check policies",
-        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]",
-    },
-    CommandSpec {
-        name: "keygen",
-        summary: "generate a policy-signing key",
-        usage: "keygen <key-id> [--dir DIR] [--force]",
-    },
-    CommandSpec {
-        name: "audit",
-        summary: "show a kennel's audit log",
-        usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
-    },
-    CommandSpec {
-        name: "oci",
-        summary: "build and run an OCI image as a confined kennel substrate (§7.11)",
-        usage: "oci <build|run|revert|update> <name> [--image <ref>] [--key K] [--force] [-- <cmd...>]",
-    },
-];
-
-/// Sub-verbs of `kennel policy`.
-pub const POLICY_VERBS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "list",
-        summary: "list policies and templates in the search path",
-        usage: "policy list",
-    },
-    CommandSpec {
-        name: "show",
-        summary: "show what a policy resolves to (the effective policy)",
-        usage: "policy show <policy> [--template-dir D]... [--trust-dir D]...",
-    },
-    CommandSpec {
-        name: "edit",
-        summary: "edit a policy's source in $EDITOR",
-        usage: "policy edit <name>",
-    },
-    CommandSpec {
-        name: "generate",
-        summary: "scaffold a new leaf policy",
-        usage: "policy generate <name> [--from <template>]",
-    },
-    CommandSpec {
-        name: "compile",
-        summary: "compile a source policy into a signed settled artefact",
-        usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
-    },
-    CommandSpec {
-        name: "validate",
-        summary: "resolve and check a policy without writing an artefact",
-        usage: "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
-    },
-    CommandSpec {
-        name: "sign",
-        summary: "sign a source template/fragment with a key",
-        usage: "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
-    },
-    CommandSpec {
-        name: "lint",
-        summary: "check the shipped template corpus for incoherences",
-        usage: "policy lint [--template-dir D]... [--trust-dir D]...",
-    },
-    CommandSpec {
-        name: "risks",
-        summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
-        usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
-    },
-    CommandSpec {
-        name: "diff",
-        summary: "interpreted grant delta between a policy and its baseline (or another policy)",
-        usage: "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    },
-    CommandSpec {
-        name: "inspect",
-        summary: "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
-        usage: "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
-    },
-];
 
 // ─── Help rendering ──────────────────────────────────────────────────────────
 

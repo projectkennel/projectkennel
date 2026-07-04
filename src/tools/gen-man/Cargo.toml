@@ -2,23 +2,24 @@
 name = "gen-man"
 version.workspace = true
 publish.workspace = true
-description = "Project Kennel build-time manpage generator (not shipped). Emits groff man pages for the shipped binaries and user-touchable config files from an in-repo data table, so `man kennel` and friends stay in sync with the CLI by construction. Std-only: no third-party dependencies."
+description = "Project Kennel build-time manpage generator (not shipped). Emits groff man pages for the shipped binaries and user-touchable config files; the command synopses derive from the live CLI tables in kennel-lib-cli, so `man kennel` cannot drift from the CLI. No third-party dependencies."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# Std-only by design (CODING-STANDARDS §5.5 / the project's no-third-party-deps
-# rule). The page data lives in `pages.rs` as plain Rust, so there is no TOML
-# parser to vendor and the data is type-checked at compile time.
+# No third-party deps by design (CODING-STANDARDS §5.5). The page data lives in
+# `pages.rs` as plain Rust, so there is no TOML parser to vendor and the data is
+# type-checked at compile time; the command tables come from the CLI definition
+# itself (kennel-lib-cli), the derive-don't-duplicate fix for the old SYNC_* mirror.
 [dependencies]
+kennel-lib-cli = { path = "../../crates/kennel-lib-cli" }
 
 [lints]
 workspace = true
 
-# A library half so the kenneld crate can dev-depend on `gen_man::pages::SYNC_*`
-# for its CLI-sync test (dev-only; never linked into the shipped daemon).
+# A library half so the emitter and page data are unit-testable.
 [lib]
 name = "gen_man"
 path = "src/lib.rs"

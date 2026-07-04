@@ -58,6 +58,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
   still serialises as a bare string, so existing signed artefacts verify unchanged.
 
+### Docs & tooling
+
+- **The man pages derive from the CLI definition** (W7). The `kennel(1)` / `kennel-policy(1)`
+  command synopses now come straight from the live `CommandSpec` tables (moved to
+  `kennel-lib-cli`, where dispatch and `--help` read them); the hand-kept `SYNC_*` mirror in
+  `gen-man` and its babysitting sync test are deleted — derive, don't duplicate-then-sync. The
+  curated per-verb OPTIONS prose is keyed by verb name and checked against the live table at
+  generation time, so stale curation fails the build instead of silently mis-attaching. Two
+  real drifts surfaced and fixed on the way out: the `policy` usage line (CLI help and man) was
+  missing the `inspect` sub-verb, and `kennel(1)` omitted `release` / `stop` / `list` /
+  `daemon-reload` entirely — a new table row now appears in help and man by construction.
+
 ### New reference content
 
 - **The `claude` reference policy** (`kennel run claude [-- <args>]`): a maintainer-signed leaf on

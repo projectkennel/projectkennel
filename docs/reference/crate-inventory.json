@@ -1,6 +1,6 @@
 {
   "crate_count": 31,
-  "total_sloc": 37723,
+  "total_sloc": 37724,
   "tcb_crate_count": 16,
   "tcb_sloc": 22851,
   "crates": [
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 3928,
+      "sloc": 3815,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -275,6 +275,16 @@
       "external_deps": ["vte"]
     },
     {
+      "name": "kennel-lib-cli",
+      "sloc": 146,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli", "facade"],
+      "first_party_deps": [],
+      "external_deps": []
+    },
+    {
       "name": "kennel-schema",
       "sloc": 104,
       "uses_unsafe": false,
@@ -291,16 +301,6 @@
       "in_tcb": true,
       "bins": [],
       "consumers": ["audit", "cli"],
-      "first_party_deps": [],
-      "external_deps": []
-    },
-    {
-      "name": "kennel-lib-cli",
-      "sloc": 32,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": [],
-      "consumers": ["cli", "facade"],
       "first_party_deps": [],
       "external_deps": []
     },
