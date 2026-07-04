@@ -43,6 +43,36 @@ pub fn fuzz_parsers(data: &[u8]) {
     // (2) The facade then frames the connect as a CONNECT_INET request `[transport | port | host]`
     // and transacts it to kenneld over binder; the host (a DNS name) is workload-controlled (07-5).
     let _ = kennel_lib_binder::service::inet::decode_request(data, 255);
+    // (3) The UDP-egress front-door (facade-tun, W2 Part C): facade-tun copies whole IPv6 L3 frames
+    // both ways behind a shape predicate, and the EGRESS direction parses fully workload-controlled
+    // frames straight off the tun. Fixed endpoints (a kennel tun addr + its /64) stand in for the
+    // per-kennel values; `data` is the raw frame. Must never panic/over-read on any bytes.
+    {
+        let kennel_addr = std::net::Ipv6Addr::new(0xfd6b, 0x6e9c, 0x691c, 0x8001, 0, 0, 0, 1);
+        let prefix = [0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01];
+        let _ = kennel_facade::tun::egress_ok(data, kennel_addr, prefix);
+        let _ = kennel_facade::tun::ingress_ok(data, kennel_addr, prefix);
+    }
+
+    // The UDP-egress broker's DNS naming shim (W2 Part D): `respond` parses the workload's DNS
+    // query via simple-dns and builds the AAAA/NODATA reply; `query_question` reads the question.
+    // `data` is the raw query — fully workload-controlled. Must never panic on any bytes.
+    {
+        let grant = |name: &str| kennel_lib_policy::settled::NameRule {
+            name: name.to_owned(),
+            ports: Vec::new(),
+            protocol: kennel_lib_policy::settled::Protocol::Udp,
+        };
+        let allow =
+            kennel_tun_broker::shim::Allowlist::new([grant("example.com"), grant(".test")]);
+        let mut pool =
+            kennel_tun_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
+        let _ = kennel_tun_broker::shim::respond(data, &allow, &mut pool);
+        let _ = kennel_tun_broker::query_question(data);
+        // The flow forwarder reads an L3 frame facade-tun handed it (workload-derived bytes) to
+        // extract the routed name/ports/payload; it must never panic on any frame.
+        let _ = kennel_tun_broker::forward::route(data, &pool);
+    }
 
     // IPC wire formats: the kenneld control protocol and the privhelper request.
     let _ = kenneld::control::Request::decode(data);

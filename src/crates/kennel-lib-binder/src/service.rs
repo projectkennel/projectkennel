@@ -119,6 +119,35 @@ pub mod verb {
     /// declared-and-ready or the broker's deadline fires, returning
     /// [`crate::service::status::UNAVAILABLE`] on timeout (§7.13.4a).
     pub const SVC_CONNECT: u32 = 16;
+
+    /// A mediation broker → kenneld (mesh node 0): **pull** the policy artifact for a session.
+    ///
+    /// The broker echoes the session's `(ctx, capability name)` (which kenneld handed it at
+    /// [`crate::service::session::NEW_SESSION`]); kenneld selects the artifact by the consume's *shape
+    /// from policy* from the running kennel's retained settled struct (the `dbus-name` `IDBus`
+    /// filter). This is how a broker learns *what to allow* without kenneld holding a filter table.
+    pub const GET_SESSION_POLICY: u32 = 17;
+
+    /// The tun-broker → kenneld (its own **per-kennel bus**): register the sink node kenneld pushes
+    /// egress sessions to.
+    ///
+    /// The `REGISTER_MIRROR` move for L3 egress: the standing tun-broker hands kenneld its callback
+    /// node once at startup; kenneld acquires it, watches its death, and records it against the
+    /// broker's ctx. Every `[net.udp]` consumer's session is then delivered to this one node
+    /// ([`DELIVER_TUN_SESSION`]). The reply is a status byte.
+    pub const REGISTER_TUN_SINK: u32 = 18;
+
+    /// kenneld → the tun-broker (its per-kennel bus, the registered [`REGISTER_TUN_SINK`] node):
+    /// mint one egress session for a `[net.udp]` consumer.
+    ///
+    /// The `DELIVER_INET` move: kenneld resolves the consumer's grants + tun `/64` in its own
+    /// namespace and pushes them here (the [`tun_broker::encode_accept`](super::tun_broker::encode_accept)
+    /// payload). The broker mints a
+    /// fresh connected `SOCK_DGRAM` socketpair (frame boundaries preserved — no length prefix), spawns
+    /// a per-session flow-mediator process on one end with those grants, and replies with the **other
+    /// end's fd** — which kenneld hands to the consumer's `facade-tun` as its af-unix `[[consumes]]`
+    /// connection. One socketpair + one mediator per consumer: separation, never a shared listener.
+    pub const DELIVER_TUN_SESSION: u32 = 19;
 }
 
 /// The transport byte in a [`verb::CONNECT_INET`] request (the wire is internal-stable;
@@ -833,27 +862,149 @@ pub mod mesh {
     }
 }
 
-/// The `dbus-broker` control-channel wire protocol: the verb `kenneld` speaks on the
-/// broker's control node, acquired on the connector mesh bus (§7.13.4a / §7.7).
+/// Shared big-endian byte-codec primitives for the mesh control-channel wire protocols.
 ///
-/// There is one verb, [`broker::ACCEPT_SESSION`]: kenneld, having identified a consumer on its
-/// per-kennel bus, tells the broker to accept one D-Bus session and apply the given filter set.
-/// The broker mints a per-session node and enforces the filter on every frame it mediates for
-/// that session. kenneld decides; the broker applies and never relays through kenneld.
+/// A cursor `take`, fixed integers, and `u16`-length-prefixed strings / string-lists, shared by
+/// [`broker`] and [`tun_broker`] so the two control verbs cannot drift on their framing.
+mod codec {
+    /// Split `n` bytes off the front of the cursor, advancing it; `None` if short.
+    pub(super) fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+        let (head, tail) = cur.split_at_checked(n)?;
+        *cur = tail;
+        Some(head)
+    }
+
+    pub(super) fn put_u8(out: &mut Vec<u8>, v: u8) {
+        out.push(v);
+    }
+
+    pub(super) fn take_u8(cur: &mut &[u8]) -> Option<u8> {
+        take(cur, 1)?.first().copied()
+    }
+
+    pub(super) fn put_u16(out: &mut Vec<u8>, v: u16) {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+
+    pub(super) fn take_u16(cur: &mut &[u8]) -> Option<u16> {
+        let b = take(cur, 2)?;
+        Some(u16::from_be_bytes([*b.first()?, *b.get(1)?]))
+    }
+
+    /// A `u16`-count for a list, saturating past `u16::MAX`.
+    pub(super) fn put_count(out: &mut Vec<u8>, n: usize) {
+        put_u16(out, u16::try_from(n).unwrap_or(u16::MAX));
+    }
+
+    /// A `u16`-length-prefixed UTF-8 string.
+    pub(super) fn put_str(out: &mut Vec<u8>, s: &str) {
+        let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
+        put_u16(out, len);
+        out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
+    }
+
+    pub(super) fn take_str(cur: &mut &[u8]) -> Option<String> {
+        let len = take_u16(cur)?;
+        let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
+        Some(s.to_owned())
+    }
+
+    /// A `u16`-count-prefixed list of strings.
+    pub(super) fn put_str_list(out: &mut Vec<u8>, list: &[String]) {
+        put_count(out, list.len());
+        for s in list {
+            put_str(out, s);
+        }
+    }
+
+    pub(super) fn take_str_list(cur: &mut &[u8]) -> Option<Vec<String>> {
+        let n = take_u16(cur)?;
+        let mut list = Vec::with_capacity(usize::from(n));
+        for _ in 0..n {
+            list.push(take_str(cur)?);
+        }
+        Some(list)
+    }
+}
+
+/// The generic mediation-session verbs — the shape-agnostic mesh handshake every mediation broker
+/// (dbus, tun, …) shares (§7.13.4c).
 ///
-/// **Wire layout (all big-endian):** see [`broker::encode_accept`]. The `bus` byte selects session (0)
-/// or system (1) — same encoding as [`dbus::SESSION`]/[`dbus::SYSTEM`].
-pub mod broker {
-    /// Tell the provider to accept a D-Bus session kenneld has authorized, applying the
-    /// given filter. kenneld→provider, on the connector mesh bus's control node.
+/// A consumer's `SVC_CONNECT` to a mediated capability drives two generic transactions and no
+/// shape-specific payload: kenneld sends [`NEW_SESSION`](session::NEW_SESSION) (ctx + capability
+/// name, *no policy*) to the broker's control node, which mints a per-session node and replies with
+/// it; kenneld forwards the
+/// node to the consumer. The broker then **pulls** its policy lazily — on the session's first use it
+/// transacts [`crate::service::verb::GET_SESSION_POLICY`] (the same ctx + name) to kenneld's node 0,
+/// which selects the artifact by the consume's *shape from policy*. The artifact bytes are
+/// shape-specific (a [`crate::service::broker`] filter, a [`crate::service::tun_broker`] grant set)
+/// but the handshake is not.
+pub mod session {
+    use super::codec::{put_str, put_u16, take_str, take_u16};
+
+    /// kenneld → a mediation broker (control node): mint a session for a consumer.
     ///
-    /// The provider mints a fresh session node, stores the filter against that node's
-    /// cookie, and replies with the node (a `BINDER_TYPE_BINDER` object). kenneld forwards
-    /// that node to the consumer, which transacts it directly; the provider keys the session
-    /// by the kernel-attested **target node**, never by anything the consumer says, and
-    /// reclaims it on the node's `Br::Release` (the consumer's last ref dropping). The
-    /// provider decides nothing — it applies kenneld's filter to the session it was handed.
-    pub const ACCEPT_SESSION: u32 = 1;
+    /// Carries the consumer kennel's `ctx` and the `capability name` it connected — no policy. The
+    /// broker mints a fresh per-session node, records `(ctx, name)` against it, replies with the node,
+    /// and pulls the session's policy lazily ([`super::verb::GET_SESSION_POLICY`]) on first use.
+    pub const NEW_SESSION: u32 = 1;
+
+    /// Encode a session reference `[ctx: u16 be | name]`.
+    ///
+    /// The body of both [`NEW_SESSION`] (kenneld→broker) and [`super::verb::GET_SESSION_POLICY`]
+    /// (broker→kenneld): the same `(ctx, name)` names the session on the way out and identifies it on
+    /// the pull back.
+    #[must_use]
+    pub fn encode_ref(ctx: u16, name: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_u16(&mut out, ctx);
+        put_str(&mut out, name);
+        out
+    }
+
+    /// Decode a session reference `[ctx: u16 be | name]`. `None` for malformed or trailing input.
+    #[must_use]
+    pub fn decode_ref(data: &[u8]) -> Option<(u16, String)> {
+        let mut cur = data;
+        let ctx = take_u16(&mut cur)?;
+        let name = take_str(&mut cur)?;
+        if !cur.is_empty() {
+            return None;
+        }
+        Some((ctx, name))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ref_round_trips() {
+            let bytes = encode_ref(0x0042, "org.projectkennel.dbus");
+            assert_eq!(
+                decode_ref(&bytes),
+                Some((0x0042, "org.projectkennel.dbus".to_owned()))
+            );
+        }
+
+        #[test]
+        fn ref_rejects_trailing_and_short() {
+            let mut bytes = encode_ref(1, "x");
+            bytes.push(0);
+            assert!(decode_ref(&bytes).is_none(), "trailing garbage");
+            assert!(decode_ref(&[]).is_none(), "short (no ctx)");
+        }
+    }
+}
+
+/// The D-Bus session-policy artifact: the compiled `IDBus` filter a `dbus-name` session is policed by.
+///
+/// Not a verb — the bytes kenneld returns from a broker's [`crate::service::verb::GET_SESSION_POLICY`] pull
+/// (encoded from the consumer's retained `[dbus]` runtime) and the dbus-broker decodes to police the
+/// session's traffic. The wire layout is unchanged from when kenneld pushed it; only the direction
+/// (pull, not push) and the trigger (first use, not setup) moved.
+pub mod broker {
+    use super::codec::{put_str_list, put_u8, take, take_str_list};
 
     /// Encode an `ACCEPT_SESSION` request:
     /// `[bus: u8 | talk | call | broadcast | own | deny_talk]`.
@@ -867,12 +1018,12 @@ pub mod broker {
         deny_talk: &[String],
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        out.push(bus);
-        put_string_list(&mut out, talk);
-        put_string_list(&mut out, call);
-        put_string_list(&mut out, broadcast);
-        put_string_list(&mut out, own);
-        put_string_list(&mut out, deny_talk);
+        put_u8(&mut out, bus);
+        put_str_list(&mut out, talk);
+        put_str_list(&mut out, call);
+        put_str_list(&mut out, broadcast);
+        put_str_list(&mut out, own);
+        put_str_list(&mut out, deny_talk);
         out
     }
 
@@ -898,11 +1049,11 @@ pub mod broker {
     pub fn decode_accept(data: &[u8]) -> Option<AcceptSession> {
         let mut cur = data;
         let &bus = take(&mut cur, 1)?.first()?;
-        let talk = take_string_list(&mut cur)?;
-        let call = take_string_list(&mut cur)?;
-        let broadcast = take_string_list(&mut cur)?;
-        let own = take_string_list(&mut cur)?;
-        let deny_talk = take_string_list(&mut cur)?;
+        let talk = take_str_list(&mut cur)?;
+        let call = take_str_list(&mut cur)?;
+        let broadcast = take_str_list(&mut cur)?;
+        let own = take_str_list(&mut cur)?;
+        let deny_talk = take_str_list(&mut cur)?;
         if !cur.is_empty() {
             return None; // trailing garbage
         }
@@ -914,39 +1065,6 @@ pub mod broker {
             own,
             deny_talk,
         })
-    }
-
-    fn put_string_list(out: &mut Vec<u8>, list: &[String]) {
-        let n = u16::try_from(list.len()).unwrap_or(u16::MAX);
-        out.extend_from_slice(&n.to_be_bytes());
-        for s in list.iter().take(usize::from(n)) {
-            let len = u16::try_from(s.len()).unwrap_or(u16::MAX);
-            out.extend_from_slice(&len.to_be_bytes());
-            out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
-        }
-    }
-
-    fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
-        let (head, tail) = cur.split_at_checked(n)?;
-        *cur = tail;
-        Some(head)
-    }
-
-    fn take_string_list(cur: &mut &[u8]) -> Option<Vec<String>> {
-        let &[n_hi, n_lo] = take(cur, 2)? else {
-            return None;
-        };
-        let n = u16::from_be_bytes([n_hi, n_lo]);
-        let mut list = Vec::with_capacity(usize::from(n));
-        for _ in 0..n {
-            let &[len_hi, len_lo] = take(cur, 2)? else {
-                return None;
-            };
-            let len = u16::from_be_bytes([len_hi, len_lo]);
-            let s = core::str::from_utf8(take(cur, usize::from(len))?).ok()?;
-            list.push(s.to_owned());
-        }
-        Some(list)
     }
 
     #[cfg(test)]
@@ -974,6 +1092,140 @@ pub mod broker {
             bad.push(0xFF);
             assert!(decode_accept(&bad).is_none()); // trailing garbage
             assert!(decode_accept(&[]).is_none()); // short (no bus byte)
+        }
+    }
+}
+
+/// The UDP-egress session artifact (§8 / W2 Part D): the tun `/64` + compiled UDP grants for one
+/// egress session.
+///
+/// The payload of [`crate::service::verb::DELIVER_TUN_SESSION`] — kenneld resolves a `[net.udp]`
+/// consumer's grants + tun `/64` in its own namespace and pushes them to the tun-broker over the
+/// broker's per-kennel bus. The broker decodes them, spawns a per-session flow mediator with them,
+/// and never relays through kenneld on the data path. The categorical deny-CIDR floor is the broker's
+/// own cgroup BPF filter, not on this wire.
+///
+/// **Wire layout (all big-endian):** see [`tun_broker::encode_accept`].
+pub mod tun_broker {
+    use super::codec::{put_count, put_str, put_u16, put_u8, take, take_str, take_u16, take_u8};
+
+    /// The af-unix capability a `[net.udp]` consumer `[[consumes]]` (shape `af-unix`).
+    ///
+    /// The tun-broker's egress service: `facade-tun` `CONNECT_AFUNIX`es this on its per-kennel bus,
+    /// and kenneld special-cases the name to the [`DELIVER_TUN_SESSION`](super::verb::DELIVER_TUN_SESSION)
+    /// dance (resolve grants, deliver to the sink, hand back the minted session fd) rather than the
+    /// generic rendezvous connect. The single source both `facade-tun` and kenneld reference, so the
+    /// consume name cannot drift.
+    pub const CAPABILITY: &str = "org.projectkennel.tun-udp";
+
+    /// One name grant: a host pattern, its permitted ports (empty = any), and its transport.
+    ///
+    /// Mirrors the settled `NameRule`. `protocol` is carried on the wire (not implied) so a TCP
+    /// grant rides this same `ACCEPT_SESSION` unchanged when the tun broker gains TCP mediation — the
+    /// mechanism is transport-agnostic; UDP is only the first transport over it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Grant {
+        /// The host pattern (dot-convention: `example.com` exact, `.example.com` apex+subdomains).
+        pub name: String,
+        /// Permitted ports; empty means any port.
+        pub ports: Vec<u16>,
+        /// Protocol ordinal (`0` any, `1` tcp, `2` udp) — the settled `Protocol` order.
+        pub protocol: u8,
+    }
+
+    /// A decoded UDP `ACCEPT_SESSION`: the consumer's tun `/64` address and its grants.
+    ///
+    /// There is no deny set on the wire: the categorical deny-CIDR floor is the broker's cgroup BPF
+    /// filter (`net.bpf`, on its `net.mode = host` cgroup), not a userspace re-check.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct AcceptTunSession {
+        /// The consumer's tun interface address (`::1` in its `/64`); its low 64 bits' prefix is the
+        /// synthetic pool. Sixteen octets.
+        pub tun_addr: [u8; 16],
+        /// The UDP name grants (`udp_allow_names`).
+        pub grants: Vec<Grant>,
+    }
+
+    /// Encode an `ACCEPT_SESSION` request:
+    /// `[tun_addr: 16 | grants: count·(name, u16 nports·u16, u8 proto)]`.
+    #[must_use]
+    pub fn encode_accept(tun_addr: [u8; 16], grants: &[Grant]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&tun_addr);
+        put_count(&mut out, grants.len());
+        for g in grants {
+            put_str(&mut out, &g.name);
+            put_count(&mut out, g.ports.len());
+            for &p in &g.ports {
+                put_u16(&mut out, p);
+            }
+            put_u8(&mut out, g.protocol);
+        }
+        out
+    }
+
+    /// Decode an `ACCEPT_SESSION` request. `None` for malformed input.
+    #[must_use]
+    pub fn decode_accept(data: &[u8]) -> Option<AcceptTunSession> {
+        let mut cur = data;
+        let tun_addr = <[u8; 16]>::try_from(take(&mut cur, 16)?).ok()?;
+        let n_grants = take_u16(&mut cur)?;
+        let mut grants = Vec::with_capacity(usize::from(n_grants));
+        for _ in 0..n_grants {
+            let name = take_str(&mut cur)?;
+            let n_ports = take_u16(&mut cur)?;
+            let mut ports = Vec::with_capacity(usize::from(n_ports));
+            for _ in 0..n_ports {
+                ports.push(take_u16(&mut cur)?);
+            }
+            let protocol = take_u8(&mut cur)?;
+            grants.push(Grant {
+                name,
+                ports,
+                protocol,
+            });
+        }
+        if !cur.is_empty() {
+            return None; // trailing garbage
+        }
+        Some(AcceptTunSession { tun_addr, grants })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn accept_round_trips() {
+            let tun = [
+                0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01, 0, 0, 0, 0, 0, 0, 0, 1,
+            ];
+            let grants = vec![
+                Grant {
+                    name: "example.com".to_owned(),
+                    ports: vec![443, 53],
+                    protocol: 2,
+                },
+                Grant {
+                    name: ".internal.example".to_owned(),
+                    ports: Vec::new(),
+                    protocol: 2,
+                },
+            ];
+            let bytes = encode_accept(tun, &grants);
+            let got = decode_accept(&bytes).expect("decode");
+            assert_eq!(got.tun_addr, tun);
+            assert_eq!(got.grants, grants);
+        }
+
+        #[test]
+        fn accept_rejects_malformed() {
+            let tun = [0u8; 16];
+            let mut bad = encode_accept(tun, &[]);
+            bad.push(0x00);
+            assert!(decode_accept(&bad).is_none(), "trailing garbage");
+            assert!(decode_accept(&[]).is_none(), "short (no tun addr)");
+            assert!(decode_accept(&[0u8; 15]).is_none(), "truncated tun addr");
         }
     }
 }

@@ -59,6 +59,23 @@ pub fn loopback_v6(uid: u32, ctx: u16, host: u64) -> Ipv6Addr {
     ])
 }
 
+/// The tun `/64` ctx offset: the kennel ctx's high bit flipped, so the tun's connected `/64` never
+/// collides with the loopback `/64` in the kennel's net-ns (W2).
+pub const TUN_CTX_FLIP: u16 = 0x8000;
+/// The tun interface address's host suffix within its `/64` (`::1`); `::2` is the broker resolver
+/// and the rest is the synthetic pool.
+pub const TUN_HOST: u64 = 1;
+
+/// The kennel's tun interface address (`::1` in its ULA `/64`), from the operator uid and kennel ctx.
+///
+/// The single source both the privileged constructor (which addresses the tun) and kenneld (which
+/// tells the tun broker the consumer's `/64` over `ACCEPT_SESSION`) derive it from, so the two can
+/// never disagree on where a kennel's synthetics live.
+#[must_use]
+pub fn tun_addr(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
+    loopback_v6(op_uid, kennel_ctx ^ TUN_CTX_FLIP, TUN_HOST)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

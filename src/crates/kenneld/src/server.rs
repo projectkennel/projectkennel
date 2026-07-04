@@ -113,6 +113,15 @@ pub struct Loaded {
     /// `[spawn]`. Drives the node-0 `SPAWN` handler; `kenneld` holds it in the per-kennel binder
     /// runtime from construction.
     pub spawn: Option<kennel_lib_policy::SpawnGrant>,
+    /// The verified, substituted settled policy this runtime derives from — the in-memory struct
+    /// `kenneld` read.
+    ///
+    /// Retained so a mediation broker a kennel consumes (dbus, tun) can **pull** the policy section
+    /// it needs to police the session (`GET_SESSION_POLICY`, §7.13.4c): kenneld reaches into this
+    /// struct and selects the named stanza, holding no per-service filter table of its own. Shared
+    /// (`Arc`) because the runtime moves most of `Loaded`'s fields into the plan/spec while the
+    /// registry keeps a handle for the pull.
+    pub settled: std::sync::Arc<kennel_lib_policy::SettledPolicy>,
 }
 
 /// Translate a policy file into the artefacts kenneld applies.
@@ -198,6 +207,9 @@ pub struct Identity {
     /// the workload's bus connection and frame typed transactions onto binder node 0 (§7.7.2).
     /// `None` disables the D-Bus facade path, so `[dbus]` grants go unserved.
     pub facade_dbus_bin: Option<PathBuf>,
+    /// The host path of `facade-tun`, the in-kennel L3 forwarder for a `[net.udp]` consumer of the
+    /// tun broker (W2). `None` disables the tun facade path.
+    pub facade_tun_bin: Option<PathBuf>,
     /// The host path of `host-dbus`, the operator-context D-Bus mediation delegate kenneld spawns
     /// per enabled bus (§7.7.2b). `None` disables mediation (no delegate, so the relay denies).
     pub host_dbus_bin: Option<PathBuf>,
@@ -251,6 +263,12 @@ struct KennelMeta {
     /// its capabilities. The shape and required flag are carried for the consumer topology leg
     /// (`kennel list`). Empty for a kennel with no `[[consumes]]`.
     consumed: Vec<ConsumedEntry>,
+    /// The kennel's verified settled policy — the in-memory struct kenneld read — retained so a
+    /// mediation broker (dbus, tun) this kennel consumes can **pull** the stanza it needs to police
+    /// the session (`GET_SESSION_POLICY`, §7.13.4c). kenneld reaches into this generic struct and
+    /// selects the named section; it holds no per-service filter table of its own. `None` until the
+    /// policy loads (set by [`Shared::set_settled`] after `reserve`, mirroring [`Shared::set_broker`]).
+    settled: Option<std::sync::Arc<kennel_lib_policy::SettledPolicy>>,
 }
 
 /// One entry in `KennelMeta::consumed`: the name, expected shape, and whether the
@@ -268,12 +286,52 @@ struct Registry {
     kennels: BTreeMap<String, KennelMeta>,
 }
 
+/// Serve a mediation broker's `GET_SESSION_POLICY` pull: the policy artifact that lets the broker
+/// police the running kennel at `ctx`'s session for the capability `name`.
+///
+/// Generic in the only sense that matters — *name and shape from policy*. It finds the consumer's
+/// `[[consumes]]` entry for `name`, reads its declared [`Shape`], and encodes that shape's session
+/// artifact from the retained settled struct: a `dbus-name` consume yields the `IDBus` filter for the
+/// capability's bus. There is no stored filter table and no per-consumer state — the running kennel's
+/// own settled policy is the single source. `None` if there is no such running kennel, its policy is
+/// not retained, `name` is not a consume it declared, or the shape is not one a broker mediates.
+fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
+    use kennel_lib_binder::service::{broker, dbus};
+    use kennel_lib_policy::settled::Shape;
+
+    let settled = reg
+        .kennels
+        .values()
+        .find(|m| m.ctx == ctx)?
+        .settled
+        .as_ref()?;
+    let consume = settled.mesh.consumes.iter().find(|c| c.name == name)?;
+    match consume.shape {
+        Shape::DbusName => {
+            let bus = dbus::capability_bus(name)?;
+            let rules = match bus {
+                dbus::SYSTEM => settled.dbus.system.as_ref(),
+                _ => settled.dbus.session.as_ref(),
+            }?;
+            Some(broker::encode_accept(
+                bus,
+                &rules.talk,
+                &rules.call,
+                &rules.broadcast,
+                &rules.own,
+                &rules.deny_talk,
+            ))
+        }
+        Shape::AfUnix | Shape::BinderConnector => None,
+    }
+}
+
 /// The daemon's shared state, cloned (via `Arc`) into each connection thread.
 pub struct Shared<P: Privileged, L: PolicyLoader> {
     identity: Identity,
     privileged: P,
     loader: L,
-    registry: Mutex<Registry>,
+    registry: std::sync::Arc<Mutex<Registry>>,
     /// The per-user SSH bastion (§7.10), created lazily on the first kennel with an
     /// `[ssh]` grant and shared by all of them. `None` until then, or always when
     /// no `bastion` is configured in [`Identity`].
@@ -296,14 +354,11 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// `(tier, name, key)` triple. Created lazily on first consumes/provides match (D4);
     /// ref-counted for teardown. The `MeshBus` serves node 0 on its own looper thread.
     mesh_buses: Mutex<HashMap<String, crate::mesh_bus::MeshBus>>,
-    /// Each brokered consumer's settled `[dbus]` filter, keyed by its kennel `ctx` — the policy
-    /// already carried on the ctx kenneld built at spawn (§7.7). The D-Bus mesh bus's node-0
-    /// handler reads this when a consumer connects: it resolves the caller's `sender_pid` → cgroup
-    /// → ctx, looks up the ctx's filter here, and pushes it to the broker as `ACCEPT_SESSION`.
-    /// Inserted when a brokered kennel is prepared, removed when its ctx is released — so it lives
-    /// exactly as long as the kennel does. It is *not* a session/credential store: identity is the
-    /// kernel's per-transaction attestation, this is only the policy to apply once identified.
-    dbus_filters: std::sync::Arc<Mutex<HashMap<u16, kennel_lib_policy::DbusRuntime>>>,
+    /// The daemon-global tun-egress sink (§8 / W2): the standing tun-broker registers its sink node
+    /// here (over its own per-kennel bus), and every `[net.udp]` consumer's binder manager delivers a
+    /// session through it. One [`crate::tun_sink::TunSink`] for the whole daemon, cloned into each
+    /// kennel's `BinderPrep`.
+    tun_sink: crate::tun_sink::TunSink,
 }
 
 impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
@@ -322,13 +377,13 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             identity,
             privileged,
             loader,
-            registry: Mutex::new(Registry::default()),
+            registry: std::sync::Arc::new(Mutex::new(Registry::default())),
             bastion: Mutex::new(None),
             catalogue: std::sync::Arc::new(Mutex::new(catalogue)),
             activator: std::sync::OnceLock::new(),
             idle_reaped: Mutex::new(std::collections::BTreeSet::new()),
             mesh_buses: Mutex::new(HashMap::new()),
-            dbus_filters: std::sync::Arc::new(Mutex::new(HashMap::new())),
+            tun_sink: crate::tun_sink::TunSink::new(),
         }
     }
 
@@ -644,11 +699,22 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 // keyed to the bus identity (it has no per-kennel audit state dir).
                 let w =
                     std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
-                // The D-Bus connector bus alone gets the identity resolver: its node-0 handler
-                // mints a filtered session per consumer. Every other connector bus resolves a
-                // consumer straight to its provider's handle (no resolver).
-                let dbus_resolver =
-                    (name == "org.projectkennel.dbus-broker").then(|| self.dbus_resolver());
+                // A mediation-broker bus (dbus, tun) gets a `Mediation`: its node-0 handler mints a
+                // per-consumer session via the generic `NEW_SESSION` and answers the broker's
+                // `GET_SESSION_POLICY` pull from the running kennel's retained settled struct. Every
+                // other connector bus resolves a consumer straight to its provider's handle.
+                let mediation = crate::mesh_bus::mediation_for(name).then(|| {
+                    let registry = std::sync::Arc::clone(&self.registry);
+                    crate::mesh_bus::Mediation {
+                        broker_service: name.to_owned(),
+                        policy: std::sync::Arc::new(move |ctx: u16, cap: &str| {
+                            let reg = registry
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            session_policy_for(&reg, ctx, cap)
+                        }),
+                    }
+                });
                 // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
                 // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
                 // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
@@ -661,7 +727,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     name,
                     key,
                     &w,
-                    dbus_resolver,
+                    mediation,
                     holder_pid,
                     holder_sock,
                 )?;
@@ -726,6 +792,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 pid: None,
                 broker: None,
                 consumed: Vec::new(),
+                settled: None,
             },
         );
         drop(reg);
@@ -741,6 +808,20 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(meta) = reg.kennels.get_mut(name) {
             meta.broker = Some(broker);
+        }
+    }
+
+    /// Retain the kennel's verified settled policy — the in-memory struct kenneld read — so a
+    /// mediation broker can pull the section it needs to police the kennel's session. Set after the
+    /// policy loads; mirrors [`Self::set_broker`], and lives on the kennel's own record — not a
+    /// parallel per-ctx filter map.
+    fn set_settled(&self, name: &str, settled: std::sync::Arc<kennel_lib_policy::SettledPolicy>) {
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = reg.kennels.get_mut(name) {
+            meta.settled = Some(settled);
         }
     }
 
@@ -820,58 +901,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Deregister `name` and return its context to the pool.
     fn release(&self, name: &str, ctx: u16) {
-        // Drop this kennel's D-Bus filter (if brokered) — its ctx is being freed, so the mesh
-        // resolver must no longer resolve a future caller in a reused cgroup to a stale policy.
-        self.dbus_filters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&ctx);
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reg.kennels.remove(name);
         reg.ctx.release(ctx);
-    }
-
-    /// Record a brokered consumer's settled `[dbus]` filter under its `ctx`, for the D-Bus mesh
-    /// bus's node-0 handler to resolve callers against (see [`Shared::dbus_filters`]). Removed when
-    /// the ctx is released ([`Shared::release`]).
-    fn register_dbus_filter(&self, ctx: u16, dbus: kennel_lib_policy::DbusRuntime) {
-        self.dbus_filters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(ctx, dbus);
-    }
-
-    /// Build the D-Bus mesh resolver (see [`crate::mesh_bus::DbusResolver`]): map a connecting
-    /// consumer's `(sender_pid, capability name)` to the encoded `ACCEPT_SESSION` filter, resolving
-    /// `sender_pid` → cgroup → ctx → its `[dbus]` policy *fresh* each call. Nothing is remembered;
-    /// the only standing state is the ctx→policy map, keyed on a kernel-managed cgroup lifetime.
-    fn dbus_resolver(&self) -> crate::mesh_bus::DbusResolver {
-        let filters = std::sync::Arc::clone(&self.dbus_filters);
-        std::sync::Arc::new(move |sender_pid: i32, name: &str| {
-            let bus = kennel_lib_binder::service::dbus::capability_bus(name)?;
-            let ctx = crate::cgroup::pid_to_ctx(sender_pid)?;
-            let map = filters
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let runtime = map.get(&ctx)?;
-            let rules = match bus {
-                kennel_lib_binder::service::dbus::SYSTEM => runtime.system.as_ref(),
-                _ => runtime.session.as_ref(),
-            }?;
-            let payload = kennel_lib_binder::service::broker::encode_accept(
-                bus,
-                &rules.talk,
-                &rules.call,
-                &rules.broadcast,
-                &rules.own,
-                &rules.deny_talk,
-            );
-            drop(map);
-            Some(payload)
-        })
     }
 
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
@@ -1849,6 +1884,11 @@ pub fn run_kennel<P, L>(
         }
     }
 
+    // Retain the verified settled struct on the kennel's record, so a mediation broker it consumes
+    // (dbus, tun) can pull the section it needs to police the session — kenneld selects it by the
+    // consume's shape, holding no filter table. The `Arc` clone is cheap and leaves `loaded` intact.
+    shared.set_settled(&req.kennel, std::sync::Arc::clone(&loaded.settled));
+
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
@@ -1860,6 +1900,7 @@ pub fn run_kennel<P, L>(
         scope: id.scope.clone(),
         plan: loaded.plan,
         net: loaded.net,
+        facade_tun_bin: shared.identity.facade_tun_bin.clone(),
         proxy: id.proxy.clone(),
         etc,
         view_root: id
@@ -1953,21 +1994,19 @@ pub fn run_kennel<P, L>(
                 // `[[consumes]]`) AND the broker is enabled in the catalogue. `[dbus]` alone is the
                 // legacy host-dbus delegate; gating on the consume keeps enabling the broker for one
                 // kennel from stripping another's delegate (the dbus-session-allowed regression).
-                let brokered = consumes_dbus_name && {
+                // No per-ctx filter is recorded: the mesh bus pulls this kennel's `[dbus]` from its
+                // retained settled struct (`set_settled` above) when the broker asks.
+                consumes_dbus_name && {
                     let cat = shared
                         .catalogue
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     !cat.resolve("org.projectkennel.dbus-broker").is_empty()
-                };
-                // Brokered: record this kennel's filter under its ctx so the D-Bus mesh bus's
-                // node-0 handler can resolve a future connect (sender_pid → cgroup → ctx → here)
-                // and mint the session. The per-kennel relay then only *locates* the mesh bus.
-                if brokered {
-                    shared.register_dbus_filter(ctx, loaded.dbus.clone());
                 }
-                brokered
             },
+            // The one daemon-global tun-egress sink (§8 / W2): the tun-broker's manager registers into
+            // it, and each `[net.udp]` consumer's manager delivers a session through it.
+            tun_sink: shared.tun_sink.clone(),
         });
     }
 
@@ -2842,6 +2881,8 @@ mod tests {
             };
             let net = NetPolicy {
                 mode: kennel_lib_policy::NetMode::Constrained,
+                udp: false,
+                udp_allow_names: Vec::new(),
                 proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
@@ -2879,6 +2920,7 @@ mod tests {
                 tty_filter: true,
                 on_change: kennel_lib_policy::OnChangeAction::Warn,
                 spawn: None,
+                settled: std::sync::Arc::new(kennel_lib_policy::settled::sample_settled()),
             })
         }
     }
@@ -2906,6 +2948,7 @@ mod tests {
                 bastion: None,
                 afunix_bin: None,
                 facade_dbus_bin: None,
+                facade_tun_bin: None,
                 host_dbus_bin: None,
                 init_bin: None,
                 oci_entry_bin: None,

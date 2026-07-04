@@ -879,6 +879,14 @@
         "reason": {
           "description": "Required (non-empty) only when `mode = \"host\"`: the documented justification for",
           "type": "string"
+        },
+        "udp": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/net_udp"
+            }
+          ],
+          "description": "`[net.udp]`: opt-in for UDP egress on the proxied path (the tun + fenced broker, W2)."
         }
       },
       "type": "object"
@@ -1246,6 +1254,45 @@
         "required": {
           "description": "Whether TLS is required to the destination.",
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "net_udp": {
+      "additionalProperties": false,
+      "description": "`[net.udp]`: the UDP-egress opt-in and its destination allowlist (W2).",
+      "properties": {
+        "allow": {
+          "description": "`[[net.udp.allow]]`: by-name UDP egress allow entries (the shared [`NetAllow`] grammar,",
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/net_allow"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/net_allow"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/net_allow"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
         }
       },
       "type": "object"

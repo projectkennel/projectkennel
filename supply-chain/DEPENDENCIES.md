@@ -11,7 +11,7 @@ This ledger pairs with:
 
 ## Status
 
-Eight direct dependencies are recorded below (`libc`, `nix`, `bitflags`, `object`, `seccompiler`, `ed25519-compact`, `hmac-sha512`, `lexopt`), each a justified §5.1 exception adopted via the §5.2/§5.5 procedure. Counting transitive crates, `CHECKSUMS.toml` pins the shipped artefacts plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
+Each direct dependency recorded below is a justified §5.1 exception adopted via the §5.2/§5.5 procedure — the newest is `simple-dns` (the W2 UDP-egress broker's DNS message codec, added by this change). `CHECKSUMS.toml` is the authoritative set: it pins every direct and transitive artefact in the shipped graph, plus `arbitrary` (fuzz-only, §5.5-approved; used only by the non-shipped `fuzz/` crate). Further entries are added with the PR that introduces each dependency.
 
 ## System libraries (linked, not vendored)
 
@@ -53,6 +53,12 @@ The short list of things we use a dependency for rather than writing ourselves (
   resumption) is precisely the hostile-input parser the no-hand-roll rule targets — delegated to
   the vetted alacritty crate, default-features-off (core deps `arrayvec` + `memchr` only).
   Maintainer decision, this entry.
+- Parsing **untrusted DNS query messages** for the UDP-egress broker's naming shim (`simple-dns`).
+  A DNS wire-format decoder over fully workload-controlled bytes is the same hostile-input parser
+  the no-hand-roll rule targets (the `vte` precedent above); the shim only mints synthetic addresses
+  on allowlist approval — no resolver, no wire — so a full DNS stack (hickory / `domain`) is both
+  unnecessary and over the §5.3 transitive budget. `simple-dns` adds no new crate (its one dep,
+  `bitflags`, is already vendored). Maintainer decision, this entry.
 
 Anything outside this list requires a maintainer decision recorded in the PR.
 
@@ -203,3 +209,12 @@ Anything outside this list requires a maintainer decision recorded in the PR.
 - **Reviewer:** antigravity (2026-06-25). Provenance: `.crate` sha256 matches independent re-download (audit-helper.sh confirm); `.cargo_vcs_info.json` records commit `4bc342658bab2949a65b514494634579a1be4a63` at `gitlab.com/mmstick/numtoa` (GitLab). Four instances of `unsafe` (`str::from_utf8_unchecked` on self-produced ASCII digit sequences — trivially sound). No build.rs, no proc-macro, no FFI. Zero dependencies.
 - **Transitive deps added:** none.
 - **Proc-macros / build.rs:** none.
+
+### simple-dns
+
+- **Version:** =0.11.3 (exact pin).
+- **Justification:** The W2 UDP-egress broker's DNS naming shim parses fully workload-controlled DNS query messages and builds the AAAA/NODATA reply. This is the hostile-input parser the no-hand-roll rule targets (§5.1, the `vte` precedent): a wire-format decoder over adversarial bytes, delegated rather than hand-rolled. The shim only mints synthetic addresses on allowlist approval — it is **not** a resolver and does no wire lookups — so a full DNS stack (hickory / `domain`, with their async dependency trees) is both unnecessary and over the §5.3 transitive budget.
+- **Licence:** MIT.
+- **Reviewer:** remco (2026-07-03). Provenance verified independent of crates.io via `tools/audit-source.sh`: the `.crate` source is byte-identical (81 files) to `github.com/balliegojr/simple-dns` at commit `71bef78701404fbcb1afa428be21690474f22818`, and the release tag `simple-dns/0.11.3` resolves to that exact commit. `.crate` sha256 independently re-downloaded and byte-confirmed via `tools/audit-helper.sh confirm`.
+- **Transitive deps added:** none new — its one dependency, `bitflags` =2.11.1, is already vendored (transitive of `nix`).
+- **Proc-macros / build.rs:** none. `no_std`-capable (we build with `std`); safe public API (no caller `unsafe`).

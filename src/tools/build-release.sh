@@ -87,7 +87,7 @@ build_arch() {
 	KENNEL_PROFILE=release RUSTFLAGS="-C target-feature=+crt-static" \
 		"$ROOT/src/tools/reproducible-build.sh" --target "$triple" \
 		-p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade -p kennel-shim \
-		-p kennel-dbus-broker
+		-p kennel-dbus-broker -p kennel-tun-broker
 	# The privhelper package, with bpf-egress so its kennel-privhelper-bpf binary builds (the
 	# feature embeds the cgroup egress programs, needing clang). One package build emits all four
 	# binaries — the factory and the net/mounts/bpf sub-helpers. Built separately from kenneld so

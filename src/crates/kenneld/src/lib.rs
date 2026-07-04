@@ -48,6 +48,7 @@ pub mod ssh;
 pub mod sshd;
 pub mod supervisor;
 pub mod tripwire;
+pub mod tun_sink;
 
 // The control-socket wire protocol now lives in its own crate so the unprivileged
 // `kennel` CLI can link it without the daemon's enforcement code. Re-exported here
@@ -329,6 +330,10 @@ pub struct BinderPrep {
     /// mesh bus; the session is minted by the mesh handler (§7.7). When clear, a legacy host-dbus
     /// delegate is spawned instead.
     pub brokered_dbus: bool,
+    /// The daemon-global tun-egress sink (§8 / W2): the standing tun-broker registers its sink node
+    /// here (its manager), and each `[net.udp]` consumer's manager delivers a session through it. One
+    /// [`crate::tun_sink::TunSink`] for the whole daemon, cloned into every manager.
+    pub tun_sink: crate::tun_sink::TunSink,
 }
 
 /// Everything needed to bring one kennel up.
@@ -371,6 +376,10 @@ pub struct Spec {
     /// in-view facade sockets, and the delegate/facade binaries. Empty ([`DbusPrep::default`])
     /// for a kennel with no `[dbus]` grant.
     pub dbus: DbusPrep,
+    /// The host path of `facade-tun`, spawned into the view for a `[net.udp]` consumer that also
+    /// `[[consumes]]` the tun broker (W2): it copies L3 frames between the tun and the broker's mesh
+    /// session socket. `None` disables the facade path (the tun goes unserved).
+    pub facade_tun_bin: Option<PathBuf>,
     /// The prepared binder IPC context manager (§7.1): the settled binder policy and
     /// the audit writer. `None` for a kennel with no `[binder]` grant (no context
     /// manager is run; the seal still mounts no binderfs because the plan's view
@@ -673,6 +682,7 @@ pub fn start<P: Privileged + Sync>(
         ssh,
         unix,
         dbus,
+        facade_tun_bin,
         binder,
         oci,
         mesh_mounts,
@@ -694,6 +704,7 @@ pub fn start<P: Privileged + Sync>(
         &ssh,
         &unix,
         &dbus,
+        facade_tun_bin.as_deref(),
         binder.as_ref(),
         &oci,
         &mesh_mounts,
@@ -770,6 +781,7 @@ fn bring_up<P: Privileged + Sync>(
     ssh: &SshPrep,
     unix: &UnixPrep,
     dbus: &DbusPrep,
+    facade_tun: Option<&Path>,
     binder: Option<&BinderPrep>,
     oci: &OciPrep,
     mesh_mounts: &[(std::os::fd::OwnedFd, PathBuf)],
@@ -1037,6 +1049,26 @@ fn bring_up<P: Privileged + Sync>(
     //     other host delegates. Needs the constructed view, so it engages only when pivoting.
     apply_dbus(plan, dbus, command, unix_pivoting);
 
+    // 3c-tun. UDP egress (§8, W2): bind facade-tun into the view for a `[net.udp]` consumer of the
+    //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
+    //     bound into the view), so it needs the constructed view — engages only when pivoting. The
+    //     tun addr is derived the single-source way (matching the constructor and the mesh filter).
+    let consumes_tun = binder.is_some_and(|b| {
+        b.consumes
+            .iter()
+            .any(|c| c.name == kennel_lib_binder::service::tun_broker::CAPABILITY)
+    });
+    // The DELIVER_TUN_SESSION payload kenneld hands the tun-broker when this consumer connects
+    // (§8 / W2): its grants + tun `/64`, resolved here in kenneld's own namespace. `Some` iff this is
+    // a `[net.udp]` tun consumer — its presence is the grant the node-0 handler gates the connect on.
+    let tun_session: Option<Vec<u8>> = if net.udp && consumes_tun {
+        let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
+        apply_tun(plan, facade_tun, tun_addr, unix_pivoting);
+        Some(encode_tun_session(tun_addr, &net.udp_allow_names))
+    } else {
+        None
+    };
+
     // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
     //     the daemon gave us a staging mountpoint: point HOME at the shim root,
     //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
@@ -1180,6 +1212,9 @@ fn bring_up<P: Privileged + Sync>(
     // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
     // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
     let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
+    // Create the UDP-egress tun when the policy opts in (`[net.udp]`, W2). Valid only on the
+    // proxied modes, which own their net-ns — the same window `lo_up` covers.
+    let tun = net.udp;
     let (mut child, init_pid, sync, supervision_bytes, helper_stderr) = construct_via_factory(
         privileged,
         plan,
@@ -1187,6 +1222,7 @@ fn bring_up<P: Privileged + Sync>(
         ctx,
         &loopback,
         lo_up,
+        tun,
         &egress_bytes,
         tracer.level_u8(),
         state,
@@ -1323,6 +1359,7 @@ fn bring_up<P: Privileged + Sync>(
             net_runtime,
             std::sync::Arc::clone(&inbound_runtime),
             dbus_relay,
+            tun_session,
         ) {
             Ok(manager) => {
                 tracer.step("bring-up: binder node 0 acquired, lifecycle served");
@@ -1381,6 +1418,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
+    tun: bool,
     egress_bytes: &[u8],
     log_level: u8,
     state: &mut Provision,
@@ -1397,7 +1435,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
-    let construction = construction_half_from(plan, ctx, loopback, lo_up);
+    let construction = construction_half_from(plan, ctx, loopback, lo_up, tun);
     let supervision = supervision_from(plan, command, drop_uid, drop_gid, log_level);
     let half_bytes = kennel_lib_spawn::wire::encode_construction(&construction);
     let supervision_bytes = kennel_lib_spawn::wire::encode_supervision(&supervision);
@@ -1430,6 +1468,7 @@ fn construction_half_from(
     ctx: u16,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
+    tun: bool,
 ) -> kennel_lib_spawn::ConstructionHalf {
     kennel_lib_spawn::ConstructionHalf {
         namespaces: plan.namespaces,
@@ -1448,6 +1487,7 @@ fn construction_half_from(
         lo: lo_up,
         ctx,
         loopback: loopback.to_vec(),
+        tun,
         // Tell the factory which inherited fds accompany the datagram (sent pty-then-workload),
         // so it places them at the right fixed numbers. It decodes the half but forwards the
         // supervision-half (which holds the workload flag) opaquely, so the presence must be
@@ -1524,6 +1564,7 @@ fn supervision_from(
 /// path that is the workload (a `/children` walk from the spawn intermediate); on the
 /// factory path it is `kennel-bin-init` directly. `lifecycle` carries the init-pid gate +
 /// supervision-half kenneld serves over node 0 (disabled on the legacy path).
+#[allow(clippy::too_many_arguments)] // the node-0 serve inputs; each is one subsystem's state
 fn acquire_binder_node0(
     init_pid: u32,
     ctx: u16,
@@ -1532,6 +1573,7 @@ fn acquire_binder_node0(
     net: crate::inet::NetRuntime,
     inbound: std::sync::Arc<crate::inbound::InboundRuntime>,
     dbus: Option<std::sync::Arc<crate::dbus::DbusRelay>>,
+    tun_session: Option<Vec<u8>>,
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
@@ -1558,6 +1600,8 @@ fn acquire_binder_node0(
         prep.consumes.clone(),
         prep.catalogue.clone(),
         prep.activator.clone(),
+        prep.tun_sink.clone(),
+        tun_session,
     )
 }
 
@@ -1646,6 +1690,88 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
         path: shim_bin,
         args,
     });
+}
+
+/// Bind `facade-tun` into the view for a `[net.udp]` consumer and register it as a seal aux (§8, W2).
+///
+/// `facade-tun` copies whole L3 frames between the kennel's tun (inherited at `TUN_FD`) and the tun
+/// broker's per-session socket, which it obtains by `CONNECT_AFUNIX`ing the tun-broker capability on
+/// its **per-kennel bus** (the plain af-unix consume path) — kenneld resolves this kennel's grants,
+/// delivers them to the broker, and hands back the minted session fd. Mirrors `apply_afunix`'s bind +
+/// Landlock + aux, minus the socket shims — its channel is the per-kennel bus, not an in-view listener.
+///
+/// A no-op unless `pivoting` (the facade needs the constructed view); when the deployment provides no
+/// binary it warns and serves nothing — fail-closed, never a silent unserved tun.
+fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, pivoting: bool) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    if !pivoting {
+        return;
+    }
+    let Some(bin) = facade_tun else {
+        eprintln!(
+            "kenneld: warning: kennel opts into [net.udp] and consumes the tun broker but no \
+             facade-tun binary is configured (deployment `facade_tun`); UDP egress is unserved."
+        );
+        return;
+    };
+    // Bind the facade binary into the view (read-only) and grant execute + its loaders.
+    if let Some(view) = plan.view.as_mut() {
+        view.binds.push(kennel_lib_spawn::BindMount {
+            source: bin.to_path_buf(),
+            target: bin.to_path_buf(),
+            writable: false,
+            exclusive: false,
+        });
+    }
+    plan.landlock_fs
+        .push((bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
+    let resolution =
+        kennel_lib_policy::libresolve::resolve_loaders(&[bin.to_string_lossy().into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs.push((
+            PathBuf::from(loader),
+            AccessFs::READ_FILE | AccessFs::EXECUTE,
+        ));
+    }
+    // `facade-tun <binder-device> <kennel-tun-addr>`, run inside the sealed view. The tun fd is
+    // inherited (TUN_FD); the broker channel comes from a CONNECT_AFUNIX on the per-kennel bus (the
+    // seal-mounted binderfs), which kenneld answers with the broker's minted per-session fd.
+    plan.aux.push(kennel_lib_spawn::AuxProcess {
+        path: bin.to_path_buf(),
+        args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), tun_addr.to_string()],
+    });
+}
+
+/// Encode the [`DELIVER_TUN_SESSION`](kennel_lib_binder::service::verb::DELIVER_TUN_SESSION) payload
+/// for one `[net.udp]` consumer (§8 / W2): its tun `/64` address and its by-name UDP grants.
+///
+/// Built once, in kenneld's own namespace, from the consumer's settled `udp_allow_names` (the raw
+/// grants — the compiled `NetRuntime` ruleset drops the names the broker's naming shim needs). The
+/// broker never re-derives; it decodes this and spawns the per-session mediator with it.
+fn encode_tun_session(
+    tun_addr: Ipv6Addr,
+    udp_allow_names: &[kennel_lib_policy::settled::NameRule],
+) -> Vec<u8> {
+    use kennel_lib_binder::service::tun_broker;
+    use kennel_lib_policy::settled::Protocol;
+    // The settled `Protocol` order is the wire ordinal (`0` any, `1` tcp, `2` udp) the broker's
+    // `tun-flow` mediator decodes back — kept in lockstep with `protocol_from_ordinal` there.
+    let protocol_ordinal = |p: Protocol| -> u8 {
+        match p {
+            Protocol::Any => 0,
+            Protocol::Tcp => 1,
+            Protocol::Udp => 2,
+        }
+    };
+    let grants: Vec<tun_broker::Grant> = udp_allow_names
+        .iter()
+        .map(|r| tun_broker::Grant {
+            name: r.name.clone(),
+            ports: r.ports.clone(),
+            protocol: protocol_ordinal(r.protocol),
+        })
+        .collect();
+    tun_broker::encode_accept(tun_addr.octets(), &grants)
 }
 
 /// Bind `facade-socks5` into the view, launch it as a seal aux on the kennel loopback `listen`,

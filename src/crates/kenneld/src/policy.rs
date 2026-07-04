@@ -293,6 +293,9 @@ pub fn loaded_from_settled(
     let lifecycle = substituted.effective_policy.lifecycle.clone();
     let tty_filter = substituted.effective_policy.tty.filter_terminal_escapes;
     let on_change = substituted.effective_policy.trust.on_change;
+    // Retain the whole substituted settled struct for the mesh policy pull (a broker this kennel
+    // consumes reaches it via `GET_SESSION_POLICY`); clone before the fields below are moved out.
+    let settled = std::sync::Arc::new(substituted.clone());
     Ok(Loaded {
         plan,
         account: substituted.identity.user,
@@ -315,6 +318,7 @@ pub fn loaded_from_settled(
         cwd: substituted.effective_policy.fs.cwd,
         workload: substituted.workload,
         spawn: substituted.spawn,
+        settled,
     })
 }
 

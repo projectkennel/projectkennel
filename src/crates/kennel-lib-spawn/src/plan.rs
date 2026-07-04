@@ -793,6 +793,14 @@ pub struct ConstructionHalf {
     /// separate `add-addr` privhelper ops into the one `construct` op), re-validating each is
     /// within the caller's reserved scope before the netlink add. Empty ⇒ no loopback adds.
     pub loopback: Vec<LoopbackAddr>,
+    /// Whether to create the per-kennel UDP-egress **tun** (`[net.udp]`, W2). Set for a kennel
+    /// whose settled policy enables UDP egress. The factory creates the tun inside the kennel's
+    /// own net-ns (pre-pivot, in the `CAP_NET_ADMIN` window that brings [`lo`](Self::lo) up),
+    /// derives its ULA `/64` from the kernel-trusted uid, and places the tun fd at
+    /// [`TUN_FD`](kennel_lib_syscall::boot::TUN_FD) for `kennel-bin-init` to inherit. `false` ⇒ no
+    /// tun. Distinct from the `_fd_present` flags: the tun fd is *created* by the factory, not
+    /// passed in.
+    pub tun: bool,
     /// Whether an interactive controlling-pty return socket accompanies the construction
     /// datagram as an `SCM_RIGHTS` fd (placed at [`PTY_RETURN_FD`]). The factory needs
     /// this — it decodes the half but forwards the supervision-half (which holds the workload

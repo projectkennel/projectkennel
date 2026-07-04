@@ -461,3 +461,14 @@ verified-against = [
     "gitlab.redox-os.org/redox-os/termion @ c784cec0a6f8d1b02692eb58d781acf172bb5959 (.cargo_vcs_info.json commit) — source inspection; repo is GitLab-hosted (Redox OS), not GitHub (audit-source.sh does not cover GitLab)",
 ]
 notes = "Terminal control library: raw mode, ANSI escape codes, cursor control, terminal size, input event parsing. 2132 lines across 16 source files. Eight instances of unsafe — all thin libc FFI wrappers (isatty, ioctl for terminal size, tcgetattr/tcsetattr/cfmakeraw). No build.rs, no proc-macro. Depends only on libc (already vendored) and numtoa (above). Licence MIT. Shipped: kennel-compose only (standalone optional binary, not in the daemon TCB)."
+
+[crate."simple-dns"]
+version = "=0.11.3"
+crate-sha256 = "7a75cbde1bf934313596a004973e462f9a82caa814dcf1a5f507bdf51597eeb4"
+audited-by = "remco"
+audited-on = "2026-07-03"
+verified-against = [
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm)",
+    "github.com/balliegojr/simple-dns @ 71bef78701404fbcb1afa428be21690474f22818 — 81 source files byte-identical via tools/audit-source.sh; the release tag simple-dns/0.11.3 resolves to that exact commit",
+]
+notes = "DNS message codec for the W2 UDP-egress broker's naming shim (parse the workload's query, build the AAAA/NODATA reply). The hostile-input parser the no-hand-roll rule delegates (the vte precedent, §5.1); the shim only mints synthetics — no resolver, no wire. One transitive: bitflags (already vendored via nix). No build.rs, no proc-macro; safe API. Licence MIT. Shipped: kennel-udp-broker (per-kennel host-mode leaf), not in kenneld's per-flow path."

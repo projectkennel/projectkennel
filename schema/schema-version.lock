@@ -1,13 +1,18 @@
 # Append-only: one "<SETTLED_SCHEMA_VERSION> <sha256 of the schema shape>" line per version.
 # Maintained by src/tools/tests/schema-version-pin.sh — never edit a past version's line.
 #
-# v3 re-pinned without a version bump for two corrections, both of which leave the accepted-policy
-# set unchanged (old v3 settled artefacts stay valid): (1) when the schema became DERIVED from the
-# parser structs (#142) — the prior pins captured the hand-mirror's incomplete shape, which omitted
-# the `[[*.add]]` delta forms the parser always accepted; (2) when `[[provides]]`/`[[consumes]]`
-# `name`/`shape` were typed required — they were already compile-validated as required, so only the
-# schema's required-ness was too loose. No authorable field was added/removed and the settled
-# format is unchanged, so the version stays v3 — a corrected fingerprint of the same format.
+# v3 is re-pinned (not bumped) for changes that keep every existing v3 settled artefact valid.
+# Two classes:
+#   * Fingerprint corrections that add NO authorable field: (1) the schema became DERIVED from the
+#     parser structs (#142) — the prior pins captured the hand-mirror's incomplete shape, which
+#     omitted the `[[*.add]]` delta forms the parser always accepted; (2) `[[provides]]`/`[[consumes]]`
+#     `name`/`shape` were typed required, matching a check the compiler already enforced.
+#   * Additive-OPTIONAL sections whose absence is the default, so a policy that does not use them
+#     yields a byte-identical artefact: the 0.6.0 persona `[identity].hostname` and `[net.udp]` +
+#     `[[net.udp.allow]]` (W2). The W2 settled additions — the `udp` flag and the `udp_allow_names`
+#     grant list — are both skipped from the canonical form when unset/empty, so a v3 policy without
+#     `[net.udp]` signs and loads exactly as before.
+# The settled FORMAT is unchanged in every case, so the version stays v3.
 1 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
 2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
-3 b6fafc919d55fb9e4e616d34815a4990977463aeab3b05a99093fc88e93dd74d
+3 3d2573267474db9b7bc3ec68402ae64088259ab8408f513ad8640e7214a78c3f

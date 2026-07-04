@@ -47,7 +47,7 @@ use crate::source::{
     self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BoundaryAcl, CapSection,
     DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
     FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind, NetBpf,
-    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, PathField, RootfsSection,
+    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, NetUdp, PathField, RootfsSection,
     SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection, TrustSection,
     TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
@@ -621,6 +621,15 @@ fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
         bind: merge(&p.bind, &c.bind, fold_net_bind),
         ipv6: merge(&p.ipv6, &c.ipv6, fold_net_ipv6),
         audit: merge(&p.audit, &c.audit, fold_net_audit),
+        udp: merge(&p.udp, &c.udp, fold_net_udp),
+    }
+}
+
+/// Fold `[net.udp]`: compose the destination allowlist (fragments increment via
+/// `[[net.udp.allow.add]]`), keyed like `[[net.proxy.allow]]`.
+fn fold_net_udp(p: &NetUdp, c: &NetUdp) -> NetUdp {
+    NetUdp {
+        allow: fold_listfield(&c.allow, &p.allow, net_key),
     }
 }
 

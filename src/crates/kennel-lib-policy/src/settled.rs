@@ -139,6 +139,69 @@ pub struct NameRule {
     pub protocol: Protocol,
 }
 
+/// Whether a policy name `pattern` matches a destination/query `name`, by the proxy's
+/// dot-convention.
+///
+/// This is the single source both the egress proxy (`kenneld`'s `NetRuntime`) and the UDP-egress
+/// broker's naming shim (`kennel-tun-broker`) match names against, so the two cannot drift:
+///
+/// - a plain pattern (`example.com`) matches that name **exactly** — the safe whitelist default, so
+///   an allow of `example.com` does not silently admit subdomains;
+/// - a leading dot (`.example.com`) matches the apex **and** any subdomain (`example.com`,
+///   `api.example.com`) on a label boundary, so it does not match `notexample.com`.
+///
+/// Case-insensitive (ASCII).
+#[must_use]
+pub fn name_matches(pattern: &str, name: &str) -> bool {
+    pattern.strip_prefix('.').map_or_else(
+        || pattern.eq_ignore_ascii_case(name),
+        |apex| name.eq_ignore_ascii_case(apex) || ends_with_label(name, pattern),
+    )
+}
+
+/// Whether `name` ends with the dotted `suffix` (e.g. `.example.com`) on a label boundary,
+/// case-insensitively. `suffix` includes its leading dot, so the match is inherently label-aligned.
+fn ends_with_label(name: &str, suffix: &str) -> bool {
+    name.len() > suffix.len()
+        && name
+            .get(name.len().saturating_sub(suffix.len())..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+}
+
+#[cfg(test)]
+mod name_match_tests {
+    use super::name_matches;
+
+    #[test]
+    fn plain_pattern_matches_exactly_only() {
+        assert!(name_matches("example.com", "example.com"));
+        assert!(
+            name_matches("example.com", "EXAMPLE.COM"),
+            "case-insensitive"
+        );
+        assert!(
+            !name_matches("example.com", "api.example.com"),
+            "no implicit subdomain"
+        );
+        assert!(!name_matches("example.com", "notexample.com"));
+    }
+
+    #[test]
+    fn dotted_pattern_matches_apex_and_subdomains_on_a_label_boundary() {
+        assert!(name_matches(".example.com", "example.com"), "apex");
+        assert!(name_matches(".example.com", "api.example.com"), "subdomain");
+        assert!(
+            name_matches(".example.com", "a.b.example.com"),
+            "deep subdomain"
+        );
+        assert!(
+            !name_matches(".example.com", "notexample.com"),
+            "label boundary"
+        );
+        assert!(!name_matches(".example.com", "example.com.evil.net"));
+    }
+}
+
 /// Where the per-kennel egress proxy listens, resolved from the source policy's
 /// `proxy_listen_*_address = "offset:port"` (Kennel book Vol 2 ch.8 (The Network)).
 ///
@@ -189,6 +252,11 @@ impl ProxyListen {
 pub struct NetPolicy {
     /// Enforcement mode.
     pub mode: NetMode,
+    /// Whether UDP egress is enabled (`[net.udp]`, W2): the tun + fenced-broker path on the
+    /// proxied modes. The destination grants are [`udp_allow_names`](Self::udp_allow_names).
+    /// Omitted from the canonical form when false, so a policy without it signs unchanged.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub udp: bool,
     /// Lowest port the workload may `bind()` (`[net.bind].min_port`, §7.5.7). A bind
     /// below this is denied by the cgroup `bind4`/`bind6` BPF — the privileged-port
     /// protection (T6, §7.5.9 item 17). `0` means no minimum is enforced. Carried into
@@ -221,6 +289,14 @@ pub struct NetPolicy {
     /// the per-kennel egress proxy (the BPF cannot match names); consulted in `constrained` mode.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_names: Vec<NameRule>,
+    /// UDP egress destinations **by name** — the grants from `[[net.udp.allow]]` (`[net.udp]`, W2),
+    /// each a `Protocol::Udp` [`NameRule`]. Carried SEPARATELY from
+    /// [`allow_names`](Self::allow_names): the egress proxy is TCP-CONNECT and protocol-blind over
+    /// `allow_names` (`inet.rs` maps every entry into a proxy rule), so a UDP name must never enter
+    /// that list. The fenced broker (the tun's flow provider) is the sole consumer; omitted from the
+    /// canonical form when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub udp_allow_names: Vec<NameRule>,
     /// Invariant deny CIDRs (cloud metadata, link-local, RFC1918). Must be
     /// present; cannot be removed by any delta.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1604,6 +1680,8 @@ pub fn sample_settled() -> SettledPolicy {
         effective_policy: EffectivePolicy {
             net: NetPolicy {
                 mode: NetMode::Constrained,
+                udp: false,
+                udp_allow_names: Vec::new(),
                 proxy: ProxyListen::default(),
                 allow: vec![NetRule {
                     cidr: "93.184.216.0".to_owned(),

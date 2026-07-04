@@ -39,6 +39,8 @@ const IFF_UP: u32 = 0x1;
 // `ifaddrmsg` route attributes (`<linux/if_addr.h>`).
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
+/// `ifinfomsg` link attribute `IFLA_MTU` (`<linux/if_link.h>`): the u32 interface MTU.
+const IFLA_MTU: u16 = 4;
 
 /// `nlmsghdr` is 16 bytes; we prepend it once the body length is known.
 const NLMSGHDR_LEN: u32 = 16;
@@ -100,35 +102,57 @@ pub fn del_address(ifindex: u32, addr: IpAddr, prefix_len: u8) -> io::Result<()>
 ///
 /// Returns the OS error if the kernel rejects the request.
 pub fn set_link_up(ifindex: u32) -> io::Result<()> {
-    let msg = build_link_up_msg(ifindex)?;
-    netlink_round_trip(&msg)
+    // `change = IFF_UP` masks the update to just the admin-up bit.
+    let body = ifinfomsg(ifindex, IFF_UP, IFF_UP)?;
+    netlink_round_trip(&frame(RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK, &body)?)
 }
 
-/// Serialise an `nlmsghdr` + `ifinfomsg` setting `IFF_UP` (no rtattrs).
+/// Set the interface `ifindex` MTU (`RTM_NEWLINK`, `IFLA_MTU`).
 ///
-/// `ifinfomsg` is `{ u8 family; u8 pad; u16 type; i32 index; u32 flags; u32 change }` — 16 bytes,
-/// already 4-byte aligned. `change = IFF_UP` masks the update to just the up bit.
-fn build_link_up_msg(ifindex: u32) -> io::Result<Vec<u8>> {
+/// The UDP-egress tun is created at MTU 1280 (the IPv6 minimum) so the L3 facade never has to
+/// fragment. Unprivileged within the kennel's own user+network namespace (the construction child
+/// holds `CAP_NET_ADMIN` there).
+///
+/// # Errors
+///
+/// Returns the OS error if the kernel rejects the request.
+pub fn set_mtu(ifindex: u32, mtu: u32) -> io::Result<()> {
+    // `ifinfomsg` with no flag change, followed by an `IFLA_MTU` (u32) rtattr — the 8-byte attr
+    // keeps the message 4-byte aligned, so no padding is needed.
+    let mut body = ifinfomsg(ifindex, 0, 0)?;
+    body.extend_from_slice(&8u16.to_ne_bytes()); // rta_len (4 header + 4 value)
+    body.extend_from_slice(&IFLA_MTU.to_ne_bytes()); // rta_type
+    body.extend_from_slice(&mtu.to_ne_bytes()); // u32 value
+    netlink_round_trip(&frame(RTM_NEWLINK, NLM_F_REQUEST | NLM_F_ACK, &body)?)
+}
+
+/// Serialise a 16-byte `ifinfomsg` — `{ u8 family; u8 pad; u16 type; i32 index; u32 flags;
+/// u32 change }`, already 4-byte aligned. `change` masks which `flags` bits the kernel applies.
+fn ifinfomsg(ifindex: u32, flags: u32, change: u32) -> io::Result<Vec<u8>> {
     let index = i32::try_from(ifindex).map_err(|_| invalid("ifindex too large"))?;
     let mut body: Vec<u8> = Vec::with_capacity(16);
     body.push(0u8); // ifi_family = AF_UNSPEC
     body.push(0u8); // pad
     body.extend_from_slice(&0u16.to_ne_bytes()); // ifi_type (ignored on set)
     body.extend_from_slice(&index.to_ne_bytes()); // ifi_index
-    body.extend_from_slice(&IFF_UP.to_ne_bytes()); // ifi_flags
-    body.extend_from_slice(&IFF_UP.to_ne_bytes()); // ifi_change (only the up bit)
+    body.extend_from_slice(&flags.to_ne_bytes()); // ifi_flags
+    body.extend_from_slice(&change.to_ne_bytes()); // ifi_change
+    Ok(body)
+}
 
+/// Prepend an `nlmsghdr` (seq 1, pid 0 → to the kernel) to a serialised message `body`.
+fn frame(rtm_type: u16, flags: u16, body: &[u8]) -> io::Result<Vec<u8>> {
     let total = u32::try_from(body.len())
         .ok()
         .and_then(|b| b.checked_add(NLMSGHDR_LEN))
         .ok_or_else(|| invalid("message too long"))?;
     let mut msg = Vec::with_capacity(body.len().wrapping_add(NLMSGHDR_LEN as usize));
     msg.extend_from_slice(&total.to_ne_bytes()); // nlmsg_len
-    msg.extend_from_slice(&RTM_NEWLINK.to_ne_bytes()); // nlmsg_type
-    msg.extend_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes()); // nlmsg_flags
+    msg.extend_from_slice(&rtm_type.to_ne_bytes()); // nlmsg_type
+    msg.extend_from_slice(&flags.to_ne_bytes()); // nlmsg_flags
     msg.extend_from_slice(&1u32.to_ne_bytes()); // nlmsg_seq
     msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid (to the kernel)
-    msg.extend_from_slice(&body);
+    msg.extend_from_slice(body);
     Ok(msg)
 }
 
@@ -187,20 +211,7 @@ fn build_addr_msg(
         body.extend_from_slice(&rta_type.to_ne_bytes());
         body.extend_from_slice(addr);
     }
-
-    let total = u32::try_from(body.len())
-        .ok()
-        .and_then(|b| b.checked_add(NLMSGHDR_LEN))
-        .ok_or_else(|| invalid("message too long"))?;
-
-    let mut msg = Vec::with_capacity(body.len().wrapping_add(NLMSGHDR_LEN as usize));
-    msg.extend_from_slice(&total.to_ne_bytes()); // nlmsg_len
-    msg.extend_from_slice(&rtm_type.to_ne_bytes()); // nlmsg_type
-    msg.extend_from_slice(&flags.to_ne_bytes()); // nlmsg_flags
-    msg.extend_from_slice(&1u32.to_ne_bytes()); // nlmsg_seq
-    msg.extend_from_slice(&0u32.to_ne_bytes()); // nlmsg_pid (to the kernel)
-    msg.extend_from_slice(&body);
-    Ok(msg)
+    frame(rtm_type, flags, &body)
 }
 
 /// Open a `NETLINK_ROUTE` socket, send `msg` to the kernel, and interpret the ack.
@@ -276,12 +287,12 @@ mod root_tests {
         assert!(lo_has("127.9.9.1"), "v4 alias should be present on lo");
         assert!(lo_has("fd00:9:9::1"), "v6 ULA should be present on lo");
 
-        // Adding the same v4 again must conflict (NLM_F_EXCL).
-        assert_eq!(
-            add_address(lo, v4, 24)
-                .expect_err("re-add should fail")
-                .raw_os_error(),
-            Some(libc::EEXIST)
+        // Re-adding the same v4 is idempotent: the kernel's `EEXIST` (from `NLM_F_EXCL`) is
+        // swallowed, so a crashed kennel's leaked address never blocks the next spawn.
+        add_address(lo, v4, 24).expect("re-add is idempotent");
+        assert!(
+            lo_has("127.9.9.1"),
+            "still present after the idempotent re-add"
         );
 
         del_address(lo, v4, 24).expect("del v4");
@@ -289,4 +300,9 @@ mod root_tests {
         assert!(!lo_has("127.9.9.1"), "v4 alias should be gone");
         assert!(!lo_has("fd00:9:9::1"), "v6 ULA should be gone");
     }
+
+    // `set_mtu` (like `set_link_up`) is exercised by the real construction e2e — the UDP-egress
+    // tun is created at MTU 1280 — not a unit test here: this crate is `#![forbid(unsafe_code)]`,
+    // so the netns unshare a standalone MTU test would need cannot live in it. The shared
+    // `frame`/`ifinfomsg` builders `set_mtu` uses are covered by the address test above.
 }

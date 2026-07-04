@@ -186,6 +186,22 @@ pub fn dup_above(src: BorrowedFd<'_>, base: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
+/// Adopt an **inherited** descriptor at a fixed number (a [`crate::boot`] slot) as an [`OwnedFd`].
+///
+/// A process that inherits descriptors at agreed fixed numbers across `execve` (e.g. `facade-tun`
+/// receiving the tun and broker fds) holds only the numbers, not any `OwnedFd`. This takes
+/// ownership of one so it can drive safe typed wrappers (`File`, `UnixDatagram`) inside a
+/// `#![forbid(unsafe_code)]` binary — the same reason `boot::borrow` wraps `borrow_raw`.
+///
+/// The caller must guarantee `fd` is a valid, open descriptor this process owns and that nothing
+/// else already wraps: exactly one `adopt` per inherited slot (a second wrap risks a double close).
+#[must_use]
+pub fn adopt(fd: RawFd) -> OwnedFd {
+    // SAFETY: per the documented caller contract, `fd` is an owned, singly-wrapped inherited
+    // descriptor; wrapping it transfers ownership for RAII close.
+    unsafe { OwnedFd::from_raw_fd(fd) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

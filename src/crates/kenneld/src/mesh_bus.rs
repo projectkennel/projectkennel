@@ -21,32 +21,52 @@ use std::thread::JoinHandle;
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::ctxmgr::{ContextManager, DeathHandler, Handler, Reply, Waker};
-use kennel_lib_binder::service::{broker, mesh, status, verb};
+use kennel_lib_binder::service::{mesh, status, verb};
 
 use kennel_lib_audit::{Event, Outcome, Resource, Source, Value, Writer};
 
 use crate::catalogue::Tier;
 
 /// The mmap size for mesh bus context managers. The mesh carries only mediation
-/// transactions (`ADD_SERVICE` / `SVC_CONNECT`) — small payloads — so 64 KiB suffices.
+/// transactions (`ADD_SERVICE` / `SVC_CONNECT` / `GET_SESSION_POLICY`) — small payloads — so 64 KiB
+/// suffices.
 const MESH_MAP_SIZE: usize = 64 * 1024;
-/// The dbus-broker's control-node service name on the mesh bus (where kenneld pushes
-/// `ACCEPT_SESSION`). Consumers never resolve this — only kenneld holds it.
+/// The dbus-broker's mesh-bus / control-node service name.
 const DBUS_BROKER_SERVICE: &str = "org.projectkennel.dbus-broker";
 
-/// Maximum looper threads for a mesh bus. The D-Bus `SVC_CONNECT` blocks on an `ACCEPT_SESSION`
+/// Whether a mesh bus `name` is a mediation broker's bus — one whose `SVC_CONNECT` mints a policed
+/// session via `NEW_SESSION` rather than resolving straight to a provider handle.
+///
+/// D-Bus only: `IDBus` is genuinely binder-mediated (per-message filtering), so it rides the
+/// cross-kennel mesh. Other brokers (tun, gui) are af-unix `[[provides]]`/`[[consumes]]` pairs whose
+/// data plane is a plain socket — they never touch this path.
+#[must_use]
+pub fn mediation_for(name: &str) -> bool {
+    name == DBUS_BROKER_SERVICE
+}
+
+/// Maximum looper threads for a mesh bus. A mediated `SVC_CONNECT` blocks on a `NEW_SESSION`
 /// round-trip to the broker (a separate kennel), so the pool must hold ≥2 threads: one parked on
-/// that transaction while another serves the next consumer.
+/// that transaction while another serves the next consumer — including the broker's own
+/// `GET_SESSION_POLICY` pull, which must be serviceable while a `NEW_SESSION` is outstanding.
 const MESH_POOL_MAX: u32 = 4;
 
-/// Resolve a mesh `SVC_CONNECT` to the per-session `ACCEPT_SESSION` filter for the caller.
+/// How a mediation-broker mesh bus mints and polices sessions (dbus, tun) — the generic pull model.
 ///
-/// Given the kernel-attested `sender_pid` and the requested capability `name`, returns the encoded
-/// [`broker::encode_accept`] payload (the kennel's one D-Bus filter for the requested bus) when the
-/// name is a D-Bus capability and the pid resolves to a kennel with that bus enabled; `None`
-/// otherwise. kenneld owns this: the mesh handler stays out of identity logic and never trusts the
-/// caller. Resolved fresh per connect (`sender_pid` → cgroup → ctx → policy) — nothing remembered.
-pub type DbusResolver = Arc<dyn Fn(i32, &str) -> Option<Vec<u8>> + Send + Sync>;
+/// `broker_service` is the control-node service name (in the bus's handle map) kenneld sends
+/// [`kennel_lib_binder::service::session::NEW_SESSION`] to. `policy` answers the broker's [`verb::GET_SESSION_POLICY`] pull:
+/// given the consumer's `ctx` and the capability `name`, it returns that shape's session artifact
+/// from the running kennel's retained settled struct (`None` if not resolvable). kenneld owns
+/// identity; the handler never trusts the caller.
+pub struct Mediation {
+    /// The broker's control-node service name to send `NEW_SESSION` to.
+    pub broker_service: String,
+    /// The `GET_SESSION_POLICY` backing: `(ctx, capability name)` → session-policy artifact bytes.
+    pub policy: SessionPolicyFn,
+}
+
+/// The [`Mediation::policy`] backing: `(consumer ctx, capability name)` → session-policy artifact.
+pub type SessionPolicyFn = Arc<dyn Fn(u16, &str) -> Option<Vec<u8>> + Send + Sync>;
 
 /// Poll timeout (ms) for the mesh bus looper.
 const MESH_POLL_MS: i32 = 500;
@@ -85,9 +105,10 @@ impl MeshBus {
     /// Mounts a binderfs at `<runtime>/mesh/<tier>/<component>/`, allocates the binder
     /// device, opens it, becomes context manager (node 0), and starts the serve loop.
     ///
-    /// `dbus_resolver` is `Some` only for the D-Bus connector bus: it maps a consumer's
-    /// `SVC_CONNECT` to the per-session `ACCEPT_SESSION` filter (see [`DbusResolver`]). Every
-    /// other connector bus passes `None` and resolves consumers to their provider's handle.
+    /// `mediation` is `Some` only for a mediation-broker bus (dbus, tun): its node-0 handler mints a
+    /// policed session per consumer via [`kennel_lib_binder::service::session::NEW_SESSION`] and answers the broker's
+    /// [`verb::GET_SESSION_POLICY`] pull (see [`Mediation`]). Every other connector bus passes `None`
+    /// and resolves consumers straight to their provider's handle.
     ///
     /// # Errors
     ///
@@ -102,7 +123,7 @@ impl MeshBus {
         name: &str,
         key: Option<&str>,
         writer: &Arc<Writer>,
-        dbus_resolver: Option<DbusResolver>,
+        mediation: Option<Mediation>,
         holder_pid: i32,
         holder_sock: std::os::fd::OwnedFd,
     ) -> io::Result<Self> {
@@ -126,7 +147,7 @@ impl MeshBus {
         let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
             mesh_handle(
                 &handles_for_handler,
-                dbus_resolver.as_ref(),
+                mediation.as_ref(),
                 incoming,
                 conn,
                 &writer_for_handler,
@@ -248,18 +269,19 @@ impl Drop for MeshBus {
     }
 }
 
-/// The mesh bus node-0 handler: `ADD_SERVICE` (provider registration) and `SVC_CONNECT`
-/// (consumer resolution).
+/// The mesh bus node-0 handler: `ADD_SERVICE` (provider registration), `SVC_CONNECT` (consumer
+/// resolution), and — on a mediation-broker bus — `GET_SESSION_POLICY` (the broker's policy pull).
 fn mesh_handle(
     handles: &Mutex<HashMap<String, u32>>,
-    dbus_resolver: Option<&DbusResolver>,
+    mediation: Option<&Mediation>,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
 ) -> Reply {
     match incoming.code {
         verb::ADD_SERVICE => mesh_add_service(handles, incoming, conn, writer),
-        verb::SVC_CONNECT => mesh_svc_connect(handles, dbus_resolver, incoming, conn, writer),
+        verb::SVC_CONNECT => mesh_svc_connect(handles, mediation, incoming, conn, writer),
+        verb::GET_SESSION_POLICY => mesh_get_session_policy(mediation, incoming, writer),
         _ => {
             writer.emit(
                 &Event::new(
@@ -338,18 +360,19 @@ fn mesh_add_service(
     Reply::Data(vec![status::OK])
 }
 
-/// Handle `SVC_CONNECT` on the mesh bus: look up the provider's handle and reply
-/// with a `BINDER_TYPE_HANDLE` object. The kernel translates it from `kenneld`'s
-/// handle table into the consumer's — valid because they share the same binder context.
+/// Handle `SVC_CONNECT` on the mesh bus.
 ///
-/// On the D-Bus connector bus (`dbus_resolver` is `Some`), a consumer's `SVC_CONNECT` is resolved
-/// *fresh*: kenneld reads the kernel-attested `sender_pid`, maps it (cgroup → ctx → policy) to the
-/// kennel's one D-Bus filter, pushes `ACCEPT_SESSION(filter)` to the broker's control node, and
-/// hands the consumer the per-session node the broker mints. No table, no cookie — identity is the
-/// kernel's attestation on this transaction, never anything the consumer said.
+/// On a plain provider bus, look up the provider's handle and reply with a `BINDER_TYPE_HANDLE`
+/// object (the kernel translates it from `kenneld`'s table into the consumer's — valid because they
+/// share the binder context).
+///
+/// On a mediation-broker bus (`mediation` is `Some`), mint a policed session instead: kenneld reads
+/// the kernel-attested `sender_pid`, maps it (cgroup → ctx) to the consumer kennel, and delegates to
+/// [`mesh_new_session`]. No table, no cookie — identity is the kernel's attestation on this
+/// transaction, never anything the consumer said.
 fn mesh_svc_connect(
     handles: &Mutex<HashMap<String, u32>>,
-    dbus_resolver: Option<&DbusResolver>,
+    mediation: Option<&Mediation>,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
@@ -370,14 +393,10 @@ fn mesh_svc_connect(
         return Reply::Data(vec![status::BAD_REQUEST]);
     };
 
-    // D-Bus connector bus: resolve identity fresh and mint a filtered session via the broker.
-    if let Some(resolver) = dbus_resolver {
-        if let Some(filter) = resolver(incoming.sender_pid, name) {
-            return mesh_accept_dbus_session(handles, conn, incoming, name, &filter, writer);
-        }
-        // A D-Bus capability the caller could not be authorized for (not under a kennel cgroup, or
-        // no filter for the requested bus) falls through to the provider map, which has no entry
-        // named for a consumer capability — so it resolves to NOT_FOUND below.
+    // Mediation-broker bus: mint a policed session via the broker (the consumer never reaches a raw
+    // provider handle here).
+    if let Some(med) = mediation {
+        return mesh_new_session(handles, med, conn, incoming, name, writer);
     }
 
     let handle = handles
@@ -417,33 +436,31 @@ fn mesh_svc_connect(
     )
 }
 
-/// Push `ACCEPT_SESSION(filter)` to the broker's control node and hand the consumer the
-/// per-session node it mints. `filter` is the already-encoded payload kenneld resolved for this
-/// caller; the broker keys the session by that node (never the consumer's word) and reclaims it on
-/// `Br::Release`. kenneld is out of the byte path once the handle is delivered.
+/// Send the broker a generic [`kennel_lib_binder::service::session::NEW_SESSION`] carrying `(ctx, name)` and hand the consumer
+/// the per-session node it mints. kenneld resolves the consumer's `ctx` from the
+/// kernel-attested `sender_pid`; the broker keys the session by that node and pulls its policy lazily
+/// ([`verb::GET_SESSION_POLICY`]) on first use. kenneld is out of the byte path once the handle is
+/// delivered.
 ///
-/// The `ACCEPT_SESSION` is a nested transaction on `conn` — the same context-manager connection
-/// serving this `SVC_CONNECT`. It must be: the broker's control handle was acquired on this
-/// connection's binder proc ([`mesh_add_service`]), and the session handle the broker returns is
-/// likewise valid only in this proc's table — the very table [`Reply::Handle`] hands the consumer.
-/// A separate client connection would see neither handle.
-fn mesh_accept_dbus_session(
+/// The `NEW_SESSION` is a nested transaction on `conn` — the same context-manager connection serving
+/// this `SVC_CONNECT`; the broker's control handle and the session handle it returns are both valid
+/// only in this proc's table (the very table [`Reply::Handle`] hands the consumer). The broker does
+/// not call back during this transaction — it carries no policy and the broker pulls lazily — so this
+/// blocked connection never has to service a re-entrant transaction.
+fn mesh_new_session(
     handles: &Mutex<HashMap<String, u32>>,
+    med: &Mediation,
     conn: &Connection,
     incoming: &Incoming,
     name: &str,
-    filter: &[u8],
     writer: &Writer,
 ) -> Reply {
-    let control = handles
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(DBUS_BROKER_SERVICE)
-        .copied();
+    use kennel_lib_binder::service::session;
+
     let emit = |outcome: Outcome, reason: &str| {
         writer.emit(
             &Event::new(
-                "mesh.dbus-session",
+                "mesh.new-session",
                 Resource::Binder,
                 outcome,
                 Source::Kenneld,
@@ -453,21 +470,79 @@ fn mesh_accept_dbus_session(
             .field("detail", Value::untrusted(reason.to_owned())),
         );
     };
+
+    let Some(ctx) = crate::cgroup::pid_to_ctx(incoming.sender_pid) else {
+        emit(Outcome::Deny, "caller is not under a kennel cgroup");
+        return Reply::Data(vec![status::NOT_FOUND]);
+    };
+    let control = handles
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&med.broker_service)
+        .copied();
     let Some(control) = control else {
-        emit(Outcome::Error, "dbus-broker control node not registered");
+        emit(Outcome::Error, "broker control node not registered");
         return Reply::Data(vec![status::UNAVAILABLE]);
     };
-    match conn.transact_handle(control, broker::ACCEPT_SESSION, filter) {
-        Ok(session) => {
-            emit(Outcome::Allow, "session accepted");
+    match conn.transact_handle(
+        control,
+        session::NEW_SESSION,
+        &session::encode_ref(ctx, name),
+    ) {
+        Ok(node) => {
+            emit(Outcome::Allow, "session minted");
             // `transact_handle` took a ref on the session node so it would not dangle; forward it,
             // then release our ref (HandleOnce) so the broker reclaims the session when the consumer
             // disconnects — kenneld is not a persistent holder of per-session nodes.
-            Reply::HandleOnce(session)
+            Reply::HandleOnce(node)
         }
         Err(e) => {
-            emit(Outcome::Error, &format!("ACCEPT_SESSION failed: {e}"));
+            emit(Outcome::Error, &format!("NEW_SESSION failed: {e}"));
             Reply::Data(vec![status::UNAVAILABLE])
         }
     }
+}
+
+/// Answer a mediation broker's [`verb::GET_SESSION_POLICY`] pull: the session-policy artifact for the
+/// consumer `ctx`'s use of capability `name`, encoded by [`Mediation::policy`] from the running
+/// kennel's retained settled struct. Only a mediation-broker bus serves this verb; a plain provider
+/// bus rejects it.
+fn mesh_get_session_policy(
+    mediation: Option<&Mediation>,
+    incoming: &Incoming,
+    writer: &Writer,
+) -> Reply {
+    use kennel_lib_binder::service::session;
+
+    let emit = |outcome: Outcome, reason: &str| {
+        writer.emit(
+            &Event::new(
+                "mesh.session-policy",
+                Resource::Binder,
+                outcome,
+                Source::Kenneld,
+            )
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("detail", Value::untrusted(reason.to_owned())),
+        );
+    };
+
+    let Some(med) = mediation else {
+        emit(Outcome::Error, "GET_SESSION_POLICY on a non-mediation bus");
+        return Reply::Data(vec![status::BAD_REQUEST]);
+    };
+    let Some((ctx, name)) = session::decode_ref(&incoming.data) else {
+        emit(Outcome::Error, "malformed request");
+        return Reply::Data(vec![status::BAD_REQUEST]);
+    };
+    (med.policy)(ctx, &name).map_or_else(
+        || {
+            emit(Outcome::Deny, "no session policy for this consumer");
+            Reply::Data(vec![status::NOT_FOUND])
+        },
+        |bytes| {
+            emit(Outcome::Allow, "session policy served");
+            Reply::Data(bytes)
+        },
+    )
 }

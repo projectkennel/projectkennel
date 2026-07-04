@@ -21,6 +21,10 @@ name = "facade-socks5"
 path = "src/bin/facade-socks5.rs"
 
 [[bin]]
+name = "facade-tun"
+path = "src/bin/facade-tun.rs"
+
+[[bin]]
 name = "facade-client"
 path = "src/bin/facade-client.rs"
 
@@ -65,6 +69,9 @@ path = "src/bin/compositor-broker.rs"
 [dependencies]
 # The binder client transaction surface every facade uses to reach node 0.
 kennel-lib-binder = { path = "../kennel-lib-binder" }
+# facade-tun (W2) adopts its inherited tun/broker fds at the fixed boot slots (safe wrappers
+# over the isolated `unsafe`) — the only facade that takes inherited fds rather than binding.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # The shared CLI surface grammar (W10): the spawn unit's `run`/`--` convention is the host
 # unit's, from one definition, so the two surfaces cannot drift.
 kennel-lib-cli = { path = "../kennel-lib-cli" }

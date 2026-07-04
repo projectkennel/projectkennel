@@ -950,6 +950,7 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
         }
         w.u8(lb.prefix);
     }
+    w.bool(c.tun);
     w.bool(c.pty_fd_present);
     w.bool(c.workload_fd_present);
     w.bool(c.stdio_present);
@@ -1000,6 +1001,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         let prefix = r.u8()?;
         loopback.push(crate::plan::LoopbackAddr { addr, prefix });
     }
+    let tun = r.bool()?;
     let pty_fd_present = r.bool()?;
     let workload_fd_present = r.bool()?;
     let stdio_present = r.bool()?;
@@ -1017,6 +1019,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         lo,
         ctx,
         loopback,
+        tun,
         pty_fd_present,
         workload_fd_present,
         stdio_present,
@@ -1300,6 +1303,7 @@ mod tests {
                     prefix: 64,
                 },
             ],
+            tun: true,
             pty_fd_present: true,
             workload_fd_present: true,
             stdio_present: true,
@@ -1329,6 +1333,7 @@ mod tests {
             lo: false,
             ctx: 0,
             loopback: Vec::new(),
+            tun: false,
             pty_fd_present: false,
             workload_fd_present: false,
             stdio_present: false,

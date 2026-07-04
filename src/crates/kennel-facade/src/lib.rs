@@ -18,3 +18,4 @@
 #![forbid(unsafe_code)]
 
 pub mod socks5;
+pub mod tun;
