@@ -59,7 +59,7 @@ KENNEL="/usr/bin/kennel"
 SYSTEM_TOML="/etc/kennel/system.toml"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEY_DIR="$CFG/keys"
-SUITE_KEY="$KEY_DIR/kennel-suite.key"
+SUITE_KEY="$KEY_DIR/kennel-suite"
 TPL_DIR="$CFG/templates"
 
 WORKLOAD_LABELS=("/bin/true" "python3 -c print('hello')")

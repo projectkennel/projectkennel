@@ -39,42 +39,25 @@ impl KeySet {
         Ok(())
     }
 
-    /// Insert a trusted key from its Base64-encoded public-key bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SignatureError::MalformedKey`] if the Base64 is invalid or does
-    /// not decode to a 32-byte key.
-    pub fn insert_b64(
-        &mut self,
-        key_id: impl Into<String>,
-        key_b64: &str,
-    ) -> Result<(), SignatureError> {
-        let bytes = crate::b64::decode(key_b64.as_bytes()).ok_or(SignatureError::MalformedKey)?;
-        self.insert(key_id, &bytes)
-    }
-
     /// Insert a trusted key from a trust-store `.pub` file's contents.
     ///
-    /// Accepts the OpenSSH public-key line the keygen writes
-    /// (`ssh-ed25519 <base64-blob> [comment]`) and, for legacy stores predating the SSHSIG
-    /// format, a bare base64 of the 32 raw key bytes. The `key_id` is the caller's (the trust dir
-    /// keys by file stem), independent of any OpenSSH comment.
+    /// Accepts only the OpenSSH public-key line the keygen writes
+    /// (`ssh-ed25519 <base64-blob> [comment]`). The `key_id` is the caller's (the trust dir
+    /// keys by file stem), independent of any OpenSSH comment. The raw-base64 legacy
+    /// format was removed in 0.6.0.
     ///
     /// # Errors
     ///
-    /// Returns [`SignatureError::MalformedKey`] if the contents are neither a valid OpenSSH
-    /// Ed25519 public key nor base64 that decodes to a 32-byte key.
+    /// Returns [`SignatureError::MalformedKey`] if the contents are not a valid OpenSSH
+    /// Ed25519 public key.
     pub fn insert_pub_line(
         &mut self,
         key_id: impl Into<String>,
         contents: &str,
     ) -> Result<(), SignatureError> {
-        let trimmed = contents.trim();
-        if let Ok((bytes, _comment)) = crate::openssh::parse_public_key(trimmed) {
-            return self.insert(key_id, &bytes);
-        }
-        self.insert_b64(key_id, trimmed)
+        let (bytes, _comment) = crate::openssh::parse_public_key(contents.trim())
+            .map_err(|_| SignatureError::MalformedKey)?;
+        self.insert(key_id, &bytes)
     }
 
     /// Look up a trusted public key by its `key_id`.
@@ -173,16 +156,14 @@ mod tests {
         );
     }
 
-    /// Legacy stores (bare base64 of the 32 raw bytes) still load — the maintainer key shipped that
-    /// way before the SSHSIG format.
+    /// The raw-base64 legacy format (removed in 0.6.0) no longer loads — OpenSSH is
+    /// the only parse.
     #[test]
-    fn insert_pub_line_reads_legacy_base64() {
+    fn insert_pub_line_rejects_legacy_base64() {
         let signer = SigningKey::from_seed("k", &[9u8; 32]).expect("signer");
         let b64 = crate::b64::encode(&signer.public_key_bytes());
         let mut ks = KeySet::new();
-        ks.insert_pub_line("legacy-id", &b64)
-            .expect("legacy b64 loads");
-        assert!(ks.get("legacy-id").is_some());
+        assert!(ks.insert_pub_line("legacy-id", &b64).is_err());
     }
 
     #[test]

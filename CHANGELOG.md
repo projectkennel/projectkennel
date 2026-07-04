@@ -17,6 +17,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   Who may run kennels is governed by execute permission on the privhelper under the libexec
   dir (`chgrp` / `chmod`), not an allocation file; `install.sh` drops its `--provision-users`
   flag accordingly. The unused `<tag>` / `<gid>` template substitution variables are removed.
+- **Removed the legacy raw-base64 key format** (the schedule 0.5.0 committed: both formats
+  accepted during 0.5.0, raw-base64 removed in 0.6.0). The OpenSSH wire format is now the only
+  parse everywhere a key is loaded — the CLI trust-store loader and default-key discovery, and
+  the daemon's per-request trust-store read (signing already went through `ssh-keygen -Y sign`,
+  which never read the legacy seed). A `.pub` still in the legacy format (bare base64 of the 32
+  public-key bytes) is refused with a diagnostic naming the migration: regenerate with
+  `kennel keygen`, or convert the pair once with 0.5.x's `kennel keygen migrate` — which is
+  itself removed; the dead pre-SSHSIG `load_signing_key` path is deleted outright. The shipped
+  maintainer key `keys/kennel-maint-2026.pub` is re-encoded to the OpenSSH line (same key
+  bytes; existing signatures verify unchanged). **Upgrade note:** `install.sh` refreshes the
+  vendor store (`/usr/lib/kennel/keys`), but legacy-format keys linger in the admin and user
+  tiers (`/etc/kennel/keys`, `~/.config/kennel/keys`) — the CLI refuses with the file named
+  until each is converted or removed; the daemon skips them with a warning.
 
 ### Policy schema changes
 

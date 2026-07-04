@@ -93,7 +93,7 @@ POLICY="$CASE_DIR/policy.toml"
 CASE_RUN="$CASE_DIR/run.sh"
 SYSTEM_TOML="/etc/kennel/system.toml"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-SUITE_KEY="$KEY_DIR/kennel-suite.key"
+SUITE_KEY="$KEY_DIR/kennel-suite"
 
 [ -n "$COMPARE_IN" ] && { [ -f "$COMPARE_IN" ] || { echo "no baseline to compare: $COMPARE_IN" >&2; exit 2; }; }
 
