@@ -41,37 +41,41 @@ fn derive_struct(input: &DeriveInput, data: &syn::DataStruct) -> proc_macro2::To
         .to_compile_error();
     };
 
-    let props = named.named.iter().map(|field| {
-        let (rename, field_default) = serde_field(&field.attrs);
-        let key = rename.unwrap_or_else(|| {
-            strip_raw(
-                &field
-                    .ident
-                    .as_ref()
-                    .expect("named-field struct fields have idents")
-                    .to_string(),
-            )
-        });
-        let required = !is_option(&field.ty) && !field_default && !container_default;
-        let desc = first_doc_line(&field.attrs);
-        let ty = &field.ty;
-        // A `String` field that authors a closed value set (kept `String` for authoring
-        // leniency — aliases the strict enum rejects) sources its schema enum from the real
-        // type via `#[schema(values_from = "path::Enum")]`, so the values are derived, not
-        // hand-listed. Absent ⇒ delegate to the field's own type.
-        let node = schema_values_from(&field.attrs).map_or_else(
-            || quote! { <#ty as kennel_schema::SchemaType>::schema_node(defs) },
-            |path| quote! { <#path as kennel_schema::SchemaType>::schema_node(defs) },
-        );
-        quote! {
-            kennel_schema::Prop {
-                key: #key.to_owned(),
-                required: #required,
-                desc: #desc.to_owned(),
-                node: #node,
+    let props = named
+        .named
+        .iter()
+        .filter(|field| !schema_skip(&field.attrs))
+        .map(|field| {
+            let (rename, field_default) = serde_field(&field.attrs);
+            let key = rename.unwrap_or_else(|| {
+                strip_raw(
+                    &field
+                        .ident
+                        .as_ref()
+                        .expect("named-field struct fields have idents")
+                        .to_string(),
+                )
+            });
+            let required = !is_option(&field.ty) && !field_default && !container_default;
+            let desc = first_doc_line(&field.attrs);
+            let ty = &field.ty;
+            // A `String` field that authors a closed value set (kept `String` for authoring
+            // leniency — aliases the strict enum rejects) sources its schema enum from the real
+            // type via `#[schema(values_from = "path::Enum")]`, so the values are derived, not
+            // hand-listed. Absent ⇒ delegate to the field's own type.
+            let node = schema_values_from(&field.attrs).map_or_else(
+                || quote! { <#ty as kennel_schema::SchemaType>::schema_node(defs) },
+                |path| quote! { <#path as kennel_schema::SchemaType>::schema_node(defs) },
+            );
+            quote! {
+                kennel_schema::Prop {
+                    key: #key.to_owned(),
+                    required: #required,
+                    desc: #desc.to_owned(),
+                    node: #node,
+                }
             }
-        }
-    });
+        });
 
     quote! {
         impl kennel_schema::SchemaType for #ident {
@@ -218,6 +222,29 @@ fn schema_values_from(attrs: &[syn::Attribute]) -> Option<syn::Path> {
         });
     }
     path
+}
+
+/// Whether a field carries `#[schema(skip)]` — excluded from the authorable schema.
+///
+/// For fields the policy grammar never accepts at their own key (compile-internal carriers
+/// that are `#[serde(skip_deserializing)]`, populated by the fold): the schema describes what
+/// an author may write, so such a field must not appear in it.
+fn schema_skip(attrs: &[syn::Attribute]) -> bool {
+    let mut skip = false;
+    for attr in attrs {
+        if !attr.path().is_ident("schema") {
+            continue;
+        }
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("skip") {
+                skip = true;
+            } else {
+                consume_optional_value(&meta)?;
+            }
+            Ok(())
+        });
+    }
+    skip
 }
 
 /// Read a struct-level `#[schema(rename = "...")]` def-name override.

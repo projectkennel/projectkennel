@@ -47,9 +47,9 @@ use crate::source::{
     self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BoundaryAcl, CapSection,
     DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
     FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind, NetBpf,
-    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, NetUdp, PathField, RootfsSection,
-    SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection, TrustSection,
-    TtySection, UnixSection, UnsafeSection, WorkloadSection,
+    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, NetUdp, PathField, RedirectEntry,
+    RootfsSection, SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection,
+    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
 };
 use crate::source_sig::{Tier, Trust};
 use kennel_lib_policy::audit::{
@@ -578,7 +578,44 @@ fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
         // Scalar-wins: a child that declares `[fs.cwd]` redefines it wholesale (the grant is
         // an authority the leaf owns end-to-end, not a set to union into).
         cwd: or(&c.cwd, &p.cwd),
+        redirect: fold_redirects(p, c),
     }
+}
+
+/// Fold the `source` redirects (W15) one chain step, mirroring [`fold_pathfield`] per axis.
+///
+/// A redirect rides its granting entry, so it follows that entry's fold fate on its own axis
+/// (`fs.read` or `fs.write`): a child that *replaces* the axis (`Set`) clobbers the axis's
+/// inherited redirects (bare strings carry no `source`); a `Delta` inherits them, drops any
+/// whose path the delta removes, and adds/overrides one per `source`-bearing add (child wins
+/// on the same path); an absent field inherits unchanged. Per-artefact validation caps a
+/// `source`-bearing add at one path, so `path.first()` is total here.
+fn fold_redirects(p: &FsSection, c: &FsSection) -> Vec<RedirectEntry> {
+    let mut out = Vec::new();
+    for (write, child_field) in [(false, &c.read), (true, &c.write)] {
+        let inherited = p.redirect.iter().filter(|r| r.write == write);
+        match child_field {
+            None => out.extend(inherited.cloned()),
+            Some(PathField::Set(_)) => {}
+            Some(PathField::Delta(d)) => {
+                let mut axis: Vec<RedirectEntry> = inherited.cloned().collect();
+                axis.retain(|r| !d.remove.iter().any(|e| e.path.contains(&r.path)));
+                for e in &d.add {
+                    let (Some(source), Some(path)) = (&e.source, e.path.first()) else {
+                        continue;
+                    };
+                    axis.retain(|r| r.path != *path);
+                    axis.push(RedirectEntry {
+                        path: path.clone(),
+                        source: source.clone(),
+                        write,
+                    });
+                }
+                out.extend(axis);
+            }
+        }
+    }
+    out
 }
 
 fn fold_fs_home(p: &FsHome, c: &FsHome) -> FsHome {
@@ -873,6 +910,55 @@ mod tests {
         include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str =
         include_str!("../../../../toml/templates/untrusted-build/policy.toml");
+
+    /// Redirects (W15) ride their granting entry through the fold, per axis.
+    #[test]
+    fn redirects_fold_with_their_axis_and_child_wins_on_the_same_path() {
+        let parent = parse(
+            b"template_name = \"p\"\n[[fs.read.add]]\npath = \"~/.app/cred.json\"\nsource = \"~/stores/a.json\"\nreason = \"redirected credential\"\n",
+        )
+        .expect("parent");
+        let pfs = parent.fs.as_ref().expect("p fs");
+        // The entry's own fold step populates the carrier.
+        let folded = fold_fs(&FsSection::default(), pfs);
+        assert_eq!(folded.redirect.len(), 1);
+        assert_eq!(
+            folded.redirect.first().map(|r| r.source.as_str()),
+            Some("~/stores/a.json")
+        );
+        assert!(folded.redirect.first().is_some_and(|r| !r.write));
+
+        // An absent child field inherits; a child re-adding the same path with its own
+        // `source` overrides (child wins); a child removing the path drops the redirect.
+        let inherit = fold_fs(&folded, &FsSection::default());
+        assert_eq!(inherit.redirect, folded.redirect);
+
+        let override_child = parse(
+            b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.read.add]]\npath = \"~/.app/cred.json\"\nsource = \"~/stores/b.json\"\nreason = \"retargeted\"\n",
+        )
+        .expect("override child");
+        let folded2 = fold_fs(&folded, override_child.fs.as_ref().expect("c fs"));
+        assert_eq!(folded2.redirect.len(), 1);
+        assert_eq!(
+            folded2.redirect.first().map(|r| r.source.as_str()),
+            Some("~/stores/b.json")
+        );
+
+        let removing_child = parse(
+            b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.read.remove]]\npath = \"~/.app/cred.json\"\nreason = \"dropped\"\n",
+        )
+        .expect("removing child");
+        let folded3 = fold_fs(&folded, removing_child.fs.as_ref().expect("c fs"));
+        assert!(folded3.redirect.is_empty());
+
+        // A set-form replacement of the axis clobbers its redirects (bare strings carry no
+        // `source`), while the other axis's redirects survive.
+        let replacing_child =
+            parse(b"name = \"k\"\ntemplate_base = \"p\"\n[fs]\nread = [\"/usr\"]\n")
+                .expect("replacing child");
+        let folded4 = fold_fs(&folded, replacing_child.fs.as_ref().expect("c fs"));
+        assert!(folded4.redirect.is_empty());
+    }
 
     #[test]
     fn fold_ulimits_is_per_key_child_overrides() {

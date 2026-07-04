@@ -13,7 +13,7 @@ use std::path::Path;
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
-// ─── openat2(2) — RESOLVE_NO_SYMLINKS ────────────────────────────────────────
+// ─── openat2(2) — RESOLVE_NO_SYMLINKS / RESOLVE_NO_MAGICLINKS ────────────────
 
 /// The kernel's `struct open_how` (v0, `OPEN_HOW_SIZE_VER0 = 24`).
 ///
@@ -26,10 +26,18 @@ struct OpenHow {
     resolve: u64,
 }
 
+/// `RESOLVE_NO_MAGICLINKS` (`<linux/openat2.h>`, kernel 5.6+).
+///
+/// If any path component is a procfs/sysfs "magic link" (`/proc/<pid>/fd/…`,
+/// `/proc/<pid>/root`, …), the `openat2` call fails with `ELOOP`. Ordinary
+/// symbolic links still resolve.
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+
 /// `RESOLVE_NO_SYMLINKS` (`<linux/openat2.h>`, kernel 5.6+).
 ///
 /// If any path component (including the final one) is a symbolic link, the
-/// `openat2` call fails with `ELOOP`.
+/// `openat2` call fails with `ELOOP`. Per `openat2(2)` this implies
+/// [`RESOLVE_NO_MAGICLINKS`].
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 
 /// `__NR_openat2` — syscall 437 on x86-64 / aarch64 / riscv64.
@@ -53,6 +61,31 @@ const SYS_OPENAT2: libc::c_long = 437;
 /// - `ENOSYS`: kernel < 5.6 (does not support `openat2`).
 /// - Any other `openat2` error (`ENOENT`, `EACCES`, …).
 pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
+    openat2_o_path(dir_fd, path, RESOLVE_NO_SYMLINKS)
+}
+
+/// Open `path` relative to `dir_fd` with `RESOLVE_NO_MAGICLINKS`, returning an
+/// `O_PATH` fd.
+///
+/// Ordinary symlinks resolve (an operator-owned source tree is commonly a
+/// symlink farm — stow/chezmoi/home-manager), but a procfs/sysfs magic link in
+/// any component fails with `ELOOP` — the redirected-bind-source escape class
+/// (a `source` aliased through `/proc/<pid>/root/…` out of the intended tree).
+/// The returned fd is safe to bind via `/proc/self/fd/N`.
+///
+/// `dir_fd` follows the kernel's `int dfd` semantics (see [`open_no_symlinks`]).
+///
+/// # Errors
+///
+/// - `ELOOP`: a path component is a magic link.
+/// - `ENOSYS`: kernel < 5.6 (does not support `openat2`).
+/// - Any other `openat2` error (`ENOENT`, `EACCES`, …).
+pub fn open_no_magiclinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
+    openat2_o_path(dir_fd, path, RESOLVE_NO_MAGICLINKS)
+}
+
+/// The shared `openat2(2)` body: open `path` as `O_PATH` under `resolve` restrictions.
+fn openat2_o_path(dir_fd: RawFd, path: &Path, resolve: u64) -> io::Result<OwnedFd> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -61,7 +94,7 @@ pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
     let how = OpenHow {
         flags: libc::O_PATH as u64, // fd-only, no read/write capability
         mode: 0,
-        resolve: RESOLVE_NO_SYMLINKS,
+        resolve,
     };
     // SAFETY: `openat2` with a valid `dir_fd` (or `AT_FDCWD`), a NUL-terminated
     // `path`, and a correctly sized, stack-local `open_how` is a pure open-path

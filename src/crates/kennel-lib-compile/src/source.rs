@@ -326,6 +326,17 @@ pub struct PathEntry {
     /// form). Normalisation happens on the folded set, so order/dedup need no care here.
     #[serde(deserialize_with = "de_path_list", serialize_with = "ser_path_list")]
     pub path: Vec<String>,
+    /// A different host path serving this view path (W15).
+    ///
+    /// The fs mapping is symmetric by default — the host inode at `path` appears at `path` in
+    /// the view. `source` breaks the symmetry deliberately: the view path is served from an
+    /// operator-held store (per-workload credential/state redirection without reparenting the
+    /// whole home). Legal only on `[[fs.read.add]]`/`[[fs.write.add]]` entries with exactly
+    /// one `path`; refused on `remove` deltas, `fs.deny`, and `exec.allow`. The settle-time
+    /// floor refuses a `source` inside the resolved write set (a redirect into
+    /// workload-writable state is a confused-deputy hole, however validly signed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     /// Why (required on every delta entry; validated at compile).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -695,6 +706,30 @@ pub struct FsSection {
     /// `[fs.cwd]`: materialise the invocation cwd into the view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<FsCwd>,
+    /// Fold-accumulated `source` redirects (W15): one `{ path, source, write }` per divergent
+    /// grant, collected by the chain fold from `source`-bearing `[[fs.read.add]]` /
+    /// `[[fs.write.add]]` entries. Never authored at this key — the field is skipped on
+    /// deserialize, so a policy writing `[fs] redirect` is refused as an unknown field; the
+    /// only authoring surface is `source` on the entry. Serialized (when non-empty) so the
+    /// effective dump (`policy show`) accounts for every `source → path` divergence.
+    #[serde(default, skip_deserializing)]
+    #[cfg_attr(feature = "schema", schema(skip))]
+    pub redirect: Vec<RedirectEntry>,
+}
+
+/// One folded `source → path` fs redirect (W15): the view path and the host path serving it.
+///
+/// `write` records which axis (`fs.read` or `fs.write`) the carrying entry granted — fold
+/// bookkeeping only (a set-form replacement of one axis clobbers that axis's redirects, so the
+/// fold must know which axis a redirect rode in on); translate drops it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RedirectEntry {
+    /// The view path (the granted `path` of the carrying entry).
+    pub path: String,
+    /// The host path serving it.
+    pub source: String,
+    /// Whether the carrying entry was an `fs.write` grant (fold bookkeeping).
+    pub write: bool,
 }
 
 impl Serialize for FsSection {
@@ -738,6 +773,11 @@ impl Serialize for FsSection {
         }
         if let Some(v) = &self.cwd {
             m.serialize_entry("cwd", v)?;
+        }
+        // Fold-derived, never authored: emitted (as an array of tables, after the sub-tables)
+        // so the effective dump accounts for every `source → path` divergence.
+        if !self.redirect.is_empty() {
+            m.serialize_entry("redirect", &self.redirect)?;
         }
         m.end()
     }
@@ -1702,6 +1742,7 @@ impl SourcePolicy {
         self.check_identity(&mut errs);
         self.check_references(&mut errs);
         self.check_reasons(&mut errs);
+        self.check_redirect_sources(&mut errs);
         self.check_leaf_invariants(&mut errs);
         self.check_dbus(&mut errs);
         if errs.is_empty() {
@@ -1865,6 +1906,58 @@ impl SourcePolicy {
                 if is_blank(d.reason.as_deref()) {
                     errs.push(format!(
                         "[[ssh.destinations]] \"{who}\" is missing a `reason`"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// `source` (W15) is legal only on an `fs.read`/`fs.write` **add** with exactly one path.
+    ///
+    /// A `source` against N paths has no coherent meaning; on a `remove` it names nothing (the
+    /// entry subtracts a path, it grants none); on `fs.deny` there is no bind to redirect; on
+    /// `exec.allow` the entry names a binary to permit, not a mapping. Each is refused here,
+    /// per-artefact, before the fold would silently drop it.
+    fn check_redirect_sources(&self, errs: &mut Vec<String>) {
+        if let Some(fs) = &self.fs {
+            for (label, field) in [("fs.read", &fs.read), ("fs.write", &fs.write)] {
+                let Some(PathField::Delta(d)) = field else {
+                    continue;
+                };
+                for e in d.add.iter().filter(|e| e.source.is_some()) {
+                    if e.path.len() > 1 {
+                        errs.push(format!(
+                            "[[{label}.add]] \"{}\" carries a `source` against {} paths; \
+                             a redirect maps exactly one view path",
+                            e.path.join(", "),
+                            e.path.len()
+                        ));
+                    }
+                }
+                for e in d.remove.iter().filter(|e| e.source.is_some()) {
+                    errs.push(format!(
+                        "[[{label}.remove]] \"{}\" carries a `source`; a remove subtracts a \
+                         path and grants nothing to redirect",
+                        e.path.join(", ")
+                    ));
+                }
+            }
+            for e in fs.deny.iter().flat_map(PathField::delta_entries) {
+                if e.source.is_some() {
+                    errs.push(format!(
+                        "[[fs.deny.*]] \"{}\" carries a `source`; a deny has no bind to redirect",
+                        e.path.join(", ")
+                    ));
+                }
+            }
+        }
+        if let Some(exec) = &self.exec {
+            for e in exec.allow.iter().flat_map(PathField::delta_entries) {
+                if e.source.is_some() {
+                    errs.push(format!(
+                        "[[exec.allow.*]] \"{}\" carries a `source`; redirects apply to \
+                         `fs.read`/`fs.write` grants only",
+                        e.path.join(", ")
                     ));
                 }
             }
@@ -2444,6 +2537,63 @@ image = \"docker.io/library/postgres:17\"
         let one = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
                    [[fs.read.add]]\npath = \"/a\"\nreason = \"r\"\n";
         assert_eq!(first_add_path(one), vec!["/a".to_owned()]);
+    }
+
+    /// `source` (W15) is legal only on an fs.read/fs.write add with exactly one path.
+    #[test]
+    fn redirect_source_is_confined_to_single_path_fs_adds() {
+        fn errors_of(src: &str) -> Vec<String> {
+            match parse(src.as_bytes()).expect("parse").validate() {
+                Ok(()) => Vec::new(),
+                Err(PolicyError::SourceValidation(ms)) => ms,
+                Err(e) => vec![format!("unexpected error class: {e}")],
+            }
+        }
+        let ok = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                  [[fs.read.add]]\npath = \"~/.app/cred.json\"\nsource = \"~/stores/a.json\"\nreason = \"r\"\n";
+        assert!(
+            !errors_of(ok).iter().any(|m| m.contains("source")),
+            "single-path add carries a source"
+        );
+
+        let multi = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                     [[fs.read.add]]\npath = [\"/a\", \"/b\"]\nsource = \"/s\"\nreason = \"r\"\n";
+        assert!(
+            errors_of(multi).iter().any(|m| m.contains("2 paths")),
+            "source against N paths is refused"
+        );
+
+        let remove = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                      [[fs.write.remove]]\npath = \"/a\"\nsource = \"/s\"\nreason = \"r\"\n";
+        assert!(
+            errors_of(remove).iter().any(|m| m.contains("remove")),
+            "source on a remove is refused"
+        );
+
+        let deny = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                    [[fs.deny.add]]\npath = \"/a\"\nsource = \"/s\"\nreason = \"r\"\n";
+        assert!(
+            errors_of(deny).iter().any(|m| m.contains("fs.deny")),
+            "source on fs.deny is refused"
+        );
+
+        let exec = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                    [[exec.allow.add]]\npath = \"/a\"\nsource = \"/s\"\nreason = \"r\"\n";
+        assert!(
+            errors_of(exec).iter().any(|m| m.contains("exec.allow")),
+            "source on exec.allow is refused"
+        );
+    }
+
+    /// `[fs] redirect` is fold-derived, never authored: the key is refused at parse.
+    #[test]
+    fn fs_redirect_is_not_directly_authorable() {
+        let src = "name = \"n\"\ntemplate_base = \"base-confined\"\n\
+                   [[fs.redirect]]\npath = \"/a\"\nsource = \"/s\"\n";
+        assert!(
+            parse(src.as_bytes()).is_err(),
+            "the only authoring surface is `source` on the granting entry"
+        );
     }
 
     #[test]

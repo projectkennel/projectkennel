@@ -138,6 +138,26 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **`[[fs.read/write/deny.add]]` and `[[exec.allow.add]]` now accept an array `path`** (a list of
   paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
   still serialises as a bare string, so existing signed artefacts verify unchanged.
+- **`source` on `[[fs.read.add]]` / `[[fs.write.add]]` — the asymmetric fs grant (W15;
+  additive-optional, schema stays v3, shape re-pinned).** By default the fs mapping is symmetric —
+  the host inode at `path` appears at `path` in the view. An entry carrying `source` serves the
+  view path from a **different host path** instead: per-workload credential/state redirection
+  (`path = "~/.claude/.credentials.json"`, `source = "~/workloads/acme/claude-creds.json"`)
+  without reparenting the whole home. A dir source reparents the subtree; a file source redirects
+  one inode, over-mounting a symmetric parent grant it sits inside. The settled artefact carries
+  the divergences in a new `redirect` list (omitted when empty, so redirect-free policies sign
+  byte-identically), and `policy show` / `policy diff` account every `source → path` divergence.
+  The floor is a cross-grant self-consistency check, not signing: a `source` intersecting the
+  workload-writable surface (`fs.write` ∪ `fs.exclusive` ∪ `home_persist`) is refused at compile
+  and re-asserted at spawn (`fs.redirect.write-set` — a workload-writable source is a
+  confused-deputy hole however validly signed), and a `[fs.cwd] write` invocation whose resolved
+  cwd intersects a redirect source is refused at run time (the one writable surface settle cannot
+  see). `source` is legal only on a single-`path` add — refused on `remove`, `fs.deny`,
+  `exec.allow`, and multi-path entries — and a redirect under `/etc`/`/proc` (served by the
+  constructed view, not a host bind) is a compile error. At materialisation a redirected
+  read-only source resolves with `RESOLVE_NO_MAGICLINKS` (procfs/sysfs aliasing refused; ordinary
+  symlink farms — stow/chezmoi — still work); writable sources keep the stricter existing
+  `RESOLVE_NO_SYMLINKS` guard.
 
 ### Runtime & enforcement
 

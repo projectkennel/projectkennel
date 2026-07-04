@@ -1,0 +1,45 @@
+# ============================================================================
+# Suite case: fs-redirect — an asymmetric `source` grant serves the view path from a
+# different host inode (W15).
+#
+# The whole of `~/kennel-e2e/redirect/granted` is a symmetric read grant; its file
+# `aka.json` (host content `LOCAL`) is additionally redirected to
+# `~/kennel-e2e/redirect/store/real.json` (content `REDIRECTED`). The redirected bind
+# over-mounts the parent's inode inside the read-only tree, so the view must read
+# `REDIRECTED` at the granted path while the sibling `plain.json` still reads its own
+# symmetric content — and the store itself, never granted, must be ENOENT (its name is
+# gone, not merely denied). setup.sh stages the host fixture. Exit 0 ⇒ the redirect
+# materialised the source inode at the view path. net=none.
+#
+# (Both grants are `[[fs.read.add]]` deltas: one TOML key cannot carry the bare-set
+# form and a `.add` table at once, and the redirect is delta-only by design.)
+# ============================================================================
+
+template_name = "fs-redirect"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[[fs.read.add]]
+path = ["/usr/**", "/lib/**", "/lib64/**", "~/kennel-e2e/redirect/granted"]
+reason = "userland + the symmetric read grant the redirect over-mounts into"
+
+[[fs.read.add]]
+path = "~/kennel-e2e/redirect/granted/aka.json"
+source = "~/kennel-e2e/redirect/store/real.json"
+reason = "the W15 asymmetric grant under test: view path served from the operator-held store"
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/test", "/usr/bin/[", "/usr/bin/cat"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    test "$(cat "$HOME/kennel-e2e/redirect/granted/aka.json")" = REDIRECTED \
+    && test "$(cat "$HOME/kennel-e2e/redirect/granted/plain.json")" = LOCAL \
+    && ! test -e "$HOME/kennel-e2e/redirect/store"
+    """,
+]

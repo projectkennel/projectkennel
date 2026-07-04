@@ -212,6 +212,14 @@ pub fn substitute(
         *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.exclusive", path)?;
     }
+    // Redirects (W15): `path` must keep matching its (substituted) grant in `read`/`write`,
+    // and `source` is a bind-backed host path like any grant — both substitute identically.
+    for r in &mut fs.redirect {
+        r.path = substitute_path(&r.path, subst, &user, &group);
+        reject_leftover("fs.redirect.path", &r.path)?;
+        r.source = substitute_path(&r.source, subst, &user, &group);
+        reject_leftover("fs.redirect.source", &r.source)?;
+    }
     for bin in &mut p.effective_policy.exec.allow {
         *bin = substitute_path(bin, subst, &user, &group);
         reject_leftover("exec.allow", bin)?;
@@ -704,7 +712,9 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
 /// **target already exists** is also skipped: a broader earlier grant (e.g. `/usr/**`) already
 /// materialised it at the same host inode, and creating the mountpoint would land *inside* that
 /// read-only bind and fail EROFS (the facade binaries under `/usr/libexec/kennel` are exactly
-/// this case). A *writable* bind is never skipped — it must override a read-only parent.
+/// this case). A *writable* bind is never skipped — it must override a read-only parent. A
+/// *redirected* bind (W15) is never skipped either: its source is a different host inode, so
+/// an existing target is the parent's view to over-mount, not redundancy.
 ///
 /// # Errors
 ///
@@ -717,7 +727,11 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
             continue;
         }
         let dest = under(&b.target);
-        if !b.writable && dest.symlink_metadata().is_ok() {
+        // The already-materialised skip holds only for a *symmetric* bind: the broader
+        // earlier grant serves the same host inode, so the child bind is redundant. A
+        // redirected bind (W15) serves a DIFFERENT inode — it must over-mount the parent's
+        // view of the path, exactly like a writable child inside a read-only tree.
+        if !b.writable && !b.redirected && dest.symlink_metadata().is_ok() {
             continue;
         }
         create_bind_target(&b.source, &dest).map_err(|e| {
@@ -763,12 +777,42 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
             // `fd` is dropped here — after mount::bind has consumed the
             // /proc/self/fd/N path and the bind is in place.
         } else {
-            mount::bind(&b.source, &dest, true).map_err(|e| {
+            // A *redirected* read-only source (W15) resolves with RESOLVE_NO_MAGICLINKS:
+            // the source path is an operator assertion of origin, and a procfs/sysfs magic
+            // link in it would alias the bind out of the intended tree. Ordinary symlinks
+            // are permitted (operator credential stores are commonly symlink farms). A
+            // symmetric read-only bind stays unguarded as before — its source IS the
+            // granted path, and read-only aliasing cannot reach a protected write.
+            let magic_guard = if b.redirected {
+                let fd = kennel_lib_syscall::fd::open_no_magiclinks(
+                    -100, // AT_FDCWD; ignored for the absolute paths a plan carries
+                    &b.source,
+                )
+                .map_err(|e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!(
+                            "redirected bind source {}: {e} (magic link in path? \
+                             RESOLVE_NO_MAGICLINKS refuses procfs/sysfs-aliased sources)",
+                            b.source.display(),
+                        ),
+                    )
+                })?;
+                Some(fd)
+            } else {
+                None
+            };
+            let source = magic_guard.as_ref().map_or_else(
+                || b.source.clone(),
+                |fd| PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())),
+            );
+            mount::bind(&source, &dest, true).map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!("bind {}->{}: {e}", b.source.display(), dest.display()),
                 )
             })?;
+            drop(magic_guard); // the bind is in place; the O_PATH fd has served its purpose
             mount::remount_readonly(&dest).map_err(|e| {
                 io::Error::new(e.kind(), format!("remount_ro {}: {e}", dest.display()))
             })?;
@@ -886,7 +930,15 @@ fn materialize_dir_masks(
 
 /// Create `dest` (and its parent) as the right type to bind `source` over: a
 /// directory for a directory source, otherwise an empty file.
+///
+/// An already-present `dest` is left as-is — a mountpoint needs only existence, and the
+/// present inode may be served by a read-only parent bind (the redirected-child case, W15),
+/// where a truncating `File::create` would fail `EROFS` even though the over-mount itself
+/// is fine.
 fn create_bind_target(source: &Path, dest: &Path) -> io::Result<()> {
+    if dest.symlink_metadata().is_ok() {
+        return Ok(());
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1048,6 +1100,7 @@ mod tests {
                     exclusive: Vec::new(),
                     home_persist: Vec::new(),
                     home_readonly: false,
+                    redirect: Vec::new(),
                     cwd: kennel_lib_policy::settled::CwdPolicy::default(),
                     tmp: TmpPolicy {
                         writable: true,
@@ -1246,6 +1299,46 @@ mod tests {
         assert!(
             !usr.first().expect("one bind").writable,
             "a read-only path is bound read-only"
+        );
+    }
+
+    /// A redirected grant (W15) binds the `source` inode at the granted path's view location:
+    /// the target, Landlock rule, and `~` remap all key on the granted path; only the bind's
+    /// host origin diverges.
+    #[test]
+    fn a_redirected_grant_binds_the_source_at_the_granted_paths_view_location() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy
+            .fs
+            .read
+            .push("~/.app/cred.json".to_owned());
+        p.effective_policy
+            .fs
+            .redirect
+            .push(kennel_lib_policy::settled::FsRedirect {
+                path: "~/.app/cred.json".to_owned(),
+                source: "~/stores/acme/cred.json".to_owned(),
+            });
+        let p = substitute(&p, &subst()).expect("substitute");
+        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let bind = view
+            .binds
+            .iter()
+            .find(|b| b.redirected)
+            .expect("redirected bind");
+        assert_eq!(bind.source, Path::new("/home/dev/stores/acme/cred.json"));
+        assert_eq!(bind.target, Path::new("/home/kennel/.app/cred.json"));
+        assert!(!bind.writable);
+
+        // The cwd floor helper reports an intersecting directory and clears a disjoint one.
+        assert_eq!(
+            plan.redirected_source_within(Path::new("/home/dev/stores")),
+            Some(Path::new("/home/dev/stores/acme/cred.json"))
+        );
+        assert_eq!(
+            plan.redirected_source_within(Path::new("/home/dev/elsewhere")),
+            None
         );
     }
 

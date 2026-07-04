@@ -68,9 +68,10 @@ pub use spawn::spawn_eligible;
 /// Bumped to 2 with the SSHSIG signature format; to 3 for a schema cleanup: `[fs.tmp]` lost its
 /// DAC-mode knob and renamed `private` → `writable`, the `[binder]` user-service section and its
 /// settled runtime were removed, and the invariant-only `fs.proc.visibility` / `unix.default`
-/// keys were dropped — all changing the settled shape. `[workload] allowed_args` and `[fs.cwd]`
-/// (0.6.0) are additive-optional, so they extend v3 without a bump (a policy not using them is
-/// byte-identical, and old v3 artefacts stay valid) — the shape fingerprint is re-pinned in place.
+/// keys were dropped — all changing the settled shape. `[workload] allowed_args`, `[fs.cwd]`, and
+/// the fs `redirect` list (0.6.0) are additive-optional, so they extend v3 without a bump (a
+/// policy not using them is byte-identical, and old v3 artefacts stay valid) — the shape
+/// fingerprint is re-pinned in place.
 pub const SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
@@ -316,6 +317,47 @@ mod tests {
         let canon =
             String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
         assert!(canon.contains("[spawn]") && canon.contains("[[spawn.allow]]"));
+    }
+
+    /// An fs redirect (W15) survives sign → serialise → verify, sits inside the signed
+    /// canonical form, and — being skip-when-empty — leaves a redirect-free policy's canonical
+    /// bytes untouched (every existing signature stays valid).
+    #[test]
+    fn an_fs_redirect_round_trips_and_absence_leaves_the_canonical_form_unchanged() {
+        let key = signing_key();
+        let baseline =
+            canonical::canonical_bytes(&sample_policy()).expect("baseline canonical bytes");
+
+        let mut policy = sample_policy();
+        policy
+            .effective_policy
+            .fs
+            .read
+            .push("~/.app/cred.json".to_owned());
+        policy
+            .effective_policy
+            .fs
+            .redirect
+            .push(settled::FsRedirect {
+                path: "~/.app/cred.json".to_owned(),
+                source: "~/stores/acme/cred.json".to_owned(),
+            });
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert_eq!(verified.effective_policy.fs.redirect.len(), 1);
+        let canon =
+            String::from_utf8(canonical::canonical_bytes(&policy).expect("canon")).expect("utf8");
+        assert!(canon.contains("[[fs.redirect]]") || canon.contains("redirect"));
+
+        // A policy with no redirects canonicalises byte-identically to the pre-W15 shape.
+        assert_eq!(
+            canonical::canonical_bytes(&sample_policy()).expect("canonical bytes"),
+            baseline
+        );
+        assert!(!String::from_utf8(baseline)
+            .expect("utf8")
+            .contains("redirect"));
     }
 
     #[test]
