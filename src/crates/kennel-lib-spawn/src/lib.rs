@@ -372,8 +372,58 @@ pub fn build_view_and_pivot(
         std::fs::copy(source, &dest)?;
     }
 
+    // 3b. `/etc` overlays: bind the granted real host `/etc` files read-only ON TOP of the
+    //     synthetic floor just built (the resolver/hosts a `net.mode = host` service needs). The
+    //     synthetic `/etc` is the floor; an explicit `fs.read` grant layers the real file over it.
+    materialize_etc_overlays(&view.etc_overlays, &under)?;
+
     // 4–7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home, masks, pivot).
     seal_view_tail(view, new_root)
+}
+
+/// Bind each granted host `/etc` file read-only over the synthetic `/etc` floor (the real resolver
+/// config / hosts a `net.mode = host` service resolves real names against, §8 / W2).
+///
+/// The synthetic `/etc` is built first (a floor of scrubbed files); this layers the real host file
+/// on top of the specific paths the policy granted. Each `path` is the same on the host and in the
+/// view. A path whose host source does not exist is skipped (nothing to overlay). The overlay set
+/// is already restricted to safe files ([`crate::plan`] never emits an identity-mask or credential
+/// path), so this trusts its input.
+///
+/// # Errors
+/// The OS error if creating the target mountpoint, the bind, or the read-only remount fails.
+fn materialize_etc_overlays(
+    overlays: &[std::path::PathBuf],
+    under: &impl Fn(&Path) -> PathBuf,
+) -> io::Result<()> {
+    use kennel_lib_syscall::mount;
+    for path in overlays {
+        // The host source (still reachable pre-pivot). Skip a grant whose host file is absent.
+        if path.symlink_metadata().is_err() {
+            continue;
+        }
+        let dest = under(path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Ensure the synthetic floor file (or an empty placeholder) exists to mount over.
+        if dest.symlink_metadata().is_err() {
+            std::fs::File::create(&dest)?;
+        }
+        mount::bind(path, &dest, false).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("etc overlay bind {}: {e}", dest.display()),
+            )
+        })?;
+        mount::remount_readonly(&dest).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("etc overlay remount_ro {}: {e}", dest.display()),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// The Kennel-shipped scaffold lower (§7.11.4a): empty mountpoint dirs the seal mounts over
@@ -445,6 +495,20 @@ fn build_image_view_and_pivot(
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(source, &dest)?;
+    }
+    // `/etc` overlays (W2): copy the granted REAL host `/etc` file over the synthetic one in the
+    // top `kennel-etc` lower, so the real resolver/hosts wins by overlay precedence (the bind-based
+    // equivalent of the ordinary view's on-top overlay; the overlayfs upper is where precedence
+    // lives here). A grant whose host source is absent is skipped.
+    for overlay in &view.etc_overlays {
+        if overlay.symlink_metadata().is_err() {
+            continue;
+        }
+        let dest = kennel_etc.join(overlay.strip_prefix("/").unwrap_or(overlay));
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(overlay, &dest)?;
     }
 
     // 3. Build the `scaffold` bottom lower: empty mountpoint dirs + empty /etc placeholders.

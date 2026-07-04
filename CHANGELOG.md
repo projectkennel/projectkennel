@@ -69,6 +69,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
   (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
   bare form). A future `[net.tcp]` slow-lane rides the same table.
+- **`fs.read` of a specific host `/etc` file overlays the real file over the synthetic floor**
+  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a
+  `resolv.conf` pointed at the proxy), built not bound — so a `net.mode = "host"` service that must
+  resolve real names could not see the host resolver. A policy that `fs.read`s a specific, safe
+  host `/etc` file (e.g. `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) now gets the REAL
+  file mounted read-only over the synthetic one (an OCI image gets it copied into the top overlay
+  lower). Restricted to exact files — no glob, no bare `/etc`, no `..` — and the identity-mask and
+  credential files (`passwd`, `group`, `shadow`, `gshadow`, `hostname`, `sudoers`, `machine-id`)
+  are never overlaid, so a grant cannot re-leak the masked host user list (T1.1) or a secret. The
+  synthetic `/etc` stays the floor for every path not explicitly granted.
 
 ### IPC protocol changes
 
