@@ -55,11 +55,5 @@ serde_json = { version = "=1.0.150", default-features = false, features = ["std"
 # zero transitive deps).
 lexopt = "=0.3.2"
 
-[dev-dependencies]
-# Test-only: the manpage generator's `SYNC_*` copies of the CLI command tables.
-# A unit test asserts they match `COMMANDS`/`POLICY_VERBS`, so `man kennel` cannot
-# drift from the CLI.
-gen-man = { path = "../../tools/gen-man" }
-
 [lints]
 workspace = true

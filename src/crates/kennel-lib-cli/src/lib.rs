@@ -42,6 +42,131 @@ pub const RUN: &str = "run";
 /// reads the same in either context.
 pub const RUN_SUMMARY: &str = "run a workload confined by a policy or template, in the foreground";
 
+// ─── The host unit's command tables ──────────────────────────────────────────
+//
+// The live definition of the host-side `kennel` surface: dispatch, `--help`, and
+// the generated man pages (`gen-man`) all read these tables, so a verb cannot
+// exist in one and not the others. The in-cage spawn unit keeps its own (much
+// smaller) table; the shared verbs pin to the constants above.
+
+/// Top-level `kennel` commands (the unified help surface).
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: RUN,
+        summary: RUN_SUMMARY,
+        usage: "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+    },
+    CommandSpec {
+        name: "attach",
+        summary: "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
+        usage: "attach <name>",
+    },
+    CommandSpec {
+        name: "review",
+        summary: "review a workspace's trust manifest: re-pin legitimate edits, or --revert tampering",
+        usage: "review <policy> [--yes] [--revert]",
+    },
+    CommandSpec {
+        name: "release",
+        summary: "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
+        usage: "release <policy>",
+    },
+    CommandSpec {
+        name: "stop",
+        summary: "stop a running kennel",
+        usage: "stop <name>",
+    },
+    CommandSpec {
+        name: "list",
+        summary: "list running kennels and the cross-kennel service mesh",
+        usage: "list",
+    },
+    CommandSpec {
+        name: "daemon-reload",
+        summary: "re-derive the service catalogue from the enablement links",
+        usage: "daemon-reload",
+    },
+    CommandSpec {
+        name: "policy",
+        summary: "author, inspect, sign, and check policies",
+        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|inspect> [...]",
+    },
+    CommandSpec {
+        name: "keygen",
+        summary: "generate a policy-signing key",
+        usage: "keygen <key-id> [--dir DIR] [--force]",
+    },
+    CommandSpec {
+        name: "audit",
+        summary: "show a kennel's audit log",
+        usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
+    },
+    CommandSpec {
+        name: "oci",
+        summary: "build and run an OCI image as a confined kennel substrate (§7.11)",
+        usage: "oci <build|run|revert|update> <name> [--image <ref>] [--key K] [--force] [-- <cmd...>]",
+    },
+];
+
+/// Sub-verbs of `kennel policy`.
+pub const POLICY_VERBS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "list",
+        summary: "list policies and templates in the search path",
+        usage: "policy list",
+    },
+    CommandSpec {
+        name: "show",
+        summary: "show what a policy resolves to (the effective policy)",
+        usage: "policy show <policy> [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "edit",
+        summary: "edit a policy's source in $EDITOR",
+        usage: "policy edit <name>",
+    },
+    CommandSpec {
+        name: "generate",
+        summary: "scaffold a new leaf policy",
+        usage: "policy generate <name> [--from <template>]",
+    },
+    CommandSpec {
+        name: "compile",
+        summary: "compile a source policy into a signed settled artefact",
+        usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "validate",
+        summary: "resolve and check a policy without writing an artefact",
+        usage: "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "sign",
+        summary: "sign a source template/fragment with a key",
+        usage: "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
+    },
+    CommandSpec {
+        name: "lint",
+        summary: "check the shipped template corpus for incoherences",
+        usage: "policy lint [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "risks",
+        summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
+        usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    },
+    CommandSpec {
+        name: "diff",
+        summary: "interpreted grant delta between a policy and its baseline (or another policy)",
+        usage: "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
+    },
+    CommandSpec {
+        name: "inspect",
+        summary: "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
+        usage: "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
+    },
+];
+
 /// Render a command table as the aligned help body.
 ///
 /// One `  verb  summary` line per command, in table order (the program name lives in the caller's
@@ -99,6 +224,25 @@ mod tests {
         let (before, after) = split_trailing_argv(&args);
         assert_eq!(before, ["caps"]);
         assert!(after.is_none());
+    }
+
+    /// The `policy` command's usage line enumerates its sub-verbs by hand (a const
+    /// string cannot be derived from the table); this pins the enumeration to the
+    /// live [`POLICY_VERBS`] so adding a verb without listing it fails here.
+    #[test]
+    fn policy_usage_names_every_sub_verb() {
+        let policy = COMMANDS
+            .iter()
+            .find(|c| c.name == "policy")
+            .expect("a `policy` top-level command");
+        for verb in POLICY_VERBS {
+            assert!(
+                policy.usage.contains(verb.name),
+                "`policy` usage is missing sub-verb `{}`: {}",
+                verb.name,
+                policy.usage
+            );
+        }
     }
 
     #[test]

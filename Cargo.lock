@@ -54,6 +54,9 @@ version = "0.5.0"
 [[package]]
 name = "gen-man"
 version = "0.5.0"
+dependencies = [
+ "kennel-lib-cli",
+]
 
 [[package]]
 name = "gen-schema"
@@ -98,7 +101,6 @@ dependencies = [
 name = "kennel-cli"
 version = "0.5.0"
 dependencies = [
- "gen-man",
  "kennel-lib-audit",
  "kennel-lib-cli",
  "kennel-lib-compile",

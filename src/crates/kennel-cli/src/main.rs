@@ -197,28 +197,4 @@ signed_fields = []
             "temp settled file should be removed on drop"
         );
     }
-
-    /// The manpage generator keeps its own copy of the command tables.
-    #[test]
-    fn man_pages_in_sync_with_cli_tables() {
-        let live: Vec<(&str, &str, &str)> = COMMANDS
-            .iter()
-            .map(|c| (c.name, c.summary, c.usage))
-            .collect();
-        assert_eq!(
-            live,
-            gen_man::pages::SYNC_COMMANDS.to_vec(),
-            "COMMANDS drifted from gen-man SYNC_COMMANDS — update src/tools/gen-man/src/pages.rs and regenerate man/"
-        );
-
-        let live_policy: Vec<(&str, &str, &str)> = POLICY_VERBS
-            .iter()
-            .map(|c| (c.name, c.summary, c.usage))
-            .collect();
-        assert_eq!(
-            live_policy,
-            gen_man::pages::SYNC_POLICY.to_vec(),
-            "POLICY_VERBS drifted from gen-man SYNC_POLICY — update src/tools/gen-man/src/pages.rs and regenerate man/"
-        );
-    }
 }

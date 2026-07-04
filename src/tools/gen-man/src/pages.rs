@@ -5,26 +5,33 @@
 //! type-checked at compile time. The emitter in `main.rs` turns each [`Page`]
 //! into groff `man(7)` source.
 //!
-//! The `kennel` and `kennel-policy` command synopses are kept verbatim from the
-//! `CommandSpec` tables in `kennel-cli/src/main.rs`; a test in that crate
-//! asserts the two stay in sync (`SYNC_COMMANDS` / `SYNC_POLICY` below are the
-//! checked-against copies).
+//! The `kennel` and `kennel-policy` command synopses are **derived from the live
+//! `CommandSpec` tables** in `kennel-lib-cli` — the same tables dispatch and
+//! `--help` read — so the pages cannot drift from the CLI (there is no mirror
+//! and no sync test; the old hand-kept `SYNC_*` copies are gone). What this file
+//! curates is the prose: the per-verb OPTIONS rows, keyed by verb name and
+//! checked against the live table at generation time.
 
-// Constant-index reads into the `SYNC_*` tables (`SYNC_COMMANDS[0].2`) are
-// in-bounds by construction and verified by the sync-test in `kennel-cli`; the
-// workspace `indexing_slicing` deny targets runtime input, not literal indexing of
-// a local const, so it is allowed here in this build-only tool.
-#![allow(clippy::indexing_slicing)]
+/// Which live `CommandSpec` table a `.1` page's COMMANDS section reflects.
+pub enum CommandSource {
+    /// No COMMANDS section (`.5`/`.8` pages).
+    NoCommands,
+    /// The top-level `kennel` commands ([`kennel_lib_cli::COMMANDS`]).
+    TopLevel,
+    /// The `kennel policy` sub-verbs ([`kennel_lib_cli::POLICY_VERBS`]).
+    PolicyVerbs,
+}
 
-/// One command/sub-verb entry on a `.1` page (a row under SYNOPSIS + OPTIONS).
-pub struct Command {
-    /// The usage line, verbatim from `CommandSpec.usage` (without the leading `kennel`).
-    /// Begins with the verb, so no separate name field is needed.
-    pub usage: &'static str,
-    /// One-line summary, verbatim from `CommandSpec.summary`.
-    pub summary: &'static str,
-    /// Per-option `(flag, description)` rows for the OPTIONS section. May be empty.
-    pub options: &'static [(&'static str, &'static str)],
+impl CommandSource {
+    /// The live specs this source reflects, in table order.
+    #[must_use]
+    pub const fn specs(&self) -> &'static [kennel_lib_cli::CommandSpec] {
+        match self {
+            Self::NoCommands => &[],
+            Self::TopLevel => kennel_lib_cli::COMMANDS,
+            Self::PolicyVerbs => kennel_lib_cli::POLICY_VERBS,
+        }
+    }
 }
 
 /// One field row on a `.5` config page.
@@ -60,8 +67,14 @@ pub struct Page {
     pub synopsis: &'static str,
     /// The DESCRIPTION body (free roff-safe prose; blank lines separate paragraphs).
     pub description: &'static str,
-    /// Commands for a `.1` page (empty for `.5`/`.8`).
-    pub commands: &'static [Command],
+    /// The live command table this page's COMMANDS section derives from.
+    pub command_source: CommandSource,
+    /// Curated per-verb OPTIONS rows: `(verb name, [(flag, description)])`.
+    ///
+    /// Keyed by name, never by position; a key naming no live verb is a hard
+    /// generation error ([`crate::check_page_options`]), so stale curation fails
+    /// the build instead of silently mis-attaching.
+    pub command_options: &'static [(&'static str, &'static [(&'static str, &'static str)])],
     /// Field groups for a `.5` page (empty otherwise).
     pub fields: &'static [FieldGroup],
     /// EXIT STATUS rows `(code, meaning)` (empty to omit the section).
@@ -75,135 +88,17 @@ pub struct Page {
 }
 
 // ---------------------------------------------------------------------------
-// Sync copies of the CommandSpec tables (kennel-cli/src/main.rs). The test
-// `man_meta_in_sync` in that crate asserts these match the live tables, so a CLI
-// change that is not reflected here fails CI. Kept as (name, summary, usage).
-// ---------------------------------------------------------------------------
-
-/// Top-level `kennel` commands, mirrored from `COMMANDS`.
-pub const SYNC_COMMANDS: &[(&str, &str, &str)] = &[
-    (
-        "run",
-        "run a workload confined by a policy or template, in the foreground",
-        "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
-    ),
-    (
-        "attach",
-        "reattach a terminal to a running kennel (Ctrl-\\ d to detach)",
-        "attach <name>",
-    ),
-    (
-        "review",
-        "review a workspace's trust manifest: re-pin legitimate edits, or --revert tampering",
-        "review <policy> [--yes] [--revert]",
-    ),
-    (
-        "release",
-        "release a leaked exclusive over-mount (fs.exclusive crash recovery)",
-        "release <policy>",
-    ),
-    ("stop", "stop a running kennel", "stop <name>"),
-    (
-        "list",
-        "list running kennels and the cross-kennel service mesh",
-        "list",
-    ),
-    (
-        "daemon-reload",
-        "re-derive the service catalogue from the enablement links",
-        "daemon-reload",
-    ),
-    (
-        "policy",
-        "author, inspect, sign, and check policies",
-        "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff> [...]",
-    ),
-    (
-        "keygen",
-        "generate a policy-signing key",
-        "keygen <key-id> [--dir DIR] [--force]",
-    ),
-    (
-        "audit",
-        "show a kennel's audit log",
-        "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",
-    ),
-    (
-        "oci",
-        "build and run an OCI image as a confined kennel substrate (§7.11)",
-        "oci <build|run|revert|update> <name> [--image <ref>] [--key K] [--force] [-- <cmd...>]",
-    ),
-];
-
-/// `kennel policy` sub-verbs, mirrored from `POLICY_VERBS`.
-pub const SYNC_POLICY: &[(&str, &str, &str)] = &[
-    (
-        "list",
-        "list policies and templates in the search path",
-        "policy list",
-    ),
-    (
-        "show",
-        "show what a policy resolves to (the effective policy)",
-        "policy show <policy> [--template-dir D]... [--trust-dir D]...",
-    ),
-    ("edit", "edit a policy's source in $EDITOR", "policy edit <name>"),
-    (
-        "generate",
-        "scaffold a new leaf policy",
-        "policy generate <name> [--from <template>]",
-    ),
-    (
-        "compile",
-        "compile a source policy into a signed settled artefact",
-        "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
-    ),
-    (
-        "validate",
-        "resolve and check a policy without writing an artefact",
-        "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
-    ),
-    (
-        "sign",
-        "sign a source template/fragment with a key",
-        "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
-    ),
-    (
-        "lint",
-        "check the shipped template corpus for incoherences",
-        "policy lint [--template-dir D]... [--trust-dir D]...",
-    ),
-    (
-        "risks",
-        "evaluate a policy against the threat catalogue (exposures, residuals)",
-        "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
-    ),
-    (
-        "diff",
-        "interpreted grant delta between a policy and its baseline (or another policy)",
-        "policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    ),
-    (
-        "inspect",
-        "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
-        "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
-    ),
-];
-
-// ---------------------------------------------------------------------------
 // Shared bits.
 // ---------------------------------------------------------------------------
 
-const COMMON_OPTS: &[(&str, &str)] = &[
-    (
-        "--template-dir D",
-        "Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.",
-    ),
-    (
-        "--trust-dir D",
-        "Add a directory to the signing-key trust store used while authoring (repeatable).",
-    ),
-];
+const TEMPLATE_DIR_OPT: (&str, &str) = (
+    "--template-dir D",
+    "Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.",
+);
+const TRUST_DIR_OPT: (&str, &str) = (
+    "--trust-dir D",
+    "Add a directory to the signing-key trust store used while authoring (repeatable).",
+);
 
 const EXIT_CODES: &[(&str, &str)] = &[
     (
@@ -250,55 +145,36 @@ validate, lint) is done locally by the CLI and needs no daemon.
 
 Run \\fBkennel \\fIcommand\\fB --help\\fR for a command's usage. The policy \
 sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
-        commands: &[
-            Command {
-                usage: SYNC_COMMANDS[0].2,
-                summary: SYNC_COMMANDS[0].1,
-                options: &[
-                    ("--key K", "Sign the in-memory compiled policy with key K for the local-dev run loop (auto-compile)."),
-                    ("--force", "Override a [workload] pinned argv with a CLI -- command."),
-                    ("-- <cmd...>", "The command to run inside the kennel (overrides [workload].argv unless pinned)."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
-            Command { usage: SYNC_COMMANDS[1].2, summary: SYNC_COMMANDS[1].1, options: &[] },
-            Command { usage: SYNC_COMMANDS[2].2, summary: SYNC_COMMANDS[2].1, options: &[] },
-            Command {
-                usage: SYNC_COMMANDS[7].2,
-                summary: SYNC_COMMANDS[7].1,
-                options: &[("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign, lint.")],
-            },
-            Command {
-                usage: SYNC_COMMANDS[8].2,
-                summary: SYNC_COMMANDS[8].1,
-                options: &[
-                    ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
-                    ("--force", "Overwrite an existing key of the same id."),
-                ],
-            },
-            Command {
-                usage: SYNC_COMMANDS[9].2,
-                summary: SYNC_COMMANDS[9].1,
-                options: &[
-                    ("--resource CLASS", "Filter to one class (network, filesystem, exec, ...)."),
-                    ("--since DUR", "Only events newer than DUR (e.g. 1h, 30m)."),
-                    ("--novel-only", "Suppress events seen in a prior run (new events only)."),
-                    ("--follow", "Stream new events as they arrive."),
-                    ("--print-journalctl-command", "Print the equivalent journalctl invocation and exit."),
-                ],
-            },
-            Command {
-                usage: SYNC_COMMANDS[10].2,
-                summary: SYNC_COMMANDS[10].1,
-                options: &[
-                    ("build <name> --image <ref>", "Provision a named image store entry: record the provenance digest and scaffold a run policy."),
-                    ("run <name> [--key K] [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
-                    ("revert <name>", "Obliterate the persisted overlay upper (persistence = persist); a no-op for discard/readonly."),
-                    ("update <name> -- <ref>", "Replace the image layer: record the new digest, discard the upper (--keep-state to keep)."),
-                    ("--force", "Overwrite an existing entry (build) or override a pinned [workload] (run)."),
-                ],
-            },
+        command_source: CommandSource::TopLevel,
+        command_options: &[
+            ("run", &[
+                ("--key K", "Sign the in-memory compiled policy with key K for the local-dev run loop (auto-compile)."),
+                ("--force", "Override a [workload] pinned argv with a CLI -- command."),
+                ("-- <cmd...>", "The command to run inside the kennel (overrides [workload].argv unless pinned)."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
+            ("policy", &[
+                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign, lint, risks, diff, inspect."),
+            ]),
+            ("keygen", &[
+                ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
+                ("--force", "Overwrite an existing key of the same id."),
+            ]),
+            ("audit", &[
+                ("--resource CLASS", "Filter to one class (network, filesystem, exec, ...)."),
+                ("--since DUR", "Only events newer than DUR (e.g. 1h, 30m)."),
+                ("--novel-only", "Suppress events seen in a prior run (new events only)."),
+                ("--follow", "Stream new events as they arrive."),
+                ("--print-journalctl-command", "Print the equivalent journalctl invocation and exit."),
+            ]),
+            ("oci", &[
+                ("build <name> --image <ref>", "Provision a named image store entry: record the provenance digest and scaffold a run policy."),
+                ("run <name> [--key K] [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
+                ("revert <name>", "Obliterate the persisted overlay upper (persistence = persist); a no-op for discard/readonly."),
+                ("update <name> -- <ref>", "Replace the image layer: record the new digest, discard the upper (--keep-state to keep)."),
+                ("--force", "Overwrite an existing entry (build) or override a pinned [workload] (run)."),
+            ]),
         ],
         fields: &[],
         exit_status: EXIT_CODES,
@@ -329,74 +205,44 @@ compile, and sign policies; none of them need the \\fBkenneld\\fR(8) daemon.
 Compilation resolves the inheritance chain and includes, verifies every \
 referenced artefact's signature and lockfile pin, and emits a signed settled \
 artefact that the daemon enforces at \\fBkennel run\\fR time.",
-        commands: &[
-            Command {
-                usage: SYNC_POLICY[0].2, summary: SYNC_POLICY[0].1, options: &[],
-            },
-            Command {
-                usage: SYNC_POLICY[1].2, summary: SYNC_POLICY[1].1,
-                options: &[(COMMON_OPTS[0].0, COMMON_OPTS[0].1), (COMMON_OPTS[1].0, COMMON_OPTS[1].1)],
-            },
-            Command { usage: SYNC_POLICY[2].2, summary: SYNC_POLICY[2].1, options: &[] },
-            Command {
-                usage: SYNC_POLICY[3].2, summary: SYNC_POLICY[3].1,
-                options: &[("--from <template>", "Scaffold the leaf from this template (default base-confined).")],
-            },
-            Command {
-                usage: SYNC_POLICY[4].2, summary: SYNC_POLICY[4].1,
-                options: &[
-                    ("--output P", "Write the settled artefact to P."),
-                    ("--key K", "Sign the settled artefact with key K."),
-                    ("--unsigned", "Emit an unsigned artefact (mutually exclusive with --key)."),
-                    ("--require-signed", "Fail unless every referenced artefact is signed."),
-                    ("--no-lock", "Do not read or write the kennel.lock pin file."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[5].2, summary: SYNC_POLICY[5].1,
-                options: &[
-                    ("--require-signed", "Fail unless every referenced artefact is signed."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[6].2, summary: SYNC_POLICY[6].1,
-                options: &[
-                    ("--key <key>", "The signing key id (required)."),
-                    ("--output <path>", "Write the signed artefact to path."),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[7].2, summary: SYNC_POLICY[7].1,
-                options: &[(COMMON_OPTS[0].0, COMMON_OPTS[0].1), (COMMON_OPTS[1].0, COMMON_OPTS[1].1)],
-            },
-            Command {
-                usage: SYNC_POLICY[8].2, summary: SYNC_POLICY[8].1,
-                options: &[
-                    ("--json", "Emit the structured report (for CI/tooling) instead of the human view."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[9].2, summary: SYNC_POLICY[9].1,
-                options: &[
-                    ("--json", "Emit the structured delta (for CI/tooling) instead of the human view."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
-            Command {
-                usage: SYNC_POLICY[10].2, summary: SYNC_POLICY[10].1,
-                options: &[
-                    ("--unix", "Show AF_UNIX socket grants (§7.6)."),
-                    (COMMON_OPTS[0].0, COMMON_OPTS[0].1),
-                    (COMMON_OPTS[1].0, COMMON_OPTS[1].1),
-                ],
-            },
+        command_source: CommandSource::PolicyVerbs,
+        command_options: &[
+            ("show", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
+            ("generate", &[("--from <template>", "Scaffold the leaf from this template (default base-confined).")]),
+            ("compile", &[
+                ("--output P", "Write the settled artefact to P."),
+                ("--key K", "Sign the settled artefact with key K."),
+                ("--unsigned", "Emit an unsigned artefact (mutually exclusive with --key)."),
+                ("--require-signed", "Fail unless every referenced artefact is signed."),
+                ("--no-lock", "Do not read or write the kennel.lock pin file."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
+            ("validate", &[
+                ("--require-signed", "Fail unless every referenced artefact is signed."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
+            ("sign", &[
+                ("--key <key>", "The signing key id (required)."),
+                ("--output <path>", "Write the signed artefact to path."),
+            ]),
+            ("lint", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
+            ("risks", &[
+                ("--json", "Emit the structured report (for CI/tooling) instead of the human view."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
+            ("diff", &[
+                ("--json", "Emit the structured delta (for CI/tooling) instead of the human view."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
+            ("inspect", &[
+                ("--unix", "Show AF_UNIX socket grants (§7.6)."),
+                TEMPLATE_DIR_OPT,
+                TRUST_DIR_OPT,
+            ]),
         ],
         fields: &[],
         exit_status: EXIT_CODES,
@@ -432,7 +278,8 @@ kenneld is unprivileged; the one privilege boundary is the privhelper.
 kenneld resolves its helper binaries and trust store through a config cascade; see \
 \\fBsystem.toml\\fR(5). Spawn diagnostics are controlled by the \\fIlog_level\\fR key \
 there and split across the user and system journals.",
-        commands: &[],
+        command_source: CommandSource::NoCommands,
+        command_options: &[],
         fields: &[],
         exit_status: &[],
         files: &[
@@ -459,7 +306,8 @@ machine-generated schema/policy.toml.schema is the exhaustive field reference.
 Paths use \\fB~/\\fR for the kennel persona home (\\fI/home/<user>\\fR, never a host \
 path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and \
 \\fB*\\fR/\\fB**\\fR globs. Execution is deny-by-default.",
-        commands: &[],
+        command_source: CommandSource::NoCommands,
+        command_options: &[],
         fields: &[
             FieldGroup {
                 heading: "top-level",
@@ -581,7 +429,8 @@ Resolution is a cascade, lowest priority first: the vendor copy \
 (/usr/lib/kennel/system.toml), then /etc/kennel/system.toml, each key overriding \
 the layer below. Compiled-in defaults apply where a key is unset, so a host with no \
 file still runs.",
-        commands: &[],
+        command_source: CommandSource::NoCommands,
+        command_options: &[],
         fields: &[
             FieldGroup {
                 heading: "",
@@ -634,7 +483,8 @@ here.
 Search order, highest priority first: ~/.config/kennel/config.toml (or \
 $XDG_CONFIG_HOME), /etc/kennel/config.toml, then the vendor copy. A set list \
 \\fBreplaces\\fR the built-in three-layer default for that key.",
-        commands: &[],
+        command_source: CommandSource::NoCommands,
+        command_options: &[],
         fields: &[
             FieldGroup {
                 heading: "",
@@ -711,7 +561,8 @@ const fn helper(name: &'static str, summary: &'static str, role: &'static str) -
         summary,
         synopsis: "(internal \\(em forked by kenneld(8), not invoked directly)",
         description: role,
-        commands: &[],
+        command_source: CommandSource::NoCommands,
+        command_options: &[],
         fields: &[],
         exit_status: &[],
         files: &[],

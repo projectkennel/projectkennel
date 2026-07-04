@@ -1,9 +1,9 @@
 //! `gen_man` — the manpage data and the roff emitter.
 //!
-//! The binary (`main.rs`) is a thin CLI over this library. The library half exists
-//! so the kenneld crate can dev-depend on [`pages::SYNC_COMMANDS`] /
-//! [`pages::SYNC_POLICY`] in its CLI-sync test (dev-only; never linked into the
-//! shipped daemon). Std-only: no third-party crates, no roff library.
+//! The binary (`main.rs`) is a thin CLI over this library. The `.1` command
+//! synopses derive from the live `CommandSpec` tables in `kennel-lib-cli` (the
+//! ones dispatch and `--help` read), so the pages cannot drift from the CLI.
+//! No third-party crates, no roff library.
 
 pub mod pages;
 
@@ -40,13 +40,19 @@ pub fn render(p: &Page) -> String {
     section(&mut o, "DESCRIPTION");
     push_para(&mut o, p.description);
 
-    if !p.commands.is_empty() {
+    let specs = p.command_source.specs();
+    if !specs.is_empty() {
         section(&mut o, "COMMANDS");
-        for c in p.commands {
+        for spec in specs {
             push_line(&mut o, ".TP");
-            push_line(&mut o, &format!("\\fBkennel {}\\fR", esc(c.usage)));
-            push_line(&mut o, &esc(c.summary));
-            for (flag, desc) in c.options {
+            push_line(&mut o, &format!("\\fBkennel {}\\fR", esc(spec.usage)));
+            push_line(&mut o, &esc(spec.summary));
+            let options = p
+                .command_options
+                .iter()
+                .find(|(name, _)| *name == spec.name)
+                .map_or(&[] as &[_], |(_, opts)| *opts);
+            for (flag, desc) in options {
                 push_line(&mut o, ".RS");
                 push_line(&mut o, ".TP");
                 push_line(&mut o, &format!("\\fB{}\\fR", esc(flag)));
@@ -109,6 +115,37 @@ pub fn render(p: &Page) -> String {
     }
 
     o
+}
+
+/// Check one page's curated OPTIONS keys against its live command table.
+///
+/// A key naming no live verb (a renamed or removed command with stale curation)
+/// is an error — the generation fails instead of silently dropping the rows.
+///
+/// # Errors
+///
+/// Returns a message naming the page and the stale key.
+pub fn check_page_options(p: &Page) -> Result<(), String> {
+    let specs = p.command_source.specs();
+    for (name, _) in p.command_options {
+        if !specs.iter().any(|s| s.name == *name) {
+            return Err(format!(
+                "{}.{}: OPTIONS are curated for `{name}`, which names no live command \
+                 — update pages.rs to match the CLI tables",
+                p.name, p.section
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`check_page_options`] over every page.
+///
+/// # Errors
+///
+/// Returns the first stale-curation message.
+pub fn check_pages() -> Result<(), String> {
+    pages::PAGES.iter().try_for_each(check_page_options)
 }
 
 /// The right-hand manual title for a section number.
@@ -202,6 +239,57 @@ mod tests {
                 p.name
             );
         }
+    }
+
+    /// The `.1` pages carry every live verb — the derivation, not a mirror: a verb
+    /// added to the CLI tables appears on the page with no gen-man edit.
+    #[test]
+    fn command_pages_carry_every_live_verb() {
+        for (page_name, specs) in [
+            ("kennel", kennel_lib_cli::COMMANDS),
+            ("kennel-policy", kennel_lib_cli::POLICY_VERBS),
+        ] {
+            let page = PAGES
+                .iter()
+                .find(|p| p.name == page_name && p.section == 1)
+                .expect("the page exists");
+            let out = render(page);
+            for spec in specs {
+                assert!(
+                    out.contains(&esc(spec.usage)),
+                    "{page_name}(1) is missing the `{}` synopsis",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    /// Every curated OPTIONS key names a live verb (the shipped data passes its
+    /// own stale-curation gate).
+    #[test]
+    fn shipped_option_curation_matches_the_live_tables() {
+        check_pages().expect("no stale OPTIONS keys");
+    }
+
+    /// A curated key for a verb the tables no longer carry is a hard error.
+    #[test]
+    fn stale_option_key_is_a_generation_error() {
+        let bogus = Page {
+            name: "t",
+            section: 1,
+            summary: "t",
+            synopsis: "t",
+            description: "t",
+            command_source: pages::CommandSource::TopLevel,
+            command_options: &[("no-such-verb", &[])],
+            fields: &[],
+            exit_status: &[],
+            files: &[],
+            examples: &[],
+            see_also: &[],
+        };
+        let err = check_page_options(&bogus).map_or_else(|e| e, |()| String::new());
+        assert!(err.contains("no-such-verb"), "names the stale key: {err}");
     }
 
     #[test]
