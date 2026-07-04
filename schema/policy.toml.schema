@@ -985,7 +985,7 @@
           "type": "array"
         },
         "in6addr_any_policy": {
-          "description": "What to do with a wildcard IPv6 bind.",
+          "description": "What to do with a wildcard IPv6 bind (`\"rewrite\"` / `\"deny\"`).",
           "enum": [
             "rewrite",
             "deny"

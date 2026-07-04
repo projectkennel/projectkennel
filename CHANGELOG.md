@@ -45,6 +45,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
     under a non-overridable framework floor (realpath-normalised, operator-owned, never `$HOME`);
     an unmet floor or marker refuses the run with a naming diagnostic, and the materialised grant
     is recorded in the run audit event.
+- **The four schema-enum'd fields now validate at compile** (W6): `[net.bind].inaddr_any_policy`
+  / `in6addr_any_policy` (`rewrite` / `deny`), `[net.audit].level` (`summary` / `full`), and
+  `[dbus.audit].level` (`off` / `summary` / `full`) deserialize through their enums, so an
+  invalid value is a typed compile error naming the accepted set. Previously they passed
+  through unchecked (a §10.2 violation — the values were only schema *hints* since the JSON
+  Schema derivation), so a policy carrying a misspelled value that compiled before now fails —
+  the reason this is a named change. Valid values are unaffected; the settled artefact shape is
+  unchanged (no re-pin, no bump), and the published JSON Schema's value sets were already
+  identical.
 - **`[[fs.read/write/deny.add]]` and `[[exec.allow.add]]` now accept an array `path`** (a list of
   paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
   still serialises as a bare string, so existing signed artefacts verify unchanged.
