@@ -56,6 +56,30 @@ little reward. They move onto a roadmap only if the specific condition named is 
   shaped — a peer vouching). Not backlogged pending a better design; **declined**, and the general rule
   is now a standing constraint ([[authentication-never-attestation]], design §4.3) and the subject of a
 documentation sweep.
+- **`[net.bind.ingress]` — the OAuth loopback-callback ingress leg — declined on principle.** W13
+  shipped its generic half (the port-0 ephemeral-bind exemption, #175, which unblocked W2's outbound
+  dial); this is the inbound remainder it did **not** build. The motivating receipt is `kennel run
+  claude` on a host with no seeded token: the RFC 8252 native-app flow binds an ephemeral loopback
+  listener and advertises `localhost:<port>` to a host browser, and the design would make that
+  reachable — a policy-declared `[net.bind.ingress]` block of ephemeral loopback ports, allocated by
+  **inverting host-inetd's** bind-and-hold (`allocate { addr, count }` → it binds `127.0.0.1:0` × N,
+  reads the real ports via `getsockname()`, keeps those very sockets as the serving listeners),
+  steered into by a `bind4`/`bind6` rewrite of `:0` to the next block port (port identity preserved
+  1:1 across the boundary, or the advertised redirect URI breaks), and forwarded inbound over a
+  binder connector — the mirror of host-netproxy's egress leg. The full spec is recoverable from this
+  paragraph and the ROADMAP-0.6.0 history. **Why declined, not deferred:** completing the OAuth flow
+  *inside* the boundary has the confined workload end up holding a fresh **user-equivalent bearer
+  token** — credential *creation* moved across the confinement boundary, the inverse of the
+  ssh-bastion shape (which re-originates a *host-held* credential with the destination bound and never
+  holds the key). The operator's browser approval is a single consent, but the artifact is durable
+  operator-equivalent authority in untrusted hands — the wrong side of
+  [[authentication-never-attestation]] (design §4.3): not *using* a bounded capability, but *minting*
+  operator-equivalent authentication. **Standing answer:** host-seeded tokens — the operator does the
+  OAuth on the host and seeds the token in as a signed, declared construction parameter
+  (authentication-shaped: the kennel *has* what it needs), never mints it at runtime inside the
+  boundary. **Re-open only if** the operator-consent step is shown to change the calculus — i.e. that
+  a single human-approved login does not amount to creating the user-equivalent authentication the
+  axiom forbids. The port-0 exemption W13 shipped stands on its own; it needed no ingress table.
 
 ## Candidate (promote-if-needed, not a workstream)
 
