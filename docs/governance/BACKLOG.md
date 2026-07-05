@@ -81,6 +81,34 @@ documentation sweep.
   a single human-approved login does not amount to creating the user-equivalent authentication the
   axiom forbids. The port-0 exemption W13 shipped stands on its own; it needed no ingress table.
 
+- **The interactive file broker — the per-file portal FileChooser fd grant — declined as too much
+  plumbing for too little, and subsumed.** The confined-GUI residual (§7.14.7, was 0.6.0 W3): a
+  confined app touches only its pre-granted paths, so "open a file the policy did not anticipate"
+  means editing policy. The proposed shape routed `org.freedesktop.portal.FileChooser` over the
+  existing D-Bus facade to a host-side operator-context picker, delivering **one fd** into the view
+  (the §4.3 fd-broker shape). The D-Bus refactor (W4) made the *request* path nearly free — the
+  filter already understands `org.freedesktop.portal.*` and the broker holds the real bus — but the
+  **result** path is where the cost lives, and it is not small. `xdg-desktop-portal` decides
+  sandbox-ness from the *caller's* credentials, and on the real bus the caller is the unsandboxed
+  broker, so FileChooser returns a `file://` **URI**, not an fd; an unmodified GTK/Qt client then
+  `open()`s that path — outside the sealed view. Making an *unmodified* app consume the result
+  therefore forces a materialisation layer (URI rewriting + a post-seal view-mutation verb on
+  `kennel-bin-init` to bind the received fd under a pre-granted docs dir, plus per-request async
+  Response-signal tracking) — the flatpak documents-FUSE nightmare in miniature, and it turns the
+  D-Bus mediation from a pure filter into an active reply-body-rewriting participant. Dropping
+  "unmodified app" collapses it to a small kennel-aware fd verb (`kennel grant <kennel> <file>`:
+  operator-context `open()`, fd over the mesh, SCM_RIGHTS to the app) — real, but **niche** given
+  `[fs.cwd]` (W11) and the W15 `source` redirects already cover the anticipated-file cases, and
+  **subsumed** by the honest alternative: an `xdg-desktop-portal` *inside* the kennel's own private
+  session (the `gui-session` bus), which consents within the kennel's world with no host reach-through
+  and no fd-broker at all. **Why declined, not deferred:** the fd *transport* was never the hard part
+  (binder carries `BINDER_TYPE_FD` today); the hard part is the unmodified-client contract mismatch,
+  and the capability the mismatch buys is already covered from two directions. The GUI investment for
+  0.6.0 goes into the display stack that exists (W3 recast — default configs + the session runtime),
+  not a bespoke consent path. **Re-open only if** a concrete workload needs interactive per-file
+  access that neither `[fs.cwd]`/`source` nor an in-session portal can serve — at which point the
+  small kennel-aware fd verb is the shape, and the unmodified-app URI-materialisation face stays out.
+
 ## Candidate (promote-if-needed, not a workstream)
 
 - **Cross-instance binder reach — a kennel offering a rich binder interface to other kennels.** The mesh's
