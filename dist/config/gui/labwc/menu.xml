@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<!-- The right-click desktop menu: the confined session's application launcher. Only apps in the
+     kennel's exec allowlist are listed. "Log out" ends the session (labwc exits → the kennel tears
+     down). -->
+<openbox_menu>
+  <menu id="root-menu" label="Applications">
+    <item label="Terminal">
+      <action name="Execute"><command>foot</command></action>
+    </item>
+    <item label="Files">
+      <action name="Execute"><command>nautilus --new-window</command></action>
+    </item>
+    <item label="Text Editor">
+      <action name="Execute"><command>gnome-text-editor</command></action>
+    </item>
+    <item label="Calculator">
+      <action name="Execute"><command>gnome-calculator</command></action>
+    </item>
+    <item label="Image Viewer">
+      <action name="Execute"><command>eog</command></action>
+    </item>
+    <item label="Document Viewer">
+      <action name="Execute"><command>evince</command></action>
+    </item>
+    <separator />
+    <item label="Log out">
+      <action name="Exit" />
+    </item>
+  </menu>
+</openbox_menu>

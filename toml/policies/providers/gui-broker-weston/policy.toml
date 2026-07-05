@@ -1,0 +1,46 @@
+# ============================================================================
+# Provider policy: gui-broker-weston — the confined-GUI display service, weston (windowed).
+#
+# One of three shipped display-broker defaults (cage / weston / sway); the operator enables ONE
+# ondemand (or builds their own leaf). This one runs weston in nested mode: weston's wayland backend
+# draws its own titlebar + resize frame, so the confined display is a normal movable / resizable /
+# closable window on the host desktop. The recommended default for a desktop-integrated confined GUI.
+#
+# Thin leaf over the maintainer-signed gui-broker template (which carries the shape: the host-Wayland
+# leg, /dev/dri, the compositor SET incl. weston, and the reserved [[provides]]
+# org.projectkennel.wayland). This leaf adds the [workload] (weston via the broker) and a read of the
+# kennel-shipped weston.ini. Host-signed at install (it derives the VENDOR-tier template).
+# ============================================================================
+
+name = "gui-broker-weston"
+template_base = "gui-broker"
+
+# The kennel-authored weston config (panel-off windowed wrapper), read via --config below.
+[[fs.read.add]]
+path = "/etc/kennel/config/weston/weston.ini"
+reason = "the kennel-authored weston config the broker's compositor loads"
+
+# --width/--height fix the nested output at 1280x720 — the size wlroots (sway, for gui-session)
+# defaults to as a wayland client. kiosk-shell forces the client to the output size, so if they
+# disagree a nested COMPOSITOR raises an xdg protocol error and dies (a single app just adopts the
+# size); matching them lets both a lone app and a full sway session render. The operator resizes the
+# window via weston's frame afterwards.
+[workload]
+argv = [
+    "/usr/libexec/kennel-facades/compositor-broker",
+    "/run/mesh/wayland/gui.sock,/run/mesh/wayland-session/gui.sock",
+    "/usr/bin/weston",
+    "--backend=wayland",
+    "--socket=wayland-0",
+    "--width=1280",
+    "--height=720",
+    "--config=/etc/kennel/config/weston/weston.ini",
+]
+pinned = true
+
+
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCLT9HNdOVBq4cTJAJfhjLS2RC0cCIanZx\nE18vliQqD+VEz0qOty46ze2bptCgKj9WeVK6hCgIVgQgVRA1Pq8wA=\n-----END SSH SIGNATURE-----\n"

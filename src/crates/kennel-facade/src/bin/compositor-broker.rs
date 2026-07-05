@@ -28,10 +28,11 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -63,8 +64,10 @@ const RATE_REFILL_PER_SEC: f64 = 8.0;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let Some(listen) = args.next() else {
-        eprintln!("compositor-broker: usage: <listen-socket> <compositor> [compositor-args...]");
+    let Some(listen_arg) = args.next() else {
+        eprintln!(
+            "compositor-broker: usage: <listen-socket[,socket...]> <compositor> [compositor-args...]"
+        );
         return ExitCode::FAILURE;
     };
     let compositor: Vec<String> = args.collect();
@@ -79,31 +82,66 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let _ = std::fs::remove_file(&listen); // a stale socket from a prior run
-    if let Some(parent) = Path::new(&listen).parent() {
-        let _ = std::fs::create_dir_all(parent);
+    // One or more comma-separated listen sockets. A single broker serves several capabilities —
+    // each an in-view rendezvous socket in its OWN directory (the mesh binds a provide's rendezvous
+    // at `dirname(endpoint)`, so co-located capabilities must differ there) — spawning a fresh
+    // compositor per accepted connection on any of them.
+    let listens: Vec<&str> = listen_arg.split(',').filter(|s| !s.is_empty()).collect();
+    if listens.is_empty() {
+        eprintln!("compositor-broker: no listen socket given");
+        return ExitCode::FAILURE;
     }
-    let listener = match UnixListener::bind(&listen) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("compositor-broker: bind {listen}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    eprintln!("compositor-broker: listening at {listen}, compositor {compositor:?}");
 
     let compositor = Arc::new(compositor);
     let live = Arc::new(AtomicUsize::new(0));
+    let ids = Arc::new(AtomicU64::new(0)); // globally-unique connection ids across all listeners
+
+    let mut handles = Vec::new();
+    for listen in listens {
+        let _ = std::fs::remove_file(listen); // a stale socket from a prior run
+        if let Some(parent) = Path::new(listen).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let listener = match UnixListener::bind(listen) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("compositor-broker: bind {listen}: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!("compositor-broker: listening at {listen}, compositor {compositor:?}");
+        let compositor = Arc::clone(&compositor);
+        let live = Arc::clone(&live);
+        let ids = Arc::clone(&ids);
+        handles.push(thread::spawn(move || {
+            accept_loop(&listener, &compositor, &live, &ids);
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
+    ExitCode::SUCCESS
+}
+
+/// Accept connections on one listen socket, spawning a compositor per connection. Run one per
+/// listener; `live` (the global concurrency cap) and `ids` (globally-unique connection ids, so two
+/// listeners never share a compositor runtime dir) are shared, the token-bucket rate limit is
+/// per-listener.
+fn accept_loop(
+    listener: &UnixListener,
+    compositor: &Arc<Vec<String>>,
+    live: &Arc<AtomicUsize>,
+    ids: &Arc<AtomicU64>,
+) {
     let mut tokens = RATE_BURST;
     let mut last_refill = Instant::now();
-    let mut id: u64 = 0;
     for incoming in listener.incoming() {
         let Ok(conn) = incoming else { continue };
-        id = id.wrapping_add(1);
+        let id = ids.fetch_add(1, Ordering::SeqCst);
         // Rate-limit new compositors (token bucket): refill by elapsed time, capped at the burst,
-        // then require a whole token. The accept loop is single-threaded, so no synchronisation is
-        // needed. A flood that outruns the refill is dropped (the consumer retries) before it can
-        // spawn — this caps connect/disconnect *churn* the live ceiling alone would let through.
+        // then require a whole token. A flood that outruns the refill is dropped (the consumer
+        // retries) before it can spawn — this caps connect/disconnect *churn* the live ceiling
+        // alone would let through.
         let now = Instant::now();
         tokens = now
             .duration_since(last_refill)
@@ -128,14 +166,13 @@ fn main() -> ExitCode {
             );
             continue; // `conn` drops here, closing it
         }
-        let compositor = Arc::clone(&compositor);
-        let live = Arc::clone(&live);
+        let compositor = Arc::clone(compositor);
+        let live = Arc::clone(live);
         thread::spawn(move || {
             serve(conn, id, &compositor);
             live.fetch_sub(1, Ordering::SeqCst); // release the slot when the window folds
         });
     }
-    ExitCode::SUCCESS
 }
 
 /// Spawn a fresh compositor for one accepted connection, relay the app into it, and fold it (kill
@@ -160,7 +197,11 @@ fn serve(conn: UnixStream, id: u64, compositor: &[String]) {
         }
     };
     match wait_for_display(&runtime) {
-        Some(display) => match UnixStream::connect(&display) {
+        // `_keepalive` is the readiness-probe connection, HELD open until this scope ends so the
+        // compositor never sees zero clients between "ready" and the app connecting (a kiosk shell
+        // folds on a zero-client gap, which reset the app's connection). Dropped after the splice
+        // returns — by then the app has long been the client.
+        Some((display, _keepalive)) => match UnixStream::connect(&display) {
             // Relay the remote app into this compositor, forwarding SCM_RIGHTS fds. Returns when the
             // app disconnects (the compositor drops the client and closes the socket) — then we fold
             // the window.
@@ -191,17 +232,128 @@ fn spawn_compositor(runtime: &Path, compositor: &[String]) -> std::io::Result<Ch
         .spawn()
 }
 
-/// Poll the compositor's runtime dir until its `wayland-*` display socket appears (or the deadline
-/// lapses).
-fn wait_for_display(runtime: &Path) -> Option<PathBuf> {
+/// Poll the compositor's runtime dir until its `wayland-*` display socket appears **and the
+/// compositor is ready** (advertises `wl_compositor`), or the deadline lapses.
+///
+/// The socket file appears before the compositor finishes registering its globals, so returning on
+/// socket-exists alone races: a nested compositor client (sway, for a full session) that queries the
+/// registry before `wl_compositor` is advertised fails to create its backend and dies (`wlroots:
+/// Remote Wayland compositor does not support wl_compositor`). A single app tolerates it (it retries
+/// its own connection), which is why the race only bit sessions and only on a cold broker. Gating on
+/// [`probe_ready`] closes it; the returned socket is the probe connection, kept open for the caller
+/// to hold across the app hand-off (see [`serve`]).
+fn wait_for_display(runtime: &Path) -> Option<(PathBuf, UnixStream)> {
     let start = Instant::now();
     while start.elapsed() < DISPLAY_WAIT {
         if let Some(display) = find_display(runtime) {
-            return Some(display);
+            if let Some(keepalive) = probe_ready(&display) {
+                return Some((display, keepalive));
+            }
         }
         thread::sleep(POLL);
     }
     None
+}
+
+/// A probe connection to the compositor at `display`, **kept open**, once it advertises the
+/// `wl_compositor` global — else `None`.
+///
+/// Does the minimal Wayland handshake — `wl_display.get_registry` then `wl_display.sync` — and, if
+/// `wl_compositor` appears in the registry dump before the sync callback, returns the live socket so
+/// the caller can HOLD it through the app hand-off. That matters because a kiosk compositor (weston
+/// `kiosk-shell`, cage) tears down when it briefly sees zero clients: a throwaway probe that
+/// connected and closed would leave a zero-client gap between readiness and the real app connecting,
+/// and the app would then hit `Connection reset`. Keeping this connection alive across the hand-off
+/// closes that gap. Native-endian, 32-bit-aligned wire (libwayland's ABI); no client library. A
+/// connect failure, short read, or timeout reads as "not ready yet" so the caller keeps polling.
+fn probe_ready(display: &Path) -> Option<UnixStream> {
+    let mut sock = UnixStream::connect(display).ok()?;
+    sock.set_read_timeout(Some(Duration::from_millis(500)))
+        .ok()?;
+    // wl_display is object 1. get_registry(new_id=2), then sync(new_id=3); each message is
+    // `object_id`, `(size<<16)|opcode`, args — get_registry is opcode 1, sync opcode 0, both
+    // carrying one 4-byte new-id, so size = 12.
+    let mut req = Vec::with_capacity(24);
+    for (opcode, new_id) in [(1u32, 2u32), (0u32, 3u32)] {
+        req.extend_from_slice(&1u32.to_ne_bytes());
+        req.extend_from_slice(&((12u32 << 16) | opcode).to_ne_bytes());
+        req.extend_from_slice(&new_id.to_ne_bytes());
+    }
+    sock.write_all(&req).ok()?;
+    // Read events until wl_compositor appears (registry object 2, global opcode 0, whose interface
+    // string is `wl_compositor`) or the sync callback fires (object 3, opcode 0 — registry dump
+    // done without it).
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let start = Instant::now();
+    loop {
+        let (verdict, consumed) = scan_registry(&buf);
+        match verdict {
+            Some(true) => return Some(sock), // ready — hand the LIVE connection back to hold
+            Some(false) => return None,
+            None => {}
+        }
+        buf.drain(..consumed.min(buf.len()));
+        if start.elapsed() > Duration::from_secs(2) {
+            return None;
+        }
+        match sock.read(&mut chunk) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => buf.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+        }
+    }
+}
+
+/// Take `n` bytes off the front of `cur`, advancing it; `None` (leaving `cur` untouched) if fewer
+/// than `n` remain. The cursor idiom the codebase's wire parsers use — bounds-checked, no indexing.
+fn take<'a>(cur: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    let (head, tail) = cur.split_at_checked(n)?;
+    *cur = tail;
+    Some(head)
+}
+
+/// A native-endian `u32` from a 4-byte slice (as returned by `take(.., 4)`).
+fn u32_ne(b: &[u8]) -> u32 {
+    u32::from_ne_bytes(b.try_into().unwrap_or([0; 4]))
+}
+
+/// Scan `buf` for the Wayland registry verdict: `Some(true)` if `wl_compositor` was advertised,
+/// `Some(false)` if the sync callback fired first (dump complete, not present) or a message is
+/// malformed, `None` if more bytes are needed. The second element is how many bytes were consumed
+/// (complete messages) so the caller can drain them and keep any partial trailing message.
+fn scan_registry(buf: &[u8]) -> (Option<bool>, usize) {
+    let mut cur: &[u8] = buf;
+    loop {
+        let msg_start = cur;
+        let (Some(obj_b), Some(w1_b)) = (take(&mut cur, 4), take(&mut cur, 4)) else {
+            // No full 8-byte header — rewind to the message start and ask for more.
+            return (None, buf.len().saturating_sub(msg_start.len()));
+        };
+        let (obj, word1) = (u32_ne(obj_b), u32_ne(w1_b));
+        let size = (word1 >> 16) as usize;
+        let opcode = word1 & 0xffff;
+        if size < 8 {
+            return (Some(false), buf.len()); // malformed framing — give up, not-ready
+        }
+        let Some(body) = take(&mut cur, size.saturating_sub(8)) else {
+            return (None, buf.len().saturating_sub(msg_start.len())); // incomplete body
+        };
+        // wl_registry.global: name(u32), interface(u32 len incl NUL + padded bytes), version(u32).
+        if obj == 2 && opcode == 0 {
+            let mut bc: &[u8] = body;
+            let _name = take(&mut bc, 4);
+            if let Some(slen_b) = take(&mut bc, 4) {
+                let slen = u32_ne(slen_b) as usize;
+                if bc.get(..slen.saturating_sub(1)) == Some(b"wl_compositor".as_slice()) {
+                    return (Some(true), buf.len());
+                }
+            }
+        }
+        // wl_callback.done on our sync object: the registry dump is complete, no wl_compositor.
+        if obj == 3 && opcode == 0 {
+            return (Some(false), buf.len());
+        }
+    }
 }
 
 /// The first `wayland-*` socket in `runtime` (the compositor's auto-named display), excluding its

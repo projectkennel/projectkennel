@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!--
+  Kennel confined-desktop window manager (labwc).
+
+  labwc, not sway: sway is a TILING compositor, so a single window fills the screen — which is why
+  the earlier session looked like a fullscreen terminal. labwc is a STACKING WM (openbox-style):
+  applications open as normal windows with title bars, movable and resizable, over a desktop with a
+  right-click application menu. wlroots + cairo, no GTK. Served at /etc/xdg/labwc by a W15 redirect.
+-->
+<labwc_config>
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+    <!-- A confined session runs Wayland-native clients only. labwc 0.9 cannot fully disable
+         Xwayland from config; it starts lazily and (harmlessly) fails to bind the abstract X
+         socket that the host's real X server already holds. `no` at least stops it persisting. -->
+    <xwaylandPersistence>no</xwaylandPersistence>
+  </core>
+
+  <theme>
+    <cornerRadius>4</cornerRadius>
+    <font place="ActiveWindow">
+      <name>monospace</name>
+      <size>10</size>
+    </font>
+  </theme>
+
+  <keyboard>
+    <!-- labwc's built-in defaults (A-Tab window switching, etc.) plus a few kennel bindings. -->
+    <default />
+    <keybind key="A-Return">
+      <action name="Execute"><command>foot</command></action>
+    </keybind>
+    <keybind key="A-d">
+      <action name="Execute"><command>fuzzel --config /etc/kennel/config/fuzzel/fuzzel.ini</command></action>
+    </keybind>
+    <keybind key="A-F4">
+      <action name="Close" />
+    </keybind>
+    <keybind key="A-S-e">
+      <action name="Exit" />
+    </keybind>
+  </keyboard>
+
+  <mouse>
+    <!-- Defaults: drag title bar to move, drag edges to resize, right-click the desktop for the
+         application menu. This is what makes it a recognizable windowed desktop. -->
+    <default />
+  </mouse>
+</labwc_config>

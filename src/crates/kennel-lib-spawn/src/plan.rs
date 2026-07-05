@@ -443,14 +443,29 @@ pub struct ShimView {
     /// choosing the upper; the host system closure is *not* mirrored (the image carries its
     /// own `/usr` layout) and `/etc` wins by layer precedence, not by a synthesised copy.
     pub image: Option<ImageRoot>,
-    /// Host `/etc` files the policy grants (`fs.read`) that are bind-mounted **read-only over the
-    /// synthetic `/etc` floor** (the real file, not the scrubbed synthetic one). The synthetic
-    /// `/etc` is a floor; an explicit grant layers the real host file on top — e.g. a
-    /// `net.mode = host` service that must resolve real names grants `/etc/resolv.conf` +
-    /// `/etc/hosts`. Restricted to a safe set: the identity-mask files (`passwd`/`group`/
-    /// `hostname`) and credential files (`shadow`/…) are never overlayable, so a grant cannot
-    /// re-leak the host user list or secrets. Each path is the same on the host and in the view.
-    pub etc_overlays: Vec<PathBuf>,
+    /// Host `/etc` paths the policy grants (`fs.read`) that are bind-mounted **read-only over the
+    /// synthetic `/etc` floor** (the real path, not the scrubbed synthetic one). The synthetic
+    /// `/etc` is a floor; an explicit grant layers the real host file/dir on top — e.g. a
+    /// `net.mode = host` service grants `/etc/resolv.conf`, a GUI kennel grants `/etc/fonts`. The
+    /// protected floor (`PROTECTED_ETC_FLOOR`) is never overlayable, so a grant cannot clobber the
+    /// persona mask or the loader config. A W15 `source` redirect may serve the overlay from an
+    /// alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`), which is why each entry
+    /// carries both ends rather than a single path.
+    pub etc_overlays: Vec<EtcOverlay>,
+}
+
+/// One `/etc` overlay: the host `source` bound read-only at the in-view `/etc` `view_path`.
+///
+/// `source == view_path` for an ordinary grant (the real host `/etc/resolv.conf` at `/etc/resolv.conf`);
+/// they diverge for a W15 `source` redirect (kennel-shipped `/etc/kennel/config/sway` served at the
+/// view's `/etc/sway`), which is how a policy overlays a kennel-authored config over the floor
+/// without depending on — or exposing — the host's version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EtcOverlay {
+    /// The host path the overlay content comes from (the redirect `source`, else `view_path`).
+    pub source: PathBuf,
+    /// The `/etc/...` path in the view it lands at (a granted, overlayable `fs.read` path).
+    pub view_path: PathBuf,
 }
 
 /// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
@@ -554,7 +569,7 @@ const PROTECTED_ETC_FLOOR: &[&str] = &[
 /// **file** (`/etc/resolv.conf` for a `net.mode = host` resolver) or a whole **directory**
 /// (`/etc/fonts`, `/etc/ssl/certs` — the fontconfig tree and CA bundle a GUI or TLS client needs).
 /// Requires a path under `/etc` (no glob, not bare `/etc`, no `..`) whose first component below
-/// `/etc` is not in [`PROTECTED_ETC_FLOOR`] — the component test (not leaf) also refuses a grant
+/// `/etc` is not in `PROTECTED_ETC_FLOOR` — the component test (not leaf) also refuses a grant
 /// *inside* a protected directory (`/etc/ld.so.conf.d/x`). A glob stays refused (it could pull in a
 /// whole host `/etc` subtree the author did not name); everything else — including a host file the
 /// operator chooses to expose — is admitted.
@@ -1244,12 +1259,23 @@ impl Plan {
         // exceptions, layered after the synthetic copy. Restricted to specific files (no glob)
         // that are not identity-mask or credential files, so a grant can expose the host
         // resolver/hosts without re-leaking the masked user list or a secret.
-        let etc_overlays: Vec<PathBuf> = ep
+        // A W15 `source` redirect on an overlayable `/etc` grant serves the overlay from an
+        // alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`) — the mechanism a policy
+        // uses to lay a kennel-shipped config over the floor without touching the host's version.
+        // The redirect map is glob-rooted; `/etc` grants carry no glob, so the key is the path.
+        let etc_overlays: Vec<EtcOverlay> = ep
             .fs
             .read
             .iter()
             .map(PathBuf::from)
             .filter(|p| is_overlayable_etc_path(p))
+            .map(|view_path| {
+                let source = redirects
+                    .get(&view_path)
+                    .cloned()
+                    .unwrap_or_else(|| view_path.clone());
+                EtcOverlay { source, view_path }
+            })
             .collect();
 
         let view = Some(ShimView {

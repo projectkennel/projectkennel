@@ -1,0 +1,20 @@
+# Kennel confined-desktop panel (yambar).
+#
+# yambar, not waybar: waybar is GTK3 and reaches for xdg-desktop-portal / a11y / gvfs; yambar is
+# fcft/pixman (the foot/fuzzel ecosystem), no GTK, so it starts clean in the confined view. Read via
+# --config on the labwc autostart; installed at /etc/kennel/config/yambar/config.yml. Clock-only: the
+# session runs under labwc (a stacking WM), which does not expose the sway/i3 IPC yambar's workspace
+# module would need.
+
+bar:
+  location: top
+  height: 26
+  background: 16161eff
+  font: "monospace:size=11"
+  foreground: c0caf5ff
+  right:
+    - clock:
+        date-format: "%a %Y-%m-%d"
+        time-format: "%H:%M"
+        content:
+          - string: {text: "{date}  {time}", right-margin: 12}

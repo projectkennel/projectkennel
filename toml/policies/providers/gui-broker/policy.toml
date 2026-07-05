@@ -16,12 +16,13 @@ template_base = "gui-broker"
 [workload]
 argv = [
     "/usr/libexec/kennel-facades/compositor-broker",
-    "/run/mesh/gui.sock",
+    "/run/mesh/wayland/gui.sock,/run/mesh/wayland-session/gui.sock",
     "/usr/bin/cage",
 ]
 pinned = true
 
+
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQJ15V81S88lbkOTJAG/UYb+w3AYJ0nomyt\n+uJXicPoDZ377Wla1RA+i4graBxydKtw2C8XFr9te3S34+okxa0gE=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQEuSdi8B7Rqhma8G44eqYZbLkuv/1e1hv8\nwyWuE8A79VDPJQSIPQLIPQfuv82CsBJ4Uq95xox9V7jnwVWCw9rg4=\n-----END SSH SIGNATURE-----\n"

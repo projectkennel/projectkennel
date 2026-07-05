@@ -58,20 +58,24 @@ WLR_BACKENDS = "wayland"
 WLR_RENDERER = "pixman"
 
 [[consumes]]
-name = "org.projectkennel.wayland"
+name = "org.projectkennel.wayland-session"
 shape = "af-unix"
 at = "/tmp/wayland-0"
 required = true
-reason = "the confined desktop session reaches its display server — a broker-spawned nested compositor — over the mesh"
+reason = "the confined desktop session (its own nested labwc) reaches its host window through the broker — the full-desktop display capability, distinct from the single-window org.projectkennel.wayland"
 
 # The fixed session command: a private session bus (dbus-run-session) wrapping the nested sway
 # compositor. Pinned so a CLI `-- override` is refused (it would run with no bus / wrong display);
 # --force remains the deliberate escape.
 [workload]
-argv = ["/usr/bin/dbus-run-session", "/usr/bin/sway"]
+argv = ["/usr/bin/dbus-run-session", "/usr/bin/labwc"]
 pinned = true
+
+
+
+
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIMYzBnlDGNfaGecnN18zJwmGinmhNXwm2\nGt77PTAh2bseILxuuOAbuFxoxt6QNUIaBs49Pc4GHBNspXE3wcdg0=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBHSxXmWUKUeJ8O5N0YceQMTzK8piL7Tnt\n2AnN2z5IncRYFez00YRBMHm7YFQIK7sTFl6AnkoXp6Ck0U6mt4lQY=\n-----END SSH SIGNATURE-----\n"

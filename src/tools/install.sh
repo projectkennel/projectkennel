@@ -386,16 +386,29 @@ install_reference_policies() {
 		echo "install.sh: enabled the tun-broker provider (ondemand, per-host)"
 	fi
 
-	# Enable the standing confined-GUI display broker ondemand at the per-host layer: a
-	# `gui-interactive` / `gui-session` kennel `[[consumes]]` org.projectkennel.wayland, unserved
-	# without it — socket-activated on first consume (a host with no GUI consumer pays nothing).
-	# Same admin-tier enablement as the D-Bus / UDP brokers; a per-user link overrides it. The
-	# broker holds the host-Wayland leg + render node, so it activates only where a display exists.
-	local gui_settled="/etc/kennel/policies/providers/gui-broker/gui-broker.settled.toml"
-	if [ -f "$gui_settled" ]; then
+	# Enable ONE confined-GUI display broker ondemand at the per-host layer: a `gui-interactive` /
+	# `gui-session` kennel `[[consumes]]` org.projectkennel.wayland, unserved without it —
+	# socket-activated on first consume (a host with no GUI consumer pays nothing). Three brokers
+	# are shipped so the operator can pick the compositor: **weston** (default — a decorated,
+	# resizable host window), **cage** (`gui-broker` — a minimal borderless kiosk)
+	# Switch by repointing this link at the
+	# chosen provider's settled artefact, or build your own leaf. Same admin-tier enablement as the
+	# D-Bus / UDP brokers; a per-user link overrides it. The broker holds the host-Wayland leg +
+	# render node, so it activates only where a display exists.
+	local gui_default="/etc/kennel/policies/providers/gui-broker-weston/gui-broker-weston.settled.toml"
+	if [ -f "$gui_default" ]; then
 		install -d -m 0755 /etc/kennel/ondemand
-		ln -sf "$gui_settled" /etc/kennel/ondemand/gui-broker
-		echo "install.sh: enabled the gui-broker provider (ondemand, per-host)"
+		ln -sf "$gui_default" /etc/kennel/ondemand/gui-broker
+		echo "install.sh: enabled the gui-broker-weston provider (ondemand, per-host; cage kiosk also shipped)"
+	fi
+
+	# Kennel-authored app configs, served into a kennel's view by a W15 `source` redirect
+	# (`gui-session` overlays /etc/kennel/config/sway at the view's /etc/sway). Host-independent
+	# and identical everywhere; a confined desktop never inherits the host's /etc/sway assumptions.
+	if [ -d "$pkg_root/dist/config/gui" ]; then
+		install -d -m 0755 /etc/kennel/config
+		cp -a "$pkg_root/dist/config/gui/." /etc/kennel/config/
+		echo "install.sh: installed the confined-GUI default configs (/etc/kennel/config)"
 	fi
 }
 
