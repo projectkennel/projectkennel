@@ -15,9 +15,10 @@ Baseline: 0.5.0 (released)
 releases accrued; 0.6.0 spends the ground they cleared on the largest tractable gap left in the
 confinement story: constrained mode has never carried the transport class the web is moving to — UDP
 egress lands without giving up the property that DNS exfiltration is unexpressible (W2). Around the
-bet, the release finishes what the `dbus-broker` started: the interactive file broker the confined
-GUI has owed since §7.14.7 (W3), and the retirement of the legacy per-kennel `host-dbus` delegate
-once the broker demonstrably subsumes it (W4). Three small owed debts ride along (W5–W7), and the
+bet, the release finishes what the `dbus-broker` started: the confined-GUI display stack gets the
+default configs and session runtime that make it usable out of the box (W3 — recast from the file
+broker, now declined), and the legacy per-kennel `host-dbus` delegate retires once the broker
+demonstrably subsumes it (W4). Three small owed debts ride along (W5–W7), and the
 clunky admin-provisioned `/etc/kennel/subkennel` per-user allocation retires — derived from the
 kernel-trusted uid instead, which also clears the ULA addressing scheme for W2 (W10). The adoption
 story finally reaches its last mile: a maintainer-signed `claude` policy that runs in three commands
@@ -42,8 +43,9 @@ Standing constraints carried from 0.5.0:
   daemon (facade on the untrusted side, broker as a quarantined operator-context leaf). Where a
   workstream touches a TCB crate, the growth is measured (`gen-inventory`) and justified, never
   assumed — and W4 is measured because it *shrinks*.
-- **Authentication, never attestation.** Load-bearing for W3: file-open consent is the operator's
-  act, performed host-side; nothing confined can vouch for it.
+- **Authentication, never attestation.** The axiom that declined the W3 file broker (a per-file
+  consent path whose honest form is an in-session portal, not a host reach-through) and, before it,
+  the W13 ingress leg — both in [BACKLOG.md](BACKLOG.md).
 - **Never overclaim.** W2's accepted residuals (AF_INET-only legacy clients, exfil inside approved
   flows) are recorded, not papered over.
 
@@ -286,34 +288,49 @@ fork**:
   direct line at the W1 seam. Only a move of the *decision* (not just the plumbing) evicts inet;
   orthogonal to the TCP slow-lane.
 
-### W3 · The interactive file broker
+### W3 · Confined-GUI polish: default configs and the session runtime
 
-**[capability] M. Promoted from BACKLOG; the fence condition is met.**
+**[capability, quality] M. Recast from "the interactive file broker" — that file-picker leg is
+declined and moved to [BACKLOG.md](BACKLOG.md); this slot invests in the display stack that exists.**
 
-The confined GUI's committed residual (§7.14.7): a confined app touches only its pre-granted paths —
-there is no consented, per-file grant, so "open a file the policy did not anticipate" means editing
-policy. The backlog fenced this behind one question — where the D-Bus broker itself lives — and
-0.5.0 answered it: D-Bus mediation is a standing `dbus-broker@v1` service kennel on the mesh. The
-app-facing surface now has a home.
+The confined-GUI mechanism is shipped and proven (`gui-broker` display-service kennel running
+`compositor-broker`, `gui-interactive` for one app, `gui-session` for a nested desktop; verified
+end-to-end by the `gui-mesh` suite case). What is rough is everything *around* the mechanism: run one
+today and you get bare compositors with no default configuration. The value for 0.6.0 is turning "it
+renders" into "it is usable out of the box" — config and fragment work, **no TCB surface, no schema
+change**.
 
-The shape, within the settled model:
+The rough edges, concretely:
 
-- **App-facing:** an unmodified GTK/Qt app reaches a chooser only through the
-  `org.freedesktop.portal.FileChooser` D-Bus interface. The request rides the kennel's existing
-  in-view D-Bus facade over the brokered path — no new socket, no new protocol parser in the daemon;
-  the FileChooser method surface is handled where D-Bus is already handled.
-- **Consent-facing:** the picker is a host-side transient component in operator context, under the
-  delegate pattern (`host-netproxy`/`host-inetd` precedent). Consent is the operator's act;
-  nothing confined can vouch for it (authentication, never attestation).
-- **Delivery:** the result of consent is **one fd** delivered into the workload's view (the §4.3
-  fd-broker shape) — the file, not its path, not its parent directory, no grant widening.
-- **Floor first:** open-one-file and save-one-file. Per-method/fine-grained service policy stays
-  fenced behind its own design question (see non-goals).
+- **No shipped compositor config.** `gui-session-runtime` reads `/etc/sway` from the *host* — a
+  load-bearing dependency on the host shipping a sway config, and if it does, on that config being
+  sane for a single-window nested session. `gui-broker`'s `cage`/`weston` compositors are likewise
+  unconfigured. Ship kennel-authored defaults (a `sway` config with a bar, launcher keybinds, and
+  output/scale sane for the nested-window case; a `weston.ini`; the `cage` kiosk defaults), delivered
+  into the view as part of the GUI templates rather than borrowed from the host — so a confined GUI
+  session is self-sufficient and identical across hosts.
+- **The session comes up bare.** `gui-session` runs `dbus-run-session sway` with no panel, launcher,
+  or notifier, so the reference desktop is an empty canvas with apps reachable only if the operator
+  already knows a keybind. Define the **session runtime** once (in the `gui-session-runtime` fragment
+  + its default config): what starts with the session, what its keybinds are, and how it tears down
+  coherently. If a session manager earns its place here, this is where it is declared — one fragment,
+  default-configured, not per-leaf improvisation.
+- **App defaults and dotfile seeds.** The `gui-*` fragments pull app *binaries* but ship no defaults,
+  so the file manager, editor, and viewers open unconfigured. Seed the minimum that makes them
+  behave in a fresh-tmpfs `$HOME` (fontconfig is already carried; add the per-app defaults the
+  standard bundle needs).
 
-**Exit:** an unmodified GTK or Qt app in a confined GUI kennel opens a host file through the portal
-FileChooser and receives exactly the picked file as an fd in its view; the save-one-file round trip
-works; a policy-suite case covers the deny shape (no chooser surface granted → the portal call fails
-cleanly, no picker appears); a test asserts the picked fd is the only new reach in the view.
+**Non-goals (this slot):** the render-node story stays software-only for consumers (the broker owns
+the GPU; a passthrough path is separate work), and the interactive per-file grant is declined
+([BACKLOG.md](BACKLOG.md)) — an in-session `xdg-desktop-portal` is the honest home for "pick a file"
+and, if pursued, rides this fragment's session-bus, not a host reach-through.
+
+**Exit:** `kennel run gui-session` and `kennel run gui-interactive` come up **usable on a stock
+install with no host GUI config and no operator dotfiles** — a configured compositor (bar/keybinds
+present), the session apps launchable without foreknowledge, and each app opening with sane defaults;
+the GUI templates no longer depend on host `/etc/sway` (or any host compositor config) being present
+or correct; the `gui-mesh` suite case still passes and a case (or an extension of it) asserts the
+shipped config is what the session actually loads.
 
 ### W4 · Retire the per-kennel `host-dbus` delegate
 
@@ -334,8 +351,10 @@ workstream is that demonstration, then the deletion, in that order:
   legacy path and its maintenance. The shrink is measured (`gen-inventory`), not asserted.
 
 If parity fails on something real — a bus behaviour the broker cannot carry — the workstream stops
-and records why: the delegate stays, this roadmap says so, and the gate did its job. Sequenced after
-W3, which adds a real brokered consumer and is exactly the subsumption evidence the gate wants.
+and records why: the delegate stays, this roadmap says so, and the gate did its job. The subsumption
+evidence is the shipped brokered-D-Bus suite (the `dbus-brokered` / `dbus-session-allowed` /
+`dbus-system-allowed` / `dbus-deny-wins` cases already routing over the broker); W3's recast to GUI
+polish removes its old ordering dependency on the file broker as the demonstrating consumer.
 
 **Exit:** `[dbus.session]` alone routes over the standing broker; the policy suite and confined-GUI
 cases pass with the `host-dbus` delegate deleted from the tree; the `gen-inventory` delta is
@@ -708,16 +727,15 @@ symmetric policies and their signatures are byte-unchanged.
 **[security, ship-gate] S.**
 
 0.6.0 creates boundaries and authorities that did not exist: the UDP facade predicate and flow broker
-(hostile L3 and DNS wire parsed in operator context), the file-broker consent path (a host-side picker
-delivering fds across the boundary), and the W11 invocation-cwd write grant (a signed slot the
-invocation fills with a writable directory). The 0.5.0 precedent holds — no finding from a focused pass
-is not proven safe — and none has been driven from the hostile seat. Drive each live:
+(hostile L3 and DNS wire parsed in operator context) and the W11 invocation-cwd write grant (a signed
+slot the invocation fills with a writable directory). The 0.5.0 precedent holds — no finding from a
+focused pass is not proven safe — and none has been driven from the hostile seat. (The file-broker
+consent path this pass was also to cover is gone with the declined W3 file broker — there is no new
+picker boundary to drive.) Drive each live:
 
 - the **UDP facade and broker** with the four crafted-frame classes and DNS-wire fuzz — the §10.6
   fuzz targets land with their parsers in W2; this pass drives them further and from composed
   positions (facade and broker together);
-- the **picker path** for consent bypass, fd-scope widening, and confused-deputy shapes (a kennel
-  inducing a picker it should not reach);
 - the **cwd-write grant** for floor escape — symlink/bind-mount races against the `RESOLVE_NO_SYMLINKS`
   resolution, marker spoofing, and any path to a `$HOME`-or-unowned target slipping past the floor;
 - the **fs-redirect floor (W15, if landed by then)** for write-set escape — a redirect source
@@ -728,7 +746,8 @@ is not proven safe — and none has been driven from the hostile seat. Drive eac
 **Exit:** a dated `audits/` note covers each boundary above; every confirmed finding is fixed before
 the tag.
 
-(The parent-child relay boundary this pass was also to cover is gone with the withdrawn W1.)
+(The parent-child relay boundary this pass was also to cover is gone with the withdrawn W1; the
+picker/file-broker boundary is gone with the declined W3 file broker.)
 
 ### W9 · Corpus cutover: retire `docs/design` + `docs/architecture` in favour of the book
 
@@ -793,8 +812,8 @@ W0 (validation probes) ── S,  first: P4→W2-D (P1/P2/P3/P5 gated the withdr
 W9 (corpus cutover)    ── M,  early: before W2 writes its corpus half ────────────►
 W1 (self-confinement)  ── WITHDRAWN → BACKLOG (seam not tidy; see the audit note) ►
 W2 (UDP egress)        ── L,  A→B→C/D→E; the release's structural bet ────────────►
-W3 (file broker)       ── M,  independent; lands before W4 ───────────────────────►
-W4 (host-dbus retire)  ── M,  after W3 (its consumer is the evidence) ────────────►
+W3 (GUI polish)        ── M,  independent; config/fragment work, no TCB, no schema ►
+W4 (host-dbus retire)  ── M,  after the brokered-D-Bus suite is the evidence ──────►
 W5 (raw-base64 removal)── XS, independent ────────────────────────────────────────►
 W6 (enum validation)   ── S,  independent ────────────────────────────────────────►
 W7 (gen-man)           ── S,  independent ────────────────────────────────────────►
@@ -804,14 +823,15 @@ W12 (persona hostname) ── XS–S, TENTATIVE — additive field, re-pin not b
 W13 (bind exemption)   ── ephemeral :0 exemption SHIPPED (#175); ingress leg declined → BACKLOG ►
 W14 (seccomp hardening)── S,  SHIPPED (#173); defence-in-depth hardening, no fail-open ►
 W15 (fs source redirect)── S, independent; additive re-pin (no bump); before W8 ──────►
-W8 (adversarial pass)  ── S,  after W2 + W3 + W11, ship gate ──────────────────────►
+W8 (adversarial pass)  ── S,  after W2 + W11 + W15, ship gate ─────────────────────►
 ```
 
 W0 opened the release and is cheap insurance on the work that remains; with W1 withdrawn, its live
 consequence is P4 → W2 (the other probes are recorded for a future W1). W9 runs alongside it — the
 cutover must land before W2 writes its corpus half, so that chapter is written once, in the book. W2
-is the one long pole. W3 lands before W4 because the file broker is itself the brokered-D-Bus consumer
-that W4's subsumption gate wants as evidence. W5–W7, W11, and W15 slot against capacity, with W15 landing before W8 so the pass can cover its
+is the one long pole. W3 is now independent — GUI config/fragment polish with no schema or TCB
+surface — so it no longer gates W4 (whose subsumption evidence is the shipped brokered-D-Bus suite).
+W5–W7, W11, and W15 slot against capacity, with W15 landing before W8 so the pass can cover its
 floor. 0.6.0 makes only **additive-optional** settled changes (W2
 `[net.udp]`, W11 `allowed_args`/`[fs.cwd]`, W12 `hostname`, W15 `source`/`redirect`), so it
 **re-pins the v3 shape** rather
@@ -830,8 +850,10 @@ BPF change (the ephemeral-bind exemption, no schema); its `[net.bind.ingress]` g
   corpus covers the four crafted-frame classes; broker ceilings hold under flow-spray with kenneld's
   transaction rate flat; the `SETTLED_SCHEMA_VERSION` bump, threat entries, §8.2 ordering test, and
   `kennel-compose` question land with it (W2).
-- An unmodified GTK/Qt app opens and saves a host file through the portal FileChooser, receiving
-  exactly the picked fd, with the deny shape covered in the policy suite (W3).
+- `kennel run gui-session` and `kennel run gui-interactive` come up usable on a stock install with no
+  host GUI config and no operator dotfiles — a configured compositor, launchable session apps, sane
+  app defaults — and the GUI templates no longer depend on host `/etc/sway` (or any host compositor
+  config); the `gui-mesh` case still passes and a case asserts the shipped config is what loads (W3).
 - `[dbus.session]` alone routes over `dbus-broker@v1`, the suite and GUI cases pass with the
   `host-dbus` delegate deleted, and the inventory shrink is recorded — or the parity failure is
   recorded and the delegate stays, explicitly (W4).
@@ -863,11 +885,11 @@ BPF change (the ephemeral-bind exemption, no schema); its `[net.bind.ingress]` g
   a resolved `[fs.cwd]` covering a redirect source refuses at spawn; the policy account records
   `source → path` on divergence; the v3 shape is re-pinned (no bump) and existing signatures are
   byte-unchanged (W15).
-- The adversarial pass covers the UDP facade/broker, the picker path, the W11 cwd-write grant, and
-  the W15 redirect floor; every confirmed finding is fixed before the tag (W8, ship gate).
+- The adversarial pass covers the UDP facade/broker, the W11 cwd-write grant, and the W15 redirect
+  floor; every confirmed finding is fixed before the tag (W8, ship gate).
 
 CHANGELOG records every stable-surface change — the `[net.udp]` section (v3 shape re-pinned, no version bump),
-the portal FileChooser surface, the `host-dbus` retirement (or its recorded retention), the
+the confined-GUI default configs + session runtime (W3), the `host-dbus` retirement (or its recorded retention), the
 raw-base64 removal, the four-field validation tightening, the threat-catalogue additions (+ version
 bump), the man-page derivation, the retirement of `/etc/kennel/subkennel` (per-user disambiguation now
 derived from the uid), the new `[workload] allowed_args` and `[fs] cwd` policy fields (v3 shape re-pinned) and the `claude` reference policy, the port-0 ephemeral-bind exemption (a QoL BPF change, no
