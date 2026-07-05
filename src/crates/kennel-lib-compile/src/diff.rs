@@ -383,6 +383,23 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
         for path in fs.write.iter().flatten() {
             out.push(simple_allow("fs.write", "fs", "[[fs.write]]", path));
         }
+        // The `source` redirects (W15): an atom per divergence, keyed by the view path and
+        // valued `source → path`. Without it a redirect appearing, retargeting, or vanishing
+        // would diff as "no change" while the origin of the data at `path` changed — the
+        // provenance the symmetric case carries implicitly.
+        for r in &fs.redirect {
+            let axis = if r.write { "write" } else { "read" };
+            out.push(Grant {
+                key: format!("fs.redirect:{}", r.path),
+                carrier: format!("[[fs.{axis}.add]] {} source = {}", r.path, r.source),
+                section: "fs",
+                value: format!("{} \u{2192} {}", r.source, r.path),
+                reason: None,
+                exposed: Vec::new(),
+                mitigated: Vec::new(),
+                polarity: Polarity::Allow,
+            });
+        }
         if let Some(dev) = &fs.dev {
             for pt in &dev.passthrough {
                 let path = pt.path.as_deref().unwrap_or("(device)");

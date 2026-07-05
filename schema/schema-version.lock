@@ -11,8 +11,11 @@
 #     yields a byte-identical artefact: the 0.6.0 persona `[identity].hostname` and `[net.udp]` +
 #     `[[net.udp.allow]]` (W2). The W2 settled additions — the `udp` flag and the `udp_allow_names`
 #     grant list — are both skipped from the canonical form when unset/empty, so a v3 policy without
-#     `[net.udp]` signs and loads exactly as before.
+#     `[net.udp]` signs and loads exactly as before. Likewise the W15 `source` on
+#     `[[fs.read.add]]`/`[[fs.write.add]]` entries (settled counterpart: the `redirect` list,
+#     skipped from the canonical form when empty), so a v3 policy without redirects signs and
+#     loads exactly as before.
 # The settled FORMAT is unchanged in every case, so the version stays v3.
 1 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
 2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
-3 2a0ad34061677dc132cc86732def376e9968c648c65816417d3290748149a3e4
+3 fecc8aa8d07089ba4366ebd53bb503bd425a82bec90eec1ac8cb6ec88ebf9996

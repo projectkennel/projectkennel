@@ -1337,6 +1337,10 @@
           "description": "Why (required on every delta entry; validated at compile).",
           "type": "string"
         },
+        "source": {
+          "description": "A different host path serving this view path (W15).",
+          "type": "string"
+        },
         "threats": {
           "allOf": [
             {

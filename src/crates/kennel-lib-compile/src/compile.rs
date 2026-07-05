@@ -45,6 +45,7 @@ pub const ASSERTED_INVARIANTS: &[&str] = &[
     "exec.deny_setcap",
     "exec.deny_writable",
     "fs.home.shadow",
+    "fs.redirect.write-set",
     "net.mode",
     "net.proxy.deny.invariant",
 ];

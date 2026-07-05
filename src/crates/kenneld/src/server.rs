@@ -1439,6 +1439,30 @@ pub fn run_kennel<P, L>(
                     loaded.cwd.grant,
                     kennel_lib_policy::settled::CwdGrant::Write
                 );
+                // The redirect floor's runtime half (W15): settle intersected every redirect
+                // `source` against the policy's own write set, but the cwd grant is a slot the
+                // invocation fills — the one workload-writable surface settle cannot see. A
+                // resolved *writable* cwd that covers (or sits inside) a redirect source would
+                // hand the workload write access to the tree the redirect asserts is
+                // operator-held. A read grant adds no write, so it needs no refusal.
+                if writable {
+                    if let Some(src) = loaded.plan.redirected_source_within(&resolved) {
+                        return fail(
+                            shared,
+                            &req.kennel,
+                            ctx,
+                            conn,
+                            "fs.cwd",
+                            format!(
+                                "invocation cwd {} intersects the fs.redirect source {} — a \
+                                 cwd-writable redirect source is a confused-deputy hole; run \
+                                 from outside the redirected store",
+                                resolved.display(),
+                                src.display()
+                            ),
+                        );
+                    }
+                }
                 tr.detail(&format!(
                     "run_kennel: [fs.cwd] grant {:?} materialised at {} (writable={writable})",
                     loaded.cwd.grant,
@@ -1791,6 +1815,7 @@ pub fn run_kennel<P, L>(
                     target: target.to_path_buf(),
                     writable: true,
                     exclusive: false,
+                    redirected: false,
                 });
             }
             // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability

@@ -31,6 +31,7 @@ missing prerequisite aborts with the precise cause.
 |---|---|---|
 | `masked-identity` | none | `$HOME`/`$USER`/passwd/group are the synthetic `kennel` persona; supplementary groups dropped |
 | `fs-view`         | none | granted `~` subdir readable; non-granted sibling ENOENT; home tmpfs writable; `/etc/shadow` absent |
+| `fs-redirect`     | none | a `source`-redirected grant (W15) serves the view path from a different host inode, over-mounting the symmetric parent; the never-granted store is ENOENT. Setup stages the host tree. |
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-constrained` | constrained | own netns loopback is up + bindable; the in-ns SOCKS endpoint listens at `<addr>:1080` |

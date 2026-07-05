@@ -464,6 +464,16 @@ pub struct FsPolicy {
     /// signs unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub home_readonly: bool,
+    /// Asymmetric `source` redirects (W15): view paths served by a different host path.
+    ///
+    /// Each entry's `path` is also in `read` (and in `write` when the carrying grant was
+    /// writable); the spawn binds `source` at the view location instead of `path`. The
+    /// settle-time floor (re-asserted in `invariant::validate`) refuses a `source` that
+    /// intersects the workload-writable surface (`write` ∪ `exclusive` ∪ `home_persist`).
+    /// Empty ⇒ every grant is symmetric; omitted from the canonical form, so a policy
+    /// without redirects signs exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub redirect: Vec<FsRedirect>,
     /// The invocation-cwd grant. Declared among the sub-tables so the canonical TOML
     /// emits it as a table; omitted entirely when default, so a policy without a
     /// `[fs.cwd]` signs exactly as before.
@@ -474,6 +484,19 @@ pub struct FsPolicy {
     pub tmp: TmpPolicy,
     /// Device-file allowlist for the constructed `/dev`.
     pub dev: DevPolicy,
+}
+
+/// One asymmetric fs redirect (W15): the view path and the host path serving it.
+///
+/// The audit consequence of asymmetry: wherever `source` and `path` diverge, the account
+/// must carry both — a symmetric grant's view path *is* its origin, a redirected one's is not.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsRedirect {
+    /// The view path (a granted `read`/`write` path).
+    pub path: String,
+    /// The host path serving it.
+    pub source: String,
 }
 
 /// Exec policy. The four `deny_*` flags are framework invariants (all true);
@@ -1725,6 +1748,7 @@ pub fn sample_settled() -> SettledPolicy {
                 exclusive: Vec::new(),
                 home_persist: Vec::new(),
                 home_readonly: false,
+                redirect: Vec::new(),
                 cwd: CwdPolicy::default(),
                 tmp: TmpPolicy {
                     writable: true,

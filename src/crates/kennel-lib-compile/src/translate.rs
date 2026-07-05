@@ -39,11 +39,11 @@
 use crate::source::{PathField, SourcePolicy};
 use kennel_lib_policy::settled::{
     AuditRuntime, CapPolicy, ConsumeRuntime, CwdGrant, CwdPolicy, DbusBusRuntime, DbusRuntime,
-    DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy,
-    MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, Protocol, ProvideRuntime,
-    ProxyListen, RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy, ServiceRuntime,
-    SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime, UnixSocket,
-    WorkloadRuntime,
+    DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy, FsRedirect, IdentityRuntime,
+    LifecyclePolicy, MeshRuntime, NameRule, NetMode, NetPolicy, NetRule, ProcPolicy, Protocol,
+    ProvideRuntime, ProxyListen, RestartPolicy, RootfsRuntime, SeccompAction, SeccompPolicy,
+    ServiceRuntime, SshGrant, SshRuntime, TmpPolicy, TtlAction, UlimitsRuntime, UnixRuntime,
+    UnixSocket, WorkloadRuntime,
 };
 use kennel_lib_policy::variant::{Manifest, Variant};
 use kennel_lib_policy::PolicyError;
@@ -1390,12 +1390,25 @@ fn translate_fs(
         }
     }
 
+    // The `source` redirects (W15). The fold carried one entry per divergent grant; here the
+    // axis tag is dropped and the pair enters the settled artefact. Checks that are decidable
+    // at translate: the redirected path must still be granted (its entry survived the fold by
+    // construction, but a cross-axis remove can orphan a redirect — refuse rather than carry a
+    // mapping for a path that binds nothing); the same path must not redirect to two different
+    // sources across the axes; a path under `/etc`/`/proc` is served by the constructed view,
+    // not a host bind, so a redirect there would silently not materialise — refuse. The
+    // write-set floor lives in `invariant::validate`, post-assembly, beside the other
+    // framework invariants.
+    let redirect = translate_fs_redirects(fs, &read, &write, deferred)?;
+
     // The kenneld control socket — the CLI→daemon trust boundary — is ungrantable by rule: reaching
     // it from inside a kennel is privilege escalation, not a footgun (the same refusal `[[unix.allow]]`
     // makes on the socket leaf, here extended to fs binds, which name a *directory* that can contain
     // it). `read` has already folded in every `write` path, and every `exclusive` path is in `write`,
-    // so this one sweep covers fs.read, fs.write, and fs.exclusive.
-    for p in &read {
+    // so this one sweep covers fs.read, fs.write, and fs.exclusive. A redirect `source` is an
+    // equal host exposure (the bind serves its inode wherever the view path lands), so the
+    // sweep covers the sources too.
+    for p in read.iter().chain(redirect.iter().map(|r| &r.source)) {
         if kennel_lib_control::socket::grant_exposes_control_socket(std::path::Path::new(p)) {
             return Err(translation(format!(
                 "fs grant `{p}` exposes the kenneld control socket — the CLI→daemon trust boundary. \
@@ -1437,10 +1450,61 @@ fn translate_fs(
         exclusive,
         home_persist,
         home_readonly: home.readonly.unwrap_or(false),
+        redirect,
         cwd,
         tmp,
         dev,
     })
+}
+
+/// The settled `source` redirects (W15) from the fold-carried entries.
+///
+/// The axis tag is dropped and the `{ path, source }` pair enters the settled artefact, after
+/// the checks decidable at translate: the redirected path must still be granted on its axis (a
+/// cross-axis remove can orphan a redirect — refuse rather than carry a mapping for a path that
+/// binds nothing); the same path must not redirect to two different sources across the axes; a
+/// path under `/etc`/`/proc` is served by the constructed view, not a host bind, so a redirect
+/// there would silently not materialise — refuse. The write-set floor lives in
+/// `invariant::validate`, post-assembly, beside the other framework invariants.
+fn translate_fs_redirects(
+    fs: &crate::source::FsSection,
+    read: &[String],
+    write: &[String],
+    deferred: &mut BTreeSet<String>,
+) -> Result<Vec<FsRedirect>, PolicyError> {
+    let mut redirect: Vec<FsRedirect> = Vec::new();
+    for r in &fs.redirect {
+        let path = subst(&r.path, deferred);
+        let source = subst(&r.source, deferred);
+        let granted = if r.write { write } else { read };
+        if !granted.contains(&path) {
+            return Err(translation(format!(
+                "fs redirect `{path}` is no longer granted in fs.{} — the redirect outlived \
+                 its grant",
+                if r.write { "write" } else { "read" }
+            )));
+        }
+        if std::path::Path::new(&path).starts_with("/etc")
+            || std::path::Path::new(&path).starts_with("/proc")
+        {
+            return Err(translation(format!(
+                "fs redirect `{path}`: paths under /etc and /proc are served by the \
+                 constructed view, not a host bind — a redirect there cannot materialise"
+            )));
+        }
+        match redirect.iter().find(|x| x.path == path) {
+            Some(x) if x.source == source => {}
+            Some(x) => {
+                return Err(translation(format!(
+                    "fs redirect `{path}` maps to both `{}` and `{source}`; a view path has \
+                     one origin",
+                    x.source
+                )));
+            }
+            None => redirect.push(FsRedirect { path, source }),
+        }
+    }
+    Ok(redirect)
 }
 
 /// Default private-`/tmp` size when a policy omits one.
@@ -2334,6 +2398,51 @@ mod tests {
             crate::compile::effective_source(src.as_bytes(), &base_src(), &Trust::dev())
                 .expect("effective source");
         translate(&effective).expect("translate")
+    }
+
+    // ---- fs `source` redirects (W15) ----
+
+    /// The full chain: a `source`-bearing add folds into the effective policy and lands in the
+    /// settled `redirect` list, axis tag dropped.
+    #[test]
+    fn redirect_folds_through_to_the_settled_artefact() {
+        let leaf = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                    [[fs.read.add]]\npath = \"~/.app/cred.json\"\nsource = \"~/stores/acme/cred.json\"\nreason = \"per-workload credential\"\n";
+        let fs = translate_template(leaf).effective_policy.fs;
+        assert_eq!(fs.redirect.len(), 1);
+        let r = fs.redirect.first().expect("one redirect");
+        assert_eq!(r.path, "~/.app/cred.json");
+        assert_eq!(r.source, "~/stores/acme/cred.json");
+        assert!(fs.read.contains(&"~/.app/cred.json".to_owned()));
+    }
+
+    fn translate_err(leaf: &str) -> String {
+        let effective =
+            crate::compile::effective_source(leaf.as_bytes(), &base_src(), &Trust::dev())
+                .expect("effective source");
+        format!(
+            "{}",
+            translate(&effective).expect_err("translate must fail")
+        )
+    }
+
+    /// A redirect under `/etc`/`/proc` cannot materialise (constructed view, not a host bind);
+    /// a view path with two origins is incoherent; a `source` reaching the control socket is
+    /// the same escalation as granting it directly.
+    #[test]
+    fn redirect_refusals_at_translate() {
+        let etc = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                   [[fs.read.add]]\npath = \"/etc/myapp.conf\"\nsource = \"~/stores/myapp.conf\"\nreason = \"r\"\n";
+        assert!(translate_err(etc).contains("constructed view"));
+
+        let conflict = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                        [[fs.read.add]]\npath = \"~/.app/db\"\nsource = \"~/stores/a\"\nreason = \"r\"\n\
+                        [[fs.write.add]]\npath = \"~/.app/db\"\nsource = \"~/stores/b\"\nreason = \"r\"\n";
+        assert!(translate_err(conflict).contains("one origin"));
+
+        let sock = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                    [[fs.read.add]]\npath = \"~/.app/ipc\"\nsource = \"/run/user/1000/kennel\"\nreason = \"r\"\n";
+        assert!(translate_err(sock).contains("control socket"));
     }
 
     // ---- [service] supervision discipline ----

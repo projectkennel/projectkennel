@@ -387,6 +387,12 @@ pub struct BindMount {
     /// operator's host namespace, so the operator and the workload cannot use the path
     /// concurrently. Released at teardown (`exclusive-unmount`). Only meaningful with `writable`.
     pub exclusive: bool,
+    /// **Redirected** (W15): `source` came from an `fs.redirect` entry, not the granted path
+    /// itself. A redirected read-only source is resolved with `RESOLVE_NO_MAGICLINKS` at
+    /// materialisation (a magic link would alias it out of the intended tree; a symmetric RO
+    /// bind needs no guard because its source *is* the granted path); a writable one already
+    /// passes the stricter `RESOLVE_NO_SYMLINKS` guard every writable bind gets.
+    pub redirected: bool,
 }
 
 /// The constructed-`$HOME` view (§7.4.5).
@@ -885,6 +891,24 @@ pub struct LoopbackAddr {
 }
 
 impl Plan {
+    /// The first redirected bind source (W15) that `dir` intersects, if any.
+    ///
+    /// Intersects = equal, or either contains the other (component-boundary). The daemon
+    /// calls this with the resolved invocation cwd before granting `[fs.cwd] write`: a
+    /// workload-writable cwd covering a redirect source re-opens the confused-deputy hole
+    /// the settle-time write-set floor closed — settle cannot see the cwd, so the runtime
+    /// refuses it here.
+    #[must_use]
+    pub fn redirected_source_within(&self, dir: &Path) -> Option<&Path> {
+        self.view
+            .as_ref()?
+            .binds
+            .iter()
+            .filter(|b| b.redirected)
+            .map(|b| b.source.as_path())
+            .find(|src| src.starts_with(dir) || dir.starts_with(src))
+    }
+
     /// Grant an already-resolved host directory into the view at its own path — the
     /// materialised `[fs.cwd]` invocation grant (§7.9).
     ///
@@ -908,6 +932,7 @@ impl Plan {
                 target: host_dir,
                 writable,
                 exclusive: false,
+                redirected: false,
             });
         }
     }
@@ -1007,11 +1032,20 @@ impl Plan {
         // source path the writable bind carries.
         let exclusive_sources: std::collections::BTreeSet<PathBuf> =
             ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
+        // The redirects (W15), keyed like the grants (glob-rooted) so a redirected grant's
+        // lookup matches its `fs_grants` entry. Translate guarantees each `path` is granted
+        // and maps to exactly one `source`.
+        let redirects: std::collections::BTreeMap<PathBuf, PathBuf> = ep
+            .fs
+            .redirect
+            .iter()
+            .map(|r| (glob_root(&r.path), glob_root(&r.source)))
+            .collect();
         // Shortest source path first (parent before child). Stable: equal-length paths keep their
         // first-seen order, so the result is deterministic.
         fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
-        for (source, writable) in fs_grants {
-            let target = remap_target(&source, home, &shim_root);
+        for (granted, writable) in fs_grants {
+            let target = remap_target(&granted, home, &shim_root);
             landlock_fs.push((
                 target.clone(),
                 if writable {
@@ -1020,13 +1054,20 @@ impl Plan {
                     read_access(permissive_exec)
                 },
             ));
-            if !is_special_mount(&source) {
-                let exclusive = writable && exclusive_sources.contains(&source);
+            if !is_special_mount(&granted) {
+                let exclusive = writable && exclusive_sources.contains(&granted);
+                // A redirect decouples the bind's host origin from the granted (view) path;
+                // everything view-side — the target, the Landlock rule, the exclusive match —
+                // keys on the granted path as before.
+                let (source, redirected) = redirects
+                    .get(&granted)
+                    .map_or((granted, false), |src| (src.clone(), true));
                 binds.push(BindMount {
                     source,
                     target,
                     writable,
                     exclusive,
+                    redirected,
                 });
             }
         }
