@@ -392,11 +392,12 @@ pub fn build_view_and_pivot(
 /// Bind each granted host `/etc` file read-only over the synthetic `/etc` floor (the real resolver
 /// config / hosts a `net.mode = host` service resolves real names against, §8 / W2).
 ///
-/// The synthetic `/etc` is built first (a floor of scrubbed files); this layers the real host file
-/// on top of the specific paths the policy granted. Each `path` is the same on the host and in the
-/// view. A path whose host source does not exist is skipped (nothing to overlay). The overlay set
-/// is already restricted to safe files ([`crate::plan`] never emits an identity-mask or credential
-/// path), so this trusts its input.
+/// The synthetic `/etc` is built first (a floor of scrubbed files); this layers the real host path
+/// on top of the specific entries the policy granted — a **file** (`/etc/resolv.conf`) or a whole
+/// **directory** (`/etc/fonts`, `/etc/ssl/certs` — fontconfig and the CA bundle a GUI or TLS client
+/// needs). Each `path` is the same on the host and in the view. A path whose host source does not
+/// exist is skipped (nothing to overlay). The overlay set is already restricted to safe entries
+/// ([`crate::plan`] never emits an identity-mask or credential path), so this trusts its input.
 ///
 /// # Errors
 /// The OS error if creating the target mountpoint, the bind, or the read-only remount fails.
@@ -414,9 +415,17 @@ fn materialize_etc_overlays(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Ensure the synthetic floor file (or an empty placeholder) exists to mount over.
+        // Ensure a mountpoint of the RIGHT TYPE exists to bind over: a directory for a
+        // directory source (`/etc/fonts`, `/etc/ssl/certs`), an empty file otherwise
+        // (`/etc/resolv.conf`, `/etc/hosts`). Binding a directory onto a file target — or a
+        // file onto a directory — fails ENOTDIR/EISDIR, so the placeholder must match the
+        // source. An existing synthetic-floor entry is left as-is (already the right kind).
         if dest.symlink_metadata().is_err() {
-            std::fs::File::create(&dest)?;
+            if path.is_dir() {
+                std::fs::create_dir_all(&dest)?;
+            } else {
+                std::fs::File::create(&dest)?;
+            }
         }
         mount::bind(path, &dest, false).map_err(|e| {
             io::Error::new(

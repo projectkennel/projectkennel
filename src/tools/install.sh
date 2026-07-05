@@ -385,6 +385,18 @@ install_reference_policies() {
 		ln -sf "$tun_settled" /etc/kennel/ondemand/tun-broker
 		echo "install.sh: enabled the tun-broker provider (ondemand, per-host)"
 	fi
+
+	# Enable the standing confined-GUI display broker ondemand at the per-host layer: a
+	# `gui-interactive` / `gui-session` kennel `[[consumes]]` org.projectkennel.wayland, unserved
+	# without it — socket-activated on first consume (a host with no GUI consumer pays nothing).
+	# Same admin-tier enablement as the D-Bus / UDP brokers; a per-user link overrides it. The
+	# broker holds the host-Wayland leg + render node, so it activates only where a display exists.
+	local gui_settled="/etc/kennel/policies/providers/gui-broker/gui-broker.settled.toml"
+	if [ -f "$gui_settled" ]; then
+		install -d -m 0755 /etc/kennel/ondemand
+		ln -sf "$gui_settled" /etc/kennel/ondemand/gui-broker
+		echo "install.sh: enabled the gui-broker provider (ondemand, per-host)"
+	fi
 }
 
 # The signed reference templates and fragments are MAINTAINER content: they ship to the vendor

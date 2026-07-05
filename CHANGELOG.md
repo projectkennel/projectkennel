@@ -69,16 +69,22 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
   (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
   bare form). A future `[net.tcp]` slow-lane rides the same table.
-- **`fs.read` of a specific host `/etc` file overlays the real file over the synthetic floor**
-  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a
-  `resolv.conf` pointed at the proxy), built not bound — so a `net.mode = "host"` service that must
-  resolve real names could not see the host resolver. A policy that `fs.read`s a specific, safe
-  host `/etc` file (e.g. `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) now gets the REAL
-  file mounted read-only over the synthetic one (an OCI image gets it copied into the top overlay
-  lower). Restricted to exact files — no glob, no bare `/etc`, no `..` — and the identity-mask and
-  credential files (`passwd`, `group`, `shadow`, `gshadow`, `hostname`, `sudoers`, `machine-id`)
-  are never overlaid, so a grant cannot re-leak the masked host user list (T1.1) or a secret. The
-  synthetic `/etc` stays the floor for every path not explicitly granted.
+- **`fs.read` of a host `/etc` file or directory overlays the real path over the synthetic floor**
+  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a `resolv.conf`
+  pointed at the proxy), built not bound — so a `net.mode = "host"` service that must resolve real
+  names could not see the host resolver, and a GUI app could not find fontconfig or the CA bundle. A
+  policy that `fs.read`s a host `/etc` path now gets the REAL path mounted read-only over the
+  synthetic one (an OCI image gets it copied into the top overlay lower). Both **files**
+  (`/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) and whole **directories** (`/etc/fonts`,
+  `/etc/ssl/certs`, `/etc/sway`) work — the earlier version created a file-only mountpoint and failed
+  `ENOTDIR` on a directory grant. Restricted to exact paths (no glob, no bare `/etc`, no `..`). The
+  floor it refuses to clobber is **kennel's own constructed `/etc`, not the operator's secrets**: the
+  persona mask (`passwd`/`group`/`hostname` — real ones re-leak the host identity, T1.1) and the
+  dynamic-loader config (`ld.so.preload`/`ld.so.cache`/`ld.so.conf`/`ld.so.conf.d`, execution
+  integrity) can never be overlaid; the resolver files stay overlayable (that is the feature). An
+  operator exposing their own host subtree (`/etc/ssh`, `/etc/shadow`) into a kennel they run is a
+  footgun, not a blocked action — the persona uid gates what it can actually read. The synthetic
+  `/etc` stays the floor for every path not explicitly granted.
 - **The standing UDP-egress broker ships as a maintainer-signed `tun-broker` template + provider,
   enabled ondemand** (W2 Part D) — the dbus-broker pattern applied to UDP egress. A `[net.udp]`
   kennel's egress is unserved without a running broker; `install.sh` now keys the reference
