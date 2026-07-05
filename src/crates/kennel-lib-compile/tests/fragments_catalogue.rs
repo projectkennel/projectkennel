@@ -79,9 +79,9 @@ const CATALOGUE: &[Expect] = &[
     Expect {
         fragment: "gui-session-runtime",
         grants: &[
-            "/usr/bin/sway",
+            "/usr/bin/labwc",
             "/usr/bin/dbus-run-session",
-            "/etc/sway",
+            "/etc/xdg/labwc",
             "/etc/fonts",
         ],
     },

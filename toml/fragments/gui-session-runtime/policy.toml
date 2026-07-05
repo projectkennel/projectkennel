@@ -2,18 +2,23 @@
 # Fragment: gui-session-runtime
 #
 # A composable capability bundle: the runtime a confined DESKTOP session needs to be
-# its own display server — a wlroots compositor (sway) the kennel runs nested, plus a
+# its own display server — a wlroots compositor (labwc) the kennel runs nested, plus a
 # PRIVATE per-kennel D-Bus session bus (dbus-run-session) for the session's internal IPC.
 #
 #   include = ["gui-session-runtime"]
+#
+# labwc, not sway: sway is a TILING compositor (one window fills the screen — a confined session
+# under it collapses to a fullscreen terminal). labwc is a STACKING WM (openbox-style): apps open
+# as normal WINDOWS with title bars, movable/resizable, over a desktop with a right-click
+# application menu. wlroots + cairo, no GTK.
 #
 # The bus is the point of the no-host-bus design: dbus-run-session starts dbus-daemon on a
 # PATH socket in the kennel's own /tmp and execs the session under it, so the panel, launcher,
 # and apps talk only to EACH OTHER — never a host bus, never the mesh. The mount namespace
 # contains it; the abstract-socket scope stays denied.
 #
-# Additive-only: widens exec.allow with the compositor + the private-bus tools. The DISPLAY LEG
-# (the gui-broker [[consumes]] and the WLR_BACKENDS/WLR_RENDERER env that nest sway as a software
+# Additive-only: widens exec.allow with the compositor + the session-shell tools. The DISPLAY LEG
+# (the gui-broker [[consumes]] and the WLR_BACKENDS/WLR_RENDERER env that nest labwc as a software
 # client of the broker's compositor) is the session template's job, not this fragment's — env is
 # not a fragment-additive field. Pair this with a template that brings the leg, e.g. gui-session.
 # ============================================================================
@@ -21,8 +26,8 @@
 name = "gui-session-runtime"
 
 [[exec.allow.add]]
-path = "/usr/bin/sway"
-reason = "the in-kennel wlroots compositor: the session's own display server, nested as a single client of the broker's compositor"
+path = "/usr/bin/labwc"
+reason = "the in-kennel stacking window manager: the session's own display server, nested as a single client of the broker's compositor"
 
 [[exec.allow.add]]
 path = "/usr/bin/dbus-run-session"
@@ -32,18 +37,50 @@ reason = "starts a private session bus (a path socket in the kennel's /tmp) and 
 path = "/usr/bin/dbus-daemon"
 reason = "the session bus that dbus-run-session launches"
 
-# sway reads its config from /etc/sway/config (the kennel's $HOME is a fresh tmpfs, so there is no
-# ~/.config/sway/config). Without a config sway exits with a fatal error, so this read is load-bearing.
-[[fs.read.add]]
-path = "/etc/sway"
+# The session shell — a windowed desktop. swaybg (background), yambar (clock panel), fuzzel
+# (launcher, Alt+d), mako (notifications). Started by the labwc autostart and torn down with the
+# session; the desktop chrome itself (title bars, the right-click application menu) is labwc.
+[[exec.allow.add]]
+path = "/usr/bin/swaybg"
+reason = "paints the desktop background (the labwc autostart's solid colour)"
 
-# sway renders its own chrome (title bars, the status bar) through cairo/pango, which resolve fonts
-# via fontconfig (/etc/fonts). Carried here so the runtime is self-sufficient: a session built on
-# this fragment alone gets font discovery without having to also pull a terminal fragment.
+[[exec.allow.add]]
+path = "/usr/bin/yambar"
+reason = "the clock panel (fcft/pixman, no GTK/portal — fits the confined session)"
+
+[[exec.allow.add]]
+path = "/usr/bin/fuzzel"
+reason = "the application launcher (Alt+d)"
+
+[[exec.allow.add]]
+path = "/usr/bin/mako"
+reason = "the notification daemon — serves org.freedesktop.Notifications on the private session bus"
+
+# The kennel-authored labwc config (rc.xml/menu.xml/autostart), served at the view's /etc/xdg/labwc
+# by a W15 `source` redirect so the session is host-independent. labwc's XDG search finds
+# /etc/xdg/labwc when the fresh-tmpfs $HOME has no ~/.config/labwc.
+[[fs.read.add]]
+path = "/etc/xdg/labwc"
+source = "/etc/kennel/config/labwc"
+reason = "the kennel-authored labwc config (rc.xml, menu.xml, autostart)"
+
+# The kennel-authored panel + launcher configs (overlaid into the view under /etc/kennel/config);
+# yambar and fuzzel read theirs via --config (the labwc autostart / the Alt+d keybind).
+[[fs.read.add]]
+path = "/etc/kennel/config/yambar"
+reason = "the kennel-authored yambar panel config"
+
+[[fs.read.add]]
+path = "/etc/kennel/config/fuzzel"
+reason = "the kennel-authored fuzzel launcher config"
+
+# The session and its clients render chrome (title bars, panel, menus) through cairo/pango, which
+# resolve fonts via fontconfig (/etc/fonts).
 [[fs.read.add]]
 path = "/etc/fonts"
+reason = "fontconfig — labwc and its clients resolve fonts via /etc/fonts"
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIqKOx96SyayuSl5Ejs5AfO/A3ZQ1PG7LW\nkK6A9/TDGp77Os1PCkrqZlkRbJHU2k26eGWLxk999CLeBxIJY0/wQ=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQNZEiN2fPDTAxne8lS+24DJycPJBI3JJk6\nl+ZseDmWMi84Nf+p6AzFfhDLRYkKqhE1GHwa+/RlV8EDh3nFI9rgw=\n-----END SSH SIGNATURE-----\n"

@@ -450,8 +450,9 @@ fn put_view(w: &mut Writer, v: &ShimView) {
         }
     }
     w.count(v.etc_overlays.len());
-    for p in &v.etc_overlays {
-        w.path(p);
+    for o in &v.etc_overlays {
+        w.path(&o.source);
+        w.path(&o.view_path);
     }
 }
 
@@ -647,7 +648,9 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     };
     let mut etc_overlays = Vec::new();
     for _ in 0..r.count()? {
-        etc_overlays.push(r.path()?);
+        let source = r.path()?;
+        let view_path = r.path()?;
+        etc_overlays.push(crate::plan::EtcOverlay { source, view_path });
     }
     Ok(ShimView {
         shim_root,
@@ -1116,8 +1119,16 @@ mod tests {
                 writable: vec![PathBuf::from("/usr/lib/python3.12")],
             }),
             etc_overlays: vec![
-                PathBuf::from("/etc/resolv.conf"),
-                PathBuf::from("/etc/hosts"),
+                // An ordinary overlay (source == view path) and a W15-redirected one (source
+                // diverges — a kennel-shipped config served at the view's /etc path).
+                crate::plan::EtcOverlay {
+                    source: PathBuf::from("/etc/resolv.conf"),
+                    view_path: PathBuf::from("/etc/resolv.conf"),
+                },
+                crate::plan::EtcOverlay {
+                    source: PathBuf::from("/etc/kennel/config/sway"),
+                    view_path: PathBuf::from("/etc/sway"),
+                },
             ],
         }
     }

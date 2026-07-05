@@ -443,14 +443,29 @@ pub struct ShimView {
     /// choosing the upper; the host system closure is *not* mirrored (the image carries its
     /// own `/usr` layout) and `/etc` wins by layer precedence, not by a synthesised copy.
     pub image: Option<ImageRoot>,
-    /// Host `/etc` files the policy grants (`fs.read`) that are bind-mounted **read-only over the
-    /// synthetic `/etc` floor** (the real file, not the scrubbed synthetic one). The synthetic
-    /// `/etc` is a floor; an explicit grant layers the real host file on top — e.g. a
-    /// `net.mode = host` service that must resolve real names grants `/etc/resolv.conf` +
-    /// `/etc/hosts`. Restricted to a safe set: the identity-mask files (`passwd`/`group`/
-    /// `hostname`) and credential files (`shadow`/…) are never overlayable, so a grant cannot
-    /// re-leak the host user list or secrets. Each path is the same on the host and in the view.
-    pub etc_overlays: Vec<PathBuf>,
+    /// Host `/etc` paths the policy grants (`fs.read`) that are bind-mounted **read-only over the
+    /// synthetic `/etc` floor** (the real path, not the scrubbed synthetic one). The synthetic
+    /// `/etc` is a floor; an explicit grant layers the real host file/dir on top — e.g. a
+    /// `net.mode = host` service grants `/etc/resolv.conf`, a GUI kennel grants `/etc/fonts`. The
+    /// protected floor (`PROTECTED_ETC_FLOOR`) is never overlayable, so a grant cannot clobber the
+    /// persona mask or the loader config. A W15 `source` redirect may serve the overlay from an
+    /// alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`), which is why each entry
+    /// carries both ends rather than a single path.
+    pub etc_overlays: Vec<EtcOverlay>,
+}
+
+/// One `/etc` overlay: the host `source` bound read-only at the in-view `/etc` `view_path`.
+///
+/// `source == view_path` for an ordinary grant (the real host `/etc/resolv.conf` at `/etc/resolv.conf`);
+/// they diverge for a W15 `source` redirect (kennel-shipped `/etc/kennel/config/sway` served at the
+/// view's `/etc/sway`), which is how a policy overlays a kennel-authored config over the floor
+/// without depending on — or exposing — the host's version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EtcOverlay {
+    /// The host path the overlay content comes from (the redirect `source`, else `view_path`).
+    pub source: PathBuf,
+    /// The `/etc/...` path in the view it lands at (a granted, overlayable `fs.read` path).
+    pub view_path: PathBuf,
 }
 
 /// Rootfs persistence mode (§7.11.4a): which upper the OCI overlay gets.
@@ -524,25 +539,41 @@ fn is_special_mount(path: &Path) -> bool {
     path.starts_with("/etc") || path.starts_with("/proc")
 }
 
-/// The synthetic-`/etc` files a host overlay must **never** replace: the identity mask
-/// (`passwd`/`group`/`hostname` — real ones re-leak the host user list, defeating T1.1) and the
-/// credential/privilege files. A grant for any of these is ignored for overlay purposes (it still
-/// Landlock-grants the synthetic file, which is the safe floor).
-const NON_OVERLAYABLE_ETC: &[&str] = &[
+/// The constructed-`/etc` entries an overlay must **never** clobber — kennel's own floor, not the
+/// operator's secrets.
+///
+/// The bar is deliberately narrow (footgun, not nanny — an operator exposing their own `/etc/ssh`
+/// host keys or `/etc/shadow` into a kennel they run is their call; the persona uid cannot even read
+/// a mode-0640 `shadow`). What an overlay must not do is **replace a file kennel synthesised with a
+/// different, load-bearing version of its own**:
+///
+/// - the **persona mask** (`passwd`/`group`/`hostname`) — the real host files re-leak the host user
+///   list / identity, defeating T1.1, and carry host uids the view is not built for;
+/// - the **dynamic-loader config** (`ld.so.preload`/`ld.so.cache`/`ld.so.conf`/`ld.so.conf.d`) —
+///   execution integrity for every binary in the view.
+///
+/// NOT here, on purpose: `resolv.conf`/`hosts`/`nsswitch.conf`/`host.conf` — overlaying those with
+/// the real host resolver is exactly what a `net.mode = host` service (the tun-broker) needs, so
+/// they must stay overlayable.
+const PROTECTED_ETC_FLOOR: &[&str] = &[
     "passwd",
     "group",
-    "shadow",
-    "gshadow",
     "hostname",
-    "sudoers",
-    "machine-id",
+    "ld.so.preload",
+    "ld.so.cache",
+    "ld.so.conf",
+    "ld.so.conf.d",
 ];
 
-/// Whether `path` is a specific host `/etc` **file** a policy may bind-mount over the synthetic
-/// `/etc` floor (the resolver/hosts/NSS config a `net.mode = host` service needs to resolve real
-/// names). Requires an exact path under `/etc` (no glob, not bare `/etc`, no `..`) whose file name
-/// is not in [`NON_OVERLAYABLE_ETC`]. Everything else stays the synthetic floor.
-fn is_overlayable_etc_file(path: &Path) -> bool {
+/// Whether `path` is a host `/etc` entry a policy may bind-mount over the synthetic `/etc` floor: a
+/// **file** (`/etc/resolv.conf` for a `net.mode = host` resolver) or a whole **directory**
+/// (`/etc/fonts`, `/etc/ssl/certs` — the fontconfig tree and CA bundle a GUI or TLS client needs).
+/// Requires a path under `/etc` (no glob, not bare `/etc`, no `..`) whose first component below
+/// `/etc` is not in `PROTECTED_ETC_FLOOR` — the component test (not leaf) also refuses a grant
+/// *inside* a protected directory (`/etc/ld.so.conf.d/x`). A glob stays refused (it could pull in a
+/// whole host `/etc` subtree the author did not name); everything else — including a host file the
+/// operator chooses to expose — is admitted.
+fn is_overlayable_etc_path(path: &Path) -> bool {
     if !path.starts_with("/etc") || path == Path::new("/etc") {
         return false;
     }
@@ -551,11 +582,15 @@ fn is_overlayable_etc_file(path: &Path) -> bool {
     }
     let s = path.to_string_lossy();
     if s.contains('*') {
-        return false; // a glob could pull in a whole host /etc subtree; overlays are file-exact
+        return false; // a glob could pull in a whole host /etc subtree; overlays are name-exact
     }
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|name| !NON_OVERLAYABLE_ETC.contains(&name))
+    // The first component below `/etc` (`/etc/<here>/…`). A protected floor entry there — the file
+    // itself or a directory whose subtree the overlay would shadow — refuses the overlay.
+    path.strip_prefix("/etc")
+        .ok()
+        .and_then(|rest| rest.components().next())
+        .and_then(|c| c.as_os_str().to_str())
+        .is_some_and(|top| !PROTECTED_ETC_FLOOR.contains(&top))
 }
 
 /// Whether `path` is a device node safe to bind into the constructed `/dev`:
@@ -1224,12 +1259,23 @@ impl Plan {
         // exceptions, layered after the synthetic copy. Restricted to specific files (no glob)
         // that are not identity-mask or credential files, so a grant can expose the host
         // resolver/hosts without re-leaking the masked user list or a secret.
-        let etc_overlays: Vec<PathBuf> = ep
+        // A W15 `source` redirect on an overlayable `/etc` grant serves the overlay from an
+        // alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`) — the mechanism a policy
+        // uses to lay a kennel-shipped config over the floor without touching the host's version.
+        // The redirect map is glob-rooted; `/etc` grants carry no glob, so the key is the path.
+        let etc_overlays: Vec<EtcOverlay> = ep
             .fs
             .read
             .iter()
             .map(PathBuf::from)
-            .filter(|p| is_overlayable_etc_file(p))
+            .filter(|p| is_overlayable_etc_path(p))
+            .map(|view_path| {
+                let source = redirects
+                    .get(&view_path)
+                    .cloned()
+                    .unwrap_or_else(|| view_path.clone());
+                EtcOverlay { source, view_path }
+            })
             .collect();
 
         let view = Some(ShimView {
@@ -1425,37 +1471,47 @@ mod tests {
     }
 
     #[test]
-    fn overlayable_etc_admits_only_safe_specific_files() {
-        // The resolver/hosts/NSS config a `net.mode = host` service needs — overlayable.
+    fn overlayable_etc_protects_the_floor_not_the_operator() {
+        // Overlayable: the resolver/NSS files a `net.mode = host` service needs (deliberately
+        // overridable — the tun-broker overlays the real resolver), the GUI/TLS directories
+        // (fontconfig tree, CA bundle, sway config), and — footgun, the operator's call — a host
+        // subtree they choose to expose (the persona uid gates what it can actually read).
         for ok in [
             "/etc/resolv.conf",
             "/etc/hosts",
             "/etc/nsswitch.conf",
             "/etc/host.conf",
+            "/etc/fonts",
+            "/etc/ssl/certs",
+            "/etc/sway",
+            "/etc/ssh",    // footgun: operator exposing their own host keys is their call
+            "/etc/shadow", // footgun and inert — the non-root persona uid cannot read it
         ] {
             assert!(
-                is_overlayable_etc_file(Path::new(ok)),
+                is_overlayable_etc_path(Path::new(ok)),
                 "{ok} should be overlayable"
             );
         }
-        // The identity mask (re-leaks the host user list, defeating T1.1) and the
-        // credential/privilege files must NEVER be overlaid — the synthetic floor stands.
-        for masked in [
+        // The floor an overlay must never clobber: the persona mask (real files re-leak the host
+        // identity / carry host uids, T1.1) and the dynamic-loader config (execution integrity).
+        // The component test also refuses a grant *inside* a protected directory.
+        for floor in [
             "/etc/passwd",
             "/etc/group",
-            "/etc/shadow",
-            "/etc/gshadow",
             "/etc/hostname",
-            "/etc/sudoers",
-            "/etc/machine-id",
+            "/etc/ld.so.preload",
+            "/etc/ld.so.cache",
+            "/etc/ld.so.conf",
+            "/etc/ld.so.conf.d",
+            "/etc/ld.so.conf.d/local.conf",
         ] {
             assert!(
-                !is_overlayable_etc_file(Path::new(masked)),
-                "{masked} must not be overlayable (identity/credential floor)"
+                !is_overlayable_etc_path(Path::new(floor)),
+                "{floor} must not be overlayable (constructed floor)"
             );
         }
         // Structural refusals: not under /etc, the bare dir, a `..` escape, and any glob (a glob
-        // could pull a whole host /etc subtree over the floor — overlays are file-exact).
+        // could pull a whole host /etc subtree over the floor — overlays are name-exact).
         for bad in [
             "/usr/bin/env",
             "/etc",
@@ -1465,7 +1521,7 @@ mod tests {
             "/etc/ssh/*",
         ] {
             assert!(
-                !is_overlayable_etc_file(Path::new(bad)),
+                !is_overlayable_etc_path(Path::new(bad)),
                 "{bad} must not be overlayable"
             );
         }

@@ -392,33 +392,45 @@ pub fn build_view_and_pivot(
 /// Bind each granted host `/etc` file read-only over the synthetic `/etc` floor (the real resolver
 /// config / hosts a `net.mode = host` service resolves real names against, §8 / W2).
 ///
-/// The synthetic `/etc` is built first (a floor of scrubbed files); this layers the real host file
-/// on top of the specific paths the policy granted. Each `path` is the same on the host and in the
-/// view. A path whose host source does not exist is skipped (nothing to overlay). The overlay set
-/// is already restricted to safe files ([`crate::plan`] never emits an identity-mask or credential
-/// path), so this trusts its input.
+/// The synthetic `/etc` is built first (a floor of scrubbed files); this layers the real host path
+/// on top of the specific entries the policy granted — a **file** (`/etc/resolv.conf`) or a whole
+/// **directory** (`/etc/fonts`, `/etc/ssl/certs` — fontconfig and the CA bundle a GUI or TLS client
+/// needs). The `source` is the host path the content comes from and the `view_path` is where it
+/// lands: equal for an ordinary grant, divergent for a W15 `source` redirect (`/etc/sway` served
+/// from the kennel-shipped `/etc/kennel/config/sway`). A source that does not exist is skipped
+/// (nothing to overlay). The overlay set is already restricted to safe entries ([`crate::plan`]
+/// never emits a protected-floor path), so this trusts its input.
 ///
 /// # Errors
 /// The OS error if creating the target mountpoint, the bind, or the read-only remount fails.
 fn materialize_etc_overlays(
-    overlays: &[std::path::PathBuf],
+    overlays: &[crate::plan::EtcOverlay],
     under: &impl Fn(&Path) -> PathBuf,
 ) -> io::Result<()> {
     use kennel_lib_syscall::mount;
-    for path in overlays {
-        // The host source (still reachable pre-pivot). Skip a grant whose host file is absent.
-        if path.symlink_metadata().is_err() {
+    for overlay in overlays {
+        let source = &overlay.source;
+        // The host source (still reachable pre-pivot). Skip a grant whose host path is absent.
+        if source.symlink_metadata().is_err() {
             continue;
         }
-        let dest = under(path);
+        let dest = under(&overlay.view_path);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Ensure the synthetic floor file (or an empty placeholder) exists to mount over.
+        // Ensure a mountpoint of the RIGHT TYPE exists to bind over: a directory for a
+        // directory source (`/etc/fonts`, `/etc/ssl/certs`), an empty file otherwise
+        // (`/etc/resolv.conf`, `/etc/hosts`). Binding a directory onto a file target — or a
+        // file onto a directory — fails ENOTDIR/EISDIR, so the placeholder must match the
+        // source. An existing synthetic-floor entry is left as-is (already the right kind).
         if dest.symlink_metadata().is_err() {
-            std::fs::File::create(&dest)?;
+            if source.is_dir() {
+                std::fs::create_dir_all(&dest)?;
+            } else {
+                std::fs::File::create(&dest)?;
+            }
         }
-        mount::bind(path, &dest, false).map_err(|e| {
+        mount::bind(source, &dest, false).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("etc overlay bind {}: {e}", dest.display()),
@@ -504,19 +516,29 @@ fn build_image_view_and_pivot(
         }
         std::fs::copy(source, &dest)?;
     }
-    // `/etc` overlays (W2): copy the granted REAL host `/etc` file over the synthetic one in the
-    // top `kennel-etc` lower, so the real resolver/hosts wins by overlay precedence (the bind-based
-    // equivalent of the ordinary view's on-top overlay; the overlayfs upper is where precedence
-    // lives here). A grant whose host source is absent is skipped.
+    // `/etc` overlays (W2): copy the granted REAL host `/etc` path (the W15 redirect `source`, or
+    // the view path itself) over the synthetic one in the top `kennel-etc` lower, so the real
+    // resolver/hosts / kennel-shipped config wins by overlay precedence (the bind-based equivalent
+    // of the ordinary view's on-top overlay; the overlayfs upper is where precedence lives here). A
+    // source that is absent is skipped; a directory source (`/etc/fonts`) copies recursively.
     for overlay in &view.etc_overlays {
-        if overlay.symlink_metadata().is_err() {
+        if overlay.source.symlink_metadata().is_err() {
             continue;
         }
-        let dest = kennel_etc.join(overlay.strip_prefix("/").unwrap_or(overlay));
+        let dest = kennel_etc.join(
+            overlay
+                .view_path
+                .strip_prefix("/")
+                .unwrap_or(&overlay.view_path),
+        );
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(overlay, &dest)?;
+        if overlay.source.is_dir() {
+            copy_dir_recursive(&overlay.source, &dest)?;
+        } else {
+            std::fs::copy(&overlay.source, &dest)?;
+        }
     }
 
     // 3. Build the `scaffold` bottom lower: empty mountpoint dirs + empty /etc placeholders.
@@ -946,6 +968,30 @@ fn create_bind_target(source: &Path, dest: &Path) -> io::Result<()> {
         std::fs::create_dir_all(dest)?;
     } else {
         std::fs::File::create(dest)?;
+    }
+    Ok(())
+}
+
+/// Recursively copy `src` into `dest` (created if absent), preserving symlinks.
+///
+/// Used only by the OCI `/etc`-overlay path, where a granted directory (`/etc/fonts`, whose
+/// `conf.d` is a farm of symlinks into `conf.avail`) must be copied into the `kennel-etc` overlay
+/// lower rather than bind-mounted. Symlinks are recreated verbatim, not followed, so the copied
+/// tree matches the source's structure. The ordinary (non-OCI) view binds the directory instead.
+fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if ft.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
     }
     Ok(())
 }

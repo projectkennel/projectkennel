@@ -1,0 +1,8 @@
+# Kennel confined-desktop labwc autostart. labwc runs this at session start.
+# A solid background, the notification daemon, the panel (yambar, clock-only — labwc has no i3 IPC
+# for workspaces), and one terminal window so the desktop is not empty on first login. Everything is
+# a window or a background service; the desktop itself (right-click menu, title bars) is labwc.
+swaybg -c 1a1b26 -m solid_color &
+mako &
+yambar --config /etc/kennel/config/yambar/config.yml &
+foot &

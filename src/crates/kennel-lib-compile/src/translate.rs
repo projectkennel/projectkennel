@@ -1463,9 +1463,10 @@ fn translate_fs(
 /// the checks decidable at translate: the redirected path must still be granted on its axis (a
 /// cross-axis remove can orphan a redirect — refuse rather than carry a mapping for a path that
 /// binds nothing); the same path must not redirect to two different sources across the axes; a
-/// path under `/etc`/`/proc` is served by the constructed view, not a host bind, so a redirect
-/// there would silently not materialise — refuse. The write-set floor lives in
-/// `invariant::validate`, post-assembly, beside the other framework invariants.
+/// path under `/proc` is a fresh namespaced mount, not a host bind, so a redirect there would
+/// silently not materialise — refuse. An `/etc` redirect *does* materialise — the `/etc` overlay
+/// honours the `source` — so it is allowed. The write-set floor lives in `invariant::validate`,
+/// post-assembly, beside the other framework invariants.
 fn translate_fs_redirects(
     fs: &crate::source::FsSection,
     read: &[String],
@@ -1484,14 +1485,16 @@ fn translate_fs_redirects(
                 if r.write { "write" } else { "read" }
             )));
         }
-        if std::path::Path::new(&path).starts_with("/etc")
-            || std::path::Path::new(&path).starts_with("/proc")
-        {
+        if std::path::Path::new(&path).starts_with("/proc") {
             return Err(translation(format!(
-                "fs redirect `{path}`: paths under /etc and /proc are served by the \
-                 constructed view, not a host bind — a redirect there cannot materialise"
+                "fs redirect `{path}`: /proc is a fresh namespaced mount in the view, not a host \
+                 bind — a redirect there cannot materialise"
             )));
         }
+        // A redirect onto an `/etc` path DOES materialise: the `/etc` overlay honours the `source`
+        // (serving a kennel-shipped `/etc/kennel/config/sway` at the view's `/etc/sway`). The floor
+        // is preserved — a redirect onto a protected-floor entry is simply not overlayable, so the
+        // synthetic mask stands (checked spawn-side in `is_overlayable_etc_path`).
         match redirect.iter().find(|x| x.path == path) {
             Some(x) if x.source == source => {}
             Some(x) => {
@@ -2426,14 +2429,15 @@ mod tests {
         )
     }
 
-    /// A redirect under `/etc`/`/proc` cannot materialise (constructed view, not a host bind);
-    /// a view path with two origins is incoherent; a `source` reaching the control socket is
-    /// the same escalation as granting it directly.
+    /// A redirect under `/proc` cannot materialise (fresh namespaced mount, not a host bind); a
+    /// view path with two origins is incoherent; a `source` reaching the control socket is the
+    /// same escalation as granting it directly. An `/etc` redirect is NOT refused — it composes
+    /// with the `/etc` overlay (see `etc_redirect_translates` below).
     #[test]
     fn redirect_refusals_at_translate() {
-        let etc = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
-                   [[fs.read.add]]\npath = \"/etc/myapp.conf\"\nsource = \"~/stores/myapp.conf\"\nreason = \"r\"\n";
-        assert!(translate_err(etc).contains("constructed view"));
+        let proc = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                    [[fs.read.add]]\npath = \"/proc/self/status\"\nsource = \"~/stores/status\"\nreason = \"r\"\n";
+        assert!(translate_err(proc).contains("/proc"));
 
         let conflict = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
                         [[fs.read.add]]\npath = \"~/.app/db\"\nsource = \"~/stores/a\"\nreason = \"r\"\n\
@@ -2443,6 +2447,19 @@ mod tests {
         let sock = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
                     [[fs.read.add]]\npath = \"~/.app/ipc\"\nsource = \"/run/user/1000/kennel\"\nreason = \"r\"\n";
         assert!(translate_err(sock).contains("control socket"));
+    }
+
+    /// An `/etc` redirect composes with the `/etc` overlay (W3): a kennel-shipped config served at
+    /// the view's `/etc/sway`. It translates cleanly and carries `source → path` into the settled
+    /// redirect list.
+    #[test]
+    fn etc_redirect_translates() {
+        let leaf = "name = \"k\"\ntemplate_base = \"base-confined\"\n\
+                    [[fs.read.add]]\npath = \"/etc/sway\"\nsource = \"/etc/kennel/config/sway\"\nreason = \"kennel-shipped sway config\"\n";
+        let fs = translate_template(leaf).effective_policy.fs;
+        let r = fs.redirect.first().expect("one redirect");
+        assert_eq!(r.path, "/etc/sway");
+        assert_eq!(r.source, "/etc/kennel/config/sway");
     }
 
     // ---- [service] supervision discipline ----

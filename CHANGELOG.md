@@ -69,16 +69,22 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   af-unix consume to the standing tun-broker, synthesized the same way as the D-Bus capabilities
   (an explicit consume remains valid and equivalent; the tun-egress suite case now proves the
   bare form). A future `[net.tcp]` slow-lane rides the same table.
-- **`fs.read` of a specific host `/etc` file overlays the real file over the synthetic floor**
-  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a
-  `resolv.conf` pointed at the proxy), built not bound — so a `net.mode = "host"` service that must
-  resolve real names could not see the host resolver. A policy that `fs.read`s a specific, safe
-  host `/etc` file (e.g. `/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) now gets the REAL
-  file mounted read-only over the synthetic one (an OCI image gets it copied into the top overlay
-  lower). Restricted to exact files — no glob, no bare `/etc`, no `..` — and the identity-mask and
-  credential files (`passwd`, `group`, `shadow`, `gshadow`, `hostname`, `sudoers`, `machine-id`)
-  are never overlaid, so a grant cannot re-leak the masked host user list (T1.1) or a secret. The
-  synthetic `/etc` stays the floor for every path not explicitly granted.
+- **`fs.read` of a host `/etc` file or directory overlays the real path over the synthetic floor**
+  (W2 Part D). The constructed `/etc` is a scrubbed floor (masked `passwd`/`group`, a `resolv.conf`
+  pointed at the proxy), built not bound — so a `net.mode = "host"` service that must resolve real
+  names could not see the host resolver, and a GUI app could not find fontconfig or the CA bundle. A
+  policy that `fs.read`s a host `/etc` path now gets the REAL path mounted read-only over the
+  synthetic one (an OCI image gets it copied into the top overlay lower). Both **files**
+  (`/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`) and whole **directories** (`/etc/fonts`,
+  `/etc/ssl/certs`, `/etc/sway`) work — the earlier version created a file-only mountpoint and failed
+  `ENOTDIR` on a directory grant. Restricted to exact paths (no glob, no bare `/etc`, no `..`). The
+  floor it refuses to clobber is **kennel's own constructed `/etc`, not the operator's secrets**: the
+  persona mask (`passwd`/`group`/`hostname` — real ones re-leak the host identity, T1.1) and the
+  dynamic-loader config (`ld.so.preload`/`ld.so.cache`/`ld.so.conf`/`ld.so.conf.d`, execution
+  integrity) can never be overlaid; the resolver files stay overlayable (that is the feature). An
+  operator exposing their own host subtree (`/etc/ssh`, `/etc/shadow`) into a kennel they run is a
+  footgun, not a blocked action — the persona uid gates what it can actually read. The synthetic
+  `/etc` stays the floor for every path not explicitly granted.
 - **The standing UDP-egress broker ships as a maintainer-signed `tun-broker` template + provider,
   enabled ondemand** (W2 Part D) — the dbus-broker pattern applied to UDP egress. A `[net.udp]`
   kennel's egress is unserved without a running broker; `install.sh` now keys the reference
@@ -153,14 +159,57 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   confused-deputy hole however validly signed), and a `[fs.cwd] write` invocation whose resolved
   cwd intersects a redirect source is refused at run time (the one writable surface settle cannot
   see). `source` is legal only on a single-`path` add — refused on `remove`, `fs.deny`,
-  `exec.allow`, and multi-path entries — and a redirect under `/etc`/`/proc` (served by the
-  constructed view, not a host bind) is a compile error. At materialisation a redirected
+  `exec.allow`, and multi-path entries — and a redirect under `/proc` (a fresh namespaced mount,
+  not a host bind) is a compile error. A redirect onto an `/etc` path **does** compose: it drives
+  the `/etc` overlay from the alternate `source`, which is how a kennel ships an app config
+  (`/etc/sway` served from `/etc/kennel/config/sway`) over the synthetic floor without touching or
+  exposing the host's version; the floor is preserved (a redirect onto a protected-floor entry is
+  simply not overlayable, so the persona mask stands). At materialisation a redirected
   read-only source resolves with `RESOLVE_NO_MAGICLINKS` (procfs/sysfs aliasing refused; ordinary
   symlink farms — stow/chezmoi — still work); writable sources keep the stricter existing
   `RESOLVE_NO_SYMLINKS` guard.
 
 ### Runtime & enforcement
 
+- **Confined-GUI QoL: a real windowed desktop session, kennel-authored and host-independent (W3).**
+  `gui-session` is now a usable **stacking desktop** instead of a fullscreen tiling terminal. It runs
+  **labwc** (a wlroots stacking WM — apps open as movable/resizable windows with title bars and a
+  right-click application menu), with **yambar** (clock panel), **fuzzel** (`Alt+d` launcher),
+  **mako** (notifications on the private `dbus-run-session` bus), and a solid `swaybg` background —
+  all fcft/cairo, no GTK, so they start clean in the confined view (waybar was tried and dropped: it
+  is GTK and fatally reaches for `xdg-desktop-portal`). GTK *applications* (gnome-text-editor, files,
+  calculator, viewers) run fine as windows. All shell configs are kennel-authored under
+  `/etc/kennel/config` and served into the view — labwc's `rc.xml`/`menu.xml`/`autostart` at
+  `/etc/xdg/labwc` via a **W15 `source` redirect** — so a session is identical on any host and never
+  inherits the host's compositor config. Closing the anchor terminal *or* `Alt+Shift+e`/the menu's
+  "Log out" tears the session and the kennel down cleanly. `install.sh` installs the configs and
+  enables the display broker ondemand (it shipped the provider but never enabled it).
+- **The confined display is a decorated host window (weston broker) and splits by client type.** The
+  display broker's per-connection compositor is now **weston** (windowed mode — its wayland backend
+  draws a decorated, resizable, closable host window), the default the installer enables; **cage**
+  (kiosk) ships as an alternative. The reserved capability splits into two: **`org.projectkennel.wayland`**
+  (a single confined window — `gui-interactive`) and **`org.projectkennel.wayland-session`** (a full
+  confined desktop whose consumer runs its own compositor — `gui-session`). One broker serves both:
+  `compositor-broker` now **listens on multiple sockets** (comma-separated argv), and the two
+  capabilities take **distinct endpoint directories** (`/run/mesh/wayland/` vs
+  `/run/mesh/wayland-session/`) so their per-provide mesh rendezvous, bound at `dirname(endpoint)`,
+  do not collide. `compositor-broker` also waits for the nested compositor to advertise
+  `wl_compositor` before handing the client over — and holds that probe connection open across the
+  hand-off — closing a cold-start race where a nested session hit `Connection reset` / `does not
+  support wl_compositor`.
+- **W15 `source` redirects compose with the `/etc` overlay.** A redirect whose view path is under
+  `/etc` (e.g. `/etc/sway` ← `/etc/kennel/config/sway`) now drives the `/etc` overlay from the
+  alternate source instead of being refused at compile — the mechanism the GUI configs above ride.
+  The floor is preserved (a redirect onto a protected-floor entry is simply not overlayable). Only
+  a `/proc` redirect stays a compile error (a fresh namespaced mount, never a host bind). The
+  `/etc` overlay also honours a **directory** source now (fontconfig `/etc/fonts`, the CA bundle
+  `/etc/ssl/certs`), where it previously created a file mountpoint and failed `ENOTDIR`.
+- **The `/etc` overlay floor protects kennel's constructed `/etc`, not the operator's secrets.** The
+  never-overlayable set is reframed to the persona mask (`passwd`/`group`/`hostname` — real files
+  re-leak host identity, T1.1) and the dynamic-loader config (`ld.so.preload`/`cache`/`conf`/
+  `conf.d` — execution integrity); `resolv.conf`/`hosts`/`nsswitch.conf` stay overlayable (that is
+  the feature). An operator exposing their own `/etc/ssh` or `/etc/shadow` into a kennel they run is
+  a footgun, not a blocked action (the non-root persona uid gates what it can read).
 - **Ephemeral (`:0`) binds are always permitted by the cgroup bind ACL (W13).** A bind to port 0
   is a kernel-allocated ephemeral **source** port, not a reachable listening surface — so the
   `bind4`/`bind6` programs now allow it unconditionally, ahead of the port floor, the port

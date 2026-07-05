@@ -86,14 +86,32 @@ reason = "the nested wlroots compositor's GL renderer and gbm buffer allocator"
 threats.exposed = ["T1.6"]
 
 
-# --- Capability provided (reserved → vendor-tier; this template is maintainer-signed) --------------
+# --- Capabilities provided (reserved → vendor-tier; this template is maintainer-signed) ------------
+# Two names, ONE broker. The compositor-broker relays a consumer into a per-connection nested
+# compositor identically whether it is handed a single app or a whole nested session, but the two are
+# distinct capabilities a consumer declares:
+#   * org.projectkennel.wayland          — a single confined window (one app, e.g. gui-interactive);
+#   * org.projectkennel.wayland-session  — a full confined desktop (the consumer runs its own
+#                                          compositor, e.g. gui-session's nested labwc).
+# Each has its OWN endpoint DIRECTORY (`…/wayland/` vs `…/wayland-session/`) — the mesh binds a
+# provide's rendezvous at `dirname(endpoint)`, so co-located capabilities must differ there or the
+# second clobbers the first. The broker (its `[workload]` argv) listens on both sockets.
 [[provides]]
 name = "org.projectkennel.wayland"
 shape = "af-unix"
-endpoint = "/run/mesh/gui.sock"
-reason = "the confined display capability: each consumer is relayed into its own per-connection nested compositor"
+endpoint = "/run/mesh/wayland/gui.sock"
+reason = "the confined single-window display capability: one app relayed into a per-connection nested compositor"
+
+[[provides]]
+name = "org.projectkennel.wayland-session"
+shape = "af-unix"
+endpoint = "/run/mesh/wayland-session/gui.sock"
+reason = "the confined full-desktop display capability: a consumer running its own compositor (labwc) reaches its host window through the same broker"
+
+
+
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQL8QC7r6kCQkfGd928scq4S4C9uX/9XHZZ\nfBgHXGuPt+E/+Kk3nwGq5hBxe59BRuQeCFyFZ20yTqhl+UxIyABAI=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQDuptGMjhecE/etTPRlG1DyTxSghxJS0CT\nkVqfqW4hN79NlN61IG5o+8bHQPfuC2wwyUERE1GT1bABwbhZJEgQ8=\n-----END SSH SIGNATURE-----\n"
