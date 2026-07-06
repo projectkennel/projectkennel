@@ -155,7 +155,7 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
                 TRUST_DIR_OPT,
             ]),
             ("policy", &[
-                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign, lint, risks, diff, inspect."),
+                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign-template, lint, risks, diff, inspect."),
             ]),
             ("keygen", &[
                 ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
@@ -223,7 +223,7 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
                 TEMPLATE_DIR_OPT,
                 TRUST_DIR_OPT,
             ]),
-            ("sign", &[
+            ("sign-template", &[
                 ("--key <key>", "The signing key id (required)."),
                 ("--output <path>", "Write the signed artefact to path."),
             ]),

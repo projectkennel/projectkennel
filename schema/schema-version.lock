@@ -1,21 +1,32 @@
-# Append-only: one "<SETTLED_SCHEMA_VERSION> <sha256 of the schema shape>" line per version.
-# Maintained by src/tools/tests/schema-version-pin.sh — never edit a past version's line.
+# Append-only ABI ledger: one "<SETTLED_SCHEMA_VERSION> <sha256 of the schema shape>" line per
+# version. A daemon accepts an artefact whose stamped version is in
+# [MIN_SETTLED_SCHEMA_VERSION, SETTLED_SCHEMA_VERSION]; a shape a version's reader cannot parse must
+# carry a HIGHER version so that reader refuses it cleanly instead of choking on it.
 #
-# v3 is re-pinned (not bumped) for changes that keep every existing v3 settled artefact valid.
-# Two classes:
-#   * Fingerprint corrections that add NO authorable field: (1) the schema became DERIVED from the
-#     parser structs (#142) — the prior pins captured the hand-mirror's incomplete shape, which
-#     omitted the `[[*.add]]` delta forms the parser always accepted; (2) `[[provides]]`/`[[consumes]]`
-#     `name`/`shape` were typed required, matching a check the compiler already enforced.
-#   * Additive-OPTIONAL sections whose absence is the default, so a policy that does not use them
-#     yields a byte-identical artefact: the 0.6.0 persona `[identity].hostname` and `[net.udp]` +
-#     `[[net.udp.allow]]` (W2). The W2 settled additions — the `udp` flag and the `udp_allow_names`
-#     grant list — are both skipped from the canonical form when unset/empty, so a v3 policy without
-#     `[net.udp]` signs and loads exactly as before. Likewise the W15 `source` on
-#     `[[fs.read.add]]`/`[[fs.write.add]]` entries (settled counterpart: the `redirect` list,
-#     skipped from the canonical form when empty), so a v3 policy without redirects signs and
-#     loads exactly as before.
-# The settled FORMAT is unchanged in every case, so the version stays v3.
+# Re-pin vs bump — the release-gate rule. Within a dev cycle the CURRENT version's line may be
+# re-pinned in place for a shape change that keeps every existing artefact of that version valid
+# (an additive-OPTIONAL field, or a fingerprint correction that adds no authorable field) — a
+# convenience so the ABI version does not churn on every commit. That convenience does NOT survive
+# a release: a shape that moved since the last release tag is an ABI change and owes a version BUMP
+# at release. "Additive-optional" only covers the ABSENCE case (a policy that uses none of the new
+# fields is byte-identical); an artefact that USES them carries fields an old, `deny_unknown_fields`
+# reader cannot parse — the 0.3.1 drift class, which surfaces as a cryptic `unknown field` deep in
+# policy loading. The bump is what lets the old daemon refuse it as too-new instead. So: re-pin
+# freely in-cycle; promote the accumulated shape delta to a real bump at release.
+#
+# v1 / v2: the pre-SSHSIG and SSHSIG signature formats.
+# v3: the 0.5.0 ABI, frozen at its CORRECTED shape (b6fafc91). #142 made the schema derived from the
+#     parser structs (the hand-mirror had omitted the `[[*.add]]` delta forms the parser always
+#     accepted) and #145 typed `[[provides]]`/`[[consumes]]` name/shape required — fingerprint
+#     corrections that added no authorable field, so they stayed v3. (The v0.5.0 tag shipped the
+#     pre-correction fingerprint 4b4b9fdd; this line records the same ABI, described honestly.)
+# v4: the 0.6.0 ABI. The stanzas that landed this cycle extend the shape: `[net.udp]` + the
+#     `udp_allow_names` grant list (W2), `[identity].hostname` (W12), the fs `redirect` list backing
+#     the `source` redirect (W15), and `[workload] allowed_args` / `[fs.cwd]`. Each is
+#     additive-optional (a policy using none is byte-identical to a v3 artefact — which is why v3
+#     was re-pinnable across the cycle), but an artefact that uses one carries a field a v3 reader
+#     rejects: an ABI break. The bump makes it legible.
 1 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
 2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
-3 fecc8aa8d07089ba4366ebd53bb503bd425a82bec90eec1ac8cb6ec88ebf9996
+3 b6fafc919d55fb9e4e616d34815a4990977463aeab3b05a99093fc88e93dd74d
+4 fecc8aa8d07089ba4366ebd53bb503bd425a82bec90eec1ac8cb6ec88ebf9996

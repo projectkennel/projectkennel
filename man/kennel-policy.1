@@ -92,8 +92,8 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
 .TP
-\fBkennel policy sign <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
-sign a source template/fragment with a key
+\fBkennel policy sign\-template <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
+sign a source template or fragment (a shared base; use `compile` for your own policy)
 .RS
 .TP
 \fB\-\-key <key>\fR

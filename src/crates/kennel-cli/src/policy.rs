@@ -15,8 +15,9 @@ use kennel_lib_compile::TemplateSource;
 use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, default_settled_path, default_signing_key,
-    is_valid_policy_name, lexopt_unexpected, lexopt_value, policy_error_code, resolve_policy,
-    settled_with_sshsig, signing_trust_dirs, sshsig_sign, usage_of, TrustContext, POLICY_VERBS,
+    is_valid_policy_name, lexopt_unexpected, lexopt_value, policy_error_code, resolve_key_arg,
+    resolve_policy, resolve_template, settled_with_sshsig, signing_trust_dirs, sshsig_sign,
+    usage_of, TrustContext, POLICY_VERBS,
 };
 
 // ---- `kennel compile` ----------------------------------------------------------
@@ -208,7 +209,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
         kennel_lib_compile::seal_unsigned(policy)
     } else {
         let key = match key_path {
-            Some(p) => p.to_owned(),
+            Some(p) => resolve_key_arg(p)?.to_string_lossy().into_owned(),
             None => default_signing_key()?.to_string_lossy().into_owned(),
         };
         let canonical =
@@ -1176,7 +1177,7 @@ fn is_under_system_dir(path: &Path) -> bool {
 /// # Errors
 ///
 /// Returns a message if the arguments are invalid, no name is given, the name is not a
-/// valid policy name, `--from` is not a versioned reference, a policy of that name
+/// valid policy name, `--from` is not a valid template name, a policy of that name
 /// already exists, or the scaffold directory or file cannot be written.
 pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     let mut name: Option<String> = None;
@@ -1201,12 +1202,11 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     if !is_valid_policy_name(&name) {
         return Err(format!("`{name}` is not a valid policy name"));
     }
-    // `--from` must be a `<template>@v<ver>` reference (the leaf's template_base).
-    if !from.contains('@') {
-        return Err(format!(
-            "--from `{from}` must be a versioned reference, e.g. `base-confined`"
-        ));
-    }
+    // `--from` is the leaf's `template_base`: a bare template name (versioned references were
+    // removed). Validate it with the compiler's own rule so a scaffold can never carry a
+    // `template_base` that `kennel policy compile` would then reject as malformed.
+    kennel_lib_compile::source::validate_reference(&from)
+        .map_err(|d| format!("--from `{from}` is not a valid template name: {d}"))?;
     let dir = user_policies_dir().join(&name);
     let dest = dir.join("policy.toml");
     if dest.exists() {
@@ -1319,20 +1319,22 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
         Ok(ExitCode::from(7))
     }
 }
-/// Sign a source template/fragment with an ed25519 key.
+/// Sign a source **template or fragment** — a shared base other policies inherit — with a key.
 ///
 /// **Appends** a `[signature]` block to the file so its comments are preserved (the
 /// signature covers the canonical re-serialisation, not the raw bytes). Prints the
-/// public key to install in the trust store as `<key_id>.pub`. Leaf policies may stay
-/// unsigned.
+/// public key to install in the trust store as `<key_id>.pub`.
+///
+/// This is NOT how a leaf policy is signed: a leaf is signed when it is compiled
+/// (`kennel policy compile`), so a leaf handed here is refused with a pointer to `compile`.
 ///
 /// # Errors
 ///
 /// Returns a message if the arguments are invalid, no template or `--key` is given, the
-/// file cannot be read, the key cannot be loaded, the file already carries a
-/// `[signature]`, the file is not a signable source template or fragment, signing
-/// fails, or the output cannot be written.
-pub fn sign(args: &[String]) -> Result<ExitCode, String> {
+/// argument is a leaf policy (not a template), the file cannot be read, the key cannot be
+/// loaded, the file already carries a `[signature]`, the file is not a signable source
+/// template or fragment, signing fails, or the output cannot be written.
+pub fn sign_template(args: &[String]) -> Result<ExitCode, String> {
     let mut path: Option<&str> = None;
     let mut key_path: Option<&str> = None;
     let mut key_id: Option<&str> = None;
@@ -1348,19 +1350,39 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
             _ => return Err("only one <template> may be given".to_owned()),
         }
     }
-    let path =
-        path.ok_or("usage: kennel sign <template> --key <key> [--key-id <id>] [--output <path>]")?;
-    let key_path = key_path.ok_or("sign needs --key <path>")?;
+    let path_arg = path.ok_or(
+        "usage: kennel policy sign-template <template> --key <key> [--key-id <id>] [--output <path>]",
+    )?;
+    // Resolve the template by NAME from the template cascade (user ~/.config/kennel/templates
+    // first), or take a path — the same smart resolution `compile` gives a policy.
+    let (path, _tname) = resolve_template(path_arg)?;
 
-    let bytes = std::fs::read(path).map_err(|e| format!("reading {path}: {e}"))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     // A template (`[fs] read = [...]`) and a composable fragment (`[[fs.read.add]]`) are the one
-    // `SourcePolicy` type, so `policy sign` covers both through a single parse (05-templates §5.10).
+    // `SourcePolicy` type, so this covers both through a single parse (Kennel book Vol 2, templates).
     // We need the canonical bytes the signature covers, which the signer then signs.
-    let policy = kennel_lib_compile::parse_source(&bytes)
-        .map_err(|e| format!("{path} is not a signable source template/fragment ({e})"))?;
+    let policy = kennel_lib_compile::parse_source(&bytes).map_err(|e| {
+        format!(
+            "{} is not a signable source template/fragment ({e})",
+            path.display()
+        )
+    })?;
+    // A leaf is not signed here — it is signed when compiled. Point the way (BEFORE demanding a key)
+    // rather than append a meaningless source signature to a policy only ever run as a settled artefact.
+    if policy.is_leaf() {
+        return Err(format!(
+            "{} is a leaf policy, not a template — sign it by compiling it: \
+             `kennel policy compile {} --key <key>`",
+            path.display(),
+            policy.name.as_deref().unwrap_or(path_arg)
+        ));
+    }
+    let key_arg = key_path.ok_or("sign-template needs --key <name-or-path>")?;
+    let key_path = resolve_key_arg(key_arg)?;
     if policy.signature.is_some() {
         return Err(format!(
-            "{path} already carries a [signature]; remove it before re-signing"
+            "{} already carries a [signature]; remove it before re-signing",
+            path.display()
         ));
     }
     let payload =
@@ -1371,7 +1393,7 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     // private key itself may live in `~/.ssh`, an agent, or a token (ssh-keygen).
     let mut trust_dirs = Vec::new();
     add_system_trust_dirs(&mut trust_dirs);
-    let (key_id, armor) = sshsig_sign(&payload, key_path, key_id, &trust_dirs)?;
+    let (key_id, armor) = sshsig_sign(&payload, &key_path.to_string_lossy(), key_id, &trust_dirs)?;
 
     // Append the signature as a new top-level table, preserving the original text. The
     // multi-line SSHSIG armor is stored as a single-line basic string with escaped
@@ -1382,7 +1404,7 @@ pub fn sign(args: &[String]) -> Result<ExitCode, String> {
     );
     let mut out_bytes = bytes;
     out_bytes.extend_from_slice(block.as_bytes());
-    let out = output.unwrap_or_else(|| PathBuf::from(path));
+    let out = output.unwrap_or(path);
     std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
 
     eprintln!("signed {} with key `{key_id}`", out.display());

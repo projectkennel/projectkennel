@@ -5,7 +5,7 @@
 //! This gate asserts, for every one:
 //!
 //! 1. it carries a committed maintainer `[signature]` (the §5.10 promise; run
-//!    `kennel policy sign <name> --key …`),
+//!    `kennel policy sign-template <name> --key …`),
 //! 2. it compiles to a settled policy with a well-formed `[[mutable]]` manifest, and
 //! 3. it is **spawn-eligible** (§7.12.8) — a spawner that `[[spawn.allow]]`s all three
 //!    compiles, so `spawn::resolve_grant`'s depth-1 / TTL / ceilings checks pass on each, and the

@@ -2162,8 +2162,15 @@ pub(crate) const fn deny_key(a: &NetDenyRule) -> &str {
     a.cidr.as_str()
 }
 
-/// Validate a template/fragment reference: a bare `<name>`.
-pub(crate) fn validate_reference(reference: &str) -> Result<(), String> {
+/// Validate a template/fragment reference — a bare `<name>`, `[a-z0-9][a-z0-9-]{0,63}`.
+///
+/// References are versionless: an `@` (or any other disallowed character) is rejected.
+///
+/// # Errors
+///
+/// Returns a message if `reference` is empty, too long, or contains a character outside
+/// `[a-z0-9-]` (or starts with `-`).
+pub fn validate_reference(reference: &str) -> Result<(), String> {
     validate_ref_name(reference)
 }
 
