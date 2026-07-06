@@ -89,7 +89,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "policy",
         summary: "author, inspect, sign, and check policies",
-        usage: "policy <list|show|edit|generate|compile|validate|sign|lint|risks|diff|inspect> [...]",
+        usage: "policy <list|show|edit|generate|compile|validate|sign-template|lint|risks|diff|inspect> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -141,9 +141,9 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         usage: "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
     },
     CommandSpec {
-        name: "sign",
-        summary: "sign a source template/fragment with a key",
-        usage: "policy sign <template> --key <key> [--key-id <id>] [--output <path>]",
+        name: "sign-template",
+        summary: "sign a source template or fragment (a shared base; use `compile` for your own policy)",
+        usage: "policy sign-template <template> --key <key> [--key-id <id>] [--output <path>]",
     },
     CommandSpec {
         name: "lint",

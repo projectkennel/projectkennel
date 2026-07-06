@@ -4,10 +4,41 @@ All notable changes to Project Kennel are recorded here. The format follows [Kee
 
 Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
-## [Unreleased]
+## [0.6.0] — 2026-07-06
+
+**UDP egress, the mediation story finished, and the corpus moves to the book.** 0.6.0 spends the
+ground 0.5.0 cleared on the largest tractable gap in the confinement story: **UDP egress in
+constrained mode** (W2) — a QUIC/DNS client reaches a name-gated destination over a per-kennel tun,
+brokered by a fenced `net.mode = host` leaf, **without** making DNS exfiltration expressible (denied
+names are answered locally with zero wire activity; DNS rebinding is closed by a kernel `net.bpf`
+fence on the actual dial). Around the bet the release **finishes the mediation story** — the legacy
+per-kennel `host-dbus` delegate is retired and the standing `dbus-broker@v1` is the one mediation
+home (W4) — turns the **confined GUI** from "it renders" into a usable, host-independent windowed
+desktop (W3), retires the admin-provisioned `/etc/kennel/subkennel` allocation file for
+uid-derived addressing (W10), and ships a maintainer-signed **`claude`** policy that runs an agent in
+three commands with no user-authored leaf (W11). Owed debts ride along: the legacy raw-base64 key
+format is gone (W5), four enum'd policy fields validate at compile (W6), the man pages derive from
+the CLI definition (W7), the persona hostname is an opt-in knob (W12), and the asymmetric fs `source`
+redirect lands (W15). The frozen `docs/design` / `docs/architecture` trees retire in favour of the
+two-volume book (W9). The **settled-schema ABI bumps to v4**: the additive stanzas this cycle moved
+the shape, so an old daemon now refuses a 0.6.0 artefact cleanly instead of choking on an `unknown
+field`. Verified on Linux 7.0 against the installed stack.
 
 ### CLI changes
 
+- **`kennel policy` authoring is coherent end to end.** Signing the policy you run is
+  `kennel policy compile <policy> --key <key>` — nothing else. The old `kennel policy sign`, which
+  signed *templates* (a shared base other policies inherit) and never the leaf you run, is **renamed
+  to `kennel policy sign-template`**; the bare `sign` verb now returns a diagnostic pointing at
+  `compile` (for your own policy) or `sign-template` (for a base). `--key` takes a key **name**
+  resolved from the key dir where `keygen` writes it — `--key remco-dev` — falling back to a path,
+  and names the available keys on a miss (previously it demanded a filesystem path, so `--key <name>`
+  failed and the fix was undiscoverable). `sign-template` resolves a template by **name** from the
+  template cascade (`~/.config/kennel/templates/<name>` first), and refuses a leaf with a pointer to
+  `compile` instead of a cryptic `unknown file`. `kennel policy generate --from <template>` no longer
+  demands a phantom `@version` suffix (versioned references were removed in 0.5.0); it validates the
+  base name with the compiler's own rule and fails fast on a bad one. `kennel oci build` / `oci
+  update` scaffolds now tell you to `compile` (which signs) the leaf they produce, not `sign` it.
 - **Removed `kennel subkennel`** (the `add` / `check` sub-verbs) and its `subkennel(5)`
   man page. The per-user `/etc/kennel/subkennel` allocation file is retired: a kennel's
   reserved loopback subnet is now derived from the caller's kernel-trusted real uid (an
@@ -110,9 +141,20 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Policy schema changes
 
-- **Two additive-optional settled fields (schema stays v3).** Both are backward-compatible — a
-  policy not using them is byte-identical and old v3 artefacts stay valid — so the schema shape is
-  re-pinned without a version bump.
+- **Settled-schema ABI bumped to v4** (`SETTLED_SCHEMA_VERSION = 4`; `MIN_SETTLED_SCHEMA_VERSION`
+  stays 3). The additive-optional stanzas this release adds — `[net.udp]` + `udp_allow_names` (W2),
+  `[identity].hostname` (W12), the fs `redirect` list backing a `source` redirect (W15), and
+  `[workload] allowed_args` / `[fs.cwd]` (all detailed below) — were re-pinned onto v3 *in-cycle*
+  because a policy using none of them is byte-identical to a v3 artefact. But an artefact that *uses*
+  one carries a field a v3 reader's `deny_unknown_fields` structs reject, so stamping it v3 would let
+  an old daemon accept the version and then choke on a cryptic `unknown field` (the 0.3.1 drift
+  class). The release promotes the accumulated shape change to a real bump: 0.6.0 artefacts are v4,
+  an old (v3-max) daemon refuses a v4 artefact cleanly as too-new, and a 0.6.0 daemon still reads v3
+  artefacts (MIN 3). `schema/schema-version.lock` freezes v3 at its pre-additions shape and pins v4;
+  `RELEASE-CEREMONY.md` records the rule — re-pin in-cycle, bump at release when the shape moved.
+- **Two additive-optional settled fields (part of the v4 shape).** Both are backward-compatible — a
+  policy not using them is byte-identical and old v3 artefacts stay valid under a 0.6.0 daemon — but
+  an artefact that uses one is a v4 artefact (see the ABI bump above).
   - **`[workload] allowed_args`** — when a `[workload]` is `pinned`, CLI `-- <args>` tokens are
     *appended* to the pinned argv instead of refused. The program and base argv stay pinned
     exactly (the fd-pin/digest binds the program, not the args).
@@ -131,8 +173,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the reason this is a named change. Valid values are unaffected; the settled artefact shape is
   unchanged (no re-pin, no bump), and the published JSON Schema's value sets were already
   identical.
-- **`[identity].hostname` — the opt-in persona hostname (W12; additive-optional, schema stays
-  v3, shape re-pinned).** Setting it gives the kennel its own **UTS namespace** with one coherent,
+- **`[identity].hostname` — the opt-in persona hostname (W12; additive-optional, part of the v4
+  shape).** Setting it gives the kennel its own **UTS namespace** with one coherent,
   policy-set identity: `uname -n`, the synthetic `/etc/hostname`, and `/etc/hosts` all agree (the
   factory `sethostname`s inside the new namespace — unprivileged, via the identity-mapped userns).
   **Unset means no masking**: no UTS namespace, `uname -n` shows the host name — the current
@@ -145,7 +187,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   paths under one `reason`), matching the bare-set form — QoL, source-only. A single-path entry
   still serialises as a bare string, so existing signed artefacts verify unchanged.
 - **`source` on `[[fs.read.add]]` / `[[fs.write.add]]` — the asymmetric fs grant (W15;
-  additive-optional, schema stays v3, shape re-pinned).** By default the fs mapping is symmetric —
+  additive-optional, part of the v4 shape).** By default the fs mapping is symmetric —
   the host inode at `path` appears at `path` in the view. An entry carrying `source` serves the
   view path from a **different host path** instead: per-workload credential/state redirection
   (`path = "~/.claude/.credentials.json"`, `source = "~/workloads/acme/claude-creds.json"`)
@@ -249,6 +291,34 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   real drifts surfaced and fixed on the way out: the `policy` usage line (CLI help and man) was
   missing the `inspect` sub-verb, and `kennel(1)` omitted `release` / `stop` / `list` /
   `daemon-reload` entirely — a new table row now appears in help and man by construction.
+- **The installer stops writing host configuration into the vendor tree.** `/usr/lib/kennel` is
+  package payload (FHS: static, package-owned) and `/etc/kennel` is host configuration — the
+  `kennel-lib-config` cascade already resolves `/etc` over `/usr/lib` per key, and the shipped
+  `system.toml` header already documented it, but `install.sh` violated it: on `--prefix` it
+  `sed -i`'d `libexec_dir` **into the vendor `system.toml`** and `ExecStart` into the packaged
+  systemd unit — mutating package-owned files per host. Now both install **verbatim**; a `--prefix`
+  relocation is recorded where a host fact belongs — a merge-safe `libexec_dir` override in
+  `/etc/kennel/system.toml` and a `/etc/systemd/user/kenneld.service.d/` drop-in — with **zero**
+  `sed` of `/usr`. The completion banner names `/usr/lib/kennel` as immutable vendor payload and
+  `/etc/kennel` as the host-config root, instead of calling the vendor dir "config".
+- **`dev-install.sh` — a one-command dev rebuild + reinstall.** The release payload needs each binary
+  built a specific way (host-side dynamic, in-view `+crt-static`, the privhelper with `bpf-egress`)
+  and `stage-tree.sh` routes each from the right directory; hand-mirroring that split — and the
+  `kennel-host`→`host` rename — for a one-crate change was a recurring puzzle. The new tool builds the
+  workspace both ways, then hands off to the same `stage-tree.sh` + `install.sh` a release uses. It is
+  the dev sibling of `build-release.sh` (native, not byte-reproducible); `stage-tree.sh` stays the
+  single source of truth for the layout.
+
+### Fixed
+
+- **Confined-GUI readiness probe broke the headless `gui-mesh` suite case.** The `compositor-broker`
+  cold-start readiness probe (which waits for the nested compositor to advertise `wl_compositor`
+  before handing the client over) treated a peer that connects and then closes/errors without
+  speaking Wayland as "not ready yet", looping to the 8 s display-wait timeout — so the suite's echo
+  stand-in, which is not a compositor, made the consumer see `Connection reset` after 50 attempts.
+  The probe now treats a peer-close or hard error *after a successful connect* as a hand-off (the
+  peer is up but not talking Wayland), and only a failed *connect* keeps polling. The real
+  compositor path is unchanged; the suite case passes.
 
 ### New reference content
 

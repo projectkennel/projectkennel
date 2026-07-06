@@ -71,7 +71,14 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "generate" => kennel_cli::policy::policy_generate(rest),
         "compile" => kennel_cli::policy::compile(rest),
         "validate" => kennel_cli::policy::validate(rest),
-        "sign" => kennel_cli::policy::sign(rest),
+        "sign-template" => kennel_cli::policy::sign_template(rest),
+        // The old `sign` signed only templates, not the policy you run — a renamed trap. Redirect.
+        "sign" => Err(
+            "`kennel policy sign` was renamed. To sign your own policy so you can run it, use \
+             `kennel policy compile <policy> --key <key>`. To sign a shared base template, use \
+             `kennel policy sign-template <template> --key <key>`."
+                .to_owned(),
+        ),
         "lint" => kennel_cli::policy::policy_lint(rest),
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),

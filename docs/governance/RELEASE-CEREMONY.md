@@ -6,17 +6,23 @@ reviewable PR; the **tag & publish** is the operator's act on a green `main`.
 
 ## The three version axes (they are independent — do not conflate)
 
-A release bumps the **package** version. The other two move on their **own** triggers and are
-usually already correct by release time — *verify*, do not blindly bump.
+A release bumps the **package** version. The threat-catalogue moves on its own trigger (verify). The
+settled-schema is a **release gate**, not a "verify only" axis — read its row carefully.
 
 | Axis | Where | Bumps when | At release |
 |---|---|---|---|
 | **Package** | `Cargo.toml` `[workspace.package].version` (all crates inherit `version.workspace = true`) | every release | **bump** to the new `x.y.z` |
-| **Settled-schema** | `SETTLED_SCHEMA_VERSION` (+ `MIN_…`) in `kennel-lib-policy/src/lib.rs`; pinned in `schema/schema-version.lock` | the **policy schema shape** changes (field/type/required/enum) — CI's `schema-version-pin.sh` forces it per-change | **verify only.** Run the pin test; it must say "no bump owed". Bumping without a shape change *fails CI* (no pin line for the new version). |
+| **Settled-schema** | `SETTLED_SCHEMA_VERSION` (+ `MIN_…`) in `kennel-lib-policy/src/lib.rs`; pinned in `schema/schema-version.lock` | the policy schema **shape** changes (field/type/required/enum). In-cycle, CI's `schema-version-pin.sh` only requires the lock to *match* the shape, so a shape change may **re-pin the current version** without a bump — a convenience, NOT the ABI decision. | **RELEASE GATE.** Fingerprint the schema at the last release tag and now; if they differ, the shape moved under one version. A settled reader is `deny_unknown_fields`, so an artefact that *uses* the new fields breaks an older daemon (the 0.3.1 drift class — a cryptic `unknown field`, not a clean version refusal). That is the ABI break the version exists to signal, so **bump** `SETTLED_SCHEMA_VERSION`, append a pin line, and freeze the prior version's line at its pre-change shape. Only a genuinely unchanged shape since the last release ⇒ no bump. |
 | **Threat-catalogue** | `catalogue_version` in `dist/threats/catalogue.toml` **and** the `Version` line in `docs/reference/THREATS.md` (they must match) | a `THREATS.md` entry is added/changed | **verify only.** Confirm the two match; it was bumped when the entry landed. |
 
 > 0.5.0 example: package `0.4.0`→`0.5.0`; schema stayed `2` (no shape change — `abstract = "allow"`
 > was a value gate, not a new field); threats stayed `0.5` (W13 bumped it when its entry landed).
+>
+> 0.6.0 example: package `0.5.0`→`0.6.0`; schema **`3`→`4`** — W2 (`[net.udp]`), W12
+> (`[identity].hostname`), and W15 (fs `redirect`) each added an additive-optional stanza and were
+> re-pinned onto v3 *in-cycle*, but the shape moved since 0.5.0, so the release promoted it to v4
+> (an old daemon now refuses a v4 artefact instead of choking on `unknown field`). `MIN_…` stayed 3
+> (a 0.6.0 daemon still reads v3 artefacts). Threats stayed `0.6`.
 
 ## Prep (one PR)
 

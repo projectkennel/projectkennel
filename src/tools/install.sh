@@ -8,9 +8,11 @@
 #   1. System install (root): all binaries under <libexec> (default
 #      /usr/libexec/kennel, the documented non-PATH helper location),
 #      the privhelper factory file-capped (cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin)
-#      with its capability-split sub-helpers, the vendor deployment config under
-#      /usr/lib/kennel, the systemd *user* units, the AppArmor profile, and the
-#      root-owned /etc/kennel directory. Run with sudo.
+#      with its capability-split sub-helpers, the immutable vendor PAYLOAD under
+#      /usr/lib/kennel (templates, keys, reference-policy sources, the baseline
+#      system.toml — never rewritten in place), the systemd *user* units, the AppArmor
+#      profile, and the root-owned /etc/kennel HOST-config tree (trust store, this host's
+#      compiled policies, provider enablement, and any admin deployment override). Run with sudo.
 #   2. Per-user enable (each user, unprivileged): `systemctl --user enable --now
 #      kenneld.socket`. No per-user allocation is needed — a kennel's reserved
 #      loopback subnet is derived from the caller's kernel-trusted uid. The
@@ -19,7 +21,8 @@
 # No install path is baked into a binary: kenneld reads the helper-binary
 # locations and the trust store from the root-owned config cascade
 # (/usr/lib/kennel/system.toml then /etc/kennel/system.toml; kennel-lib-config). The
-# installer writes the vendor system.toml to match where it actually installs.
+# vendor system.toml ships as the untouched package baseline; a --prefix relocation is
+# recorded as an /etc/kennel/system.toml override, which the cascade merges per key.
 #
 # The installer does NOT fabricate the security-sensitive admin inputs (the
 # trust-store public keys); it creates the directory skeleton and tells the admin
@@ -173,9 +176,10 @@ install_binaries() {
 }
 
 install_config() {
-	# Vendor deployment + user config (the lowest-priority cascade layer). The
-	# deployment file's libexec_dir is rewritten to wherever we actually
-	# installed, so a --prefix relocation stays coherent without hand-editing.
+	# Vendor deployment + user config (the lowest-priority cascade layer). The vendor
+	# system.toml installs VERBATIM — it is package payload, never rewritten in place. A
+	# --prefix relocation is a HOST fact, recorded as an /etc/kennel/system.toml override
+	# (install_etc_skeleton) which the cascade merges per key over this baseline.
 	run install -d -m 0755 "$vendor_dir"
 	# Vendor cascade layers for keys/templates/policies so the lowest-priority
 	# search dir always exists (kennel-lib-config 3-layer cascade). This is the
@@ -244,17 +248,24 @@ install_config() {
 	# Both are additive cascades; /etc/kennel overrides this vendor layer.
 	run install -m 0644 "$pkg_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
 	run install -m 0644 "$pkg_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
-	if [ "$libexec" != "/usr/libexec/kennel" ]; then
-		run sed -i "s#^libexec_dir = .*#libexec_dir = \"$libexec\"#" "$vendor_dir/system.toml"
-	fi
 }
 
 install_units() {
+	# The packaged units install VERBATIM under /usr/lib/systemd/user (vendor, immutable).
+	# A --prefix relocation is a HOST fact, so it lands in a drop-in under /etc/systemd/user —
+	# never a sed of the packaged unit. The empty ExecStart= resets the vendor value before the
+	# override (systemd requires the reset to replace a single-valued directive).
 	run install -d -m 0755 "$units_dir"
 	run install -m 0644 "$pkg_root/dist/systemd/kenneld.socket" "$units_dir/kenneld.socket"
 	run install -m 0644 "$pkg_root/dist/systemd/kenneld.service" "$units_dir/kenneld.service"
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
-		run sed -i "s#^ExecStart=.*#ExecStart=$libexec/kenneld#" "$units_dir/kenneld.service"
+		local dropin_dir="/etc/systemd/user/kenneld.service.d"
+		run install -d -m 0755 "$dropin_dir"
+		if [ "$dry_run" -eq 1 ]; then
+			echo "DRY-RUN: write $dropin_dir/kennel-prefix.conf (ExecStart=$libexec/kenneld)"
+		else
+			printf '[Service]\nExecStart=\nExecStart=%s/kenneld\n' "$libexec" > "$dropin_dir/kennel-prefix.conf"
+		fi
 	fi
 }
 
@@ -292,10 +303,25 @@ install_apparmor() {
 }
 
 install_etc_skeleton() {
-	# Root-owned configuration root. `keys/` is the trust store:
-	# the daemon's signing-key store (system.toml's trust_dir default) and the CLI's
-	# authoring search dir. Admin-owned; org keys go here.
+	# Root-owned HOST configuration root — the admin tier and this host's generated state
+	# (trust store, host-compiled settled policies, provider enablement, GUI configs). `keys/`
+	# is the trust store: the daemon's signing-key store (system.toml's trust_dir default) and
+	# the CLI's authoring search dir. Admin-owned; org keys go here.
 	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/templates /etc/kennel/policies
+	# A --prefix relocation is a HOST fact: record it as an /etc/kennel/system.toml override
+	# (wins per key over the vendor baseline), never by mutating the vendor system.toml. Merge
+	# in place — an admin may already keep other keys here, so set libexec_dir without clobbering.
+	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+		local sys_override=/etc/kennel/system.toml
+		if [ "$dry_run" -eq 1 ]; then
+			echo "DRY-RUN: set libexec_dir = \"$libexec\" in $sys_override"
+		elif [ -f "$sys_override" ] && grep -q '^libexec_dir *=' "$sys_override"; then
+			sed -i "s#^libexec_dir *=.*#libexec_dir = \"$libexec\"#" "$sys_override"
+		else
+			[ -f "$sys_override" ] || printf '# Host deployment overrides (win per key over the vendor %s/system.toml).\n' "$vendor_dir" > "$sys_override"
+			printf 'libexec_dir = "%s"\n' "$libexec" >> "$sys_override"
+		fi
+	fi
 }
 
 install_keys() {
@@ -425,7 +451,10 @@ print_next_steps() {
 	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
 	# tailored to the invoking (sudo) user so it can be pasted verbatim.
 	echo
-	echo "Project Kennel: system install complete (binaries under $libexec, config under $vendor_dir)."
+	echo "Project Kennel: system install complete."
+	echo "  binaries:        $libexec (host) + $facades_dir (in-view) + $pathbin_dir/kennel"
+	echo "  vendor payload:  $vendor_dir (package-shipped, immutable: templates, keys, reference-policy sources, baseline system.toml)"
+	echo "  host config:     /etc/kennel (trust store, host-compiled policies, provider enablement, GUI configs; overrides win over the vendor baseline)"
 	echo
 	echo "Post-install checks:"
 

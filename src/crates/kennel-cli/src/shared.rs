@@ -159,6 +159,94 @@ pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, Strin
     ))
 }
 
+/// Resolve a `--key` value: a key **name** in the user key dir (where `keygen` puts it), else a path.
+///
+/// Keys are name-addressed everywhere else — `keygen` writes `<key-id>` by name, the daemon trusts
+/// by name — so `--key remco-dev` finds `~/.config/kennel/keys/remco-dev`. Only if no such key
+/// exists is the argument treated as a filesystem path (a key held elsewhere: `~/.ssh/id_ed25519`,
+/// an agent/token public key).
+///
+/// # Errors
+///
+/// Returns a message naming the keys that ARE in the key dir if the argument is neither a key there
+/// nor an existing file.
+pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
+    // Where `keygen` puts keys: the user key dir, by name. Look here first.
+    let in_key_dir = default_key_dir().join(arg);
+    if in_key_dir.is_file() {
+        return Ok(in_key_dir);
+    }
+    // Otherwise a filesystem path to a key held elsewhere.
+    let literal = PathBuf::from(arg);
+    if literal.is_file() {
+        return Ok(literal);
+    }
+    // Neither: name the keys that ARE present, so the fix is obvious.
+    let dir = default_key_dir();
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for p in entries.flatten().map(|e| e.path()) {
+            if p.extension().and_then(|x| x.to_str()) == Some("pub") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_owned());
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let avail = if names.is_empty() {
+        "none — generate one with `kennel keygen <key-id>`".to_owned()
+    } else {
+        names.join(", ")
+    };
+    Err(format!(
+        "no signing key `{arg}`: not a key in {} and not a file (available: {avail})",
+        dir.display()
+    ))
+}
+
+/// Resolve a template/fragment argument: a **name** in the template cascade (user
+/// `~/.config/kennel/templates/<name>` first), else a filesystem path.
+///
+/// The template counterpart of [`resolve_policy`], so `sign-template base-mine` finds
+/// `~/.config/kennel/templates/base-mine/policy.toml` (or `base-mine.toml`) without the caller
+/// spelling out the path — mirroring the [`FsTemplateSource`](crate::policy::FsTemplateSource)
+/// layout the compiler resolves against.
+///
+/// # Errors
+///
+/// Returns a message if the argument is neither an existing file nor a valid name resolving in the
+/// template dirs.
+pub fn resolve_template(arg: &str) -> Result<(PathBuf, String), String> {
+    let literal = Path::new(arg);
+    if literal.exists() {
+        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
+    }
+    if !is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid template name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    let mut dirs = Vec::new();
+    add_default_template_dirs(&mut dirs);
+    for dir in dirs {
+        // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
+        for candidate in [
+            dir.join(format!("{arg}.toml")),
+            dir.join(arg).join("policy.toml"),
+        ] {
+            if candidate.is_file() {
+                return Ok((candidate, arg.to_owned()));
+            }
+        }
+    }
+    Err(format!(
+        "no template named `{arg}` (searched `templates/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel); pass a path to a template file"
+    ))
+}
+
 /// Derive a kennel name from a policy file path.
 pub fn policy_name_from_path(path: &Path) -> String {
     let stem = path
@@ -421,7 +509,7 @@ pub fn default_signing_key() -> Result<PathBuf, String> {
                 .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
                 .collect();
             Err(format!(
-                "multiple signing keys in {} ({}); pass --key <path> to choose",
+                "multiple signing keys in {} ({}); pass --key <name> to choose one of them",
                 dir.display(),
                 ids.join(", ")
             ))

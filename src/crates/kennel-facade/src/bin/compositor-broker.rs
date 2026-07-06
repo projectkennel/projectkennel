@@ -28,7 +28,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
@@ -294,12 +294,23 @@ fn probe_ready(display: &Path) -> Option<UnixStream> {
             None => {}
         }
         buf.drain(..consumed.min(buf.len()));
+        // Fallback: the socket is open and accepting but did not introspect as a Wayland
+        // compositor within the window — a server we cannot probe this way (or a non-Wayland
+        // stand-in, e.g. the headless echo the gui-mesh test uses). Hand the connection off rather
+        // than stall; a real compositor advertises `wl_compositor` well within this window, so the
+        // cold-start race it guards against is still closed.
         if start.elapsed() > Duration::from_secs(2) {
-            return None;
+            return Some(sock);
         }
         match sock.read(&mut chunk) {
-            Ok(0) | Err(_) => return None,
-            Ok(n) => buf.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+            Ok(n) if n > 0 => buf.extend_from_slice(chunk.get(..n).unwrap_or(&[])),
+            // The read TIMED OUT (500 ms) with no verdict yet — a real compositor still coming up.
+            // Loop and re-check the 2 s deadline; do not give up on the first quiet read.
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}
+            // EOF or a hard error AFTER a successful connect: the peer is up but not talking the
+            // Wayland handshake (it read our bytes and closed — the echo stand-in does exactly
+            // this). Hand off; only a failed *connect* means "not up yet, keep polling".
+            Ok(_) | Err(_) => return Some(sock),
         }
     }
 }

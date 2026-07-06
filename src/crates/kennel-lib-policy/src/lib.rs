@@ -63,19 +63,33 @@ pub use settled::{
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use spawn::spawn_eligible;
 
-/// The newest `settled_schema_version` this build accepts.
+/// The newest `settled_schema_version` this build accepts — the settled-artefact ABI version.
 ///
 /// Bumped to 2 with the SSHSIG signature format; to 3 for a schema cleanup: `[fs.tmp]` lost its
 /// DAC-mode knob and renamed `private` → `writable`, the `[binder]` user-service section and its
 /// settled runtime were removed, and the invariant-only `fs.proc.visibility` / `unix.default`
-/// keys were dropped — all changing the settled shape. `[workload] allowed_args`, `[fs.cwd]`, and
-/// the fs `redirect` list (0.6.0) are additive-optional, so they extend v3 without a bump (a
-/// policy not using them is byte-identical, and old v3 artefacts stay valid) — the shape
-/// fingerprint is re-pinned in place.
-pub const SETTLED_SCHEMA_VERSION: u32 = 3;
+/// keys were dropped.
+///
+/// Bumped to 4 for 0.6.0: the additive stanzas that landed this cycle — `[workload] allowed_args`,
+/// `[fs.cwd]`, the fs `redirect` list (W15), `[identity].hostname` (W12), and `[net.udp]` +
+/// `udp_allow_names` (W2) — extend the settled *shape*. They are additive-**optional** (a policy
+/// that uses none is byte-identical to a v3 artefact), which is why the version could be *re-pinned*
+/// in place across the dev cycle rather than bumped on every commit. But an artefact that *uses*
+/// them carries fields an old (v3-max) daemon's `deny_unknown_fields` structs cannot parse — a hard
+/// ABI break. Stamping such an artefact v3 would lie: the old daemon accepts the version, then
+/// chokes on a `unknown field` (the 0.3.1 drift class). So the release promotes the accumulated
+/// shape change to a real version: 0.6.0 artefacts are v4, and an old daemon refuses v4 cleanly as
+/// too-new. In-cycle re-pinning is a convenience; a shape that moved since the last release owes a
+/// bump *at release* (see `schema/schema-version.lock` and `docs/governance/RELEASE-CEREMONY.md`).
+pub const SETTLED_SCHEMA_VERSION: u32 = 4;
 
 /// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
 /// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.
+///
+/// Stays at 3 across the v4 bump: the 0.6.0 additions are additive-optional, so a v3 artefact (which
+/// simply lacks them) still loads and enforces identically under this build — backward compatibility
+/// is preserved. Only the *forward* direction (an old daemon meeting a v4 artefact) is the break the
+/// bump guards, and that is the old daemon's to refuse.
 pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// Verify a settled-policy document and return its body.

@@ -255,8 +255,8 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then sign:\n\
-         #   kennel policy sign {name} --key <key>\n\
+        "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then compile (which signs it):\n\
+         #   kennel policy compile {name} --key <key>\n\
          name = \"{name}\"\n\
          template_base = \"base-confined\"\n\
          \n\
@@ -786,9 +786,9 @@ fn finish_update(
         &new_readonly,
         &base.writable,
     );
-    eprintln!("  signature CLEARED — review the policy and re-sign:");
+    eprintln!("  signature CLEARED — review the policy and recompile (which re-signs it):");
     eprintln!(
-        "    kennel policy sign {} --key <key>",
+        "    kennel policy compile {} --key <key>",
         policy_path.display()
     );
     Ok(std::process::ExitCode::SUCCESS)
@@ -1181,7 +1181,7 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
     );
     eprintln!("  digest: {recorded}");
     eprintln!(
-        "  policy: {} (complete `reason`, then `kennel policy sign`)",
+        "  policy: {} (complete `reason`, then `kennel policy compile` to sign it)",
         policy.display()
     );
     eprintln!("  rootfs: {}", entry.rootfs().display());
