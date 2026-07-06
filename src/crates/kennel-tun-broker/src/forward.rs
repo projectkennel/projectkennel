@@ -168,7 +168,7 @@ mod tests {
         dst_port: u16,
         payload: &[u8],
     ) -> Vec<u8> {
-        let synth = pool.mint(name);
+        let synth = pool.mint(name, 0).expect("mint");
         build_udp_datagram(kennel(), synth, src_port, dst_port, payload).expect("frame")
     }
 
@@ -225,7 +225,7 @@ mod tests {
         let mut pool = Pool::new(PREFIX);
         let frame = egress(&mut pool, "api.example", 40000, 53, b"query");
         let r = route(&frame, &pool).expect("routed");
-        let synth = pool.mint("api.example"); // stable
+        let synth = pool.mint("api.example", 0).expect("mint"); // stable
         let reply = build_udp_datagram(synth, kennel(), r.dst_port, r.src_port, b"answer")
             .expect("reply frame");
         let back = route(&reply, &pool); // the reply's dst is the kennel, not a synthetic → no route

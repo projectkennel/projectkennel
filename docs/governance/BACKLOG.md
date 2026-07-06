@@ -149,6 +149,19 @@ documentation sweep.
   bump, so it wants its own release slot, not a ride-along. (Parked 2026-07-04; overlaps W14 #2, which
   fixes the one *security-bearing* instance — `[seccomp] deny` narrowing — independently.)
 
+- **UDP synthetic-pool per-grant rotation (FIFO/LRU) instead of a hard cap.** 0.6.0's W8 hardening
+  caps the shim's `name → synthetic` mints at `MAX_PER_GRANT` (32) *per allowlist grant* — the
+  wildcard-exfil bound — and past it a new name under that grant is NODATA. A hard cap is tight on
+  exfil (≤ 32 distinct labels ever through one wildcard) but breaks a legitimate app that fans out to
+  more than 32 subdomains of one granted domain over its life. Promote to a **rotating window** —
+  evict the oldest (FIFO) or least-recently-used (LRU) mint when a new one arrives past the cap — so a
+  high-fanout app keeps working while the pool stays bounded (32 *concurrent*, not 32 total; a looser
+  but still-bounded exfil surface for an already-accepted residual). The catch that keeps it out of
+  the ship-gate: the pool (`shim::Pool`) does not know which mints have **live flows** (that is
+  `FlowTable`, a separate structure in `serve.rs`), so a naïve eviction can drop a name mid-flow and
+  break it. Doing it right needs pool↔flow-table coordination (evict only inactive mints, or tear the
+  flow down on eviction). (Parked 2026-07-08 from the W8 UDP hardening.)
+
 ## Fenced to a later release
 
 - **kenneld self-confinement — the monitor inside its own box (was 0.6.0 W1; withdrawn 2026-07-02).**

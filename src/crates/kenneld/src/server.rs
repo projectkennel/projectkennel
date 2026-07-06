@@ -2450,15 +2450,38 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
             resolved.display()
         ));
     }
-    // Never `$HOME`: a whole-home bind is exactly what the persona view exists to prevent. A
-    // path *under* the home is fine (a project dir); the home root itself is not.
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        if std::fs::canonicalize(&home).is_ok_and(|h| h == resolved) {
-            return Err(format!(
-                "the invocation cwd {} is the operator's $HOME; the cwd grant never binds $HOME",
+    // Not world-writable: a writable bind of an other-writable dir lets ANY host user plant content
+    // (and the required markers) in the tree the confined workload then reads/writes — a cross-user
+    // vector on a shared host. (Group-writable is deliberately allowed: on private-usergroup systems
+    // a project dir is commonly `0775` with the operator's OWN single-member group, so refusing
+    // group-write would be a false positive; only the unambiguous world-writable case is refused.)
+    if meta.mode() & 0o002 != 0 {
+        return Err(format!(
+            "{} is world-writable ({:04o}); the cwd grant refuses a bind any host user can write",
+            resolved.display(),
+            meta.mode() & 0o7777
+        ));
+    }
+    // Never `$HOME`: a whole-home bind is exactly what the persona view exists to prevent (a path
+    // *under* the home is fine — a project dir — the home root itself is not). This floor is
+    // non-overridable, so it must fail CLOSED: if the operator's `$HOME` cannot be resolved (unset,
+    // or a broken/absent path), we cannot prove `resolved` is not the home, so refuse rather than
+    // silently bind a possibly-home directory.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|h| std::fs::canonicalize(&h).ok())
+        .ok_or_else(|| {
+            format!(
+                "cannot resolve the operator's $HOME to floor-check the cwd grant for {} — refusing \
+                 (set HOME, or run from a resolvable project dir)",
                 resolved.display()
-            ));
-        }
+            )
+        })?;
+    if home == resolved {
+        return Err(format!(
+            "the invocation cwd {} is the operator's $HOME; the cwd grant never binds $HOME",
+            resolved.display()
+        ));
     }
     // Markers: each required dirent must be present (a trailing slash requires a directory),
     // so the grant applies only to a project the operator has marked for agent use.
@@ -2747,6 +2770,23 @@ mod tests {
                 assert!(err.contains("$HOME"), "{err}");
             }
         }
+    }
+
+    #[test]
+    fn resolve_cwd_grant_refuses_world_writable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = std::env::temp_dir().join(format!(
+            "kennel-cwd-ww-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("mk base");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        // Owned by the test uid, but world-writable → refused (any host user could plant content).
+        let err = resolve_cwd_grant(&base, &[]).expect_err("world-writable must be refused");
+        assert!(err.contains("world-writable"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
