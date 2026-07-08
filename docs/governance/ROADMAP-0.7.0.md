@@ -114,8 +114,10 @@ The change, for `run` and the shared launch core `oci run` uses:
 
 **Exit:** `run`/`oci run` accept only a name resolving to a settled artefact in the three repos;
 the compile-side flags and the in-memory compile are gone from the run path; each wrong-object
-refusal names the object and the real next step; the policy suite passes with its cases invoked
-through the narrowed form; CHANGELOG records the CLI surface change.
+refusal names the object and the real next step; the policy suite drives the **shipped operator
+flow verbatim** — `keygen` → `policy compile` (default cascade, no test-only flags) → `run` by
+name — per the standing e2e-eats-the-dogfood ruling (the W0-V3 audit note), which also gives the
+settled pass-through its first e2e coverage; CHANGELOG records the CLI surface change.
 
 ### W2 · The authoring split: `kennel template` beside `kennel policy`
 
