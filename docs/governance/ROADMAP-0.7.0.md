@@ -341,17 +341,31 @@ evict only inactive mints, or tear the flow down on eviction, never silently bre
 bound holds under the flow-spray case; no live flow is broken by eviction (e2e-asserted); the
 threat note records the loosened-but-bounded exfil surface.
 
-### W10 · `kennel-compose` gains the `[net.udp]` capability question
+### W10 · `kennel-compose` revisit — informed by the release, closing with it
 
-**[debt] XS. Owed from the 0.6.0 retirement sweep.**
+**[quality, debt] S. Deliberately slots LAST, after W1–W6: the work ahead of it defines what
+compose must become, so its scope is drawn from the landed release, not now.**
 
-0.6.0 W2's exit recorded the compose capability question as landed with Part A; the tree says
-otherwise — `kennel-compose`'s network dialogue asks only the TCP leg (a proxy grant, port 443)
-and `udp` appears nowhere in the crate. The dialogue gains the UDP leg: granted names + ports
-minting `[[net.udp.allow]]` deltas with a `reason`, the same shape as the proxy leg beside it.
+Compose is the guided author of leaves, and nearly every workstream ahead moves the ground under
+it: the two-house CLI changes the ceremony its output feeds (W1/W2), W3's `install` is arguably
+the natural last step of a compose session (author → place → sign → "run it with:"), W6's v5
+composition rule changes the stanzas compose emits, and tier provenance (W3) changes what compose
+should say about the result. Revisiting it early would reshape the dialogue once per landing;
+revisiting it last reshapes it once. The revisit reads compose against the finished release and
+draws its scope then — small findings fixed in place, larger ones recorded as scoped items for
+the next roadmap.
 
-**Exit:** compose can author a `[net.udp]` grant; the emitted leaf compiles and runs the
-`net-udp` suite case's shape; the compose walkthrough names it.
+One item is already owed and named, from the 0.6.0 retirement sweep: **the `[net.udp]` capability
+question**. 0.6.0 W2's exit recorded it as landed with Part A; the tree says otherwise —
+`kennel-compose`'s network dialogue asks only the TCP leg (a proxy grant, port 443) and `udp`
+appears nowhere in the crate. The dialogue gains the UDP leg (granted names + ports minting
+`[[net.udp.allow]]` deltas with a `reason`, the same shape as the proxy leg beside it) — landed
+with the revisit, not before, so the dialogue is reshaped once.
+
+**Exit:** the owed `[net.udp]` question ships (compose authors a `[net.udp]` grant; the emitted
+leaf compiles); compose is coherent with the two-house CLI, the install ceremony, and the v5
+schema as landed; remaining findings are fixed in place or recorded as scoped items on the next
+roadmap — none carried as unwritten intentions.
 
 ### W9 · Pre-ship pass: the ceremonies are not enforcement points
 
@@ -388,7 +402,7 @@ W5 (version verb)          ── XS, independent ──────────
 W6 (schema v5 pass)        ── M,  independent of the CLI train; owns the bump ────►
 W7 (installer manifest)    ── S,  independent ────────────────────────────────────►
 W8 (UDP pool rotation)     ── S–M, independent ───────────────────────────────────►
-W10 (compose udp question) ── XS, independent ────────────────────────────────────►
+W10 (compose revisit)      ── S,  LAST before the gate: scope drawn from W1–W6 ───►
 W9 (enforcement-point pass)── S,  after W1–W4 + W6; ship gate ────────────────────►
 ```
 
@@ -427,7 +441,10 @@ diagnostics for this release rather than vanishing silently.
   subtree with no catalogue entry is never silent (W7).
 - A >32-fan-out under one UDP grant works within the rotating window with no live-flow breakage
   and the concurrent bound intact (W8).
-- `kennel-compose` can author a `[net.udp]` grant and the emitted leaf compiles (W10).
+- The compose revisit has run against the landed release: the owed `[net.udp]` question ships
+  (compose authors a `[net.udp]` grant, the emitted leaf compiles), compose is coherent with the
+  two-house CLI / install ceremony / v5 schema, and remaining findings are fixed or recorded —
+  none carried as unwritten intentions (W10).
 - Every new ceremony has a recorded bypass check proving the authoritative gate behind it holds;
   any load-bearing courtesy is fixed by moving enforcement down before the tag (W9).
 
