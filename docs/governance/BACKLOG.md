@@ -1,6 +1,6 @@
 # Project Kennel — backlog / parking lot
 
-Status: **standing** · Last touched: 2026-07-04
+Status: **standing** · Last touched: 2026-07-08
 
 > The parking lot for work that is **not on any release roadmap** and should not be carried from one to
 > the next. Three kinds live here: items **declined on principle** (mostly risk, little reward — re-open
@@ -23,7 +23,11 @@ little reward. They move onto a roadmap only if the specific condition named is 
   MCP proxy/filter, dropped into a confined service kennel the way `oci-fetch` drops in `skopeo`/`umoci` —
   their code, their maintenance, Kennel only brokers it. Promote **only** if such a tool exists and is sound; until
   then the seam stays at the operator and R2 (delegated composition) remains accepted-and-tagged. No
-  first-party interposer is built.
+  first-party interposer is built. Adjacent but distinct (deferred by 0.6.0 W11): **MCP-server
+  confinement** — an MCP server is an *endpoint the agent dials*, not an agent binary, so its
+  confinement shape is a standing service kennel offering the endpoint over the mesh (the existing
+  provides/consumes model as-is, no new mechanism and no protocol parsing). Promote when a concrete
+  MCP server wants confining; it needs a policy, not a workstream.
 
 - **First-party OCI unpacker — stays backlogged, do not promote.** The security argument for
   first-party (unpacking is adversarial-input parsing) is **already met by confinement**: `skopeo`+`umoci`
@@ -132,35 +136,24 @@ documentation sweep.
   buy. Recorded here only so the idea is not re-proposed: the nested compositor *is* the cross-host render
   mechanism; there is no filtering-proxy fallback to build.
 
-- **Settled-schema list-field consistency: which sections offer `.add`/`.remove` deltas, and why.**
-  List-shaped policy fields do not compose uniformly. Some are `ListField` — a bare `[[…]]` **set**
-  (replace-on-inherit) *or* an `[[….add]]`/`[[….remove]]` **delta** carrying a required `reason`
-  (`[[net.proxy.allow]]`, `[[net.udp.allow]]`, `[[net.bpf.connect.allow/deny]]`, `[[unix.allow]]`,
-  `[[fs.read/write/deny]]`, `[[exec.allow]]`). Others are plain `Vec` with **bare-set fold** semantics
-  and no delta form at all — a child's non-empty list replaces the parent's, silently
-  (`[identity].groups`, `[[provides]]`/`[[consumes]]`). Nothing documents *which* fields are which,
-  or the rule for when a section should be delta-capable. Two live consequences seen in 0.6.0: a leaf
-  can silently drop an inherited `[seccomp] deny` list by writing a bare set (the W14 defect), and the
-  tun-broker fence work surfaced that `[[net.bpf.connect.deny]]`'s set-vs-`.add` distinction is
-  invisible until you compile and diff the artefact. Promote as a **deliberate schema pass**: decide
-  the rule (default to `ListField` for any inheritable list where a base contributes a floor; keep plain
-  `Vec` only where replace-is-the-contract and document why), apply it uniformly, and document the
-  set/delta/fold semantics in one place. Touches the settled schema shape ⇒ a `SETTLED_SCHEMA_VERSION`
-  bump, so it wants its own release slot, not a ride-along. (Parked 2026-07-04; overlaps W14 #2, which
-  fixes the one *security-bearing* instance — `[seccomp] deny` narrowing — independently.)
+- **A transparent TCP slow-lane on the tun path (the raw-TCP sibling of `[net.udp]`).** Carried from
+  the retired 0.6.0 roadmap (W2's named generalisation). Extending the tun capture to TCP gives
+  non-proxy-aware **raw TCP** clients a transparent egress at userspace-L3 (per-frame memcpy) cost.
+  It coexists **permanently** with `net.proxy`, which stays the fast lane — the CONNECT conduit
+  splices kernel-to-kernel for proxy-aware bulk TCP. Two lanes in one kennel: the proxy on loopback,
+  the tun owning the synthetic pool, selected by whether the client honours the proxy or dials a
+  resolved synthetic raw (the same DNS shim feeds both). Additive; touches `net.proxy` nothing.
+  Promote when a real workload needs raw-TCP egress that cannot honour a proxy.
 
-- **UDP synthetic-pool per-grant rotation (FIFO/LRU) instead of a hard cap.** 0.6.0's W8 hardening
-  caps the shim's `name → synthetic` mints at `MAX_PER_GRANT` (32) *per allowlist grant* — the
-  wildcard-exfil bound — and past it a new name under that grant is NODATA. A hard cap is tight on
-  exfil (≤ 32 distinct labels ever through one wildcard) but breaks a legitimate app that fans out to
-  more than 32 subdomains of one granted domain over its life. Promote to a **rotating window** —
-  evict the oldest (FIFO) or least-recently-used (LRU) mint when a new one arrives past the cap — so a
-  high-fanout app keeps working while the pool stays bounded (32 *concurrent*, not 32 total; a looser
-  but still-bounded exfil surface for an already-accepted residual). The catch that keeps it out of
-  the ship-gate: the pool (`shim::Pool`) does not know which mints have **live flows** (that is
-  `FlowTable`, a separate structure in `serve.rs`), so a naïve eviction can drop a name mid-flow and
-  break it. Doing it right needs pool↔flow-table coordination (evict only inactive mints, or tear the
-  flow down on eviction). (Parked 2026-07-08 from the W8 UDP hardening.)
+- **Relocating `net.proxy`'s broker decision into a provider kennel.** Carried from the retired
+  0.6.0 roadmap (W2's second named generalisation). Lifting the binder/afunix conversation + the
+  INet decision out of kenneld into a mesh provider kennel (the `dbus-broker@v1` pattern) moves the
+  inet + cross-ns-binder host-effects off the daemon's per-flow path **while preserving the splice
+  datapath and the proven resolve-check-pin enforcement**. Only a move of the *decision* (not just
+  the plumbing) evicts inet. Doubly motivated: it is also a concrete step toward the kenneld
+  self-confinement prerequisite (the host-effects factoring named in the fenced self-confinement
+  entry below) — the lower-risk, direct line at that seam. Orthogonal to the TCP slow-lane. Promote with the
+  self-confinement factoring, or on its own when a hardening pass is scheduled.
 
 ## Fenced to a later release
 
