@@ -291,16 +291,21 @@ field`. Verified on Linux 7.0 against the installed stack.
   real drifts surfaced and fixed on the way out: the `policy` usage line (CLI help and man) was
   missing the `inspect` sub-verb, and `kennel(1)` omitted `release` / `stop` / `list` /
   `daemon-reload` entirely — a new table row now appears in help and man by construction.
-- **The installer stops writing host configuration into the vendor tree.** `/usr/lib/kennel` is
-  package payload (FHS: static, package-owned) and `/etc/kennel` is host configuration — the
-  `kennel-lib-config` cascade already resolves `/etc` over `/usr/lib` per key, and the shipped
-  `system.toml` header already documented it, but `install.sh` violated it: on `--prefix` it
-  `sed -i`'d `libexec_dir` **into the vendor `system.toml`** and `ExecStart` into the packaged
-  systemd unit — mutating package-owned files per host. Now both install **verbatim**; a `--prefix`
-  relocation is recorded where a host fact belongs — a merge-safe `libexec_dir` override in
-  `/etc/kennel/system.toml` and a `/etc/systemd/user/kenneld.service.d/` drop-in — with **zero**
-  `sed` of `/usr`. The completion banner names `/usr/lib/kennel` as immutable vendor payload and
-  `/etc/kennel` as the host-config root, instead of calling the vendor dir "config".
+- **Host configuration lives in `/etc`; the vendor tree is invariants-only.** `/usr/lib/kennel` is
+  package payload (FHS: static, package-owned) holding the vendor **invariants** — the
+  reserved-namespace authority (maintainer key + signed templates/fragments), the threat catalogue,
+  the trigger/etc-bind catalogues — while `/etc/kennel` is host configuration. The three config files
+  (`system.toml`, `config.toml`, `kennel-sshd.conf`) are host config **with a vendor default**, like
+  any `/etc` conffile: `install.sh` now **seeds** them into `/etc/kennel` install-if-absent (an
+  existing admin copy is never clobbered) and ships **none** of them into the vendor tree; an upgrade
+  removes any stale vendor copy so the tier ends up invariants-only. `kennel-lib-config` reads
+  `system.toml` from `/etc` alone (the compiled defaults backstop any unset key), so the config source
+  is unambiguous; the key/template/policy **search** cascades still span `/etc` + `/usr/lib`, since
+  that pair *is* the host/vendor authority split the reserved-namespace gate keys on. The installer no
+  longer `sed`s package-owned files per host either: a `--prefix` `libexec_dir` relocation is recorded
+  where a host fact belongs — a merge-safe override in `/etc/kennel/system.toml` and a
+  `/etc/systemd/user/kenneld.service.d/` drop-in — with **zero** `sed` of `/usr`. The completion
+  banner names `/usr/lib/kennel` as immutable vendor payload and `/etc/kennel` as the host-config root.
 - **`dev-install.sh` — a one-command dev rebuild + reinstall.** The release payload needs each binary
   built a specific way (host-side dynamic, in-view `+crt-static`, the privhelper with `bpf-egress`)
   and `stage-tree.sh` routes each from the right directory; hand-mirroring that split — and the

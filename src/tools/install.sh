@@ -8,21 +8,25 @@
 #   1. System install (root): all binaries under <libexec> (default
 #      /usr/libexec/kennel, the documented non-PATH helper location),
 #      the privhelper factory file-capped (cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin)
-#      with its capability-split sub-helpers, the immutable vendor PAYLOAD under
-#      /usr/lib/kennel (templates, keys, reference-policy sources, the baseline
-#      system.toml — never rewritten in place), the systemd *user* units, the AppArmor
-#      profile, and the root-owned /etc/kennel HOST-config tree (trust store, this host's
-#      compiled policies, provider enablement, and any admin deployment override). Run with sudo.
+#      with its capability-split sub-helpers, the vendor INVARIANTS under /usr/lib/kennel (the
+#      maintainer trust-anchor key + signed templates/fragments — the `org.projectkennel.*`
+#      namespace authority — the reference-policy sources, and the canonical catalogues), the
+#      systemd *user* units, the AppArmor profile, and the root-owned /etc/kennel HOST tree
+#      (trust store, this host's compiled policies, provider enablement, GUI configs, and the
+#      seeded host config defaults system.toml/config.toml/kennel-sshd.conf). Run with sudo.
 #   2. Per-user enable (each user, unprivileged): `systemctl --user enable --now
 #      kenneld.socket`. No per-user allocation is needed — a kennel's reserved
 #      loopback subnet is derived from the caller's kernel-trusted uid. The
 #      installer prints the exact command.
 #
-# No install path is baked into a binary: kenneld reads the helper-binary
-# locations and the trust store from the root-owned config cascade
-# (/usr/lib/kennel/system.toml then /etc/kennel/system.toml; kennel-lib-config). The
-# vendor system.toml ships as the untouched package baseline; a --prefix relocation is
-# recorded as an /etc/kennel/system.toml override, which the cascade merges per key.
+# The tier IS the reserved-namespace authority (§7.13.5): a template may claim `org.projectkennel.*`
+# only from the vendor tier (/usr/lib/kennel, verified by the maintainer key there) and a host
+# `[[reserved]]` family (e.g. `com.acme.*`) only from the host tier (/etc/kennel, verified by a host
+# key there). So authority-bearing content lives in /usr/lib; host config lives in /etc.
+#
+# No install path is baked into a binary: kenneld reads the helper-binary locations and the trust
+# store from /etc/kennel/system.toml — a seeded host-config default the admin owns (kennel-lib-config,
+# falling back to the compiled defaults). A --prefix relocation sets libexec_dir in that file.
 #
 # The installer does NOT fabricate the security-sensitive admin inputs (the
 # trust-store public keys); it creates the directory skeleton and tells the admin
@@ -176,10 +180,15 @@ install_binaries() {
 }
 
 install_config() {
-	# Vendor deployment + user config (the lowest-priority cascade layer). The vendor
-	# system.toml installs VERBATIM — it is package payload, never rewritten in place. A
-	# --prefix relocation is a HOST fact, recorded as an /etc/kennel/system.toml override
-	# (install_etc_skeleton) which the cascade merges per key over this baseline.
+	# The VENDOR tree (/usr/lib/kennel) holds vendor INVARIANTS only — the content that carries
+	# reserved-namespace authority and the security baseline, which an admin does NOT reconfigure:
+	# the maintainer trust-anchor key + the maintainer-signed templates/fragments here are the sole
+	# authority for the built-in `org.projectkennel.*` namespace (a template may claim it only from
+	# THIS tier; §7.13.5, tier-gated at compile — the host tier `/etc/kennel` is the authority for a
+	# host-declared `[[reserved]]` family like `com.acme.*`). The reference-policy SOURCES and the
+	# vendor-canonical threat/trigger/etc-binds catalogues (admin-extensible in /etc) live here too.
+	# HOST CONFIGURATION does NOT: system.toml/config.toml/kennel-sshd.conf are seeded as defaults
+	# under /etc/kennel (install_etc_skeleton), like any /etc config an admin owns.
 	run install -d -m 0755 "$vendor_dir"
 	# Vendor cascade layers for keys/templates/policies so the lowest-priority
 	# search dir always exists (kennel-lib-config 3-layer cascade). This is the
@@ -233,12 +242,8 @@ install_config() {
 			run install -m 0644 "${pdir}policy.toml" "$vendor_dir/policies/providers/$pname/policy.toml"
 		done
 	fi
-	run install -m 0644 "$pkg_root/dist/config/system.toml" "$vendor_dir/system.toml"
-	# The bastion's hardened sshd_config template (W18): surfaced root-owned in the vendor layer so
-	# its lockdown is legible and admin-tunable (override at /etc/kennel/kennel-sshd.conf), not baked
-	# into the daemon. kenneld renders it per bastion; a missing file falls back to the compiled copy.
-	run install -m 0644 "$pkg_root/dist/kennel-sshd.conf" "$vendor_dir/kennel-sshd.conf"
-	run install -m 0644 "$pkg_root/dist/config/config.toml" "$vendor_dir/config.toml"
+	# (system.toml / config.toml / kennel-sshd.conf are HOST config → seeded under /etc/kennel by
+	# install_etc_skeleton, not shipped here. Only vendor invariants + canonical catalogues below.)
 	# The machine-readable threat catalogue `kennel policy risks` reads (the CLI
 	# falls back to its embedded copy if absent; this lets an org ship an extended one).
 	run install -d -m 0755 "$vendor_dir/threats"
@@ -248,6 +253,14 @@ install_config() {
 	# Both are additive cascades; /etc/kennel overrides this vendor layer.
 	run install -m 0644 "$pkg_root/dist/vendor/triggers.catalog" "$vendor_dir/triggers.catalog"
 	run install -m 0644 "$pkg_root/dist/vendor/etc-binds.catalog" "$vendor_dir/etc-binds.catalog"
+	# Upgrade cleanup: config files lived in the vendor tree before 0.6.0. The daemon now reads them
+	# from /etc only (a lingering vendor copy is ignored), but remove the stale package copies so the
+	# vendor tree holds invariants exclusively.
+	local stale
+	for stale in system.toml config.toml kennel-sshd.conf; do
+		[ -f "$vendor_dir/$stale" ] && run rm -f "$vendor_dir/$stale"
+	done
+	return 0
 }
 
 install_units() {
@@ -302,24 +315,45 @@ install_apparmor() {
 	fi
 }
 
+# Seed a HOST config default into /etc/kennel, ONLY if absent — the standard /etc conffile
+# discipline, so a reinstall never clobbers an admin's edits. Under --dry-run, just report.
+seed_etc_config() {
+	local src="$pkg_root/$1" dest="$2"
+	if [ "$dry_run" -eq 1 ]; then
+		echo "DRY-RUN: seed $dest from $1 (only if absent)"
+	elif [ ! -f "$dest" ]; then
+		install -m 0644 "$src" "$dest"
+		echo "install.sh: seeded host config default $dest"
+	else
+		echo "install.sh: kept existing $dest (host config; not clobbered)"
+	fi
+}
+
 install_etc_skeleton() {
-	# Root-owned HOST configuration root — the admin tier and this host's generated state
-	# (trust store, host-compiled settled policies, provider enablement, GUI configs). `keys/`
-	# is the trust store: the daemon's signing-key store (system.toml's trust_dir default) and
-	# the CLI's authoring search dir. Admin-owned; org keys go here.
+	# Root-owned HOST configuration root — the admin/host tier. Holds this host's generated state
+	# (trust store, host-compiled settled policies, provider enablement, GUI configs) AND the seeded
+	# HOST config defaults (system.toml/config.toml/kennel-sshd.conf). `keys/` is the trust store:
+	# the daemon's signing-key store (system.toml's trust_dir default) and the HOST-tier authority
+	# for a host `[[reserved]]` family; `templates/` is the host-tier template dir (host-namespace
+	# providers), not scratch. Admin-owned; org keys and host templates go here.
 	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/templates /etc/kennel/policies
-	# A --prefix relocation is a HOST fact: record it as an /etc/kennel/system.toml override
-	# (wins per key over the vendor baseline), never by mutating the vendor system.toml. Merge
-	# in place — an admin may already keep other keys here, so set libexec_dir without clobbering.
+	# Seed the host config defaults, install-if-ABSENT (the daemon/CLI read them from /etc via the
+	# kennel-lib-config cascade, falling back to the compiled defaults; a missing file is fine).
+	if [ "$dry_run" -eq 1 ] || [ -d /etc/kennel ]; then
+		seed_etc_config dist/config/system.toml /etc/kennel/system.toml
+		seed_etc_config dist/config/config.toml /etc/kennel/config.toml
+		seed_etc_config dist/kennel-sshd.conf /etc/kennel/kennel-sshd.conf
+	fi
+	# A --prefix relocation is a HOST fact: set libexec_dir in the seeded /etc/kennel/system.toml
+	# (merge in place — an admin may keep other keys there).
 	if [ "$libexec" != "/usr/libexec/kennel" ]; then
-		local sys_override=/etc/kennel/system.toml
+		local sys=/etc/kennel/system.toml
 		if [ "$dry_run" -eq 1 ]; then
-			echo "DRY-RUN: set libexec_dir = \"$libexec\" in $sys_override"
-		elif [ -f "$sys_override" ] && grep -q '^libexec_dir *=' "$sys_override"; then
-			sed -i "s#^libexec_dir *=.*#libexec_dir = \"$libexec\"#" "$sys_override"
+			echo "DRY-RUN: set libexec_dir = \"$libexec\" in $sys"
+		elif grep -q '^libexec_dir *=' "$sys" 2>/dev/null; then
+			sed -i "s#^libexec_dir *=.*#libexec_dir = \"$libexec\"#" "$sys"
 		else
-			[ -f "$sys_override" ] || printf '# Host deployment overrides (win per key over the vendor %s/system.toml).\n' "$vendor_dir" > "$sys_override"
-			printf 'libexec_dir = "%s"\n' "$libexec" >> "$sys_override"
+			printf 'libexec_dir = "%s"\n' "$libexec" >> "$sys"
 		fi
 	fi
 }
@@ -414,9 +448,9 @@ install_reference_policies() {
 
 	# Enable ONE confined-GUI display broker ondemand at the per-host layer: a `gui-interactive` /
 	# `gui-session` kennel `[[consumes]]` org.projectkennel.wayland, unserved without it —
-	# socket-activated on first consume (a host with no GUI consumer pays nothing). Three brokers
+	# socket-activated on first consume (a host with no GUI consumer pays nothing). Two brokers
 	# are shipped so the operator can pick the compositor: **weston** (default — a decorated,
-	# resizable host window), **cage** (`gui-broker` — a minimal borderless kiosk)
+	# resizable host window) and **cage** (the `gui-broker` kiosk — a minimal borderless surface).
 	# Switch by repointing this link at the
 	# chosen provider's settled artefact, or build your own leaf. Same admin-tier enablement as the
 	# D-Bus / UDP brokers; a per-user link overrides it. The broker holds the host-Wayland leg +
@@ -429,8 +463,8 @@ install_reference_policies() {
 	fi
 
 	# Kennel-authored app configs, served into a kennel's view by a W15 `source` redirect
-	# (`gui-session` overlays /etc/kennel/config/sway at the view's /etc/sway). Host-independent
-	# and identical everywhere; a confined desktop never inherits the host's /etc/sway assumptions.
+	# (`gui-session` overlays /etc/kennel/config/labwc at the view's /etc/xdg/labwc). Host-independent
+	# and identical everywhere; a confined desktop never inherits the host's compositor assumptions.
 	if [ -d "$pkg_root/dist/config/gui" ]; then
 		install -d -m 0755 /etc/kennel/config
 		cp -a "$pkg_root/dist/config/gui/." /etc/kennel/config/
@@ -453,8 +487,8 @@ print_next_steps() {
 	echo
 	echo "Project Kennel: system install complete."
 	echo "  binaries:        $libexec (host) + $facades_dir (in-view) + $pathbin_dir/kennel"
-	echo "  vendor payload:  $vendor_dir (package-shipped, immutable: templates, keys, reference-policy sources, baseline system.toml)"
-	echo "  host config:     /etc/kennel (trust store, host-compiled policies, provider enablement, GUI configs; overrides win over the vendor baseline)"
+	echo "  vendor invariants: $vendor_dir (the maintainer key + signed templates/fragments = org.projectkennel.* authority, reference sources, canonical catalogues)"
+	echo "  host config:      /etc/kennel (trust store + host templates = host-namespace authority; host-compiled policies; provider enablement; GUI configs; seeded system.toml/config.toml/kennel-sshd.conf)"
 	echo
 	echo "Post-install checks:"
 
@@ -523,7 +557,7 @@ $uid_line
 
 Admin notes (root):
   * Add org/customer policy-signing public keys to /etc/kennel/keys/<key_id>.pub.
-  * Override a deployment path in /etc/kennel/system.toml (wins over $vendor_dir/system.toml).
+  * Edit a deployment path in /etc/kennel/system.toml (seeded default; the daemon reads it, else compiled defaults).
   * Restrict who may run kennels by group-gating the privhelper: e.g.
       chgrp kennel-users $libexec/kennel-privhelper && chmod 0750 $libexec/kennel-privhelper
     Only members of that group can then invoke the privileged factory (and so start a

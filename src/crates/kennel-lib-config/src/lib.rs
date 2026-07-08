@@ -5,37 +5,47 @@
 //! TOML, resolved through a cascade, with compiled-in fallback defaults so a
 //! host with no config files still runs.
 //!
-//! # Two trust levels, two files, two search paths
+//! # Config files vs the vendor-invariant tier
 //!
-//! * [`Deployment`] (`system.toml`) — integrity-sensitive: binary locations and
-//!   the daemon's signing-key trust store. Resolved from **root-owned** dirs
-//!   only — `/usr/lib/kennel` (vendor baseline) then `/etc/kennel` (admin) —
-//!   and **never** from the user's `~/.config`. `kenneld` runs as the user, so
-//!   letting the user redirect the trust store would defeat policy signing
-//!   (they could trust their own key); the deployment cascade deliberately
-//!   excludes any user-writable location and honours no environment override.
-//! * [`User`] (`config.toml`) — conveniences for the `kennel` CLI (template and
-//!   key *search* dirs). Resolved from `~/.config/kennel` then `/etc/kennel`
-//!   then `/usr/lib/kennel`. Safe to be user-writable: it only steers where the
-//!   CLI looks while authoring; the daemon re-verifies against the locked
-//!   [`Deployment::trust_dir`] at run time.
+//! Config files are HOST configuration: the installer seeds a default into `/etc/kennel` (like any
+//! `/etc` conffile) and the admin owns it. `/usr/lib/kennel` is NOT a config layer — it is the
+//! reserved-namespace **authority** tier (the maintainer trust-anchor key + the signed
+//! templates/fragments that may claim `org.projectkennel.*`; §7.13.5), which the *search-dir*
+//! cascades below resolve, distinct from the config-file reads.
+//!
+//! * [`Deployment`] (`system.toml`) — integrity-sensitive: binary locations and the daemon's
+//!   signing-key trust store. Read from the **root-owned host** dir `/etc/kennel` only, else the
+//!   compiled defaults; **never** from the user's `~/.config`. `kenneld` runs as the user, so
+//!   letting the user redirect the trust store would defeat policy signing (they could trust their
+//!   own key) — the deployment read excludes any user-writable location and honours no env override.
+//! * [`User`] (`config.toml`) — conveniences for the `kennel` CLI (template and key *search* dirs).
+//!   Read from `/etc/kennel` then `~/.config/kennel` (the user layer wins). Safe to be
+//!   user-writable: it only steers where the CLI looks while authoring; the daemon re-verifies
+//!   against the locked [`Deployment::trust_dir`] at run time.
+//!
+//! The *search-dir* cascades ([`User::template_dirs`], [`User::key_dirs`], [`User::policy_dirs`])
+//! are separate and DO include the vendor tier — `~/.config/kennel` → `/etc/kennel` →
+//! `/usr/lib/kennel` — because they resolve the authority-bearing templates/keys, whose vendor-tier
+//! copies are the `org.projectkennel.*` authority.
 //!
 //! # Cascade semantics
 //!
-//! Layers are read lowest-priority first; a higher layer overrides a lower one
-//! **per key** (a present value wins). Anything left unset falls back to the
-//! compiled defaults ([`Deployment::trust_dir`] → `/etc/kennel/keys`, helper
-//! binaries → `/usr/libexec/kennel/<name>`). The vendor `system.toml` normally
-//! supplies these, so the compiled defaults are a last resort, not the contract.
+//! Layers are read lowest-priority first; a higher layer overrides a lower one **per key** (a
+//! present value wins). Anything left unset falls back to the compiled defaults
+//! ([`Deployment::trust_dir`] → `/etc/kennel/keys`, helper binaries → `/usr/libexec/kennel/<name>`).
+//! The seeded `/etc/kennel/system.toml` default normally supplies these, so the compiled defaults
+//! are a last resort, not the contract.
 
 #![forbid(unsafe_code)]
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// The vendor (package-shipped) config dir: lowest-priority layer.
+/// The vendor (package-shipped) tier: the invariant floor — the `org.projectkennel.*` namespace
+/// authority (maintainer key + signed templates) and the canonical catalogues. NOT a config-file
+/// layer: `system.toml`/`config.toml` are seeded to the host dir below.
 const VENDOR_DIR: &str = "/usr/lib/kennel";
-/// The system (admin) config dir.
+/// The system (host/admin) config + host-tier authority dir.
 const SYSTEM_DIR: &str = "/etc/kennel";
 /// The deployment (integrity-sensitive) config filename.
 const SYSTEM_FILE: &str = "system.toml";
@@ -43,7 +53,7 @@ const SYSTEM_FILE: &str = "system.toml";
 const USER_FILE: &str = "config.toml";
 
 /// Last-resort default for the helper-binary directory (D4: the documented
-/// `/usr/libexec/kennel`). The vendor `system.toml` normally sets this. Holds the
+/// `/usr/libexec/kennel`). The seeded `/etc/kennel/system.toml` normally sets this. Holds the
 /// **host-side** binaries only (daemon, privhelper, host delegates, the host
 /// execution unit) — the whole tree is blacklisted from constructed views (W10).
 const DEFAULT_LIBEXEC_DIR: &str = "/usr/libexec/kennel";
@@ -387,16 +397,20 @@ pub struct Deployment {
 }
 
 impl Deployment {
-    /// Resolve from the root-owned cascade: `/usr/lib/kennel` then `/etc/kennel`.
+    /// Resolve `system.toml` from the root-owned **host** dir `/etc/kennel`, else the compiled
+    /// defaults.
     ///
-    /// Deliberately consults no user-writable location and no environment
-    /// override (see the module docs): the daemon runs as the user, so these
-    /// keys must come only from dirs the user cannot write.
+    /// `system.toml` is HOST configuration: the installer seeds a default into `/etc/kennel` (like
+    /// any `/etc` conffile) and the admin owns it. The vendor tree `/usr/lib/kennel` is NOT a config
+    /// layer — it holds the reserved-namespace authority (the maintainer key + signed templates),
+    /// which is a *separate* cascade (see [`User::system_key_dirs`]/[`User::template_dirs`]). Deliberately
+    /// consults no user-writable location and no environment override: the daemon runs as the user,
+    /// so these keys must come only from a dir the user cannot write.
     ///
     /// # Errors
-    /// [`ConfigError`] if a present layer is unreadable, oversized, or malformed.
+    /// [`ConfigError`] if the layer is unreadable, oversized, or malformed.
     pub fn load() -> Result<Self, ConfigError> {
-        Self::load_from_dirs(&[PathBuf::from(VENDOR_DIR), PathBuf::from(SYSTEM_DIR)])
+        Self::load_from_dirs(&[PathBuf::from(SYSTEM_DIR)])
     }
 
     /// Resolve from explicit dirs, **lowest-priority first** (tests, relocation).
@@ -625,13 +639,18 @@ pub struct User {
 }
 
 impl User {
-    /// Resolve from the cascade: vendor, then system, then the user's config dir
-    /// (`$XDG_CONFIG_HOME/kennel` or `$HOME/.config/kennel`).
+    /// Resolve `config.toml` from the host dir `/etc/kennel`, then the user's config dir
+    /// (`$XDG_CONFIG_HOME/kennel` or `$HOME/.config/kennel`), the user layer winning.
+    ///
+    /// `config.toml` is host/user configuration (the installer seeds a default into `/etc/kennel`);
+    /// the vendor tree is not a config layer (it is the reserved-namespace authority tier — a
+    /// separate cascade). Note the search *dirs* a user may override here (`template_dirs`,
+    /// `key_dirs`, …) still include the vendor tier, because those resolve authority-bearing content.
     ///
     /// # Errors
     /// [`ConfigError`] if a present layer is unreadable, oversized, or malformed.
     pub fn load() -> Result<Self, ConfigError> {
-        let mut dirs = vec![PathBuf::from(VENDOR_DIR), PathBuf::from(SYSTEM_DIR)];
+        let mut dirs = vec![PathBuf::from(SYSTEM_DIR)];
         if let Some(user) = user_config_dir() {
             dirs.push(user);
         }

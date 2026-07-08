@@ -1,13 +1,13 @@
-# Project Kennel — vendor deployment defaults (`system.toml`).
+# Project Kennel — host deployment config (`system.toml`), the installed default.
 #
-# Integrity-sensitive paths kenneld resolves at startup. This vendor copy is the
-# baseline; an admin overrides individual keys in /etc/kennel/system.toml (which
-# wins per key). It is deliberately NOT user-overridable — kenneld never reads
-# ~/.config for these, because the daemon runs as the user and letting the user
-# redirect the trust store would defeat policy signing.
+# Integrity-sensitive paths kenneld resolves at startup. The installer seeds this file into
+# /etc/kennel (install-if-absent, like any /etc conffile); the admin owns and edits it there.
+# kenneld reads /etc/kennel/system.toml, falling back to the compiled defaults for any unset key.
+# It is deliberately NOT user-overridable — kenneld never reads ~/.config for these, because the
+# daemon runs as the user and letting the user redirect the trust store would defeat policy signing.
 #
-# Resolution order (lowest priority first): this file, then /etc/kennel/system.toml.
-# See docs/archive/architecture/07-paths.md and the kennel-lib-config crate.
+# (/usr/lib/kennel is the vendor-INVARIANT tier — the org.projectkennel.* namespace authority, NOT a
+# config layer; deployment config lives here in /etc.) See the kennel-lib-config crate.
 
 # Directory holding kenneld's helper binaries. Each binary defaults to
 # <libexec_dir>/<name>; override an individual one with the keys below.
