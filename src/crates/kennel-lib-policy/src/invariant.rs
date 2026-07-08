@@ -141,13 +141,38 @@ fn normalize_persist(entry: &str) -> String {
 /// Whether two grant paths intersect: equal, or either is a directory prefix of the other.
 ///
 /// Both sides are policy-authored grant strings in the same namespace (`~`-relative or
-/// absolute), so a literal component-boundary comparison is exact for what a settled policy
-/// can express. A `source` that *contains* a writable path is as unsound as one contained by
-/// it — part of the redirected tree is workload-authored — so the test is symmetric.
+/// absolute). The comparison is by PATH COMPONENT, not by raw string prefix: a raw
+/// `strip_prefix` is fooled by a trailing `/` on either side (`"~/data/cred.json"` does not
+/// string-prefix-match `"~/data/"`, so the confused-deputy source slips the floor) and by a
+/// `.`/`..` component. So each side is split into components with `.`/`""` dropped and `..`
+/// collapsed, and one must be a component-prefix of the other. A `source` that *contains* a
+/// writable path is as unsound as one contained by it — part of the redirected tree is
+/// workload-authored — so the test is symmetric.
 fn paths_intersect(a: &str, b: &str) -> bool {
-    a == b
-        || a.strip_prefix(b).is_some_and(|r| r.starts_with('/'))
-        || b.strip_prefix(a).is_some_and(|r| r.starts_with('/'))
+    // One is a component-prefix of the other iff every zipped (shorter-length) component is equal —
+    // `zip` stops at the shorter side, so this is the `a[..n] == b[..n]` prefix test without slicing.
+    clean_components(a)
+        .iter()
+        .zip(clean_components(b).iter())
+        .all(|(x, y)| x == y)
+}
+
+/// A path's components with `""`/`.` dropped and `..` collapsed (popping the prior component,
+/// clamped at the root). Lexical only — the floor is a structural check on grant strings, and
+/// non-canonical redirect `source`s are already refused at translate, so this is the runtime
+/// re-assertion's defense-in-depth against a trailing slash or a stray `.`/`..`.
+fn clean_components(p: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for c in p.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -219,5 +244,38 @@ mod tests {
         let mut p = with_redirect("~/.app/cred.json", "~/database/cred.json");
         p.effective_policy.fs.write.push("~/data".to_owned());
         assert!(redirect_violations(&p).is_empty(), "sibling prefix");
+    }
+
+    /// Regression (W8 ship-gate): the floor compares by PATH COMPONENT, so a trailing `/` on
+    /// either side — or a `.`/`..` segment — cannot slip a confused-deputy source past it. The
+    /// raw-`strip_prefix` floor accepted `write = "~/data/"` with `source = "~/data/cred.json"`.
+    #[test]
+    fn redirect_floor_not_fooled_by_trailing_slash_or_dot_segments() {
+        // The confirmed bypass: a trailing slash on the write grant.
+        let mut p = with_redirect("~/.app/cred.json", "~/data/cred.json");
+        p.effective_policy.fs.write.push("~/data/".to_owned());
+        assert_eq!(
+            redirect_violations(&p).len(),
+            1,
+            "trailing-slash write grant"
+        );
+
+        // Trailing slash on the source side.
+        let mut p = with_redirect("~/.app/cred.json", "~/data/cred.json/");
+        p.effective_policy.fs.write.push("~/data".to_owned());
+        assert_eq!(redirect_violations(&p).len(), 1, "trailing-slash source");
+
+        // `.`/`..` collapse to the same real tree (defense-in-depth; translate also rejects `..`).
+        let mut p = with_redirect("~/.app/cred.json", "~/data/./sub/../cred.json");
+        p.effective_policy.fs.write.push("~/data".to_owned());
+        assert_eq!(redirect_violations(&p).len(), 1, "dot/dotdot source");
+
+        // A genuine sibling still passes — the component compare adds no false positive.
+        let mut p = with_redirect("~/.app/cred.json", "~/data-other/cred.json");
+        p.effective_policy.fs.write.push("~/data".to_owned());
+        assert!(
+            redirect_violations(&p).is_empty(),
+            "sibling not intersecting"
+        );
     }
 }

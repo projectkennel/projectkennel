@@ -1491,6 +1491,23 @@ fn translate_fs_redirects(
                  bind — a redirect there cannot materialise"
             )));
         }
+        // A redirect `source` (and view `path`) must be CANONICAL — no `..` component. The
+        // write-set floor's containment check is structural (paths, not resolved inodes), so a
+        // `source` carrying `..` can sit lexically *outside* the workload-writable set yet resolve
+        // *into* it at spawn (`..` collapses at mount time — `open_no_symlinks`/`open_no_magiclinks`
+        // set no `RESOLVE_BENEATH`), re-opening the confused-deputy hole the floor exists to close.
+        // Reject non-canonical redirect paths rather than try to out-normalise the mount.
+        for (label, p) in [("source", &source), ("path", &path)] {
+            if std::path::Path::new(p)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                return Err(translation(format!(
+                    "fs redirect {label} `{p}` contains a `..` component; a redirect path must be \
+                     canonical (the write-set floor cannot vet a non-canonical source)"
+                )));
+            }
+        }
         // A redirect onto an `/etc` path DOES materialise: the `/etc` overlay honours the `source`
         // (serving a kennel-shipped `/etc/kennel/config/sway` at the view's `/etc/sway`). The floor
         // is preserved — a redirect onto a protected-floor entry is simply not overlayable, so the

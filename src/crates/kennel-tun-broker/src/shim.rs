@@ -31,6 +31,17 @@ const FIRST_POOL_HOST: u64 = 0x10;
 /// keeps re-queries down without pinning a client to a stale view across a kennel restart.
 const SYNTH_TTL: u32 = 60;
 
+/// Absolute ceiling on distinct minted names per kennel — the synthetic pool's coarse bound (the
+/// flow cap bounds live flows, not mints). A spraying workload hits NODATA past it, and only
+/// inflates its own fate-shared broker until then.
+const MAX_POOL: usize = 4096;
+
+/// Ceiling on distinct minted names per allowlist grant — the wildcard-exfil bound. A wildcard grant
+/// (`.example.com`) can mint at most this many distinct subdomains, so a DNS tunnel through it
+/// carries at most this many distinct labels; an exact grant mints one. Generous for real use (a
+/// service reaches a handful of subdomains); past it a new name under that grant is answered NODATA.
+const MAX_PER_GRANT: usize = 32;
+
 // The pool must start strictly above the reserved interface (`::1`) and resolver (`::2`) suffixes,
 // so a mint can never collide with either — enforced at compile time.
 const _: () = assert!(FIRST_POOL_HOST > RESOLVER_HOST && RESOLVER_HOST > TUN_HOST);
@@ -58,7 +69,14 @@ impl Allowlist {
     /// port, so the shim mints a synthetic for any allowed name and the flow gate vets the port).
     #[must_use]
     pub fn allows_name(&self, name: &str) -> bool {
-        self.rules.iter().any(|r| name_matches(&r.name, name))
+        self.first_match(name).is_some()
+    }
+
+    /// The index of the first grant that permits `name` (regardless of port) — the DNS-time match,
+    /// used to attribute a mint to its grant for the per-grant cap. `None` if no grant matches.
+    #[must_use]
+    pub fn first_match(&self, name: &str) -> Option<usize> {
+        self.rules.iter().position(|r| name_matches(&r.name, name))
     }
 
     /// Whether any grant permits `(name, port)` — the flow-time check the forwarder applies before
@@ -84,6 +102,8 @@ pub struct Pool {
     prefix: [u8; 8],
     next_host: u64,
     mapping: HashMap<String, Ipv6Addr>,
+    /// Distinct names minted per allowlist grant index — the per-grant cap's counters.
+    per_grant: HashMap<usize, usize>,
 }
 
 impl Pool {
@@ -94,21 +114,41 @@ impl Pool {
             prefix,
             next_host: FIRST_POOL_HOST,
             mapping: HashMap::new(),
+            per_grant: HashMap::new(),
         }
     }
 
-    /// The synthetic address for `name`, minting one on first sight and returning the existing one
-    /// thereafter (stable for the kennel's life).
-    pub fn mint(&mut self, name: &str) -> Ipv6Addr {
+    /// The synthetic address for `name` (minted under allowlist grant `grant`), minting one on first
+    /// sight and returning the existing one thereafter (stable for the kennel's life). Returns `None`
+    /// when a NEW name would exceed the absolute pool ceiling (`MAX_POOL`) or the grant's own
+    /// per-grant ceiling (`MAX_PER_GRANT`).
+    ///
+    /// A mint costs only a DNS AAAA query (cheap, zero-wire) and opens no flow, so the flow cap does
+    /// not bound it. The per-grant cap is the wildcard-exfil bound (a wildcard grant mints at most
+    /// `MAX_PER_GRANT` distinct subdomains); the pool cap is the absolute backstop across all grants.
+    /// Past either, a new name is answered NODATA, like a denied name; existing mints keep resolving.
+    pub fn mint(&mut self, name: &str, grant: usize) -> Option<Ipv6Addr> {
         if let Some(addr) = self.mapping.get(name) {
-            return *addr;
+            return Some(*addr);
+        }
+        // A new name: bounded globally and per grant. Check before minting so a refused name leaves
+        // no counter or pool residue.
+        if self.mapping.len() >= MAX_POOL
+            || self
+                .per_grant
+                .get(&grant)
+                .is_some_and(|c| *c >= MAX_PER_GRANT)
+        {
+            return None;
         }
         let addr = self.synthetic(self.next_host);
-        // Saturating: the /64 host space is 2^64 and a per-kennel flow cap bounds live names long
-        // before this, but never wrap into the reserved low suffixes.
+        // Saturating so a mint never wraps into the reserved low suffixes (unreachable under the cap,
+        // but the invariant holds regardless).
         self.next_host = self.next_host.saturating_add(1);
         self.mapping.insert(name.to_owned(), addr);
-        addr
+        let count = self.per_grant.entry(grant).or_insert(0);
+        *count = count.saturating_add(1);
+        Some(addr)
     }
 
     /// The name a synthetic address maps to, if it was minted (the forwarder's reverse lookup).
@@ -142,14 +182,22 @@ pub fn respond(query: &[u8], allow: &Allowlist, pool: &mut Pool) -> Option<Vec<u
 
     let mut reply = Packet::new_reply(parsed.id());
     reply.questions.push(question.clone());
-    if u16::from(question.qtype) == QTYPE_AAAA && allow.allows_name(&name) {
-        let synth: u128 = pool.mint(&name).into();
-        reply.answers.push(ResourceRecord::new(
-            question.qname.clone(),
-            CLASS::IN,
-            SYNTH_TTL,
-            RData::AAAA(AAAA { address: synth }),
-        ));
+    // Mint under the matching grant. A mint past the pool cap OR the grant's per-grant cap answers
+    // NODATA (empty NOERROR), exactly like a denied name — the workload gets no new synthetic and no
+    // wire activity, and can neither grow the pool unbounded nor tunnel unlimited labels through a
+    // single wildcard grant.
+    if u16::from(question.qtype) == QTYPE_AAAA {
+        if let Some(grant) = allow.first_match(&name) {
+            if let Some(addr) = pool.mint(&name, grant) {
+                let synth: u128 = addr.into();
+                reply.answers.push(ResourceRecord::new(
+                    question.qname.clone(),
+                    CLASS::IN,
+                    SYNTH_TTL,
+                    RData::AAAA(AAAA { address: synth }),
+                ));
+            }
+        }
     }
     // NODATA (denied, or A/CNAME/other): a reply with the question echoed and no answers — NOERROR
     // by default, deliberately not NXDOMAIN.
@@ -280,5 +328,38 @@ mod tests {
         let mut pool = Pool::new(PREFIX);
         assert_eq!(respond(&[], &allow, &mut pool), None);
         assert_eq!(respond(&[0xff; 5], &allow, &mut pool), None);
+    }
+
+    #[test]
+    fn a_wildcard_grant_mints_at_most_max_per_grant_distinct_names() {
+        let allow = Allowlist::new([grant(".example.com")]);
+        let mut pool = Pool::new(PREFIX);
+        let aaaa = |n: &str, pool: &mut Pool| {
+            reply_summary(
+                &respond(&query(n, QTYPE::TYPE(TYPE::AAAA)), &allow, pool).expect("reply"),
+            )
+            .0
+        };
+        // The first MAX_PER_GRANT distinct subdomains each mint a synthetic.
+        for i in 0..MAX_PER_GRANT {
+            assert_eq!(
+                aaaa(&format!("s{i}.example.com"), &mut pool),
+                1,
+                "distinct name {i}"
+            );
+        }
+        // The next distinct subdomain is NODATA — the wildcard-exfil bound (bounds distinct tunnelled
+        // labels through one grant).
+        assert_eq!(
+            aaaa("overflow.example.com", &mut pool),
+            0,
+            "past per-grant cap = NODATA"
+        );
+        // An already-minted name still resolves (the cap bounds distinct names, not queries).
+        assert_eq!(
+            aaaa("s0.example.com", &mut pool),
+            1,
+            "existing mint still resolves"
+        );
     }
 }

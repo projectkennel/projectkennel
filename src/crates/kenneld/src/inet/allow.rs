@@ -432,63 +432,10 @@ fn port_matches(ports: &[u16], port: u16) -> bool {
     ports.is_empty() || ports.contains(&port)
 }
 
-/// Whether `addr` is in special-use / non-public space.
-///
-/// IPv4: RFC1918 private, CGNAT (`100.64.0.0/10`), loopback, link-local,
-/// multicast, broadcast, documentation, and unspecified. IPv6: loopback,
-/// unspecified, multicast, ULA (`fc00::/7`), and link-local (`fe80::/10`).
-///
-/// The proxy refuses to connect to a *resolved* address in this space unless the
-/// policy opts in (the server's `accept_private_resolved`). The point is the
-/// rebinding / SSRF-to-internal defence: a public name that resolves into private
-/// space — whether through a hostile resolver or system DNS answering for an
-/// internal zone — must not become a reachable internal destination by default.
-///
-/// The classification is a set of explicit, well-defined range checks (no DNS or
-/// other footgun parsing); the bit checks for CGNAT, ULA, and IPv6 link-local use
-/// the octets directly because the corresponding `std` predicates are unstable.
-#[must_use]
-pub const fn is_special_use(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(a) => {
-            a.is_private()
-                || a.is_loopback()
-                || a.is_link_local()
-                || a.is_broadcast()
-                || a.is_documentation()
-                || a.is_unspecified()
-                || a.is_multicast()
-                || is_cgnat(a)
-        }
-        IpAddr::V6(a) => {
-            a.is_loopback()
-                || a.is_unspecified()
-                || a.is_multicast()
-                || is_ula(a)
-                || is_v6_link_local(a)
-        }
-    }
-}
-
-/// Whether `a` is in the carrier-grade NAT range `100.64.0.0/10` (RFC 6598).
-const fn is_cgnat(a: std::net::Ipv4Addr) -> bool {
-    let [first, second, ..] = a.octets();
-    first == 100 && matches!(second, 64..=127)
-}
-
-/// Whether `a` is a unique-local address `fc00::/7` (RFC 4193): the top 7 bits
-/// are `1111110`, i.e. the first octet is `0xfc` or `0xfd`.
-const fn is_ula(a: std::net::Ipv6Addr) -> bool {
-    let [first, ..] = a.octets();
-    first & 0xfe == 0xfc
-}
-
-/// Whether `a` is a link-local unicast address `fe80::/10`: the first ten bits
-/// are `1111111010`.
-const fn is_v6_link_local(a: std::net::Ipv6Addr) -> bool {
-    let [first, second, ..] = a.octets();
-    first == 0xfe && second & 0xc0 == 0x80
-}
+// The special-use classification lives in `kennel_lib_policy::netaddr` so the TCP CONNECT decision
+// here and the UDP flow dial in the tun broker share ONE definition (a drift between them would be a
+// rebinding hole). Re-exported so this module's callers and tests are unchanged.
+pub use kennel_lib_policy::netaddr::is_special_use;
 
 #[cfg(test)]
 mod tests {

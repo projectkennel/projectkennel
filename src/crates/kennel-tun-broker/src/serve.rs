@@ -159,9 +159,14 @@ impl Broker {
                 let _ = socket.send(route.payload);
                 Egress::NewFlow { key, socket }
             }
-            Err(FlowError::NotAllowed | FlowError::Unresolved | FlowError::Dial(_)) => {
-                // Not permitted, unreachable, or refused by the BPF deny floor (connect EPERM):
-                // fast-fail with admin-prohibited, quoting the frame that triggered it.
+            Err(
+                FlowError::NotAllowed
+                | FlowError::Unresolved
+                | FlowError::Rebound
+                | FlowError::Dial(_),
+            ) => {
+                // Not permitted, unreachable, rebound into special-use space, or refused by the BPF
+                // deny floor (connect EPERM): fast-fail with admin-prohibited, quoting the frame.
                 Egress::ToFacade(build_dest_unreachable(
                     key.synthetic,
                     self.kennel_addr,
