@@ -52,6 +52,7 @@ suite_case() {
 	ONDEMAND="$CFG/ondemand"
 	SUITE_CLEANUPS=()
 	trap suite_run_cleanups EXIT
+	return 0
 }
 
 # suite_defer <command…> — push a cleanup command, run LIFO at exit, failures ignored
@@ -60,6 +61,7 @@ suite_case() {
 suite_defer() {
 	local command="$*"
 	SUITE_CLEANUPS+=("$command")
+	return 0
 }
 
 suite_run_cleanups() {
@@ -67,6 +69,7 @@ suite_run_cleanups() {
 	for ((i = ${#SUITE_CLEANUPS[@]} - 1; i >= 0; i--)); do
 		eval "${SUITE_CLEANUPS[$i]}" 2>/dev/null || true
 	done
+	return 0
 }
 
 # suite_enable_ondemand <source.toml> <provider-name> — compile + sign a provider to its
@@ -90,6 +93,7 @@ suite_enable_ondemand() {
 suite_vendor_trust_suite_key() {
 	sudo install -m 0644 "$SUITE_KEY.pub" /usr/lib/kennel/keys/kennel-suite.pub
 	suite_defer "sudo rm -f /usr/lib/kennel/keys/kennel-suite.pub"
+	return 0
 }
 
 # suite_run_consumer <source.toml> — stage + compile the consumer leaf (unstage deferred)
