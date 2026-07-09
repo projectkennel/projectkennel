@@ -880,16 +880,15 @@ fn etc_binds_layer_paths() -> Vec<PathBuf> {
     ]
 }
 
-/// The `/etc` grants in `paths` that the constructed view cannot serve: not covered by any
-/// catalogued subtree and not one of the synthetic files — the author's silent dead end
-/// this diagnostic closes (0.7.0 W7).
+/// The `/etc` grants in `paths` the constructed view cannot serve (W7).
 ///
-/// A grant is compared by its literal prefix (everything before the first glob character):
-/// covered when that prefix and a catalogued subtree contain one another. Servable synthetic
-/// files ([`SYNTHETIC_ETC_FILES`]) are excepted.
-/// `served` carries additional per-policy view paths that ARE servable without a
-/// catalogue entry — the fs `source` redirects, which bind their operator-held source at
-/// the view path directly.
+/// Not covered by any catalogued subtree and not one of the synthetic files — the
+/// author's silent dead end this diagnostic closes. A grant is compared by its literal
+/// prefix (everything before the first glob character): covered when that prefix and a
+/// catalogued subtree contain one another. Servable synthetic files
+/// ([`SYNTHETIC_ETC_FILES`]) are excepted, and `served` carries additional per-policy
+/// view paths that ARE servable without a catalogue entry — the fs `source` redirects,
+/// which bind their operator-held source at the view path directly.
 #[must_use]
 pub fn uncatalogued_etc_grants(
     paths: &[String],

@@ -32,9 +32,10 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
-/// The files this module renders, in a stable order. The spawn binds each over
-/// `/etc/<name>` in the kennel's mount namespace. One source with the diagnostics'
-/// synthetic-file exception (`kennel-lib-config`, W7).
+/// The files this module renders, in a stable order.
+///
+/// The spawn binds each over `/etc/<name>` in the kennel's mount namespace. One source
+/// with the diagnostics' synthetic-file exception (`kennel-lib-config`, W7).
 pub const FILES: &[&str] = kennel_lib_config::SYNTHETIC_ETC_FILES;
 
 /// What the synthetic `/etc` is rendered from: the kennel's network identity and
