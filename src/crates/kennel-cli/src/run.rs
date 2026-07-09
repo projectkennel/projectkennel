@@ -1,9 +1,10 @@
-//! `kennel run` (foreground confined run, incl. the in-memory compile of a source policy) and
-//! `kennel attach`, plus the interactive PTY proxy machinery they share. Split out of `main.rs`.
+//! `kennel run` (foreground confined run of a settled artefact) and `kennel attach`, plus the
+//! interactive PTY proxy machinery they share. Split out of `main.rs`.
 //!
-//! The in-memory compile reuses the policy/compile machinery, which lives in the crate root for
-//! now (`build_settled`, `FsTemplateSource`, `TempSettled`, `mint_ssh_keys`, …); the trust-manifest
-//! and exclusive-bind helpers live in `review`.
+//! `run` is the operating house: it reads a **settled** artefact by **name** from the three
+//! policy repos and nothing else. Templates, includes, source policies, and signing keys are
+//! compile-side material (`kennel policy …`); the trust-manifest and exclusive-bind helpers
+//! live in `review`.
 
 use std::io::{self, IsTerminal as _};
 use std::os::fd::{AsFd as _, BorrowedFd};
@@ -13,32 +14,23 @@ use std::process::ExitCode;
 
 use kennel_lib_control::control::{self, Request, Response, StartRequest};
 
-use crate::policy::{
-    build_settled, is_source_policy, mint_ssh_keys, print_warnings, FsTemplateSource, TempSettled,
-};
+use crate::policy::is_source_policy;
 use crate::review;
-use crate::{
-    add_default_template_dirs, add_system_trust_dirs, connect, default_signing_key, exit_code,
-    resolve_policy, send, settled_with_sshsig, signing_trust_dirs, sshsig_sign, TrustContext,
-};
+use crate::{connect, exit_code, send};
 
-/// `kennel run <policy> <name> [--key K] [--template-dir D]... [--trust-dir D]... -- <argv...>`
+/// `kennel run <policy> [<name>] [--force] [-- <argv...>]`
 ///
-/// `<policy>` is either a pre-compiled **settled** artefact (used as-is, the
-/// production path) or a **source** policy (template/leaf), which is compiled and
-/// signed *in memory* before the run — the §9.10 local-dev loop, so an author need
-/// not run `kennel compile` between edits. The in-memory build needs `--key` (kenneld
-/// verifies the settled signature against its trust store); the settled bytes are
-/// written to a short-lived temp file that is removed when the run returns.
+/// `<policy>` is a **name** resolving to a settled artefact (`<name>.settled.toml`) in one of
+/// the three policy repos (`~/.config/kennel/policies`, `/etc/kennel/policies`,
+/// `/usr/lib/kennel/policies`) — nothing else. A source policy is compiled first
+/// (`kennel policy compile`), a received file is placed first (`kennel policy install`); the
+/// daemon verifies the settled signature against its trust store, so `run` needs no key.
 ///
 /// # Errors
 ///
 /// Returns a message if a flag is missing its value or is unknown, if no `<policy>`
-/// argument is given, if the policy cannot be resolved, or if [`launch`] fails.
-// allow(too_many_lines): one cohesive arg-parse → resolve → (maybe compile+sign) → start
-// sequence for the `run` subcommand; the lexopt CLI overhaul folds this into the shared
-// parser table.
-#[allow(clippy::too_many_lines)]
+/// argument is given, if the name does not resolve to a settled artefact (the refusal
+/// names what was found instead and the real next step), or if [`launch`] fails.
 pub fn run(args: &[String]) -> Result<ExitCode, String> {
     // <head...> optionally then "--" then the command. The `--` is OPTIONAL: with no
     // command the daemon runs the policy's embedded [workload] (§7.4); with a command it
@@ -55,160 +47,140 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 
     let mut policy_arg: Option<&str> = None;
     let mut name_arg: Option<&str> = None;
-    let mut key_path: Option<&str> = None;
-    let mut key_id: Option<&str> = None;
     let mut force = false;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut it = head.iter();
-    while let Some(arg) = it.next() {
+    for arg in head {
         match arg.as_str() {
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
-            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
             "--force" => force = true,
-            "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+            // The compile-house flags `run` carried before 0.7.0 refuse with the real home.
+            f @ ("--key" | "--key-id" | "--template-dir" | "--trust-dir") => {
+                return Err(format!(
+                    "`{f}` is a compile-side flag; `kennel run` runs a settled artefact by name \
+                     and needs no key (the daemon verifies it). Compile first: `kennel policy \
+                     compile <policy> --key <key>`, then `kennel run <name>`"
+                ));
             }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             v if policy_arg.is_none() => policy_arg = Some(v),
             v if name_arg.is_none() => name_arg = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let policy_arg = policy_arg.ok_or(
-        "usage: kennel run <policy> [<name>] [--key K] [--force] [--template-dir D]... [-- <cmd...>]",
-    )?;
-    // `<policy>` is a literal path if it exists, else a **name** resolved from the
-    // `policies/` cascade (`~/.config/kennel`, `/etc/kennel`, `/usr/lib/kennel`,
-    // preferring the settled artefact). The kennel instance `<name>` is optional and
-    // defaults to the resolved policy name (`07-paths`, resolve-by-name).
-    let (policy_file, default_name) = resolve_policy(policy_arg, true)?;
-    let name = name_arg.map_or(default_name, str::to_owned);
-    launch(
-        policy_file,
-        &name,
-        command,
-        force,
-        key_path,
-        key_id,
-        template_dirs,
-        trust_dirs,
-        None,
-        policy_arg,
-    )
+    let policy_arg =
+        policy_arg.ok_or("usage: kennel run <policy> [<name>] [--force] [-- <cmd...>]")?;
+    // `<policy>` is a NAME resolving to a settled artefact in the three policy repos — never a
+    // path, never source. The kennel instance `<name>` is optional and defaults to the policy
+    // name (`07-paths`, resolve-by-name).
+    let policy_file = resolve_settled_for_run(policy_arg)?;
+    let name = name_arg.map_or_else(|| policy_arg.to_owned(), str::to_owned);
+    launch(policy_file, &name, command, force, None, policy_arg)
 }
 
-/// The shared launch core for `kennel run` and `kennel oci run`: compile-or-pass-through the
-/// policy, run the host-side pre-flights, and drive the daemon to the workload's exit.
+/// Resolve `arg` to a settled artefact in the three policy repos — the ONLY thing `run` reads.
+///
+/// Anything else refuses with the object named and the real next step: a path (the form died
+/// with 0.7.0 — place the artefact in a repo), a source policy (compile it), a template name
+/// (derive a leaf from it), or nothing at all (list/compile).
+fn resolve_settled_for_run(arg: &str) -> Result<PathBuf, String> {
+    let user = kennel_lib_config::User::load().unwrap_or_default();
+    if arg.contains('/') || Path::new(arg).exists() {
+        return Err(
+            "`kennel run` takes a policy NAME resolved from the policy repos \
+             (~/.config/kennel/policies, /etc/kennel/policies, /usr/lib/kennel/policies), not a \
+             path. Compile your source into a repo first (`kennel policy compile <policy> --key \
+             <key>` writes the settled artefact beside it), then `kennel run <name>`"
+                .to_owned(),
+        );
+    }
+    if !crate::is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not a valid policy name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    let mut source_hit: Option<PathBuf> = None;
+    for dir in user.policy_dirs() {
+        let base = dir.join(arg);
+        let settled = base.join(format!("{arg}.settled.toml"));
+        if settled.is_file() {
+            return Ok(settled);
+        }
+        let source = base.join("policy.toml");
+        if source_hit.is_none() && source.is_file() {
+            source_hit = Some(source);
+        }
+    }
+    // Nothing runnable. Say what WAS found and the real next step.
+    if let Some(source) = source_hit {
+        return Err(format!(
+            "`{arg}` is a source policy ({}) with no compiled artefact — compile it first: \
+             `kennel policy compile {arg} --key <key>`, then re-run",
+            source.display()
+        ));
+    }
+    for tdir in user.template_dirs() {
+        if tdir.join(arg).join("policy.toml").is_file() {
+            return Err(format!(
+                "`{arg}` is a template — a shared base, not a runnable policy. Derive a leaf \
+                 from it (`kennel policy generate --from {arg}`), then `kennel policy compile` \
+                 and `kennel run` the leaf"
+            ));
+        }
+    }
+    Err(format!(
+        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel — `kennel policy list` shows what is there); author one with \
+         `kennel policy generate`, then `kennel policy compile {arg} --key <key>`"
+    ))
+}
+
+/// The shared launch core for `kennel run` and `kennel oci run`: pre-flight the settled
+/// artefact and drive the daemon to the workload's exit.
+///
+/// The policy is a **settled** artefact — the daemon verifies its signature against the trust
+/// store, so no key material appears here. A source policy refuses toward
+/// `kennel policy compile` (the callers' resolvers make this unreachable in the normal flow;
+/// the check holds the house boundary regardless).
 ///
 /// `oci_digest` is the [grammar partition](crate::oci) gate: `kennel run` passes `None` and
 /// refuses an `[rootfs]` policy; `kennel oci run` passes `Some(<recorded digest>)` (it has
 /// resolved the named store entry), which both permits `[rootfs]` and asserts the signed
 /// `[rootfs].image` equals that digest before boot. `display` is the operator-facing name of
-/// the policy for diagnostics (a path or a store `<name>`).
+/// the policy for diagnostics (a repo or store `<name>`).
 ///
 /// # Errors
 ///
-/// Returns a message if the policy file cannot be read, if an in-memory compile/sign
-/// fails, if a non-OCI run is handed an `[rootfs]` policy or an OCI digest does not match
-/// the signed image, if the exclusive-ownership pre-flight fails, if the daemon cannot be
-/// reached or the request/response exchange fails, or if the daemon reports an error.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// Returns a message if the policy file cannot be read or is not a settled artefact, if a
+/// non-OCI run is handed an `[rootfs]` policy or an OCI digest does not match the signed
+/// image, if the exclusive-ownership pre-flight fails, if the daemon cannot be reached or
+/// the request/response exchange fails, or if the daemon reports an error.
+#[allow(clippy::too_many_lines)]
 pub fn launch(
     policy_file: PathBuf,
     name: &str,
     command: &[String],
     force: bool,
-    key_path: Option<&str>,
-    key_id: Option<&str>,
-    template_dirs: Vec<PathBuf>,
-    trust_dirs: Vec<PathBuf>,
     oci_digest: Option<&str>,
     display: &str,
 ) -> Result<ExitCode, String> {
     let allow_oci = oci_digest.is_some();
     // For an OCI run the launcher reads the store entry's `config.json` (the sibling of the
-    // entry's `policy.toml`); kenneld binds it into the view. Derived from the original policy
-    // path (the store entry), not the in-memory temp the compile path may stage elsewhere.
+    // entry's settled policy); kenneld binds it into the view.
     let oci_config =
         oci_digest.and_then(|_| policy_file.parent().map(|dir| dir.join("config.json")));
-    let mut template_dirs = template_dirs;
-    let mut trust_dirs = trust_dirs;
-    // Auto-compile dev path: a source policy is compiled+signed in memory; a settled
-    // artefact is passed straight through. `_temp` keeps the on-disk settled file
-    // alive for the daemon to read, and removes it when this function returns.
     let bytes = std::fs::read(&policy_file)
         .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
-    // Held only for its `Drop` (removes the temp settled file when the run returns);
-    // never read, hence the allow.
-    #[allow(clippy::collection_is_never_read)]
-    let _temp;
-    let effective_policy: PathBuf = if is_source_policy(&bytes) {
-        // A source leaf is compiled-and-signed in memory (the §9.10 dev loop). That
-        // needs a *signing* (private) key — a `~/.ssh` file, an agent, or the sole key
-        // in the user key dir when `--key` is omitted. A pre-compiled settled artefact
-        // takes the `else` branch and needs no key at all (the daemon verifies it).
-        add_default_template_dirs(&mut template_dirs);
-        add_system_trust_dirs(&mut trust_dirs);
-        let source = FsTemplateSource {
-            dirs: template_dirs,
-        };
-        let tc = TrustContext::load(&trust_dirs)?;
-        let trust = tc.allow_unsigned();
-        let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
-        print_warnings(&compiled.warnings);
-        print_warnings(&kennel_lib_policy::resolve_settled_loaders(
-            &mut compiled.policy,
+    if is_source_policy(&bytes) {
+        return Err(format!(
+            "`{display}` is a source policy — the run house takes only settled artefacts. \
+             Compile it first: `kennel policy compile {display} --key <key>`"
         ));
-        // Mint/reuse the SSH synthetic keypairs beside the source policy (its dir), pinning
-        // the public halves into the settled grants before signing — same as the `compile`
-        // verb, so an in-memory `kennel run` of an `[ssh]` policy is signed over its keys too.
-        let ssh_dir = policy_file
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("ssh");
-        let minted = mint_ssh_keys(&mut compiled.policy, &ssh_dir)?;
-        let key = match key_path {
-            Some(p) => p.to_owned(),
-            None => default_signing_key()?.to_string_lossy().into_owned(),
-        };
-        let canonical = kennel_lib_policy::canonical::canonical_bytes(&compiled.policy)
-            .map_err(|e| format!("canonical form: {e}"))?;
-        let (resolved_id, armor) = sshsig_sign(&canonical, &key, key_id, &signing_trust_dirs())?;
-        let doc = settled_with_sshsig(&compiled.policy, resolved_id, armor);
-        let out = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-        // When SSH keys were minted, the daemon resolves them at `<settled>.parent()/ssh`,
-        // so the temp settled MUST sit beside that `ssh/` dir (the source policy's dir).
-        // Without SSH there is no such coupling — stage under the runtime dir as usual.
-        let temp = if minted {
-            TempSettled::write_in(
-                policy_file.parent().unwrap_or_else(|| Path::new(".")),
-                name,
-                &out,
-            )?
-        } else {
-            TempSettled::write(name, &out)?
-        };
-        let path = temp.path().to_path_buf();
-        eprintln!(
-            "kennel: compiled `{}` in memory for this run",
-            policy_file.display()
-        );
-        _temp = Some(temp);
-        path
-    } else {
-        _temp = None;
-        policy_file
-    };
+    }
+    let effective_policy = policy_file;
 
     // Pre-flight: ensure a `.trust-manifest.json` at each writable workspace root before
     // the kennel boots (mirrors SSH-key provisioning). The kennel will mask the manifest
     // invisible, so the agent cannot forge the integrity pins host tooling trusts (T2.8).
     // Read from the settled bytes we hold; host-side, never contacts kenneld.
-    let settled_bytes = std::fs::read(&effective_policy)
-        .map_err(|e| format!("reading {} for pre-flight: {e}", effective_policy.display()))?;
+    let settled_bytes = bytes;
     // Grammar partition (§7.11 / arch 02-9): `[rootfs]` is the OCI substrate model and is
     // valid only under `kennel oci run`, which resolves the named store entry and verifies
     // `[rootfs].image` against the recorded digest. `kennel run` refuses it rather than boot

@@ -21,6 +21,8 @@ SUITE_KEY="$3"
 SCRATCH="${4:-$(mktemp -d)}"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEYS="$CFG/keys"
+# shellcheck source=../suite-lib.sh
+. "$CASE_DIR/../suite-lib.sh"
 ONDEMAND="$CFG/ondemand"
 BROKER_LINK="$ONDEMAND/dbus-broker"
 # The broker provides the reserved `org.projectkennel.*` namespace, which only a VENDOR-provenance
@@ -31,6 +33,7 @@ VENDOR_KEYS="/usr/lib/kennel/keys"
 VENDOR_SUITE_PUB="$VENDOR_KEYS/kennel-suite.pub"
 
 cleanup() {
+    suite_unstage dbus-consumer
     # Stop the activated broker BEFORE unlinking: a still-running instance would sit on the
     # provider name with its supervision thread alive, so later cases (which enable the same
     # name at another tier) could never re-activate it — and a daemon-reload resets a running
@@ -69,5 +72,6 @@ sed "s#__REAL_BUS__#$REAL_BUS#" "$CASE_DIR/provider.toml" >"$PROVIDER_SRC"
 # 3. Run the consumer: its workload's dbus-send drives the brokered round trip. Exit code is verdict.
 # No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
 # the shell and leak the enabled provider link into the user tier for later cases).
-"$KENNEL" run "$CASE_DIR/consumer.toml" dbus-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+suite_compile "$CASE_DIR/consumer.toml" >/dev/null
+"$KENNEL" run dbus-consumer dbus-consumer </dev/null
 exit "$?"

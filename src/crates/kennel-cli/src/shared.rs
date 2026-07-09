@@ -155,7 +155,7 @@ pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, Strin
     }
     Err(format!(
         "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel); pass a path, or compile one with `kennel compile`"
+         /usr/lib/kennel); pass a path, or compile one with `kennel policy compile`"
     ))
 }
 

@@ -4,6 +4,39 @@ All notable changes to Project Kennel are recorded here. The format follows [Kee
 
 Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
+## [Unreleased]
+
+### CLI changes
+
+- **`kennel run` runs settled artefacts, nothing else (0.7.0 W1).** The run house narrows to its
+  contract: `kennel run <name>` resolves a **settled** artefact (`<name>.settled.toml`) from the
+  three policy repos (`~/.config/kennel/policies`, `/etc/kennel/policies`,
+  `/usr/lib/kennel/policies`) — never a path, never source. The in-memory compile+sign hybrid
+  (the old dev loop) is **removed**, and with it the compile-house flags `run` carried:
+  `--key`, `--key-id`, `--template-dir`, `--trust-dir` now refuse with a pointer at
+  `kennel policy compile`. The dev loop is two commands with no hybrid:
+  `kennel policy compile <name>` (writes the settled artefact beside the source in the repo;
+  picks the sole user key with no `--key`) then `kennel run <name>`. Every wrong-object refusal
+  names what the user is holding and the real next step — a source policy points at `compile`,
+  a template name points at `policy generate --from`, a path states the one-sentence contract.
+- **`kennel oci run` boots the store entry's compiled artefact.** The scaffold flow is now
+  load-bearing: `oci build` scaffolds, the operator completes `reason` and compiles
+  (`kennel policy compile <store>/<name>/policy.toml --key <key>` — the build banner prints the
+  exact command), and `oci run <name>` boots `<entry>/<name>.settled.toml`, refusing an
+  uncompiled entry with that pointer. `--key` is gone from `oci run` (`oci build` keeps it —
+  the confined fetch compiles its generated leaf in the authoring house). The `[rootfs]`
+  grammar partition and digest provenance check are unchanged.
+- **Stale diagnostic pointers fixed** (the W0-V2 sweep): the resolve-miss hint, the
+  `policy compile`/`validate` usage strings, and the `keygen` success blurb all said
+  `kennel compile`/`kennel validate` — spellings that do not exist; all now say
+  `kennel policy …`. `kennel-compose` gained the missing next-step pointer after writing a
+  leaf. The installer's quickstart banner shows the real three-step flow
+  (generate → compile → run).
+- **The policy e2e suite eats the dogfood.** `policy-e2e.sh` and every `run.sh` hook now drive
+  the verbatim operator flow — stage into the user repo, `policy compile`, `run <name>` — so
+  the settled pass-through (the production path) is what the whole suite exercises; no
+  compile-side flag appears on any `run` invocation anywhere in the tree.
+
 ## [0.6.0] — 2026-07-06
 
 **UDP egress, the mediation story finished, and the corpus moves to the book.** 0.6.0 spends the

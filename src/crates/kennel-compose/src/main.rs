@@ -458,6 +458,10 @@ fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             eprintln!("wrote {}", path.display());
+            eprintln!(
+                "next: `kennel policy compile {} --key <key>` to sign it, then `kennel run`",
+                path.display()
+            );
         }
         None => print!("{output}"),
     }

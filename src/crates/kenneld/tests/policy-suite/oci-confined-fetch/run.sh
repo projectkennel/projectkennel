@@ -60,7 +60,11 @@ owner="$(stat -c '%u' "$ENTRY/rootfs/bin" 2>/dev/null)"
 # is its workload EXIT CODE (the suite's contract) — not stdout, which the in-kennel→CLI path does
 # not forward; the self-check exits non-zero on any failure, 0 only if the substrate booted clean.
 sed -i 's|^reason = .*|reason = "e2e: boot a confined-fetched busybox"|' "$ENTRY/policy.toml"
-"$KENNEL" oci run "$NAME" --key "$KEY" -- /bin/sh -c '
+# Compile the completed store policy in the authoring house (dogfood: `oci run` boots only the
+# settled artefact and takes no key — the daemon verifies).
+"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
+    echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
+"$KENNEL" oci run "$NAME" -- /bin/sh -c '
     [ -e /bin/sh ] || exit 31            # the fetched substrate runs its own shell
     [ -x /bin/busybox ] || [ -x /bin/cat ] || exit 32
     [ -e /etc/resolv.conf ] || exit 33   # Kennel /etc is present over the image

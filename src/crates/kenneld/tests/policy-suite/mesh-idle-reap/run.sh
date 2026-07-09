@@ -26,10 +26,13 @@ KENNEL="$2"
 SUITE_KEY="$3"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEYS="$CFG/keys"
+# shellcheck source=../suite-lib.sh
+. "$CASE_DIR/../suite-lib.sh"
 ONDEMAND="$CFG/ondemand"
 PROVIDER_LINK="$ONDEMAND/mesh-idle-provider"
 
 cleanup() {
+    suite_unstage mesh-idle-consumer
     rm -f "$PROVIDER_LINK"
     "$KENNEL" daemon-reload >/dev/null 2>&1 || true
 }
@@ -59,7 +62,8 @@ mkdir -p "$ONDEMAND"
 
 # 3. Activate: the consumer's workload connects to its `at` socket; kenneld activates the cold provider
 #    and brokers the connector. Exit 0 iff the round-trip held.
-"$KENNEL" run "$CASE_DIR/consumer.toml" mesh-idle-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null \
+suite_compile "$CASE_DIR/consumer.toml" >/dev/null
+"$KENNEL" run mesh-idle-consumer mesh-idle-consumer </dev/null \
     || { echo "mesh-idle-reap: activation round-trip failed (consumer #1 did not read pong)" >&2; exit 1; }
 
 # The provider served, so it is ready and running right after activation (well inside its 4s TTL).
@@ -82,7 +86,7 @@ fi
 
 # 6. Re-activate from cold: a fresh consume must socket-activate the reaped provider again and
 #    round-trip — proving the reap returned it to a re-activatable state, not a dead one.
-"$KENNEL" run "$CASE_DIR/consumer.toml" mesh-idle-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null \
+"$KENNEL" run mesh-idle-consumer mesh-idle-consumer </dev/null \
     || { echo "mesh-idle-reap: re-activation round-trip failed (reaped provider did not come back)" >&2; exit 1; }
 
 echo "mesh-idle-reap: activate → idle → reap → pending → re-activate held"

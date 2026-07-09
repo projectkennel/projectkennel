@@ -26,6 +26,8 @@ CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEYS="$CFG/keys"
 ONDEMAND="$CFG/ondemand"
 BROKER_LINK="$ONDEMAND/tun-broker"
+# shellcheck source=../suite-lib.sh
+. "$CASE_DIR/../suite-lib.sh"
 # The broker provides the reserved `org.projectkennel.*` namespace, which only a VENDOR-provenance
 # key may claim (§7.13.5). The real deployment ships the broker template signed by the maintainer
 # key; this test authorizes its own suite key as vendor — the fixture equivalent of "the project
@@ -40,6 +42,8 @@ cleanup() {
     rm -f "$BROKER_LINK"
     sudo rm -f "$VENDOR_SUITE_PUB" 2>/dev/null || true
     "$KENNEL" daemon-reload >/dev/null 2>&1 || true
+    suite_unstage tun-broker
+    suite_unstage tun-consumer
 }
 trap cleanup EXIT
 
@@ -55,13 +59,15 @@ mkdir -p "$ONDEMAND"
 
 # 2. Start the standing broker in the background: it registers its egress sink and loops. `facade-tun`
 #    retries its connect (~5s), so the consumer below tolerates this start racing its bring-up.
-"$KENNEL" run "$CASE_DIR/provider.toml" tun-broker --key "$SUITE_KEY" --trust-dir "$KEYS" \
-    </dev/null >"$SCRATCH/broker.log" 2>&1 &
+#    Dogfood flow (suite-lib): stage + compile in the authoring house, run the settled by name.
+suite_compile "$CASE_DIR/provider.toml" >/dev/null
+"$KENNEL" run tun-broker tun-broker </dev/null >"$SCRATCH/broker.log" 2>&1 &
 BROKER_PID=$!
 
 # 3. Run the consumer: its tun is constructed, `facade-tun` connects the broker (grants delivered,
 #    session minted), and the workload confirms its tun. The consumer's exit code is the verdict.
 # No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
 # the shell and leak the enabled provider link into the user tier for later cases).
-"$KENNEL" run "$CASE_DIR/consumer.toml" tun-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+suite_compile "$CASE_DIR/consumer.toml" >/dev/null
+"$KENNEL" run tun-consumer tun-consumer </dev/null
 exit "$?"
