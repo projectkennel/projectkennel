@@ -37,7 +37,12 @@ suite_defer 'rm -rf "${POLICY_REPO:?}/$JOB"'
 suite_defer 'sudo rm -rf "/etc/kennel/templates/$HOST_TPL" "/etc/kennel/policies/$HOST_LEAF"'
 suite_defer 'sudo rm -f "$HOST_KEY_DIR/kennel-host.retired" "$HOST_KEY_DIR/kennel-host.pub.retired"'
 
-sig_of() { grep -m1 '^signature = ' "$1"; }
+SIG_LINE='^signature = '
+sig_of() {
+    local file="$1"
+    grep -m1 "$SIG_LINE" "$file"
+    return "$?"
+}
 
 # ── A. user-tier rotation ────────────────────────────────────────────────────
 rm -f "$KEY_DIR/$ROT_KEY" "$KEY_DIR/$ROT_KEY.pub" \
@@ -57,10 +62,10 @@ grep -q "^key_id = \"$ROT_KEY\"" "$SETTLED" || { echo "FAIL: leaf not signed by 
 "$KENNEL" key rotate "$ROT_KEY" --yes >"$SCRATCH/rotate-user.log" 2>&1 \
     || { echo "FAIL: user rotate — $(tail -3 "$SCRATCH/rotate-user.log")"; exit 1; }
 
-[ "$(cat "$KEY_DIR/$ROT_KEY.pub")" != "$OLD_PUB" ] || { echo "FAIL: pub unchanged after rotate"; exit 1; }
-[ -f "$KEY_DIR/$ROT_KEY.retired" ] && [ -f "$KEY_DIR/$ROT_KEY.pub.retired" ] \
+[[ "$(cat "$KEY_DIR/$ROT_KEY.pub")" != "$OLD_PUB" ]] || { echo "FAIL: pub unchanged after rotate"; exit 1; }
+[[ -f "$KEY_DIR/$ROT_KEY.retired" ]] && [[ -f "$KEY_DIR/$ROT_KEY.pub.retired" ]] \
     || { echo "FAIL: old pair not retired"; exit 1; }
-[ "$(sig_of "$SETTLED")" != "$OLD_SIG" ] || { echo "FAIL: leaf not re-signed"; exit 1; }
+[[ "$(sig_of "$SETTLED")" != "$OLD_SIG" ]] || { echo "FAIL: leaf not re-signed"; exit 1; }
 grep -q "^key_id = \"$ROT_KEY\"" "$SETTLED" || { echo "FAIL: key_id changed across rotation"; exit 1; }
 # The byte watched across: the daemon verifies the re-signed artefact and runs it.
 timeout 60 "$KENNEL" run "$JOB" key-rotate-user </dev/null >"$SCRATCH/run-user.log" 2>&1 \
@@ -90,27 +95,27 @@ HOST_LOCK="/etc/kennel/policies/$HOST_LEAF/$HOST_LEAF.lock"
 sudo test -f "$HOST_LOCK" || { echo "FAIL: host leaf compile wrote no lock"; exit 1; }
 
 OLD_HOST_PUB="$(sudo cat "$HOST_KEY_DIR/kennel-host.pub")"
-OLD_TPL_SIG="$(sudo grep -m1 '^signature = ' "/etc/kennel/templates/$HOST_TPL/policy.toml")"
+OLD_TPL_SIG="$(sudo grep -m1 "$SIG_LINE" "/etc/kennel/templates/$HOST_TPL/policy.toml")"
 OLD_LOCK="$(sudo cat "$HOST_LOCK")"
-OLD_LEAF_SIG="$(sudo grep -m1 '^signature = ' "$HOST_SETTLED")"
+OLD_LEAF_SIG="$(sudo grep -m1 "$SIG_LINE" "$HOST_SETTLED")"
 # One installed reference artefact, to prove the cascade reaches vendor-sourced settled
 # policies (their source lives in /usr/lib/kennel, not beside them).
 REF="$(sudo find /etc/kennel/policies -name '*.settled.toml' ! -path "*$HOST_LEAF*" | head -1)"
-[ -n "$REF" ] && OLD_REF_SIG="$(sudo grep -m1 '^signature = ' "$REF")" || OLD_REF_SIG=""
+[[ -n "$REF" ]] && OLD_REF_SIG="$(sudo grep -m1 "$SIG_LINE" "$REF")" || OLD_REF_SIG=""
 
 sudo "$KENNEL" key rotate kennel-host --yes >"$SCRATCH/rotate-host.log" 2>&1 \
     || { echo "FAIL: host rotate — $(tail -5 "$SCRATCH/rotate-host.log")"; exit 1; }
 
-[ "$(sudo cat "$HOST_KEY_DIR/kennel-host.pub")" != "$OLD_HOST_PUB" ] \
+[[ "$(sudo cat "$HOST_KEY_DIR/kennel-host.pub")" != "$OLD_HOST_PUB" ]] \
     || { echo "FAIL: host pub unchanged"; exit 1; }
-[ "$(sudo grep -m1 '^signature = ' "/etc/kennel/templates/$HOST_TPL/policy.toml")" != "$OLD_TPL_SIG" ] \
+[[ "$(sudo grep -m1 "$SIG_LINE" "/etc/kennel/templates/$HOST_TPL/policy.toml")" != "$OLD_TPL_SIG" ]] \
     || { echo "FAIL: host template not re-signed"; exit 1; }
-[ "$(sudo cat "$HOST_LOCK")" != "$OLD_LOCK" ] \
+[[ "$(sudo cat "$HOST_LOCK")" != "$OLD_LOCK" ]] \
     || { echo "FAIL: leaf lock not re-pinned after template re-sign"; exit 1; }
-[ "$(sudo grep -m1 '^signature = ' "$HOST_SETTLED")" != "$OLD_LEAF_SIG" ] \
+[[ "$(sudo grep -m1 "$SIG_LINE" "$HOST_SETTLED")" != "$OLD_LEAF_SIG" ]] \
     || { echo "FAIL: host leaf not re-signed"; exit 1; }
-if [ -n "$OLD_REF_SIG" ]; then
-    [ "$(sudo grep -m1 '^signature = ' "$REF")" != "$OLD_REF_SIG" ] \
+if [[ -n "$OLD_REF_SIG" ]]; then
+    [[ "$(sudo grep -m1 "$SIG_LINE" "$REF")" != "$OLD_REF_SIG" ]] \
         || { echo "FAIL: reference artefact $REF not recompiled (vendor-source cascade)"; exit 1; }
 fi
 # The unprivileged operator runs the host leaf: successor trust + downward-inclusive
