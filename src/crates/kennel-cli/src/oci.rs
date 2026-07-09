@@ -110,6 +110,19 @@ impl StoreEntry {
         self.dir.join("policy.toml")
     }
 
+    /// The compiled artefact `kennel policy compile` writes beside the scaffold
+    /// (`<entry>/<name>.settled.toml`, the scaffold's `name` = the entry dir name) — the
+    /// only thing `oci run` boots.
+    #[must_use]
+    pub fn settled(&self) -> PathBuf {
+        let name = self
+            .dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("policy");
+        self.dir.join(format!("{name}.settled.toml"))
+    }
+
     /// Read the recorded `image@sha256:…` digest, trimmed.
     ///
     /// # Errors
@@ -255,8 +268,9 @@ pub fn scaffold_policy(name: &str, rootfs_path: &Path, image: &str, readonly: &[
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then compile (which signs it):\n\
-         #   kennel policy compile {name} --key <key>\n\
+        "# Scaffolded by `kennel oci build {name}`. Complete `reason`, then compile (which signs it\n\
+         # and writes the settled artefact `kennel oci run` boots, beside this file):\n\
+         #   kennel policy compile <this file's path> --key <key>\n\
          name = \"{name}\"\n\
          template_base = \"base-confined\"\n\
          \n\
@@ -1042,13 +1056,21 @@ fn confined_fetch(
     let leaf = format!(
         "name = \"{name}-fetch\"\ntemplate_base = \"oci-fetch\"\n[fs]\nwrite = [\"{fs_write}\"]\n"
     );
-    let leaf_path = std::env::temp_dir().join(format!(
-        "kennel-oci-fetch-{name}-{}.toml",
-        std::process::id()
-    ));
-    std::fs::write(&leaf_path, leaf).map_err(|e| format!("staging the fetch leaf: {e}"))?;
-
     let inst = format!("{name}-fetch");
+    // Compile+sign the generated fetch leaf in the AUTHORING house (build is an authoring
+    // verb; `--key`/`--template-dir`/`--trust-dir` live here), then boot the settled bytes —
+    // the run house takes only compiled artefacts (0.7.0 W1).
+    let settled_bytes = crate::policy::compile_and_sign(
+        leaf.as_bytes(),
+        &std::env::temp_dir(),
+        opts.key,
+        None,
+        opts.template_dirs.clone(),
+        opts.trust_dirs.clone(),
+    )
+    .map_err(|e| format!("compiling the fetch leaf: {e}"))?;
+    let temp = crate::policy::TempSettled::write(&inst, &settled_bytes)?;
+
     let argv = vec![
         "/bin/sh".to_owned(),
         "-c".to_owned(),
@@ -1058,20 +1080,9 @@ fn confined_fetch(
         view,
     ];
     eprintln!("kennel: fetching `{image}` confined under oci-fetch …");
-    let res = crate::run::launch(
-        leaf_path.clone(),
-        &inst,
-        &argv,
-        false,
-        opts.key,
-        None,
-        opts.template_dirs.clone(),
-        opts.trust_dirs.clone(),
-        None,
-        &inst,
-    );
-    let _ = std::fs::remove_file(&leaf_path);
-    // A launch error (compile/daemon) propagates; a fetch failure surfaces as an unpopulated entry
+    let res = crate::run::launch(temp.path().to_path_buf(), &inst, &argv, false, None, &inst);
+    drop(temp);
+    // A launch error (daemon) propagates; a fetch failure surfaces as an unpopulated entry
     // (the workload exit code is folded into the returned ExitCode, so the post-condition is the gate).
     res?;
     if !entry.rootfs().is_dir() || !entry.config().exists() || !entry.digest_path().exists() {
@@ -1181,8 +1192,9 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
     );
     eprintln!("  digest: {recorded}");
     eprintln!(
-        "  policy: {} (complete `reason`, then `kennel policy compile` to sign it)",
-        policy.display()
+        "  policy: {p} (complete `reason`, then compile — which signs it and writes the \
+         artefact `kennel oci run` boots: `kennel policy compile {p} --key <key>`)",
+        p = policy.display()
     );
     eprintln!("  rootfs: {}", entry.rootfs().display());
     Ok(std::process::ExitCode::SUCCESS)
@@ -1211,19 +1223,25 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
             )
         });
     let mut name: Option<&str> = None;
-    let mut key_path: Option<&str> = None;
     let mut force = false;
-    let mut it = head.iter();
-    while let Some(arg) = it.next() {
+    for arg in head {
         match arg.as_str() {
             "--force" => force = true,
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
+            "--key" => {
+                return Err(
+                    "`--key` is a compile-side flag; `kennel oci run` boots the store entry's \
+                     compiled artefact and needs no key (the daemon verifies it). Complete \
+                     `reason` in the store policy, compile it (`kennel policy compile \
+                     <store>/<name>/policy.toml --key <key>`), then re-run"
+                        .to_owned(),
+                );
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             v if name.is_none() => name = Some(v),
             _ => return Err("unexpected extra argument before `--`".to_owned()),
         }
     }
-    let name = name.ok_or("usage: kennel oci run <name> [--key K] [--force] [-- <cmd...>]")?;
+    let name = name.ok_or("usage: kennel oci run <name> [--force] [-- <cmd...>]")?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
@@ -1233,19 +1251,21 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
             entry.rootfs().display()
         ));
     }
+    // The run house boots only the compiled artefact — `kennel policy compile` writes it
+    // beside the scaffolded source (the flow the scaffold header names). Source-at-run died
+    // with the 0.7.0 strip.
+    let settled = entry.settled();
+    if !settled.is_file() {
+        return Err(format!(
+            "store entry `{name}` is not compiled (no {}); complete `reason` in {} and compile \
+             it: `kennel policy compile {} --key <key>`",
+            settled.display(),
+            entry.policy().display(),
+            entry.policy().display()
+        ));
+    }
     let digest = entry.read_digest()?;
-    crate::run::launch(
-        entry.policy(),
-        name,
-        command,
-        force,
-        key_path,
-        None,
-        Vec::new(),
-        Vec::new(),
-        Some(&digest),
-        name,
-    )
+    crate::run::launch(settled, name, command, force, Some(&digest), name)
 }
 
 #[cfg(test)]

@@ -54,7 +54,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: RUN,
         summary: RUN_SUMMARY,
-        usage: "run <policy> [<name>] [--key K] [--key-id ID] [--force] [--template-dir D]... [--trust-dir D]... [-- <cmd...>]",
+        usage: "run <policy> [<name>] [--force] [-- <cmd...>]",
     },
     CommandSpec {
         name: "attach",

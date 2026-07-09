@@ -4,8 +4,16 @@
 # toolchain, not a bespoke daemon. Every case under
 # src/crates/kenneld/tests/policy-suite/<case>/ is a self-checking signed policy whose
 # [workload] inspects the constructed kennel from the inside and exits 0 iff the slice it
-# proves holds; this driver runs each through `kennel run <case>` against the installed,
-# systemd-managed `kenneld.service`. The kennel's exit code IS each case's verdict.
+# proves holds. The kennel's exit code IS each case's verdict.
+#
+# The suite eats the dogfood at BOTH layers (the standing ruling; W0-V3 audit 2026-07-08):
+# it drives the installed, systemd-managed kenneld.service, AND it types only what an
+# operator types — per case, the golden path verbatim:
+#     stage the source into ~/.config/kennel/policies/<case>/   (authoring)
+#     kennel policy compile <case> --key kennel-suite [...]     (the compile house)
+#     kennel run <case> <case>                                  (settled, by name, no flags)
+# No compile-side flags ever appear on `kennel run`; the settled pass-through is exactly
+# the path production runs.
 #
 # WHY drive the installed service (not `systemd-run` + a build-tree kenneld): the spawn
 # path threads YAMA / cgroups / AppArmor / userns / Landlock / seccomp, and getting that
@@ -68,6 +76,9 @@ ECHO_SOCK_DIR="/run/kennel-e2e"
 ECHO_SOCK="$ECHO_SOCK_DIR/echo.sock"
 HOME_FIXTURE="$HOME/kennel-e2e"
 SYSTEM_TOML="/etc/kennel/system.toml"
+# The user policy repo the dogfood flow stages each case into (authoring house → run house).
+POLICY_REPO="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/policies"
+STAGED_CASES=()
 
 ECHO_PID=""
 SYSTEM_TOML_SAVED=""        # prior /etc/kennel/system.toml contents (restored on exit)
@@ -75,6 +86,11 @@ SYSTEM_TOML_EXISTED=0
 
 cleanup() {
     [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null || true
+    # Un-stage every case this run placed in the user policy repo (a dirty repo makes the
+    # NEXT run resolve stale artefacts — always clean up after tests).
+    for staged in "${STAGED_CASES[@]:-}"; do
+        [ -n "$staged" ] && rm -rf "${POLICY_REPO:?}/$staged" 2>/dev/null || true
+    done
     # Restore the system.toml we may have rewritten for --debug.
     if [ "$DEBUG" = 1 ]; then
         if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
@@ -246,12 +262,28 @@ for name in "${CASES[@]}"; do
             continue
         fi
     fi
-    # Distinct instance name per case; </dev/null = non-interactive. A timeout bounds a
-    # wedged spawn. The workload exit code is the run status. Templates resolve from the STANDARD
-    # installed cascade (install.sh ships them to /usr/lib/kennel/templates) — never the source tree,
-    # so the daemon resolves a spawn target the same way the requester compiled against it.
-    timeout 90 "$KENNEL" run "$run_pol" "$name" --key "$SUITE_KEY" \
-        --trust-dir "$KEY_DIR" </dev/null \
+    # The dogfood flow, verbatim (W1): stage the case source into the user policy repo,
+    # compile it in the authoring house (templates resolve from the STANDARD installed
+    # cascade — install.sh ships them to /usr/lib/kennel/templates — never the source tree;
+    # --trust-dir adds the suite key for cases whose spawn targets are suite-signed, a
+    # compile-house flag any operator with self-signed spawn targets uses), then run the
+    # SETTLED artefact by name — no compile-side flags on `kennel run`, ever.
+    # Distinct instance name per case; </dev/null = non-interactive; a timeout bounds a
+    # wedged spawn. The workload exit code is the run status.
+    rm -rf "${POLICY_REPO:?}/$name"
+    mkdir -p "$POLICY_REPO/$name"
+    cp "$run_pol" "$POLICY_REPO/$name/policy.toml"
+    STAGED_CASES+=("$name")
+    if ! timeout 60 "$KENNEL" policy compile "$name" --key "$SUITE_KEY_ID" \
+            --trust-dir "$KEY_DIR" \
+            >"/tmp/kennel-suite-$name.compile.log" 2>&1; then
+        echo "FAIL (compile) — see /tmp/kennel-suite-$name.compile.log"
+        results="$results\n  FAIL(compile) $name"; fail=$((fail+1))
+        [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+        rm -rf "$scratch"
+        continue
+    fi
+    timeout 90 "$KENNEL" run "$name" "$name" </dev/null \
         >"/tmp/kennel-suite-$name.log" 2>&1
     rc=$?
     [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true

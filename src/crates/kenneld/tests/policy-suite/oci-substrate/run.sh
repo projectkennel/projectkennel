@@ -59,9 +59,12 @@ sed -i 's|^reason = .*|reason = "e2e: boot busybox as an OCI substrate"|' "$ENTR
 grep -qE '^readonly = \["/usr"' "$ENTRY/policy.toml" || {
     echo "FAIL: oci build did not derive a closure-lock from a non-root config.User"; exit 1; }
 
-# 4. Boot it and self-check the slice from inside. `oci run` compiles+signs the source policy in
-#    memory with the suite key, asserts the digest, and drives the overlay-root spawn.
-"$KENNEL" oci run "$NAME" --key "$KEY" -- /bin/sh -c '
+# 4. Compile the completed store policy in the AUTHORING house (the dogfood flow: `oci run`
+#    boots only the settled artefact), then boot and self-check the slice from inside. `oci run`
+#    asserts the digest and drives the overlay-root spawn; it takes no key (the daemon verifies).
+"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
+    echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
+"$KENNEL" oci run "$NAME" -- /bin/sh -c '
     uid=$(id -u)
     [ "$uid" = 12345 ] && { echo "FAIL: image User was honored (uid=$uid)"; exit 21; }
     [ -n "$uid" ] || { echo "FAIL: no uid"; exit 22; }

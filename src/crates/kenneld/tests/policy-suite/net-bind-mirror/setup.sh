@@ -22,7 +22,9 @@ command -v ss >/dev/null || { echo "no ss" >&2; exit 2; }
 # not leave it spinning forever.
 nohup python3 - >"$SCRATCH/connector.log" 2>&1 <<'PY' &
 import socket, subprocess, time, re
-deadline = time.time() + 60
+# Must outlive the whole per-case window: the runner compiles the policy (dogfood flow) and
+# then runs with its own 90s bound, so a 60s poll loses the race under full-suite load.
+deadline = time.time() + 150
 target = None
 while time.time() < deadline and target is None:
     out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True).stdout

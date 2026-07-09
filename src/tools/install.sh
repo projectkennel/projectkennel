@@ -547,12 +547,14 @@ $uid_line
   # 2. start the per-user daemon (socket-activated on first use):
   systemctl --user enable --now kenneld.socket
 
-  # 3. mint a personal policy-signing key (compiles your own leaf policies; when it is
-  #    the only key in your key dir, 'kennel run' picks it automatically — no --key needed):
+  # 3. mint a personal policy-signing key (signs your own leaf policies at compile; when it
+  #    is the only key in your key dir, 'kennel policy compile' picks it — no --key needed):
   kennel keygen $u-dev
 
-  # 4. scaffold an interactive shell policy from the shipped template, then run it:
+  # 4. scaffold an interactive shell policy from the shipped template, compile (= sign) it,
+  #    then run the settled artefact by name ('kennel run' takes no key — the daemon verifies):
   kennel policy generate my-shell --from interactive
+  kennel policy compile my-shell
   kennel run my-shell -- /bin/bash
 
 Admin notes (root):

@@ -181,8 +181,15 @@ for idx in 0 1; do
     # kenneld trace burst (the in-daemon EPHEMERAL phase breakdown) for this run by journal cursor.
     cur="$(journalctl --user -u kenneld.service -n0 -o export --show-cursor 2>/dev/null \
         | sed -n 's/^-- cursor: //p' | tail -1)"
-    "$KENNEL" run "$control" --key "$SUITE_KEY" --trust-dir "$KEY_DIR" \
-        >"$WORK/out.$idx" 2>"$WORK/err.$idx" || true
+    # Dogfood flow (W1): stage the generated control policy into the user repo, compile it in
+    # the authoring house, run the settled artefact by name (no compile-side flags on run).
+    cname="$(basename "$control" .toml)"
+    POLICY_REPO="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/policies"
+    rm -rf "${POLICY_REPO:?}/$cname"; mkdir -p "$POLICY_REPO/$cname"
+    cp "$control" "$POLICY_REPO/$cname/policy.toml"
+    "$KENNEL" policy compile "$cname" --key "$SUITE_KEY" --trust-dir "$KEY_DIR" >/dev/null 2>&1
+    "$KENNEL" run "$cname" >"$WORK/out.$idx" 2>"$WORK/err.$idx" || true
+    rm -rf "${POLICY_REPO:?}/$cname"
     sleep 0.3  # let late sibling-teardown milestones flush to the journal
     journalctl --user -u kenneld.service --after-cursor "$cur" -o cat 2>/dev/null > "$WORK/burst.$idx"
 

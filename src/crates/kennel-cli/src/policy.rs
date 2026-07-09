@@ -20,7 +20,7 @@ use crate::{
     usage_of, TrustContext, POLICY_VERBS,
 };
 
-// ---- `kennel compile` ----------------------------------------------------------
+// ---- `kennel policy compile` ---------------------------------------------------
 
 /// A filesystem-backed [`TemplateSource`].
 ///
@@ -63,7 +63,7 @@ impl TemplateSource for FsTemplateSource {
     }
 }
 
-/// `kennel compile <policy> [--output P] [--key K] [--unsigned] [--template-dir D]...`
+/// `kennel policy compile <policy> [--output P] [--key K] [--unsigned] [--template-dir D]...`
 ///
 /// Resolves a source policy fully and writes a settled policy. Stateless: it never
 /// contacts the daemon. Exit codes follow `02-1-cli.md` (3 = validation/resolution,
@@ -115,7 +115,8 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     }
 
     let policy_arg = policy_path.ok_or(
-        "usage: kennel compile <policy> [--output P] [--key K | --unsigned] [--template-dir D]...",
+        "usage: kennel policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] \
+         [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
     )?;
     // `<policy>` is a path or a name resolved from the `policies/` cascade,
     // preferring the source `policy.toml` (the artefact we are about to compile).
@@ -300,6 +301,51 @@ pub fn print_warnings(warnings: &[String]) {
     }
 }
 
+/// Compile and sign a source policy to settled bytes — the compile house's in-process
+/// ceremony, for verbs that generate a leaf and boot it in one flow (`kennel oci build`'s
+/// confined fetch).
+///
+/// `source_dir` anchors source-relative material (the `[ssh]` synthetic keys mint at
+/// `<source_dir>/ssh`). The run house never calls this: `kennel run`/`kennel oci run` boot
+/// only pre-compiled artefacts.
+///
+/// # Errors
+///
+/// Returns a message if the compile, key resolution, signing, or serialisation fails.
+pub fn compile_and_sign(
+    bytes: &[u8],
+    source_dir: &Path,
+    key: Option<&str>,
+    key_id: Option<&str>,
+    mut template_dirs: Vec<PathBuf>,
+    mut trust_dirs: Vec<PathBuf>,
+) -> Result<Vec<u8>, String> {
+    crate::add_default_template_dirs(&mut template_dirs);
+    crate::add_system_trust_dirs(&mut trust_dirs);
+    let source = FsTemplateSource {
+        dirs: template_dirs,
+    };
+    let tc = TrustContext::load(&trust_dirs)?;
+    let trust = tc.allow_unsigned();
+    let mut compiled = build_settled(bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
+        .map_err(|e| format!("compiling: {e}"))?;
+    print_warnings(&compiled.warnings);
+    print_warnings(&kennel_lib_policy::resolve_settled_loaders(
+        &mut compiled.policy,
+    ));
+    let _minted = mint_ssh_keys(&mut compiled.policy, &source_dir.join("ssh"))?;
+    let key = match key {
+        Some(p) => p.to_owned(),
+        None => crate::default_signing_key()?.to_string_lossy().into_owned(),
+    };
+    let canonical = kennel_lib_policy::canonical::canonical_bytes(&compiled.policy)
+        .map_err(|e| format!("canonical form: {e}"))?;
+    let (resolved_id, armor) =
+        crate::sshsig_sign(&canonical, &key, key_id, &crate::signing_trust_dirs())?;
+    let doc = crate::settled_with_sshsig(&compiled.policy, resolved_id, armor);
+    kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))
+}
+
 /// Mint (or reuse) one synthetic ed25519 keypair per `[ssh]` destination under
 /// `ssh_dir`, recording each public half + key-file basename into the settled grant.
 ///
@@ -380,7 +426,7 @@ pub fn build_settled(
     kennel_lib_compile::compile(&entry, source, trust, version)
 }
 
-/// `kennel validate <policy> [--template-dir D] [--require-signed] [--trust-dir D]`
+/// `kennel policy validate <policy> [--template-dir D] [--require-signed] [--trust-dir D]`
 ///
 /// Resolve and check a policy (chain, signatures, deltas, includes, invariants)
 /// without emitting a settled artefact. Exit 0 if valid; otherwise the same code
@@ -411,7 +457,7 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
         }
     }
     let policy_path = policy_path
-        .ok_or("usage: kennel validate <policy> [--template-dir D] [--require-signed]")?;
+        .ok_or("usage: kennel policy validate <policy> [--template-dir D] [--require-signed]")?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 

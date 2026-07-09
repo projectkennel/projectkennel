@@ -22,10 +22,13 @@ KENNEL="$2"
 SUITE_KEY="$3"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEYS="$CFG/keys"
+# shellcheck source=../suite-lib.sh
+. "$CASE_DIR/../suite-lib.sh"
 ONDEMAND="$CFG/ondemand"
 PROVIDER_LINK="$ONDEMAND/gui-provider"
 
 cleanup() {
+    suite_unstage gui-consumer
     # Stop the activated provider before unlinking (leave the daemon cold for later cases).
     "$KENNEL" stop gui-provider >/dev/null 2>&1 || true
     rm -f "$PROVIDER_LINK"
@@ -47,5 +50,6 @@ mkdir -p "$ONDEMAND"
 #    The consumer's exit code is the verdict (the broker relay reached a spawned compositor iff 0).
 # No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
 # the shell and leak the enabled provider link into the user tier for later cases).
-"$KENNEL" run "$CASE_DIR/consumer.toml" gui-consumer --key "$SUITE_KEY" --trust-dir "$KEYS" </dev/null
+suite_compile "$CASE_DIR/consumer.toml" >/dev/null
+"$KENNEL" run gui-consumer gui-consumer </dev/null
 exit "$?"

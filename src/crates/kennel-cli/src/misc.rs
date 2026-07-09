@@ -111,7 +111,7 @@ pub fn keygen(args: &[String]) -> Result<ExitCode, String> {
     eprintln!("The daemon already trusts this key for your own run policies (it reads");
     eprintln!("~/.config/kennel/keys), so no further setup is needed. Compile a policy once,");
     eprintln!("then run it — neither command needs --key while this is your only key:");
-    eprintln!("  kennel compile <name>          # signs policies/<name>/<name>.settled.toml");
+    eprintln!("  kennel policy compile <name>   # signs policies/<name>/<name>.settled.toml");
     eprintln!("  kennel run <name> -- <cmd...>  # runs the settled policy (no key to run)");
     eprintln!();
     eprintln!("Only to let *other* users or a fleet trust policies you sign — or to sign");
