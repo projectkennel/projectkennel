@@ -93,6 +93,26 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   derived from the CLI definition; a self-driving `key-rotate` suite case e2e-asserts both
   the user-tier rotation and the host-tier re-sign + re-pin cascade through a real
   `kennel run` under the successor key.
+- **`kennel version` — the whole-stack skew report (0.7.0 W5).** Nothing reported a version
+  before; the tarball name was the only carrier. The interesting output is not one number but
+  the *skew set*, in one invocation: the CLI's build and settled-schema range
+  (`SETTLED_SCHEMA_VERSION` + the MIN floor), the **daemon's — queried live over the control
+  socket**, which instantly surfaces the old-binary-still-serving-after-reinstall trap, and
+  the privhelper facts (factory + capability-split sub-helpers present, and whether the
+  bpf-egress sub-helper shipped — that feature is a separate binary, so presence is a
+  filesystem fact, no privileged probe). Every degraded state is a report, not an error:
+  an unreachable daemon, a daemon too old for this CLI's schema (the typed handshake skew),
+  and a daemon that predates the version query each print their line plus the remedy, exit 0.
+  Also carried on `--version`/`-V` for convention's sake; kennel(1) carries the verb.
+
+### IPC protocol changes
+
+- **`Request::Version` (tag 10) / `Response::Version` (tag 11)** — the additive control-plane
+  pair behind `kennel version`: the daemon answers its build version and the settled-schema
+  range it parses (`schema_version`, `min_schema_version`). Additive by design: a pre-0.7.0
+  daemon drops the connection on the unknown request tag (after a successful W17 handshake),
+  which the CLI reports as "the running daemon predates `kennel version`" — the skew report
+  degrades, never breaks, against every older daemon.
 
 ## [0.6.0] — 2026-07-06
 

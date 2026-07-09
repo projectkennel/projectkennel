@@ -102,6 +102,11 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "key <generate|list|show|trust|untrust|rotate> [...]",
     },
     CommandSpec {
+        name: "version",
+        summary: "report the whole-stack version set: CLI, live daemon, schema, privhelper",
+        usage: "version",
+    },
+    CommandSpec {
         name: "audit",
         summary: "show a kennel's audit log",
         usage: "audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]",

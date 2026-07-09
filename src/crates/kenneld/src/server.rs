@@ -1212,6 +1212,14 @@ pub fn dispatch_request<P, L>(
         },
         Request::List => shared.list(),
         Request::Mesh => shared.mesh(),
+        // The daemon leg of the `kennel version` skew report (0.7.0 W5): this build's
+        // identity and the settled-schema range it parses, from the live process — which
+        // is exactly what surfaces the old-binary-still-serving-after-reinstall trap.
+        Request::Version => Response::Version {
+            build: env!("CARGO_PKG_VERSION").to_owned(),
+            schema_version: kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+            min_schema_version: kennel_lib_policy::MIN_SETTLED_SCHEMA_VERSION,
+        },
         // AuthorizedKeys errors are routine (sshd polls for keys the bastion may not
         // hold), so they are not logged here to avoid spamming the journal.
         Request::AuthorizedKeys { key } => shared.authorized_keys(&key),

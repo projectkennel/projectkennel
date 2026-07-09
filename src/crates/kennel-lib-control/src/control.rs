@@ -84,6 +84,11 @@ pub enum Request {
     /// each capability they offer, and its readiness — the operability surface over the standing
     /// mesh. Carries no payload; the daemon answers [`Response::Mesh`].
     Mesh,
+    /// Ask the live daemon its identity (`kennel version`, 0.7.0 W5): build version plus the
+    /// settled-schema range it parses — the daemon leg of the whole-stack skew report. Carries no
+    /// payload; the daemon answers [`Response::Version`]. Additive: a pre-0.7.0 daemon drops the
+    /// connection on the unknown tag, which the CLI reports as "daemon predates the version query".
+    Version,
 }
 
 /// The payload of a [`Request::Start`].
@@ -206,6 +211,16 @@ pub enum Response {
     /// The cross-kennel mesh snapshot (the answer to [`Request::Mesh`]): one row per catalogued
     /// provider→capability, with its readiness (§7.13.7).
     Mesh(Vec<MeshProvider>),
+    /// The daemon's identity (the answer to [`Request::Version`]): the live half of the
+    /// `kennel version` skew report.
+    Version {
+        /// The daemon's build version (its `CARGO_PKG_VERSION`).
+        build: String,
+        /// The newest `settled_schema_version` this daemon parses.
+        schema_version: u32,
+        /// The oldest `settled_schema_version` this daemon still accepts (the MIN floor).
+        min_schema_version: u32,
+    },
 }
 
 /// A summary of one running kennel, for [`Response::Listing`].
@@ -423,6 +438,7 @@ impl Request {
             }
             Self::DaemonReload => put_u8(&mut b, 8),
             Self::Mesh => put_u8(&mut b, 9),
+            Self::Version => put_u8(&mut b, 10),
         }
         b
     }
@@ -468,6 +484,7 @@ impl Request {
             }),
             8 => Ok(Self::DaemonReload),
             9 => Ok(Self::Mesh),
+            10 => Ok(Self::Version),
             _ => Err(WireError::BadTag),
         }
     }
@@ -553,6 +570,16 @@ impl Response {
                     put_str(&mut b, &p.enablement);
                     put_str(&mut b, &p.readiness);
                 }
+            }
+            Self::Version {
+                build,
+                schema_version,
+                min_schema_version,
+            } => {
+                put_u8(&mut b, 11);
+                put_str(&mut b, build);
+                put_u32(&mut b, *schema_version);
+                put_u32(&mut b, *min_schema_version);
             }
         }
         b
@@ -644,6 +671,11 @@ impl Response {
                 }
                 Ok(Self::Mesh(providers))
             }
+            11 => Ok(Self::Version {
+                build: r.string()?,
+                schema_version: r.u32()?,
+                min_schema_version: r.u32()?,
+            }),
             _ => Err(WireError::BadTag),
         }
     }
@@ -1085,6 +1117,16 @@ mod tests {
                 readiness: "failed".to_owned(),
             },
         ]));
+    }
+
+    #[test]
+    fn version_messages_round_trip() {
+        round_trip_request(&Request::Version);
+        round_trip_response(&Response::Version {
+            build: "0.7.0".to_owned(),
+            schema_version: 4,
+            min_schema_version: 3,
+        });
     }
 
     #[test]
