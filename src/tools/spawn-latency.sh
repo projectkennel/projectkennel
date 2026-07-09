@@ -64,7 +64,7 @@ RECIPE
 }
 
 UID_NUM="$(id -u)"
-[ "$UID_NUM" = "0" ] && { echo "run as the ordinary operator, not root" >&2; exit 2; }
+[[ "$UID_NUM" = "0" ]] && { echo "run as the ordinary operator, not root" >&2; exit 2; }
 
 DO_INSTALL=1
 OFFCPU=0
@@ -72,7 +72,7 @@ BASELINE_OUT=""
 COMPARE_IN=""
 N=30
 CASE="net-none"
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-install) DO_INSTALL=0 ;;
         --offcpu) OFFCPU=1 ;;
@@ -86,7 +86,7 @@ while [ $# -gt 0 ]; do
 done
 
 KENNEL="/usr/bin/kennel"
-[ -x "$KENNEL" ] || KENNEL="$(command -v kennel || true)"
+[[ -x "$KENNEL" ]] || KENNEL="$(command -v kennel || true)"
 SUITE_DIR="$REPO_ROOT/src/crates/kenneld/tests/policy-suite"
 CASE_DIR="$SUITE_DIR/$CASE"
 POLICY="$CASE_DIR/policy.toml"
@@ -95,13 +95,13 @@ SYSTEM_TOML="/etc/kennel/system.toml"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
 SUITE_KEY="$KEY_DIR/kennel-suite"
 
-[ -n "$COMPARE_IN" ] && { [ -f "$COMPARE_IN" ] || { echo "no baseline to compare: $COMPARE_IN" >&2; exit 2; }; }
+[[ -n "$COMPARE_IN" ]] && { [ -f "$COMPARE_IN" ] || { echo "no baseline to compare: $COMPARE_IN" >&2; exit 2; }; }
 
 # A self-driving case (run.sh) is OCI-rooted (`kennel oci run`, needs a fetched image); a plain
 # policy.toml case is tmpfs-rooted. Tag spans by root kind so a tmpfs↔OCI comparison is legible.
-if [ -f "$CASE_RUN" ]; then
+if [[ -f "$CASE_RUN" ]]; then
     ROOT_KIND="OCI"
-elif [ -f "$POLICY" ]; then
+elif [[ -f "$POLICY" ]]; then
     ROOT_KIND="tmpfs"
     grep -qiE '^\s*\[rootfs\]|^\s*oci\s*=|image\s*=' "$POLICY" 2>/dev/null && ROOT_KIND="OCI"
 else
@@ -111,8 +111,8 @@ fi
 SYSTEM_TOML_SAVED=""; SYSTEM_TOML_EXISTED=0
 RUNS_DIR=""
 cleanup() {
-    [ -n "$RUNS_DIR" ] && rm -rf "$RUNS_DIR"
-    if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
+    [[ -n "$RUNS_DIR" ]] && rm -rf "$RUNS_DIR"
+    if [[ "$SYSTEM_TOML_EXISTED" = 1 ]]; then
         printf '%s' "$SYSTEM_TOML_SAVED" | sudo tee "$SYSTEM_TOML" >/dev/null 2>&1 || true
     else
         sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
@@ -122,18 +122,18 @@ cleanup() {
 trap cleanup EXIT
 
 # 1. Build + install the real thing (so the tracer carries the [t=] stamp), unless --no-install.
-if [ "$DO_INSTALL" = 1 ]; then
+if [[ "$DO_INSTALL" = 1 ]]; then
     echo "== build + install (dev-install.sh) =="
     # dev-install.sh owns the build routing and hands off to the same stage-tree.sh +
     # install.sh a real install uses.
     bash "$REPO_ROOT/src/tools/dev-install.sh" >/dev/null \
         || { echo "dev-install failed" >&2; exit 1; }
 fi
-[ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
+[[ -x "$KENNEL" ]] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
 # 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
 #    reserved subnet is uid-derived, so there is no allocation file to provision).
-[ -f "$SUITE_KEY" ] || "$KENNEL" key generate kennel-suite >/dev/null
+[[ -f "$SUITE_KEY" ]] || "$KENNEL" key generate kennel-suite >/dev/null
 
 # 3. Turn on the timestamped spawn-path trace (restored on exit) and restart the service.
 echo "== enabling log_level=debug (restored on exit) =="
@@ -143,12 +143,12 @@ if sudo test -e "$SYSTEM_TOML"; then SYSTEM_TOML_EXISTED=1; SYSTEM_TOML_SAVED="$
 systemctl --user restart kenneld.service 2>/dev/null || systemctl --user start kenneld.service
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID_NUM}/kennel/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
-[ -S "$SOCK" ] || { echo "kenneld.service did not bind $SOCK" >&2; exit 1; }
+[[ -S "$SOCK" ]] || { echo "kenneld.service did not bind $SOCK" >&2; exit 1; }
 
 # One construction of the case: a plain `kennel run` for a tmpfs case, the case's own run.sh for a
 # self-driving (OCI) case. Both go through the real construction + teardown path.
 construct_once() {
-    if [ -f "$CASE_RUN" ]; then
+    if [[ -f "$CASE_RUN" ]]; then
         ( cd "$CASE_DIR" && KENNEL="$KENNEL" SUITE_KEY="$SUITE_KEY" bash "$CASE_RUN" ) >/dev/null 2>&1 || true
     else
         "$KENNEL" run "$POLICY" --key "$SUITE_KEY" >/dev/null 2>&1 || true
@@ -174,7 +174,7 @@ run_once /dev/null  # warm-up, discarded
 # constructions, so the wall-clock boundaries can be read as work-vs-wait. Best-effort: a kernel
 # without the sched tracepoint, or no sudo bpftrace, downgrades to a clear note (a skip is not a proof).
 OFFCPU_OUT=""
-if [ "$OFFCPU" = 1 ]; then
+if [[ "$OFFCPU" = 1 ]]; then
     if sudo -n bpftrace --version >/dev/null 2>&1; then
         OFFCPU_OUT="$RUNS_DIR/offcpu.txt"
         OFFCPU_RUNS=10
@@ -262,7 +262,7 @@ END {
 #    the hops — confirming the slow boundaries are waits, not CPU. A *daemon* (kenneld and its
 #    kennel-lib-binder loopers) outlives every run, so its figure folds in idle parking between
 #    runs and is NOT a per-construction cost — labelled as such so it is not misread.
-if [ -n "$OFFCPU_OUT" ] && [ -s "$OFFCPU_OUT" ]; then
+if [[ -n "$OFFCPU_OUT" ]] && [[ -s "$OFFCPU_OUT" ]]; then
     echo
     echo "  off-CPU residency per spawn-path process (mean ms / construction, over $OFFCPU_RUNS runs):"
     gawk -v runs="$OFFCPU_RUNS" '
@@ -277,7 +277,7 @@ fi
 
 # 7. TCB latency delta: diff this run's profile against an earlier baseline (the runtime-behavioural
 #    signal — a structural hot-path change shifts internal proportions even at flat absolute numbers).
-if [ -n "$COMPARE_IN" ]; then
+if [[ -n "$COMPARE_IN" ]]; then
     echo
     echo "  TCB latency delta vs baseline ($COMPARE_IN), boundaries that moved most:"
     awk -F'\t' '
@@ -298,7 +298,7 @@ if [ -n "$COMPARE_IN" ]; then
 fi
 
 # 8. Snapshot this profile as a baseline for a later --compare (e.g. before/after the SPAWN verb lands).
-if [ -n "$BASELINE_OUT" ]; then
+if [[ -n "$BASELINE_OUT" ]]; then
     cp "$PROFILE_OUT" "$BASELINE_OUT"
     echo
     echo "  baseline profile written: $BASELINE_OUT  (re-run with --compare $BASELINE_OUT after a hot-path change)"

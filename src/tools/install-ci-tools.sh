@@ -48,7 +48,7 @@ BINDIR="${1:-$ROOT/.ci-tools/bin}"
 CACHE="${CI_TOOLS_CACHE:-$ROOT/.ci-tools/cache}"
 HOSTARCH="${CI_TOOLS_ARCH:-$(uname -m)}"
 
-[ -f "$MANIFEST" ] || { echo "install-ci-tools: no manifest at $MANIFEST" >&2; exit 2; }
+[[ -f "$MANIFEST" ]] || { echo "install-ci-tools: no manifest at $MANIFEST" >&2; exit 2; }
 
 # --- parse ci-tools.toml ---------------------------------------------------
 # One row per [tool."<name>".artifact."<arch>"] block:
@@ -101,12 +101,13 @@ download() { # <url> <dest>
 declare -A ROW_EXACT ROW_SOURCE SEEN
 NAMES=()
 while IFS='|' read -r name ver arch url sha bin src by; do
-	[ -n "$name" ] || continue
+	[[ -n "$name" ]] || continue
 	if [ -z "${SEEN[$name]:-}" ]; then SEEN[$name]=1; NAMES+=("$name"); fi
 	row="$ver|$arch|$url|$sha|$bin|$src|$by"
 	case "$arch" in
 		"$HOSTARCH") ROW_EXACT[$name]="$row" ;;
 		source)      ROW_SOURCE[$name]="$row" ;;
+		*)           : ;; # a pin for another host arch — not ours to install
 	esac
 done < <(parse_tools)
 
@@ -115,7 +116,7 @@ done < <(parse_tools)
 mkdir -p "$BINDIR" "$CACHE"
 for name in "${NAMES[@]}"; do
 	row="${ROW_EXACT[$name]:-${ROW_SOURCE[$name]:-}}"
-	if [ -z "$row" ]; then
+	if [[ -z "$row" ]]; then
 		echo "install-ci-tools: $name pins no artifact for host arch '$HOSTARCH' and no \"source\" fallback" >&2
 		exit 2
 	fi
@@ -125,14 +126,15 @@ for name in "${NAMES[@]}"; do
 		"" | PENDING | TODO | TODO-* )
 			echo "install-ci-tools: $name has no usable archive-sha256 (\"$sha\") — refusing (§5.5)" >&2
 			exit 1 ;;
+		*) : ;; # a real digest — verified below
 	esac
-	if [ "$by" = "PENDING" ] || [ -z "$by" ]; then
+	if [[ "$by" = "PENDING" ]] || [[ -z "$by" ]]; then
 		echo "install-ci-tools: WARNING: $name ($arch) is verified-by-hash but the §5.5 second" >&2
 		echo "  approval is still PENDING (tools/ci-tools.toml)" >&2
 	fi
 
 	# A source build takes minutes; reuse a previous build at the pinned version.
-	if [ "$arch" = "source" ] && [ -x "$BINDIR/$name" ] \
+	if [[ "$arch" = "source" ]] && [[ -x "$BINDIR/$name" ]] \
 		&& "$BINDIR/$name" --version 2>/dev/null | grep -qF "$ver"; then
 		echo "install-ci-tools: $name $ver already built -> $BINDIR/$name" >&2
 		continue
@@ -144,8 +146,8 @@ for name in "${NAMES[@]}"; do
 		source) archive="$CACHE/$name-$ver-$(basename "$url")" ;;
 		*)      archive="$CACHE/$(basename "$url")" ;;
 	esac
-	if [ ! -f "$archive" ]; then
-		if [ -n "${CI_TOOLS_OFFLINE:-}" ]; then
+	if [[ ! -f "$archive" ]]; then
+		if [[ -n "${CI_TOOLS_OFFLINE:-}" ]]; then
 			echo "install-ci-tools: offline and $archive not cached" >&2; exit 3
 		fi
 		echo "install-ci-tools: downloading $name ($url)" >&2
@@ -154,7 +156,7 @@ for name in "${NAMES[@]}"; do
 	fi
 
 	got="$(sha256sum "$archive" | cut -d' ' -f1)"
-	if [ "$got" != "$sha" ]; then
+	if [[ "$got" != "$sha" ]]; then
 		echo "install-ci-tools: SHA-256 mismatch for $name" >&2
 		echo "  manifest: $sha" >&2
 		echo "  computed: $got" >&2
@@ -163,11 +165,11 @@ for name in "${NAMES[@]}"; do
 	fi
 
 	tmp="$(mktemp -d)"
-	if [ "$arch" = "source" ]; then
+	if [[ "$arch" = "source" ]]; then
 		command -v cargo >/dev/null 2>&1 || {
 			echo "install-ci-tools: $name needs a source build on $HOSTARCH but cargo is not on PATH" >&2
 			rm -rf "$tmp"; exit 3; }
-		if ! tar -C "$tmp" -xf "$archive" || [ ! -d "$tmp/$src" ]; then
+		if ! tar -C "$tmp" -xf "$archive" || [[ ! -d "$tmp/$src" ]]; then
 			echo "install-ci-tools: $name source archive has no directory '$src'" >&2
 			rm -rf "$tmp"; exit 1
 		fi
@@ -179,7 +181,7 @@ for name in "${NAMES[@]}"; do
 		# explicitly, since outside the repo rustup may have no default.
 		if command -v rustup >/dev/null 2>&1; then
 			tc="$(cd "$ROOT" && rustup show active-toolchain 2>/dev/null | awk 'NR==1{print $1}')"
-			[ -n "$tc" ] && export RUSTUP_TOOLCHAIN="$tc"
+			[[ -n "$tc" ]] && export RUSTUP_TOOLCHAIN="$tc"
 		fi
 		if ! (cd "$tmp/$src" && cargo install --locked ${CI_TOOLS_OFFLINE:+--offline} --quiet \
 			--path . --root "$tmp/inst") >&2; then

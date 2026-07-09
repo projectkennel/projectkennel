@@ -33,7 +33,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 UID_NUM="$(id -u)"
-if [ "$UID_NUM" = "0" ]; then
+if [[ "$UID_NUM" = "0" ]]; then
     echo "Run as the ordinary operator, not root — this proves the UNPRIVILEGED vertical." >&2
     exit 2
 fi
@@ -49,15 +49,15 @@ INIT_DEST_CREATED=""  # set when WE created it (remove on exit)
 
 cleanup() {
     # Unload the temporary AppArmor profile (best-effort).
-    if [ -f "$AA_PROFILE_FILE" ]; then
+    if [[ -f "$AA_PROFILE_FILE" ]]; then
         sudo apparmor_parser -R "$AA_PROFILE_FILE" 2>/dev/null || true
         rm -f "$AA_PROFILE_FILE"
     fi
     # Restore (or remove) the root-owned kennel-bin-init we installed for the run.
-    if [ -n "$INIT_DEST_CREATED" ]; then
+    if [[ -n "$INIT_DEST_CREATED" ]]; then
         sudo rm -f "$INIT_DEST" 2>/dev/null || true
         echo "  removed test $INIT_DEST"
-    elif [ -n "$INIT_DEST_BACKUP" ]; then
+    elif [[ -n "$INIT_DEST_BACKUP" ]]; then
         sudo cp -f "$INIT_DEST_BACKUP" "$INIT_DEST" 2>/dev/null || true
         rm -f "$INIT_DEST_BACKUP"
         echo "  restored original $INIT_DEST"
@@ -78,7 +78,7 @@ cargo build -p kennel-privhelper --features bpf-egress
 
 PRIVHELPER="$REPO_ROOT/target/debug/kennel-privhelper"
 TESTBIN="$(ls -t "$REPO_ROOT"/target/debug/deps/e2e-* 2>/dev/null | grep -v '\.d$' | head -1)"
-if [ -z "${TESTBIN:-}" ] || [ ! -x "$TESTBIN" ]; then
+if [[ -z "${TESTBIN:-}" ]] || [[ ! -x "$TESTBIN" ]]; then
     echo "could not locate the compiled e2e test binary under target/debug/deps/" >&2
     exit 1
 fi
@@ -101,12 +101,12 @@ echo "== root-owned kennel-bin-init at $INIT_DEST (sudo) =="
 # root-owned copy at the default libexec path (Deployment::kennel_bin_init, no system.toml needed).
 # Back up any pre-existing install and restore it on exit.
 INIT_SRC="$REPO_ROOT/target/debug/kennel-bin-init"
-if [ ! -x "$INIT_SRC" ]; then
+if [[ ! -x "$INIT_SRC" ]]; then
     echo "kennel-bin-init not built at $INIT_SRC" >&2
     exit 1
 fi
 sudo mkdir -p "$(dirname "$INIT_DEST")"
-if [ -e "$INIT_DEST" ]; then
+if [[ -e "$INIT_DEST" ]]; then
     INIT_DEST_BACKUP="$(mktemp /tmp/kennel-e2e-init.XXXXXX)"
     sudo cp -f "$INIT_DEST" "$INIT_DEST_BACKUP"
     echo "  backed up existing $INIT_DEST"
@@ -143,7 +143,7 @@ profile ${AA_PROFILE_NAME}_privhelper $PRIVHELPER flags=(unconfined) {
   userns,
 }
 EOF
-if [ -e /sys/kernel/security/apparmor ]; then
+if [[ -e /sys/kernel/security/apparmor ]]; then
     sudo apparmor_parser -r -W "$AA_PROFILE_FILE"
     echo "  loaded $AA_PROFILE_NAME + _privhelper over the test binary and privhelper"
 else

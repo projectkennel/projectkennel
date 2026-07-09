@@ -32,7 +32,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/dist/release"
 ARCHES=()
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--out) OUT="${2:?--out needs a directory}"; shift 2 ;;
 		--arch) ARCHES+=("${2:?--arch needs a target triple}"); shift 2 ;;
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
 	esac
 done
 # Default: both supported targets, always.
-[ "${#ARCHES[@]}" -gt 0 ] || ARCHES=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)
+[[ "${#ARCHES[@]}" -gt 0 ]] || ARCHES=(x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu)
 
 VERSION="$(grep -m1 '^version = ' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
 SHA="$(git -C "$ROOT" log -1 --format=%h 2>/dev/null || echo nogit)"
@@ -70,7 +70,7 @@ build_arch() {
 	# makes the build host-arch-agnostic — it works building x86_64 on aarch64 and vice versa — where
 	# .cargo/config.toml only pins the aarch64 linker (correct on an x86_64 host, but native-on-aarch64
 	# left x86_64 to fall through to `cc`). A native target sets nothing and uses the default.
-	if [ "$arch" != "$(uname -m)" ]; then
+	if [[ "$arch" != "$(uname -m)" ]]; then
 		local lvar="CARGO_TARGET_$(printf '%s' "$triple" | tr 'a-z.-' 'A-Z__')_LINKER"
 		export "$lvar=${arch}-linux-gnu-gcc"
 		echo "==> [$triple] cross-link: $lvar=${arch}-linux-gnu-gcc" >&2

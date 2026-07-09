@@ -29,7 +29,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TRIPLE="$(uname -m)-unknown-linux-gnu"
 STAGE_ARGS=()
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--with-test-bins) STAGE_ARGS+=(--with-test-bins); shift ;;
 		-h|--help) sed -n '2,26p' "$0"; exit 0 ;;

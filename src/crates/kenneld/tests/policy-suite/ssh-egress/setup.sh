@@ -17,7 +17,7 @@ mkdir -p "$SCRATCH"
 
 command -v sshd >/dev/null 2>&1 || SSHD=/usr/sbin/sshd
 SSHD="${SSHD:-$(command -v sshd || echo /usr/sbin/sshd)}"
-[ -x "$SSHD" ] || { echo "no sshd at $SSHD" >&2; exit 2; }
+[[ -x "$SSHD" ]] || { echo "no sshd at $SSHD" >&2; exit 2; }
 for t in ssh ssh-keygen python3; do command -v "$t" >/dev/null || { echo "no $t" >&2; exit 2; }; done
 
 DEST_USER="$(id -un)"

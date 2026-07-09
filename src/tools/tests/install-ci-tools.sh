@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 fail=0
 check() { # <desc> <expected-rc> <actual-rc>
-	if [ "$2" -eq "$3" ]; then pass=$((pass + 1)); else
+	if [[ "$2" -eq "$3" ]]; then pass=$((pass + 1)); else
 		fail=$((fail + 1))
 		echo "FAIL: $1 (wanted rc $2, got $3)" >&2
 	fi
@@ -61,14 +61,14 @@ run() { # sets global rc; installs into a fresh bindir
 write_manifest "$good_sha" "remco"
 run
 check "matching hash installs" 0 "$rc"
-[ -x "$root/bin/faketool" ] && bp=0 || bp=1
+[[ -x "$root/bin/faketool" ]] && bp=0 || bp=1
 check "installed binary is present and executable" 0 "$bp"
 
 # 2. Hash mismatch: refuses (exit 1), no binary placed.
 write_manifest "0000000000000000000000000000000000000000000000000000000000000000" "remco"
 run
 check "hash mismatch refuses" 1 "$rc"
-[ -x "$root/bin/faketool" ] && bp=1 || bp=0
+[[ -x "$root/bin/faketool" ]] && bp=1 || bp=0
 check "no binary placed on mismatch" 0 "$bp"
 # the cache copy is restored for later cases (mismatch deletes it)
 cp "$TMP/faketool-1.0.tar.gz" "$root/cache/faketool-1.0.tar.gz"
@@ -101,7 +101,7 @@ check "PENDING approval still installs (warns only)" 0 "$rc"
 write_manifest "$good_sha" "remco" "otherarch"
 run
 check "no artifact for host arch refuses" 2 "$rc"
-[ -x "$root/bin/faketool" ] && bp=1 || bp=0
+[[ -x "$root/bin/faketool" ]] && bp=1 || bp=0
 check "no binary placed when arch is unserved" 0 "$bp"
 
 # 8. Two artifacts: the non-matching arch's entry (even with a refusal-grade
@@ -133,7 +133,7 @@ if command -v cargo >/dev/null 2>&1; then
 	# toolchain — pin this shell to the repo's (the test runs from the repo).
 	if command -v rustup >/dev/null 2>&1; then
 		tc="$(rustup show active-toolchain 2>/dev/null | awk 'NR==1{print $1}')"
-		[ -n "$tc" ] && export RUSTUP_TOOLCHAIN="$tc"
+		[[ -n "$tc" ]] && export RUSTUP_TOOLCHAIN="$tc"
 	fi
 	srcdir="$TMP/srcbuild/faketool-1.0"
 	mkdir -p "$srcdir/src"
@@ -161,11 +161,11 @@ if command -v cargo >/dev/null 2>&1; then
 	EOF
 	run
 	check "source fallback builds and installs" 0 "$rc"
-	[ -x "$root/bin/faketool" ] && bp=0 || bp=1
+	[[ -x "$root/bin/faketool" ]] && bp=0 || bp=1
 	check "source-built binary is present and executable" 0 "$bp"
 else
 	echo "skip: cargo not on PATH — source-fallback build not exercised" >&2
 fi
 
 echo "install-ci-tools tests: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[[ "$fail" -eq 0 ]]

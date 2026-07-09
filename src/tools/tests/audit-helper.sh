@@ -14,7 +14,7 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 fail=0
 check() { # <desc> <0|1 expected-rc> <actual-rc>
-	if [ "$2" -eq "$3" ]; then pass=$((pass + 1)); else
+	if [[ "$2" -eq "$3" ]]; then pass=$((pass + 1)); else
 		fail=$((fail + 1))
 		echo "FAIL: $1 (wanted rc $2, got $3)" >&2
 	fi
@@ -37,7 +37,7 @@ check "draft emits the exact-pin version" 0 "$vp"
 # draft refuses when the crate is not vendored.
 rc=0
 KENNEL_ROOT="$TMP" "$HELPER" draft missing 9.9.9 >/dev/null 2>&1 || rc=$?
-[ "$rc" -ne 0 ] && rc=1
+[[ "$rc" -ne 0 ]] && rc=1
 check "draft refuses an un-vendored crate" 1 "$rc"
 
 # bad arg count -> usage (exit 2).
@@ -46,4 +46,4 @@ KENNEL_ROOT="$TMP" "$HELPER" draft foo >/dev/null 2>&1 || rc=$?
 check "usage on bad arg count" 2 "$rc"
 
 echo "audit-helper tests: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[[ "$fail" -eq 0 ]]

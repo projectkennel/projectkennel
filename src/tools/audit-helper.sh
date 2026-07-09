@@ -56,7 +56,7 @@ cmd_fetch() {
 	local name="$1" ver="$2"
 	mkdir -p "$ARCHIVE"
 	local dest="$ARCHIVE/$name-$ver.crate"
-	if [ -e "$dest" ]; then
+	if [[ -e "$dest" ]]; then
 		echo "audit-helper: $dest exists; updates are an explicit rm + re-fetch" >&2
 		exit 1
 	fi
@@ -68,7 +68,7 @@ cmd_fetch() {
 cmd_confirm() {
 	local name="$1" ver="$2"
 	local dest="$ARCHIVE/$name-$ver.crate"
-	[ -f "$dest" ] || {
+	[[ -f "$dest" ]] || {
 		echo "audit-helper: $dest not vendored yet (run 'fetch' first)" >&2
 		exit 1
 	}
@@ -90,7 +90,7 @@ cmd_confirm() {
 cmd_draft() {
 	local name="$1" ver="$2"
 	local dest="$ARCHIVE/$name-$ver.crate"
-	[ -f "$dest" ] || {
+	[[ -f "$dest" ]] || {
 		echo "audit-helper: $dest not vendored yet (run 'fetch' first)" >&2
 		exit 1
 	}
@@ -129,7 +129,7 @@ cmd_draft() {
 	EOF
 }
 
-[ $# -eq 3 ] || usage
+[[ $# -eq 3 ]] || usage
 case "$1" in
 fetch) cmd_fetch "$2" "$3" ;;
 confirm) cmd_confirm "$2" "$3" ;;

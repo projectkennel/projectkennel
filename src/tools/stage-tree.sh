@@ -41,7 +41,7 @@ DEST=""
 REL="$ROOT/target/release"
 STAT="$ROOT/target/$HOST_TRIPLE/release"
 WITH_TEST_BINS=0
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--dest) DEST="${2:?--dest needs a directory}"; shift 2 ;;
 		--rel)  REL="${2:?--rel needs a directory}"; shift 2 ;;
@@ -51,7 +51,7 @@ while [ $# -gt 0 ]; do
 		*) echo "stage-tree.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$DEST" ] || { echo "stage-tree.sh: --dest is required" >&2; exit 2; }
+[[ -n "$DEST" ]] || { echo "stage-tree.sh: --dest is required" >&2; exit 2; }
 
 # The payload's binaries, grouped by their INSTALL DESTINATION (the three-dir layout). The build
 # puts host-dynamic bins in REL (host glibc) and in-kennel static bins in STAT (`+crt-static`: they
@@ -99,7 +99,7 @@ for f in "$SRC_ROOT"/src/facades/*.sh; do [ -f "$f" ] && install -m 0755 "$f" "$
 # The standalone policy-authoring tool (`kennel-compose`): a host-side CLI on PATH, disjunct from
 # the `kennel` dispatch tree and the runtime — dynamic (host glibc), like the other host tools.
 install -m 0755 "$REL/kennel-compose" "$DEST/pathbin/kennel-compose"
-if [ "$WITH_TEST_BINS" = 1 ]; then
+if [[ "$WITH_TEST_BINS" = 1 ]]; then
 	for b in $TEST_BINS; do install -m 0755 "$STAT/$b" "$DEST/facades/$b"; done
 fi
 
@@ -109,29 +109,29 @@ install -m 0755 "$ROOT/src/tools/install.sh" "$DEST/install.sh"
 # kennel-sshd.conf) — all of dist/ except the release/ output dir, so this never drifts.
 install -d "$DEST/dist"
 for item in "$ROOT"/dist/*; do
-	[ "$(basename "$item")" = "release" ] && continue
+	[[ "$(basename "$item")" = "release" ]] && continue
 	cp -a "$item" "$DEST/dist/"
 done
 
 # The trust-store public key(s) — only `*.pub` is ever in the repo (private seeds: MAINTAINERS.md).
 install -d "$DEST/keys"
 for p in "$ROOT"/keys/*.pub; do
-	[ -e "$p" ] || continue
+	[[ -e "$p" ]] || continue
 	install -m 0644 "$p" "$DEST/keys/$(basename "$p")"
 done
 
 # The signed reference templates (policy.toml + meta.toml; not the README) and the composable
 # fragments (policy.toml only). install.sh ships these into the template cascade.
 for d in "$ROOT"/toml/templates/*/; do
-	[ -f "${d}policy.toml" ] || continue
+	[[ -f "${d}policy.toml" ]] || continue
 	n="$(basename "$d")"
 	for f in "${d}"*.toml; do
-		[ -e "$f" ] || continue
+		[[ -e "$f" ]] || continue
 		install -D -m 0644 "$f" "$DEST/templates/$n/$(basename "$f")"
 	done
 done
 for d in "$ROOT"/toml/fragments/*/; do
-	[ -f "${d}policy.toml" ] || continue
+	[[ -f "${d}policy.toml" ]] || continue
 	install -D -m 0644 "${d}policy.toml" "$DEST/fragments/$(basename "$d")/policy.toml"
 done
 
@@ -140,17 +140,17 @@ done
 # install_reference_policies compiles each to a host-signed settled artefact under
 # /etc/kennel/policies (the loader pin is host-specific, so a settled policy cannot be shipped).
 for d in "$ROOT"/toml/policies/*/; do
-	[ -f "${d}policy.toml" ] || continue
+	[[ -f "${d}policy.toml" ]] || continue
 	install -D -m 0644 "${d}policy.toml" "$DEST/policies/$(basename "$d")/policy.toml"
 done
 for d in "$ROOT"/toml/policies/providers/*/; do
-	[ -f "${d}policy.toml" ] || continue
+	[[ -f "${d}policy.toml" ]] || continue
 	install -D -m 0644 "${d}policy.toml" "$DEST/policies/providers/$(basename "$d")/policy.toml"
 done
 
 # The committed man pages (gen-man output; man/README.md).
 for p in "$ROOT"/man/*.[1-9]; do
-	[ -e "$p" ] || continue
+	[[ -e "$p" ]] || continue
 	install -D -m 0644 "$p" "$DEST/man/$(basename "$p")"
 done
 

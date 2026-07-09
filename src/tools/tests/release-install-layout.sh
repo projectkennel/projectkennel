@@ -28,7 +28,7 @@ host_rel_bins="$(sed -n 's/^HOST_REL_BINS="\(.*\)"$/\1/p' "$stage_tree")"
 host_stat_bins="$(sed -n 's/^HOST_STAT_BINS="\(.*\)"$/\1/p' "$stage_tree")"
 facade_stat_bins="$(sed -n 's/^FACADE_STAT_BINS="\(.*\)"$/\1/p' "$stage_tree")"
 test_bins="$(sed -n 's/^TEST_BINS="\(.*\)"$/\1/p' "$stage_tree")"
-if [ -z "$host_rel_bins" ] || [ -z "$host_stat_bins" ] || [ -z "$facade_stat_bins" ] || [ -z "$test_bins" ]; then
+if [[ -z "$host_rel_bins" ]] || [[ -z "$host_stat_bins" ]] || [[ -z "$facade_stat_bins" ]] || [[ -z "$test_bins" ]]; then
 	echo "FAIL: could not read HOST_REL_BINS/HOST_STAT_BINS/FACADE_STAT_BINS/TEST_BINS from $stage_tree" >&2
 	exit 1
 fi
@@ -49,11 +49,11 @@ payload="$tmp/payload"
 bash "$stage_tree" --dest "$payload" --rel "$fake_rel" --stat "$fake_stat"
 
 # The payload's three binary subdirs, installer at the root, and NO mirror of the source tree.
-[ -x "$payload/install.sh" ] || { echo "FAIL: stage-tree did not place install.sh at the payload root" >&2; exit 1; }
+[[ -x "$payload/install.sh" ]] || { echo "FAIL: stage-tree did not place install.sh at the payload root" >&2; exit 1; }
 for d in bin facades pathbin; do
-	[ -d "$payload/$d" ] || { echo "FAIL: stage-tree did not create $d/" >&2; exit 1; }
+	[[ -d "$payload/$d" ]] || { echo "FAIL: stage-tree did not create $d/" >&2; exit 1; }
 done
-if [ -e "$payload/src" ] || [ -e "$payload/target" ]; then
+if [[ -e "$payload/src" ]] || [[ -e "$payload/target" ]]; then
 	echo "FAIL: payload mirrors the source tree (src/ or target/) — it must be flat" >&2
 	exit 1
 fi
@@ -61,7 +61,7 @@ fi
 # Every binary install.sh installs must resolve to a file the payload actually contains.
 status=0
 while read -r src; do
-	[ -e "$src" ] || { echo "FAIL: install references a missing payload binary: ${src#"$payload"/}" >&2; status=1; }
+	[[ -e "$src" ]] || { echo "FAIL: install references a missing payload binary: ${src#"$payload"/}" >&2; status=1; }
 done < <(
 	bash "$payload/install.sh" --dry-run 2>/dev/null \
 		| grep -oE "$payload/(bin|facades|pathbin)/[^ ]+" | sort -u
@@ -73,7 +73,7 @@ check_dir() {
 	local staged expected
 	staged="$(cd "$payload/$dir" && ls | sort)"
 	expected="$(printf '%s' "$expected_list" | tr ' ' '\n' | sed '/^$/d' | sort)"
-	if [ "$staged" != "$expected" ]; then
+	if [[ "$staged" != "$expected" ]]; then
 		echo "FAIL: staged $dir/ does not match its source-of-truth set" >&2
 		diff <(printf '%s\n' "$expected") <(printf '%s\n' "$staged") >&2 || true
 		status=1
@@ -85,7 +85,7 @@ check_dir pathbin "kennel kennel-compose"
 
 # The integrity manifest must cover EVERYTHING shipped — and the verify must actually pass from the
 # payload root. Especially the trust-store public key(s): the anchor the signature chain hangs from.
-[ -f "$payload/SHA256SUMS" ] || { echo "FAIL: stage-tree did not write a SHA256SUMS manifest" >&2; exit 1; }
+[[ -f "$payload/SHA256SUMS" ]] || { echo "FAIL: stage-tree did not write a SHA256SUMS manifest" >&2; exit 1; }
 if ! ( cd "$payload" && sha256sum -c SHA256SUMS >/dev/null 2>&1 ); then
 	echo "FAIL: SHA256SUMS does not verify against the staged payload" >&2
 	status=1
@@ -102,14 +102,14 @@ fi
 # A release payload must NOT ship the in-cage TEST drivers — they are the test suite, staged only
 # under --with-test-bins (for the spawn e2e/bench), never carried by a real release.
 for b in $test_bins; do
-	[ -e "$payload/facades/$b" ] && { echo "FAIL: release payload ships a test-only binary: $b" >&2; status=1; }
+	[[ -e "$payload/facades/$b" ]] && { echo "FAIL: release payload ships a test-only binary: $b" >&2; status=1; }
 done
 # …and --with-test-bins must add exactly those drivers, into facades/ (they run in-cage).
 payload_t="$tmp/payload-test"
 bash "$stage_tree" --dest "$payload_t" --rel "$fake_rel" --stat "$fake_stat" --with-test-bins
 for b in $test_bins; do
-	[ -e "$payload_t/facades/$b" ] || { echo "FAIL: --with-test-bins did not stage the test driver $b into facades/" >&2; status=1; }
+	[[ -e "$payload_t/facades/$b" ]] || { echo "FAIL: --with-test-bins did not stage the test driver $b into facades/" >&2; status=1; }
 done
 
-[ "$status" -eq 0 ] && echo "ok: stage-tree.sh payload and install.sh agree (three-dir layout, installer at root, full SHA256SUMS incl. the trust key; test drivers excluded from a release)"
+[[ "$status" -eq 0 ]] && echo "ok: stage-tree.sh payload and install.sh agree (three-dir layout, installer at root, full SHA256SUMS incl. the trust key; test drivers excluded from a release)"
 exit "$status"

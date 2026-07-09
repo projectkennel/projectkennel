@@ -18,8 +18,8 @@ fail=0
 run_case() {
 	local want="$1" name="$2" root="$3" got=0
 	KENNEL_VERIFY_ROOT="$root" "$VERIFY" >/dev/null 2>&1 || got=$?
-	[ "$got" -ne 0 ] && got=1
-	if [ "$got" -eq "$want" ]; then
+	[[ "$got" -ne 0 ]] && got=1
+	if [[ "$got" -eq "$want" ]]; then
 		pass=$((pass + 1))
 	else
 		fail=$((fail + 1))
@@ -32,7 +32,7 @@ run_case() {
 make_fixture() {
 	local dir="$1" mode="$2"
 	mkdir -p "$dir/src/vendor" "$dir/supply-chain"
-	if [ "$mode" = "empty" ]; then
+	if [[ "$mode" = "empty" ]]; then
 		: >"$dir/supply-chain/CHECKSUMS.toml"
 		cat >"$dir/Cargo.lock" <<-EOF
 			version = 4
@@ -47,9 +47,9 @@ make_fixture() {
 	local sha
 	sha="$(sha256sum "$dir/src/vendor/foo-1.0.0.crate" | cut -d' ' -f1)"
 	local msha="$sha"
-	[ "$mode" = "badhash" ] && msha="0000000000000000000000000000000000000000000000000000000000000000"
-	[ "$mode" = "nofile" ] && rm -f "$dir/src/vendor/foo-1.0.0.crate"
-	[ "$mode" = "extra" ] && printf 'orphan\n' >"$dir/src/vendor/bar-2.0.0.crate"
+	[[ "$mode" = "badhash" ]] && msha="0000000000000000000000000000000000000000000000000000000000000000"
+	[[ "$mode" = "nofile" ]] && rm -f "$dir/src/vendor/foo-1.0.0.crate"
+	[[ "$mode" = "extra" ]] && printf 'orphan\n' >"$dir/src/vendor/bar-2.0.0.crate"
 
 	cat >"$dir/supply-chain/CHECKSUMS.toml" <<-EOF
 		[crate."foo"]
@@ -60,7 +60,7 @@ make_fixture() {
 	EOF
 
 	local lockver="1.0.0"
-	[ "$mode" = "lockunpinned" ] && lockver="9.9.9"
+	[[ "$mode" = "lockunpinned" ]] && lockver="9.9.9"
 	cat >"$dir/Cargo.lock" <<-EOF
 		version = 4
 		[[package]]
@@ -88,4 +88,4 @@ done
 run_case 0 "real-repo-empty" "$(git -C "$HERE" rev-parse --show-toplevel)"
 
 echo "verify-checksums tests: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[[ "$fail" -eq 0 ]]

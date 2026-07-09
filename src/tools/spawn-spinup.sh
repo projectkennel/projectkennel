@@ -40,11 +40,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 UID_NUM="$(id -u)"
-[ "$UID_NUM" = "0" ] && { echo "run as the ordinary operator, not root" >&2; exit 2; }
+[[ "$UID_NUM" = "0" ]] && { echo "run as the ordinary operator, not root" >&2; exit 2; }
 
 DO_INSTALL=1
 N=20
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-install) DO_INSTALL=0 ;;
         [0-9]*) N="$1" ;;
@@ -55,7 +55,7 @@ done
 
 # The `kennel` shim on PATH (W10: /usr/bin/kennel), falling back to PATH lookup.
 KENNEL="/usr/bin/kennel"
-[ -x "$KENNEL" ] || KENNEL="$(command -v kennel || true)"
+[[ -x "$KENNEL" ]] || KENNEL="$(command -v kennel || true)"
 SYSTEM_TOML="/etc/kennel/system.toml"
 CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
 KEY_DIR="$CFG/keys"
@@ -68,9 +68,9 @@ WORKLOAD_TEMPLATES=("true-tool" "pyhello-tool")
 SYSTEM_TOML_SAVED=""; SYSTEM_TOML_EXISTED=0
 WORK=""
 cleanup() {
-    [ -n "$WORK" ] && rm -rf "$WORK"
+    [[ -n "$WORK" ]] && rm -rf "$WORK"
     rm -rf "$TPL_DIR/true-tool" "$TPL_DIR/pyhello-tool" 2>/dev/null || true
-    if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
+    if [[ "$SYSTEM_TOML_EXISTED" = 1 ]]; then
         printf '%s' "$SYSTEM_TOML_SAVED" | sudo tee "$SYSTEM_TOML" >/dev/null 2>&1 || true
     else
         sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
@@ -80,7 +80,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 1. Build + install the real thing (so the tracer carries the [t=] stamp), unless --no-install.
-if [ "$DO_INSTALL" = 1 ]; then
+if [[ "$DO_INSTALL" = 1 ]]; then
     echo "== build + install (dev-install.sh) =="
     # dev-install.sh owns the build routing and hands off to the same stage-tree.sh +
     # install.sh a real install uses. --with-test-bins: the
@@ -88,18 +88,18 @@ if [ "$DO_INSTALL" = 1 ]; then
     bash "$REPO_ROOT/src/tools/dev-install.sh" --with-test-bins >/dev/null \
         || { echo "dev-install failed" >&2; exit 1; }
 fi
-[ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
+[[ -x "$KENNEL" ]] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
 # 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
 #    reserved subnet is uid-derived, so there is no allocation file to provision).
-[ -f "$SUITE_KEY" ] || "$KENNEL" key generate kennel-suite >/dev/null
+[[ -f "$SUITE_KEY" ]] || "$KENNEL" key generate kennel-suite >/dev/null
 
 # 3. Compile + SIGN the two spawn templates to their settled form (suite key the daemon trusts) and
 #    install into the standard user cascade — exactly the spawn-roundtrip case's fixture path.
 echo "== compiling + signing spawn templates (true-tool, pyhello-tool) =="
 for t in true-tool pyhello-tool; do
     SRC="/usr/lib/kennel/templates/$t/policy.toml"
-    [ -f "$SRC" ] || { echo "template $t not installed at $SRC (install.sh ships the reference templates)" >&2; exit 2; }
+    [[ -f "$SRC" ]] || { echo "template $t not installed at $SRC (install.sh ships the reference templates)" >&2; exit 2; }
     mkdir -p "$TPL_DIR/$t"
     "$KENNEL" policy compile "$SRC" --key "$SUITE_KEY" --trust-dir "$KEY_DIR" --no-lock \
         --output "$TPL_DIR/$t/$t.settled.toml" >/dev/null
@@ -147,7 +147,7 @@ if sudo test -e "$SYSTEM_TOML"; then SYSTEM_TOML_EXISTED=1; SYSTEM_TOML_SAVED="$
 systemctl --user restart kenneld.service 2>/dev/null || systemctl --user start kenneld.service
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID_NUM}/kennel/control.sock"
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && break; sleep 0.1; done
-[ -S "$SOCK" ] || { echo "kenneld.service did not bind $SOCK" >&2; exit 1; }
+[[ -S "$SOCK" ]] || { echo "kenneld.service did not bind $SOCK" >&2; exit 1; }
 
 # median + p90 of a file of integer nanoseconds, formatted ms (gawk asort).
 stats() {

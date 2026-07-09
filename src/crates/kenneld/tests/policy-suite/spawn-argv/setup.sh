@@ -17,9 +17,9 @@ SUITE_KEY="$CFG/keys/kennel-suite"
 SRC="/usr/lib/kennel/templates/argv-tool/policy.toml"   # the installed reference-template source
 OUT="$CFG/templates/argv-tool/argv-tool.settled.toml"   # the standard user template path
 
-[ -x "$KENNEL" ]    || { echo "no installed kennel at $KENNEL (run policy-e2e.sh without --no-install)" >&2; exit 2; }
-[ -f "$SUITE_KEY" ] || { echo "no suite key at $SUITE_KEY" >&2; exit 2; }
-[ -f "$SRC" ]       || { echo "argv-tool not installed at $SRC (install.sh ships the reference templates)" >&2; exit 2; }
+[[ -x "$KENNEL" ]]    || { echo "no installed kennel at $KENNEL (run policy-e2e.sh without --no-install)" >&2; exit 2; }
+[[ -f "$SUITE_KEY" ]] || { echo "no suite key at $SUITE_KEY" >&2; exit 2; }
+[[ -f "$SRC" ]]       || { echo "argv-tool not installed at $SRC (install.sh ships the reference templates)" >&2; exit 2; }
 
 mkdir -p "$(dirname "$OUT")"
 # Compile the installed source; base-confined resolves from the standard template cascade. The

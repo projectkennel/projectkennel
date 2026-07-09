@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROFILE="${KENNEL_PROFILE:-release-with-debuginfo}"
 
 # A source-derived, not wall-clock, timestamp.
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
 	SOURCE_DATE_EPOCH="$(git -C "$ROOT" log -1 --format=%ct 2>/dev/null || echo 0)"
 fi
 export SOURCE_DATE_EPOCH

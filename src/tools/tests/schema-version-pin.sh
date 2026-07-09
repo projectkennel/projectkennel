@@ -24,16 +24,17 @@ schema="schema/policy.toml.schema"
 lock="schema/schema-version.lock"
 version_src="src/crates/kennel-lib-policy/src/lib.rs"
 
-[ -f "$schema" ] || { echo "FAIL: $schema is missing (run gen-schema)" >&2; exit 1; }
+[[ -f "$schema" ]] || { echo "FAIL: $schema is missing (run gen-schema)" >&2; exit 1; }
 
 # The current settled-schema version, read from the source of truth.
 version="$(sed -n 's/^pub const SETTLED_SCHEMA_VERSION: u32 = \([0-9]\+\);$/\1/p' "$version_src")"
-[ -n "$version" ] || { echo "FAIL: could not read SETTLED_SCHEMA_VERSION from $version_src" >&2; exit 1; }
+[[ -n "$version" ]] || { echo "FAIL: could not read SETTLED_SCHEMA_VERSION from $version_src" >&2; exit 1; }
 
 # The schema's structural fingerprint: field names/types/required/enums, with descriptions and titles
 # stripped (a doc edit must not force a version bump) and keys canonically sorted.
 fingerprint() {
-	python3 - "$1" <<'PY'
+	local schema_file="$1"
+	python3 - "$schema_file" <<'PY'
 import json, sys, hashlib
 def strip(o):
     if isinstance(o, dict):
@@ -49,19 +50,19 @@ PY
 
 live="$(fingerprint "$schema")"
 
-[ -f "$lock" ] || { echo "FAIL: $lock is missing — add the line \"$version $live\"" >&2; exit 1; }
+[[ -f "$lock" ]] || { echo "FAIL: $lock is missing — add the line \"$version $live\"" >&2; exit 1; }
 
 # The pinned fingerprint for the current version (append-only: one "<version> <sha256>" line each).
 pinned="$(awk -v v="$version" '$1 == v { print $2 }' "$lock")"
 
-if [ -z "$pinned" ]; then
+if [[ -z "$pinned" ]]; then
 	echo "FAIL: SETTLED_SCHEMA_VERSION is v$version but $lock has no pin for it." >&2
 	echo "      If you bumped the version for a real schema change, append this line to $lock:" >&2
 	echo "          $version $live" >&2
 	exit 1
 fi
 
-if [ "$pinned" != "$live" ]; then
+if [[ "$pinned" != "$live" ]]; then
 	echo "FAIL: the policy schema's shape changed but SETTLED_SCHEMA_VERSION is still v$version." >&2
 	echo "      A new/removed/retyped field is exactly the 0.3.1 drift class. Either:" >&2
 	echo "        (a) it is intentional — BUMP SETTLED_SCHEMA_VERSION in $version_src and append a" >&2

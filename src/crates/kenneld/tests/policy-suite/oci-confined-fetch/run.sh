@@ -46,7 +46,7 @@ if ! "$KENNEL" oci build "$NAME" --image "docker.io/library/busybox:latest" --ke
 fi
 
 # The entry is populated by the confined fetch.
-[ -e "$ENTRY/rootfs/bin/busybox" ] || [ -e "$ENTRY/rootfs/bin/sh" ] || {
+[[ -e "$ENTRY/rootfs/bin/busybox" ]] || [[ -e "$ENTRY/rootfs/bin/sh" ]] || {
     echo "FAIL: rootfs not unpacked at $ENTRY/rootfs"; exit 1; }
 grep -q '"config"' "$ENTRY/config.json" 2>/dev/null || {
     echo "FAIL: config.json missing or not an image config"; exit 1; }
@@ -55,7 +55,7 @@ grep -q "@sha256:" "$ENTRY/digest" 2>/dev/null || {
 
 # Rootless flatten: every unpacked inode is owned by the operator (this uid), not the image's uids.
 owner="$(stat -c '%u' "$ENTRY/rootfs/bin" 2>/dev/null)"
-[ "$owner" = "$(id -u)" ] || { echo "FAIL: rootfs not flattened to the operator uid (got $owner)"; exit 1; }
+[[ "$owner" = "$(id -u)" ]] || { echo "FAIL: rootfs not flattened to the operator uid (got $owner)"; exit 1; }
 
 # Complete the scaffolded run policy's reason, then boot the fetched substrate. The boot's success
 # is its workload EXIT CODE (the suite's contract) — not stdout, which the in-kennel→CLI path does
@@ -66,13 +66,13 @@ sed -i 's|^reason = .*|reason = "e2e: boot a confined-fetched busybox"|' "$ENTRY
 "$KENNEL" policy compile "$ENTRY/policy.toml" --key "$SUITE_KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
     echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
 "$KENNEL" oci run "$NAME" -- /bin/sh -c '
-    [ -e /bin/sh ] || exit 31            # the fetched substrate runs its own shell
-    [ -x /bin/busybox ] || [ -x /bin/cat ] || exit 32
-    [ -e /etc/resolv.conf ] || exit 33   # Kennel /etc is present over the image
+    [[ -e /bin/sh ]] || exit 31            # the fetched substrate runs its own shell
+    [[ -x /bin/busybox ]] || [[ -x /bin/cat ]] || exit 32
+    [[ -e /etc/resolv.conf ]] || exit 33   # Kennel /etc is present over the image
     exit 0
 ' >"$SCRATCH/run.log" 2>&1
 rc=$?
-[ "$rc" = 0 ] || {
+[[ "$rc" = 0 ]] || {
     echo "FAIL: confined-fetched image did not boot cleanly (rc=$rc) — $(tail -3 "$SCRATCH/run.log")"; exit 1; }
 
 echo "CONFINED_FETCH_OK (digest $(cat "$ENTRY/digest"))"

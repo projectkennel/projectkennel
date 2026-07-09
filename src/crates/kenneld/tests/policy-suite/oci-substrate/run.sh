@@ -68,16 +68,16 @@ grep -qE '^readonly = \["/usr"' "$ENTRY/policy.toml" || {
     echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
 "$KENNEL" oci run "$NAME" -- /bin/sh -c '
     uid=$(id -u)
-    [ "$uid" = 12345 ] && { echo "FAIL: image User was honored (uid=$uid)"; exit 21; }
-    [ -n "$uid" ] || { echo "FAIL: no uid"; exit 22; }
+    [[ "$uid" = 12345 ]] && { echo "FAIL: image User was honored (uid=$uid)"; exit 21; }
+    [[ -n "$uid" ]] || { echo "FAIL: no uid"; exit 22; }
     # closure-lock: /usr (and the FHS closure) must be read-only for a non-root image. The write
     # probe runs in a subshell so a failed redirect on a special built-in does not exit our shell.
     if ( echo x > /usr/_e2e_probe ) 2>/dev/null; then echo "FAIL: /usr writable (closure-lock absent)"; exit 23; fi
     # /usr still readable + executable (read+exec kept), or the image could not run at all.
-    [ -x /bin/sh ] || { echo "FAIL: /bin/sh not executable under the lock"; exit 24; }
+    [[ -x /bin/sh ]] || { echo "FAIL: /bin/sh not executable under the lock"; exit 24; }
     # the persona /tmp is writable (the DAC chown), and Kennel/etc wins by layer precedence.
     ( echo x > /tmp/_e2e_probe ) 2>/dev/null || { echo "FAIL: /tmp not writable"; exit 25; }
-    [ -f /etc/resolv.conf ] || { echo "FAIL: Kennel /etc/resolv.conf missing"; exit 26; }
+    [[ -f /etc/resolv.conf ]] || { echo "FAIL: Kennel /etc/resolv.conf missing"; exit 26; }
     echo "OCI_SLICE_OK uid=$uid"
     exit 0
 '

@@ -17,7 +17,7 @@ SUITE_POLICY_REPO="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/policies"
 suite_compile() {
 	local src="$1" name
 	name=$(sed -n -E 's/^(template_)?name = "(.*)"/\2/p' "$src" | head -n1)
-	[ -n "$name" ] || { echo "suite-lib: no name/template_name in $src" >&2; return 1; }
+	[[ -n "$name" ]] || { echo "suite-lib: no name/template_name in $src" >&2; return 1; }
 	rm -rf "${SUITE_POLICY_REPO:?}/$name"
 	mkdir -p "$SUITE_POLICY_REPO/$name"
 	cp "$src" "$SUITE_POLICY_REPO/$name/policy.toml"

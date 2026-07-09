@@ -24,8 +24,8 @@ expect() {
 	local got=0
 	"$HOOK" "$file" >/dev/null 2>&1 || got=$?
 	# Normalise any nonzero to 1 (we only care accept vs reject).
-	[ "$got" -ne 0 ] && got=1
-	if [ "$got" -eq "$want" ]; then
+	[[ "$got" -ne 0 ]] && got=1
+	if [[ "$got" -eq "$want" ]]; then
 		pass=$((pass + 1))
 	else
 		fail=$((fail + 1))
@@ -61,4 +61,4 @@ expect 1 "body line too long" "docs: tweak
 $(printf 'y%.0s' $(seq 1 120))"
 
 echo "commit-msg tests: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[[ "$fail" -eq 0 ]]
