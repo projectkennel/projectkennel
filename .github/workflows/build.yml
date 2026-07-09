@@ -5,6 +5,10 @@ on:
       - main
   pull_request:
     types: [opened, synchronize, reopened]
+# The scan reads the tree and talks to SonarCloud via SONAR_TOKEN; the GITHUB_TOKEN needs
+# nothing beyond checkout.
+permissions:
+  contents: read
 jobs:
   sonarqube:
     name: SonarQube
