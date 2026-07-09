@@ -1,16 +1,16 @@
 .TH "KENNEL-POLICY" "1" "" "Project Kennel" "User Commands"
 .SH NAME
-kennel\-policy \- author, inspect, compile, and sign Project Kennel policies
+kennel\-policy \- author, inspect, compile, and check Project Kennel policies (the leaf house)
 .SH SYNOPSIS
 \fBkennel policy\fR \fIsub-verb\fR [\fIargs\fR...]
 .SH DESCRIPTION
-\fBkennel policy\fR is the policy\-authoring noun group of \fBkennel\fR(1). A policy is a TOML file (see \fBpolicy.toml\fR(5)) that inherits from a signed template chain and may compose signed fragments. These sub\-verbs resolve, check, compile, and sign policies; none of them need the \fBkenneld\fR(8) daemon.
+\fBkennel policy\fR is the policy\-authoring noun group of \fBkennel\fR(1). A policy is a TOML file (see \fBpolicy.toml\fR(5)) that inherits from a signed template chain and may compose signed fragments. These sub\-verbs resolve, check, and compile policies; none of them need the \fBkenneld\fR(8) daemon. The shared bases a policy inherits from — templates and fragments — are managed by their own noun group, \fBkennel\-template\fR(1).
 .PP
 Compilation resolves the inheritance chain and includes, verifies every referenced artefact's signature and lockfile pin, and emits a signed settled artefact that the daemon enforces at \fBkennel run\fR time.
 .SH COMMANDS
 .TP
 \fBkennel policy list\fR
-list policies and templates in the search path
+list policies in the search path
 .TP
 \fBkennel policy show <policy> [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
 show what a policy resolves to (the effective policy)
@@ -81,32 +81,6 @@ resolve and check a policy without writing an artefact
 \fB\-\-require\-signed\fR
 Fail unless every referenced artefact is signed.
 .RE
-.RS
-.TP
-\fB\-\-template\-dir D\fR
-Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
-.RE
-.RS
-.TP
-\fB\-\-trust\-dir D\fR
-Add a directory to the signing\-key trust store used while authoring (repeatable).
-.RE
-.TP
-\fBkennel policy sign\-template <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
-sign a source template or fragment (a shared base; use `compile` for your own policy)
-.RS
-.TP
-\fB\-\-key <key>\fR
-The signing key id (required).
-.RE
-.RS
-.TP
-\fB\-\-output <path>\fR
-Write the signed artefact to path.
-.RE
-.TP
-\fBkennel policy lint [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
-check the shipped template corpus for incoherences
 .RS
 .TP
 \fB\-\-template\-dir D\fR
@@ -204,8 +178,5 @@ Resolve and check it without writing an artefact.
 .TP
 \fBkennel policy compile myjob \-\-key my\-key\-2026\fR
 Compile and sign a settled artefact.
-.TP
-\fBkennel policy lint\fR
-Check the shipped template corpus for incoherences.
 .SH SEE ALSO
-\fBkennel\fR(1), \fBpolicy.toml\fR(5), \fBkenneld\fR(8)
+\fBkennel\fR(1), \fBkennel\-template\fR(1), \fBpolicy.toml\fR(5), \fBkenneld\fR(8)

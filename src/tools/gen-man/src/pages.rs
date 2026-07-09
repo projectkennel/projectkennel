@@ -18,6 +18,8 @@ pub enum CommandSource {
     NoCommands,
     /// The top-level `kennel` commands ([`kennel_lib_cli::COMMANDS`]).
     TopLevel,
+    /// The `kennel template` sub-verbs ([`kennel_lib_cli::TEMPLATE_VERBS`]).
+    TemplateVerbs,
     /// The `kennel policy` sub-verbs ([`kennel_lib_cli::POLICY_VERBS`]).
     PolicyVerbs,
 }
@@ -30,6 +32,7 @@ impl CommandSource {
             Self::NoCommands => &[],
             Self::TopLevel => kennel_lib_cli::COMMANDS,
             Self::PolicyVerbs => kennel_lib_cli::POLICY_VERBS,
+            Self::TemplateVerbs => kennel_lib_cli::TEMPLATE_VERBS,
         }
     }
 }
@@ -143,19 +146,20 @@ The CLI talks to the per-user \\fBkenneld\\fR(8) daemon over a control socket; \
 kenneld constructs and supervises the kennel. Policy authoring (compile, sign, \
 validate, lint) is done locally by the CLI and needs no daemon.
 
-Run \\fBkennel \\fIcommand\\fB --help\\fR for a command's usage. The policy \
-sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
+Run \\fBkennel \\fIcommand\\fB --help\\fR for a command's usage. The policy and \
+template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
+\\fBkennel-template\\fR(1).",
         command_source: CommandSource::TopLevel,
         command_options: &[
             ("run", &[
-                ("--key K", "Sign the in-memory compiled policy with key K for the local-dev run loop (auto-compile)."),
                 ("--force", "Override a [workload] pinned argv with a CLI -- command."),
                 ("-- <cmd...>", "The command to run inside the kennel (overrides [workload].argv unless pinned)."),
-                TEMPLATE_DIR_OPT,
-                TRUST_DIR_OPT,
             ]),
             ("policy", &[
-                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, sign-template, lint, risks, diff, inspect."),
+                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, risks, diff, inspect."),
+            ]),
+            ("template", &[
+                ("(sub-verbs)", "See kennel-template(1) for list, show, sign, lint."),
             ]),
             ("keygen", &[
                 ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
@@ -170,7 +174,7 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
             ]),
             ("oci", &[
                 ("build <name> --image <ref>", "Provision a named image store entry: record the provenance digest and scaffold a run policy."),
-                ("run <name> [--key K] [-- <cmd...>]", "Boot a built store entry under its signed policy (the digest is checked against [rootfs].image)."),
+                ("run <name> [-- <cmd...>]", "Boot a built store entry's compiled artefact (the digest is checked against [rootfs].image; compile the store policy first)."),
                 ("revert <name>", "Obliterate the persisted overlay upper (persistence = persist); a no-op for discard/readonly."),
                 ("update <name> -- <ref>", "Replace the image layer: record the new digest, discard the upper (--keep-state to keep)."),
                 ("--force", "Overwrite an existing entry (build) or override a pinned [workload] (run)."),
@@ -183,24 +187,26 @@ sub-verbs have their own page, \\fBkennel-policy\\fR(1).",
             ("~/.config/kennel/config.toml", "User CLI conveniences (search paths). See config.toml(5)."),
         ],
         examples: &[
-            ("kennel run ai-coding-strict -- claude", "Run Claude Code confined by the ai-coding-strict template."),
-            ("kennel run ./policy.toml myjob", "Auto-compile and run a local source policy as kennel 'myjob'."),
+            ("kennel run claude", "Run the shipped claude policy (a settled artefact resolved by name)."),
+            ("kennel policy compile myjob && kennel run myjob", "Compile (= sign) a leaf in the policy repo, then run its settled artefact."),
             ("kennel list", "Show running kennels."),
             ("kennel audit myjob --follow", "Stream myjob's audit log."),
         ],
-        see_also: &["kennel-policy(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)"],
+        see_also: &["kennel-policy(1)", "kennel-template(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)"],
     },
     // -- kennel-policy(1) ---------------------------------------------------
     Page {
         name: "kennel-policy",
         section: 1,
-        summary: "author, inspect, compile, and sign Project Kennel policies",
+        summary: "author, inspect, compile, and check Project Kennel policies (the leaf house)",
         synopsis: "\\fBkennel policy\\fR \\fIsub-verb\\fR [\\fIargs\\fR...]",
         description: "\
 \\fBkennel policy\\fR is the policy-authoring noun group of \\fBkennel\\fR(1). \
 A policy is a TOML file (see \\fBpolicy.toml\\fR(5)) that inherits from a signed \
 template chain and may compose signed fragments. These sub-verbs resolve, check, \
-compile, and sign policies; none of them need the \\fBkenneld\\fR(8) daemon.
+and compile policies; none of them need the \\fBkenneld\\fR(8) daemon. The shared \
+bases a policy inherits from — templates and fragments — are managed by their own \
+noun group, \\fBkennel-template\\fR(1).
 
 Compilation resolves the inheritance chain and includes, verifies every \
 referenced artefact's signature and lockfile pin, and emits a signed settled \
@@ -223,11 +229,6 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
                 TEMPLATE_DIR_OPT,
                 TRUST_DIR_OPT,
             ]),
-            ("sign-template", &[
-                ("--key <key>", "The signing key id (required)."),
-                ("--output <path>", "Write the signed artefact to path."),
-            ]),
-            ("lint", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
             ("risks", &[
                 ("--json", "Emit the structured report (for CI/tooling) instead of the human view."),
                 TEMPLATE_DIR_OPT,
@@ -254,9 +255,49 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
             ("kennel policy generate myjob --from ai-coding-strict", "Scaffold a new leaf policy from a template."),
             ("kennel policy validate myjob", "Resolve and check it without writing an artefact."),
             ("kennel policy compile myjob --key my-key-2026", "Compile and sign a settled artefact."),
-            ("kennel policy lint", "Check the shipped template corpus for incoherences."),
         ],
-        see_also: &["kennel(1)", "policy.toml(5)", "kenneld(8)"],
+        see_also: &["kennel(1)", "kennel-template(1)", "policy.toml(5)", "kenneld(8)"],
+    },
+    // -- kennel-template(1) ---------------------------------------------------
+    Page {
+        name: "kennel-template",
+        section: 1,
+        summary: "inspect and sign Project Kennel templates and fragments (the template house)",
+        synopsis: "\\fBkennel template\\fR \\fIsub-verb\\fR [\\fIargs\\fR...]",
+        description: "\
+\\fBkennel template\\fR is the shared-base noun group of \\fBkennel\\fR(1). A \
+template is a signed source TOML file other policies inherit from (a floor); a \
+fragment is an additive-only piece a policy composes by reference. Neither is ever \
+runnable: the runnable unit is always a leaf policy, authored and compiled in the \
+\\fBkennel-policy\\fR(1) house and run by \\fBkennel run\\fR.
+
+Templates are the security baseline, so template trust is system-level: a \
+template signature verifies against the system trust stores (/etc/kennel/keys and \
+the vendor store), never a user key. Signing appends a [signature] block to the \
+source file, preserving its comments; the reserved-namespace gate (which tier may \
+claim which provides) is enforced by the compiler when a policy resolves against \
+the template.",
+        command_source: CommandSource::TemplateVerbs,
+        command_options: &[
+            ("show", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
+            ("sign", &[
+                ("--key <key>", "The signing key id (required)."),
+                ("--output <path>", "Write the signed artefact to path."),
+            ]),
+            ("lint", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
+        ],
+        fields: &[],
+        exit_status: EXIT_CODES,
+        files: &[
+            ("~/.config/kennel/templates/", "User-tier templates (the cascade's first stop); /etc/kennel and /usr/lib/kennel carry the host and vendor tiers."),
+        ],
+        examples: &[
+            ("kennel template list", "List templates and fragments across the cascade."),
+            ("kennel template show base-confined", "Print the floor a deriving leaf inherits."),
+            ("kennel template sign my-base --key host-key", "Sign a shared base template."),
+            ("kennel template lint", "Check the template corpus for incoherences."),
+        ],
+        see_also: &["kennel(1)", "kennel-policy(1)", "policy.toml(5)"],
     },
     // -- kenneld(8) ---------------------------------------------------------
     Page {

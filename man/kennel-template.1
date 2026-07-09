@@ -1,0 +1,87 @@
+.TH "KENNEL-TEMPLATE" "1" "" "Project Kennel" "User Commands"
+.SH NAME
+kennel\-template \- inspect and sign Project Kennel templates and fragments (the template house)
+.SH SYNOPSIS
+\fBkennel template\fR \fIsub-verb\fR [\fIargs\fR...]
+.SH DESCRIPTION
+\fBkennel template\fR is the shared\-base noun group of \fBkennel\fR(1). A template is a signed source TOML file other policies inherit from (a floor); a fragment is an additive\-only piece a policy composes by reference. Neither is ever runnable: the runnable unit is always a leaf policy, authored and compiled in the \fBkennel\-policy\fR(1) house and run by \fBkennel run\fR.
+.PP
+Templates are the security baseline, so template trust is system\-level: a template signature verifies against the system trust stores (/etc/kennel/keys and the vendor store), never a user key. Signing appends a [signature] block to the source file, preserving its comments; the reserved\-namespace gate (which tier may claim which provides) is enforced by the compiler when a policy resolves against the template.
+.SH COMMANDS
+.TP
+\fBkennel template list\fR
+list templates and fragments in the search path
+.TP
+\fBkennel template show <template> [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+show what a template resolves to (its effective floor)
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
+.TP
+\fBkennel template sign <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
+sign a source template or fragment (use `policy compile` for a policy you run)
+.RS
+.TP
+\fB\-\-key <key>\fR
+The signing key id (required).
+.RE
+.RS
+.TP
+\fB\-\-output <path>\fR
+Write the signed artefact to path.
+.RE
+.TP
+\fBkennel template lint [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
+check the shipped template corpus for incoherences
+.RS
+.TP
+\fB\-\-template\-dir D\fR
+Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
+.RE
+.RS
+.TP
+\fB\-\-trust\-dir D\fR
+Add a directory to the signing\-key trust store used while authoring (repeatable).
+.RE
+.SH EXIT STATUS
+.TP
+\fB0\fR
+Success. For kennel run, the workload's own exit code is passed through (clamped to a byte).
+.TP
+\fB1\fR
+Generic failure: the CLI could not reach kenneld, a file could not be read, or kenneld returned an error.
+.TP
+\fB3\fR
+Policy validation or resolution failure: schema, invariants, template inheritance, or include conflict.
+.TP
+\fB6\fR
+Signature or lockfile\-pin failure during resolution.
+.TP
+\fB7\fR
+kennel policy lint found at least one coherence finding across the template corpus.
+.SH FILES
+.TP
+\fI~/.config/kennel/templates/\fR
+User\-tier templates (the cascade's first stop); /etc/kennel and /usr/lib/kennel carry the host and vendor tiers.
+.SH EXAMPLES
+.TP
+\fBkennel template list\fR
+List templates and fragments across the cascade.
+.TP
+\fBkennel template show base\-confined\fR
+Print the floor a deriving leaf inherits.
+.TP
+\fBkennel template sign my\-base \-\-key host\-key\fR
+Sign a shared base template.
+.TP
+\fBkennel template lint\fR
+Check the template corpus for incoherences.
+.SH SEE ALSO
+\fBkennel\fR(1), \fBkennel\-policy\fR(1), \fBpolicy.toml\fR(5)

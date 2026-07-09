@@ -13,7 +13,7 @@ use std::process::ExitCode;
 // definition for dispatch, `--help`, and the generated man pages); re-exported
 // so the verb modules keep addressing them through `shared`.
 use kennel_lib_cli::{render_commands, CommandSpec};
-pub use kennel_lib_cli::{COMMANDS, POLICY_VERBS};
+pub use kennel_lib_cli::{COMMANDS, POLICY_VERBS, TEMPLATE_VERBS};
 use kennel_lib_control::control::{self, Request};
 use kennel_lib_control::socket;
 
@@ -30,6 +30,17 @@ pub fn print_help() {
 pub fn print_policy_help() {
     println!("usage: kennel policy <verb> [args...]\n\nverbs:");
     print!("{}", render_commands(POLICY_VERBS));
+    println!("\ntemplates and fragments (shared bases) live under `kennel template`.");
+}
+
+/// Render `kennel template` help (its sub-verb list) to stdout.
+pub fn print_template_help() {
+    println!("usage: kennel template <verb> [args...]\n\nverbs:");
+    print!("{}", render_commands(TEMPLATE_VERBS));
+    println!(
+        "\na template is a signed shared base, never runnable; author and run leaves with \
+         `kennel policy` / `kennel run`."
+    );
 }
 
 /// Whether `args` contains a help request (`--help`/`-h`).

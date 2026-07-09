@@ -36,6 +36,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the verbatim operator flow — stage into the user repo, `policy compile`, `run <name>` — so
   the settled pass-through (the production path) is what the whole suite exercises; no
   compile-side flag appears on any `run` invocation anywhere in the tree.
+- **The authoring house splits: `kennel template` beside `kennel policy` (0.7.0 W2).** Templates
+  and fragments — signed shared bases, never runnable — get their own noun group:
+  `kennel template list/show/sign/lint`. Under its own house `sign` is unambiguous, so the
+  `sign-template` workaround name retires (a pointer diagnostic remains for one release, like
+  `sign` before it); `policy lint` moves with the corpus it checks (pointer likewise);
+  `policy list` and `template list` each list their own house. `template show <name>` resolves
+  the template cascade and prints the floor a deriving leaf inherits — the same renderer as
+  `policy show`, which now answers a template name with a cross-house pointer (and vice versa).
+  `policy compile` deliberately still accepts template sources: compiling a template into a
+  settled artefact is the spawn-target flow, not a house violation. New man page
+  `kennel-template(1)`, derived from the CLI definition like the rest.
 
 ## [0.6.0] — 2026-07-06
 
