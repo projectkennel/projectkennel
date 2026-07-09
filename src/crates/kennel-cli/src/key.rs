@@ -917,7 +917,8 @@ fn resign_template(path: &Path, key: &str) -> Result<(), String> {
         .skip(1)
         .filter(|l| !l.trim().is_empty())
         .all(|l| {
-            l.starts_with("algorithm = ") || l.starts_with("key_id = ")
+            l.starts_with("algorithm = ")
+                || l.starts_with("key_id = ")
                 || l.starts_with("signature = ")
         });
     if !tail_is_pure_block {
