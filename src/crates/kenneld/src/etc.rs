@@ -33,20 +33,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 /// The files this module renders, in a stable order. The spawn binds each over
-/// `/etc/<name>` in the kennel's mount namespace.
-pub const FILES: &[&str] = &[
-    "hostname",
-    "hosts",
-    "resolv.conf",
-    "nsswitch.conf",
-    "services",
-    "protocols",
-    "passwd",
-    "group",
-    "host.conf",
-    "profile",
-    "bash.bashrc",
-];
+/// `/etc/<name>` in the kennel's mount namespace. One source with the diagnostics'
+/// synthetic-file exception (`kennel-lib-config`, W7).
+pub const FILES: &[&str] = kennel_lib_config::SYNTHETIC_ETC_FILES;
 
 /// What the synthetic `/etc` is rendered from: the kennel's network identity and
 /// the workload's credentials.
@@ -382,81 +371,12 @@ pub fn materialize_home_dotfiles(
     Ok(binds)
 }
 
-/// The catalogue filename on the etc-binds cascade.
-const ETC_BINDS_FILENAME: &str = "etc-binds.catalog";
-
 /// The vanilla TLS + dynamic-linker `/etc` subtrees that exist on this host.
 ///
-/// The subtrees a confined workload needs for TLS and dynamic linking — the CA-certificate
-/// bundle, the dynamic-linker configuration, and the `update-alternatives` symlink farm — bound
-/// read-only into the constructed `/etc` (§7.4.5; `/etc` itself is never bound wholesale, and the
-/// synthetic libc/NSS files come from [`materialize`]). Returned as the subset present on the host
-/// (cross-distro: Debian `/etc/ssl` vs Red Hat `/etc/pki`).
-///
-/// The set is **not** a baked-in list (that would be a footgun: the operator could neither see nor
-/// tune what the view exposes, and could only subtract an invisible default). It loads from the
-/// `etc-binds.catalog` **vendor + system** cascade — `/usr/lib/kennel` (the package default) then
-/// `/etc/kennel` (admin) — composed additively (a line adds a subtree, a leading `-` prunes one).
-/// There is **no user layer**: widening this binds host paths into kennels, a capability, so it is
-/// integrity-sensitive (vendor+system only, like the trust store, [[no-hardcoded-paths-config-cascade]]).
-#[must_use]
-pub fn essential_etc_subtrees() -> Vec<PathBuf> {
-    essential_etc_subtrees_from(&etc_binds_layer_paths())
-}
-
-/// The body of [`essential_etc_subtrees`] over explicit layer paths (for testing without env).
-fn essential_etc_subtrees_from(layer_paths: &[PathBuf]) -> Vec<PathBuf> {
-    let mut set: Vec<String> = Vec::new();
-    let mut any_found = false;
-    for path in layer_paths {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            any_found = true;
-            apply_etc_binds_layer(&mut set, &text);
-        }
-    }
-    if !any_found {
-        eprintln!(
-            "kenneld: warning: no `{ETC_BINDS_FILENAME}` found under /usr/lib/kennel or /etc/kennel \
-             — the constructed view will bind no host /etc subtrees, so TLS / dynamic linking / \
-             update-alternatives may break inside kennels. Install the package default."
-        );
-    }
-    set.into_iter()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .collect()
-}
-
-/// Apply one line-oriented etc-binds layer: a path adds a subtree, a leading `-` prunes one,
-/// `#` starts a comment, blank lines are ignored. Additive + deduplicated.
-fn apply_etc_binds_layer(set: &mut Vec<String>, text: &str) {
-    for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('-') {
-            let pruned = rest.trim();
-            set.retain(|p| p != pruned);
-        } else if !set.iter().any(|p| p == line) {
-            set.push(line.to_owned());
-        }
-    }
-}
-
-/// The etc-binds cascade paths, lowest priority first: the vendor dir (`$KENNEL_VENDOR_DIR`,
-/// default `/usr/lib/kennel`) then the system dir (`$KENNEL_ETC_DIR`, default `/etc/kennel`).
-/// **No user layer** — this is integrity-sensitive (widening exposes host paths).
-fn etc_binds_layer_paths() -> Vec<PathBuf> {
-    let vendor = std::env::var_os("KENNEL_VENDOR_DIR")
-        .map_or_else(|| PathBuf::from("/usr/lib/kennel"), PathBuf::from);
-    let etc = std::env::var_os("KENNEL_ETC_DIR")
-        .map_or_else(|| PathBuf::from("/etc/kennel"), PathBuf::from);
-    vec![
-        vendor.join(ETC_BINDS_FILENAME),
-        etc.join(ETC_BINDS_FILENAME),
-    ]
-}
+/// Moved to `kennel-lib-config` (0.7.0 W7) so the CLI's compile-time
+/// granted-but-uncatalogued diagnostic reads the SAME cascade; re-exported here for the
+/// spawn path's callers.
+pub use kennel_lib_config::essential_etc_subtrees;
 
 #[cfg(test)]
 mod tests {
@@ -654,30 +574,5 @@ mod tests {
     #[test]
     fn render_is_none_for_an_unknown_file() {
         assert!(render("shadow", &params()).is_none());
-    }
-
-    #[test]
-    fn etc_binds_layer_composes_additively_with_prune() {
-        let mut set: Vec<String> = Vec::new();
-        apply_etc_binds_layer(&mut set, "# defaults\n/etc/ssl/certs\n/etc/alternatives\n");
-        assert_eq!(set, vec!["/etc/ssl/certs", "/etc/alternatives"]);
-        // A higher layer adds a new subtree, dedups a re-add, and prunes one with `-`.
-        apply_etc_binds_layer(&mut set, "/etc/ssl/certs\n/etc/pki\n-/etc/alternatives\n");
-        assert_eq!(set, vec!["/etc/ssl/certs", "/etc/pki"]);
-    }
-
-    #[test]
-    fn essential_etc_subtrees_loads_the_cascade_and_filters_by_existence() {
-        let dir = std::env::temp_dir().join(format!("kennel-etcbinds-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let cat = dir.join("etc-binds.catalog");
-        // `/etc` exists; a bogus path does not — only the existing subtree is returned.
-        std::fs::write(&cat, "/etc\n/etc/kennel-nope-xyz\n").expect("write catalogue");
-        let got = essential_etc_subtrees_from(std::slice::from_ref(&cat));
-        assert_eq!(got, vec![PathBuf::from("/etc")]);
-        for p in &got {
-            assert!(p.starts_with("/etc") && p.exists());
-        }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

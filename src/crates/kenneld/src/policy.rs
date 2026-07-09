@@ -277,6 +277,29 @@ pub fn loaded_from_settled(
         view.mask_paths
             .push(kennel_lib_control::socket::socket_path());
     }
+    // The /etc-binds trap, daemon half (W7): a granted `/etc` subtree with no catalogued
+    // bind silently fails to appear in the constructed view — Landlock would allow it,
+    // but nothing binds it, so the author sees a bare ENOENT. Name it at spawn (the CLI
+    // names it at compile), for a constructed view only — an OCI substrate seeds its own
+    // `/etc` from the image, so the catalogue does not apply there.
+    if plan.view.as_ref().is_some_and(|v| v.image.is_none()) {
+        let fs = &substituted.effective_policy.fs;
+        let grants: Vec<String> = fs.read.iter().chain(&fs.write).cloned().collect();
+        // Redirect-served view paths bind from their source — never a dead end.
+        let served: Vec<String> = fs.redirect.iter().map(|r| r.path.clone()).collect();
+        let dead = kennel_lib_config::uncatalogued_etc_grants(
+            &grants,
+            &kennel_lib_config::essential_etc_subtrees_quiet(),
+            &served,
+        );
+        for grant in dead {
+            eprintln!(
+                "kenneld: warning: `{grant}` is granted but not bindable — no etc-binds.catalog \
+                 entry covers it, so it will not exist in the constructed view (an admin adds \
+                 the subtree to /etc/kennel/etc-binds.catalog)"
+            );
+        }
+    }
     // Resolve the policy's supplementary groups to GIDs and membership-check them (§7.4): kenneld
     // runs as the operator, so a group the operator is not in is refused — the privileged seal could
     // otherwise over-grant. The kennel always drops to exactly this set (empty ⇒ none at all).

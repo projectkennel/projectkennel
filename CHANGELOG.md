@@ -2,7 +2,36 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Installer changes
+
+- **The payload manifest (0.7.0 W7): an upgrade removes what the release no longer ships,
+  and says so.** The staged tree is the manifest: anything in a fully kennel-managed
+  directory (`/usr/libexec/kennel`, `/usr/libexec/kennel-facades`, and the vendor tree's
+  `keys/`, `templates/`, `policies/`) that the incoming payload does not ship is removed,
+  named in the output (`install.sh: removing retired /usr/libexec/kennel/host-dbus`).
+  `/etc` is never swept — host config is the admin's. The vendor `keys/` sweep is
+  deliberate and security-relevant: a stray `.pub` there would hold vendor-tier
+  (`org.projectkennel.*`) authority, so the trust-anchor dir is payload-exact; a payload
+  that ships no `keys/` at all declares nothing and sweeps nothing. `--dry-run` prints
+  the would-remove set. A fresh install and an upgraded one are now byte-identical in the
+  managed directories. Live receipts on the dev host: the retired `host-dbus` delegate
+  (0.6.0 W4) and the retired `gui-broker-sway` provider, both removed and named.
+- **The `/etc`-binds trap is dead (0.7.0 W7): a granted-but-uncatalogued `/etc` subtree
+  is never silent.** Exposing an `/etc` subtree needs both an `fs.read` grant and an
+  `etc-binds.catalog` entry; missing the catalogue half used to fail as a bare ENOENT
+  inside the kennel. The fix is a **diagnostic, not a unification** — deriving binds from
+  a user-signed leaf's `fs.read` would let any policy widen `/etc` exposure, which is
+  exactly what the vendor+system-only catalogue prevents. The compiler
+  (`policy compile`/`validate`) and the daemon (at spawn) now both warn, naming the grant
+  and the fix (`…granted but not bindable — no etc-binds.catalog entry covers it…`), off
+  one shared implementation (the catalogue reader moved from `kenneld` into
+  `kennel-lib-config` — code motion within the TCB). Synthetic `/etc` files and
+  `source`-redirected view paths are recognised as servable and never flagged. The
+  shipped catalogue gains `/etc/fonts` (the confined GUI's fontconfig — the gui fragments
+  granted it, the catalogue never bound it: the trap's own live receipt, caught by the
+  new diagnostic).
+
+### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
 ## [Unreleased]
 

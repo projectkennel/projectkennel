@@ -1,12 +1,12 @@
 {
   "crate_count": 30,
-  "total_sloc": 39500,
+  "total_sloc": 39585,
   "tcb_crate_count": 16,
-  "tcb_sloc": 22782,
+  "tcb_sloc": 22843,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7886,
+      "sloc": 7842,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 5274,
+      "sloc": 5298,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -155,6 +155,16 @@
       "external_deps": ["basic-toml", "termion"]
     },
     {
+      "name": "kennel-lib-config",
+      "sloc": 596,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "cli", "compile", "compose", "kenneld", "privhelper"],
+      "first_party_deps": [],
+      "external_deps": ["basic-toml", "serde"]
+    },
+    {
       "name": "kennel-dbus-broker",
       "sloc": 588,
       "uses_unsafe": false,
@@ -173,16 +183,6 @@
       "consumers": ["cli"],
       "first_party_deps": [],
       "external_deps": ["serde", "serde_json"]
-    },
-    {
-      "name": "kennel-lib-config",
-      "sloc": 491,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["bin-init", "cli", "compile", "compose", "kenneld", "privhelper"],
-      "first_party_deps": [],
-      "external_deps": ["basic-toml", "serde"]
     },
     {
       "name": "kennel-bin-init",

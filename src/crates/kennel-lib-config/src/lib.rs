@@ -774,6 +774,163 @@ pub fn vendor_key_dir() -> PathBuf {
     PathBuf::from(VENDOR_DIR).join("keys")
 }
 
+// ─── The etc-binds catalogue (§7.4.5) ────────────────────────────────────────
+//
+// Moved here from `kenneld::etc` (0.7.0 W7) so the CLI's compile-time diagnostic and the
+// daemon's spawn-time one read the SAME cascade — one implementation, two consumers.
+
+/// The catalogue filename on the etc-binds cascade.
+pub const ETC_BINDS_FILENAME: &str = "etc-binds.catalog";
+
+/// The synthetic `/etc` files the spawn materializes and binds over `/etc/<name>`.
+///
+/// One source for the daemon's renderer table and the diagnostics' "this grant is
+/// servable even though it is not catalogued" exception.
+pub const SYNTHETIC_ETC_FILES: &[&str] = &[
+    "hostname",
+    "hosts",
+    "resolv.conf",
+    "nsswitch.conf",
+    "services",
+    "protocols",
+    "passwd",
+    "group",
+    "host.conf",
+    "profile",
+    "bash.bashrc",
+];
+
+/// The vanilla TLS + dynamic-linker `/etc` subtrees that exist on this host.
+///
+/// The subtrees a confined workload needs for TLS and dynamic linking — the CA-certificate
+/// bundle, the dynamic-linker configuration, and the `update-alternatives` symlink farm — bound
+/// read-only into the constructed `/etc` (§7.4.5; `/etc` itself is never bound wholesale, and the
+/// synthetic libc/NSS files come from the daemon's renderer). Returned as the subset present on
+/// the host (cross-distro: Debian `/etc/ssl` vs Red Hat `/etc/pki`).
+///
+/// The set is **not** a baked-in list (that would be a footgun: the operator could neither see nor
+/// tune what the view exposes, and could only subtract an invisible default). It loads from the
+/// `etc-binds.catalog` **vendor + system** cascade — `/usr/lib/kennel` (the package default) then
+/// `/etc/kennel` (admin) — composed additively (a line adds a subtree, a leading `-` prunes one).
+/// There is **no user layer**: widening this binds host paths into kennels, a capability, so it is
+/// integrity-sensitive (vendor+system only, like the trust store).
+#[must_use]
+pub fn essential_etc_subtrees() -> Vec<PathBuf> {
+    essential_etc_subtrees_from(&etc_binds_layer_paths(), true)
+}
+
+/// Like [`essential_etc_subtrees`], but silent on a missing catalogue — for the CLI
+/// diagnostics, where the daemon's loud install-hint warning would be noise.
+#[must_use]
+pub fn essential_etc_subtrees_quiet() -> Vec<PathBuf> {
+    essential_etc_subtrees_from(&etc_binds_layer_paths(), false)
+}
+
+/// The body of [`essential_etc_subtrees`] over explicit layer paths (for testing without env).
+fn essential_etc_subtrees_from(layer_paths: &[PathBuf], warn_missing: bool) -> Vec<PathBuf> {
+    let mut set: Vec<String> = Vec::new();
+    let mut any_found = false;
+    for path in layer_paths {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            any_found = true;
+            apply_etc_binds_layer(&mut set, &text);
+        }
+    }
+    if !any_found && warn_missing {
+        eprintln!(
+            "kenneld: warning: no `{ETC_BINDS_FILENAME}` found under /usr/lib/kennel or /etc/kennel \
+             — the constructed view will bind no host /etc subtrees, so TLS / dynamic linking / \
+             update-alternatives may break inside kennels. Install the package default."
+        );
+    }
+    set.into_iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// Apply one line-oriented etc-binds layer: a path adds a subtree, a leading `-` prunes one,
+/// `#` starts a comment, blank lines are ignored. Additive + deduplicated.
+fn apply_etc_binds_layer(set: &mut Vec<String>, text: &str) {
+    for raw in text.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix('-') {
+            let pruned = rest.trim();
+            set.retain(|p| p != pruned);
+        } else if !set.iter().any(|p| p == line) {
+            set.push(line.to_owned());
+        }
+    }
+}
+
+/// The etc-binds cascade paths, lowest priority first: the vendor dir (`$KENNEL_VENDOR_DIR`,
+/// default `/usr/lib/kennel`) then the system dir (`$KENNEL_ETC_DIR`, default `/etc/kennel`).
+/// **No user layer** — this is integrity-sensitive (widening exposes host paths).
+fn etc_binds_layer_paths() -> Vec<PathBuf> {
+    let vendor = std::env::var_os("KENNEL_VENDOR_DIR")
+        .map_or_else(|| PathBuf::from(VENDOR_DIR), PathBuf::from);
+    let etc = std::env::var_os("KENNEL_ETC_DIR")
+        .map_or_else(|| PathBuf::from("/etc/kennel"), PathBuf::from);
+    vec![
+        vendor.join(ETC_BINDS_FILENAME),
+        etc.join(ETC_BINDS_FILENAME),
+    ]
+}
+
+/// The `/etc` grants in `paths` that the constructed view cannot serve: not covered by any
+/// catalogued subtree and not one of the synthetic files — the author's silent dead end
+/// this diagnostic closes (0.7.0 W7).
+///
+/// A grant is compared by its literal prefix (everything before the first glob character):
+/// covered when that prefix and a catalogued subtree contain one another. Servable synthetic
+/// files ([`SYNTHETIC_ETC_FILES`]) are excepted.
+/// `served` carries additional per-policy view paths that ARE servable without a
+/// catalogue entry — the fs `source` redirects, which bind their operator-held source at
+/// the view path directly.
+#[must_use]
+pub fn uncatalogued_etc_grants(
+    paths: &[String],
+    subtrees: &[PathBuf],
+    served: &[String],
+) -> Vec<String> {
+    let covered = |grant: &str| {
+        // The literal prefix: up to the first glob metacharacter, trimmed to its directory.
+        let literal = grant
+            .find(['*', '?', '['])
+            .map_or(grant, |i| grant.get(..i).unwrap_or(grant));
+        let literal = literal.trim_end_matches('/');
+        if literal == "/etc" || literal.is_empty() {
+            // A whole-/etc (or glob-rooted) grant intersects every catalogued subtree.
+            return true;
+        }
+        if SYNTHETIC_ETC_FILES
+            .iter()
+            .any(|f| literal == format!("/etc/{f}"))
+        {
+            return true;
+        }
+        let intersects = |sub: &str| {
+            let sub = sub.trim_end_matches('/');
+            literal == sub
+                || literal.starts_with(&format!("{sub}/"))
+                || sub.starts_with(&format!("{literal}/"))
+        };
+        subtrees
+            .iter()
+            .any(|sub| intersects(&sub.to_string_lossy()))
+            || served.iter().any(|s| intersects(s))
+    };
+    paths
+        .iter()
+        .filter(|p| p.starts_with("/etc/") || *p == "/etc")
+        .filter(|p| !covered(p))
+        .cloned()
+        .collect()
+}
+
 /// One operator enablement directory (§7.13.6): a path to scan, its tier, and its bring-up posture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnablementDir {
@@ -1030,6 +1187,52 @@ mod tests {
         assert!(u
             .key_dirs()
             .contains(&PathBuf::from("/usr/lib/kennel/keys")));
+    }
+
+    #[test]
+    fn etc_binds_layer_composes_additively_with_prune() {
+        let mut set: Vec<String> = Vec::new();
+        apply_etc_binds_layer(&mut set, "# defaults\n/etc/ssl/certs\n/etc/alternatives\n");
+        assert_eq!(set, vec!["/etc/ssl/certs", "/etc/alternatives"]);
+        // A higher layer adds a new subtree, dedups a re-add, and prunes one with `-`.
+        apply_etc_binds_layer(&mut set, "/etc/ssl/certs\n/etc/pki\n-/etc/alternatives\n");
+        assert_eq!(set, vec!["/etc/ssl/certs", "/etc/pki"]);
+    }
+
+    #[test]
+    fn essential_etc_subtrees_loads_the_cascade_and_filters_by_existence() {
+        let dir = std::env::temp_dir().join(format!("kennel-etcbinds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let cat = dir.join("etc-binds.catalog");
+        // `/etc` exists; a bogus path does not — only the existing subtree is returned.
+        std::fs::write(&cat, "/etc\n/etc/kennel-nope-xyz\n").expect("write catalogue");
+        let got = essential_etc_subtrees_from(std::slice::from_ref(&cat), false);
+        assert_eq!(got, vec![PathBuf::from("/etc")]);
+        for p in &got {
+            assert!(p.starts_with("/etc") && p.exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The W7 diagnostic: an `/etc` grant with no covering catalogued subtree is named;
+    /// covered subtrees, synthetic files, glob prefixes, and non-/etc paths are not.
+    #[test]
+    fn uncatalogued_etc_grants_names_the_dead_ends() {
+        let subs = vec![PathBuf::from("/etc/ssl/certs"), PathBuf::from("/etc/pki")];
+        let grants = vec![
+            "/etc/ssl/certs/ca.pem".to_owned(), // under a catalogued subtree
+            "/etc/ssl".to_owned(),              // contains one (intersects)
+            "/etc/passwd".to_owned(),           // synthetic — servable
+            "/etc/fonts/**".to_owned(),         // glob under an uncatalogued subtree: DEAD
+            "/etc/machine-id".to_owned(),       // uncatalogued file: DEAD
+            "/usr/share/fonts/**".to_owned(),   // not /etc — out of scope
+            "/etc/xdg/labwc/**".to_owned(),     // redirect-served — servable
+        ];
+        let dead = uncatalogued_etc_grants(&grants, &subs, &["/etc/xdg/labwc".to_owned()]);
+        assert_eq!(
+            dead,
+            vec!["/etc/fonts/**".to_owned(), "/etc/machine-id".to_owned()]
+        );
     }
 
     #[test]
