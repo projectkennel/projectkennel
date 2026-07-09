@@ -19,7 +19,9 @@
 # not a failure, but it is reported, never a silent pass.
 set -uo pipefail
 
-CASE_DIR="$1"; KENNEL="$2"; KEY="$3"; SCRATCH="$4"
+# shellcheck source=../suite-lib.sh
+. "$1/../suite-lib.sh"
+suite_case "$@"
 NAME="ocie2e"
 # A private per-operator store under the scratch dir, so the case never touches the real store.
 export XDG_DATA_HOME="$SCRATCH/xdg"
@@ -62,7 +64,7 @@ grep -qE '^readonly = \["/usr"' "$ENTRY/policy.toml" || {
 # 4. Compile the completed store policy in the AUTHORING house (the dogfood flow: `oci run`
 #    boots only the settled artefact), then boot and self-check the slice from inside. `oci run`
 #    asserts the digest and drives the overlay-root spawn; it takes no key (the daemon verifies).
-"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
+"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$SUITE_KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
     echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
 "$KENNEL" oci run "$NAME" -- /bin/sh -c '
     uid=$(id -u)

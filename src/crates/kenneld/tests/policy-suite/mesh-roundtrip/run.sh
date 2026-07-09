@@ -14,39 +14,11 @@
 #   $1 = case dir   $2 = KENNEL (installed CLI)   $3 = SUITE_KEY   $4 = scratch (unused)
 set -euo pipefail
 
-CASE_DIR="$1"
-KENNEL="$2"
-SUITE_KEY="$3"
-CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
-KEYS="$CFG/keys"
 # shellcheck source=../suite-lib.sh
-. "$CASE_DIR/../suite-lib.sh"
-ONDEMAND="$CFG/ondemand"
-PROVIDER_LINK="$ONDEMAND/mesh-provider"
+. "$1/../suite-lib.sh"
+suite_case "$@"
 
-cleanup() {
-    suite_unstage mesh-consumer
-    # Stop the activated provider before unlinking (leave the daemon cold for later cases).
-    "$KENNEL" stop mesh-provider >/dev/null 2>&1 || true
-    rm -f "$PROVIDER_LINK"
-    "$KENNEL" daemon-reload >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-# 1. Compile + sign the provider to its settled form and enable it ONDEMAND — the enablement entry IS
-#    the signed settled policy the daemon load-verifies (§7.13.6); ondemand so the consumer's first
-#    connect socket-activates it (exercising W6's lazy path + the consume-with-wait).
-mkdir -p "$ONDEMAND"
-"$KENNEL" policy compile "$CASE_DIR/provider.toml" --key "$SUITE_KEY" --trust-dir "$KEYS" \
-    --no-lock --output "$PROVIDER_LINK"
-
-# 2. Refresh the catalogue so the daemon knows `test.mesh.echo` (a Pending ondemand provider).
-"$KENNEL" daemon-reload
-
-# 3. Run the consumer: its workload connects to the `at` socket; kenneld activates the provider and
-#    brokers the connector. The consumer's exit code is the verdict (the round-trip held iff 0).
-# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
-# the shell and leak the enabled provider link into the user tier for later cases).
-suite_compile "$CASE_DIR/consumer.toml" >/dev/null
-"$KENNEL" run mesh-consumer mesh-consumer </dev/null
-exit "$?"
+# Enable the provider ONDEMAND (the lazy path: the consumer's first connect socket-activates
+# it, exercising W6's consume-with-wait), then run the consumer — its exit is the verdict.
+suite_enable_ondemand "$CASE_DIR/provider.toml" mesh-provider
+suite_run_consumer "$CASE_DIR/consumer.toml"

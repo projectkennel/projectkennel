@@ -21,23 +21,21 @@
 # already cached sudo credentials; a missing host key on a --no-install host skips B only).
 set -uo pipefail
 
-CASE_DIR="$1"; KENNEL="$2"; SUITE_KEY="$3"; SCRATCH="$4"
-KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-POLICY_REPO="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/policies"
+# shellcheck source=../suite-lib.sh
+. "$1/../suite-lib.sh"
+suite_case "$@"
+KEY_DIR="$KEYS"
+POLICY_REPO="$SUITE_POLICY_REPO"
 ROT_KEY="kennel-rotate-e2e"
 JOB="key-rotate-job"
 HOST_KEY_DIR="/etc/kennel/keys"
 HOST_TPL="rot-base-e2e"
 HOST_LEAF="rot-leaf-e2e"
 
-cleanup() {
-    rm -f "$KEY_DIR/$ROT_KEY" "$KEY_DIR/$ROT_KEY.pub" \
-          "$KEY_DIR/$ROT_KEY.retired" "$KEY_DIR/$ROT_KEY.pub.retired"
-    rm -rf "${POLICY_REPO:?}/$JOB"
-    sudo rm -rf "/etc/kennel/templates/$HOST_TPL" "/etc/kennel/policies/$HOST_LEAF" 2>/dev/null || true
-    sudo rm -f "$HOST_KEY_DIR/kennel-host.retired" "$HOST_KEY_DIR/kennel-host.pub.retired" 2>/dev/null || true
-}
-trap cleanup EXIT
+suite_defer 'rm -f "$KEY_DIR/$ROT_KEY" "$KEY_DIR/$ROT_KEY.pub" "$KEY_DIR/$ROT_KEY.retired" "$KEY_DIR/$ROT_KEY.pub.retired"'
+suite_defer 'rm -rf "${POLICY_REPO:?}/$JOB"'
+suite_defer 'sudo rm -rf "/etc/kennel/templates/$HOST_TPL" "/etc/kennel/policies/$HOST_LEAF"'
+suite_defer 'sudo rm -f "$HOST_KEY_DIR/kennel-host.retired" "$HOST_KEY_DIR/kennel-host.pub.retired"'
 
 sig_of() { grep -m1 '^signature = ' "$1"; }
 

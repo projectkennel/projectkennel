@@ -17,39 +17,12 @@
 #   $1 = case dir   $2 = KENNEL (installed CLI)   $3 = SUITE_KEY   $4 = scratch (unused)
 set -euo pipefail
 
-CASE_DIR="$1"
-KENNEL="$2"
-SUITE_KEY="$3"
-CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
-KEYS="$CFG/keys"
 # shellcheck source=../suite-lib.sh
-. "$CASE_DIR/../suite-lib.sh"
-ONDEMAND="$CFG/ondemand"
-PROVIDER_LINK="$ONDEMAND/gui-provider"
+. "$1/../suite-lib.sh"
+suite_case "$@"
 
-cleanup() {
-    suite_unstage gui-consumer
-    # Stop the activated provider before unlinking (leave the daemon cold for later cases).
-    "$KENNEL" stop gui-provider >/dev/null 2>&1 || true
-    rm -f "$PROVIDER_LINK"
-    "$KENNEL" daemon-reload >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-# 1. Compile + sign the GUI-service provider to its settled form and enable it ONDEMAND — the consumer's
-#    first connect socket-activates it (W6 lazy path + consume-with-wait).
-mkdir -p "$ONDEMAND"
-"$KENNEL" policy compile "$CASE_DIR/provider.toml" --key "$SUITE_KEY" --trust-dir "$KEYS" \
-    --no-lock --output "$PROVIDER_LINK"
-
-# 2. Refresh the catalogue so the daemon knows `test.gui.wayland` (a Pending ondemand provider).
-"$KENNEL" daemon-reload
-
-# 3. Run the consumer: its workload connects to the `at` socket; kenneld activates the GUI-service
-#    provider, the compositor-broker spawns this connection's compositor, and the round-trip is brokered.
-#    The consumer's exit code is the verdict (the broker relay reached a spawned compositor iff 0).
-# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
-# the shell and leak the enabled provider link into the user tier for later cases).
-suite_compile "$CASE_DIR/consumer.toml" >/dev/null
-"$KENNEL" run gui-consumer gui-consumer </dev/null
-exit "$?"
+# Enable the GUI-service provider ONDEMAND (the consumer's first connect socket-activates it;
+# the compositor-broker spawns one compositor per accepted connection), then run the consumer —
+# the round-trip through the broker→compositor relay is the verdict.
+suite_enable_ondemand "$CASE_DIR/provider.toml" gui-provider
+suite_run_consumer "$CASE_DIR/consumer.toml"

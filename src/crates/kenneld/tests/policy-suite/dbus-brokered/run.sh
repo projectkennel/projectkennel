@@ -15,63 +15,28 @@
 #   $1 = case dir   $2 = KENNEL (installed CLI)   $3 = SUITE_KEY   $4 = scratch dir
 set -euo pipefail
 
-CASE_DIR="$1"
-KENNEL="$2"
-SUITE_KEY="$3"
-SCRATCH="${4:-$(mktemp -d)}"
-CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
-KEYS="$CFG/keys"
 # shellcheck source=../suite-lib.sh
-. "$CASE_DIR/../suite-lib.sh"
-ONDEMAND="$CFG/ondemand"
-BROKER_LINK="$ONDEMAND/dbus-broker"
-# The broker provides the reserved `org.projectkennel.*` namespace, which only a VENDOR-provenance
-# key may claim (§7.13.5). The real deployment ships the broker template signed by the maintainer
-# key (which lives in the vendor dir); this test instead authorizes its own suite key as vendor —
-# the fixture equivalent of "the project signs the broker". The mediation under test is identical.
-VENDOR_KEYS="/usr/lib/kennel/keys"
-VENDOR_SUITE_PUB="$VENDOR_KEYS/kennel-suite.pub"
+. "$1/../suite-lib.sh"
+suite_case "$@"
 
-cleanup() {
-    suite_unstage dbus-consumer
-    # Stop the activated broker BEFORE unlinking: a still-running instance would sit on the
-    # provider name with its supervision thread alive, so later cases (which enable the same
-    # name at another tier) could never re-activate it — and a daemon-reload resets a running
-    # provider's readiness to pending, starving every later consume.
-    "$KENNEL" stop dbus-broker >/dev/null 2>&1 || true
-    rm -f "$BROKER_LINK"
-    sudo rm -f "$VENDOR_SUITE_PUB" 2>/dev/null || true
-    "$KENNEL" daemon-reload >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
-
-# Authorize the suite key for the reserved namespace by placing its pubkey in the vendor dir.
-sudo install -m 0644 "${SUITE_KEY}.pub" "$VENDOR_SUITE_PUB"
+# The broker claims the reserved `org.projectkennel.*` namespace — vendor-provenance only
+# (§7.13.5) — so the suite key is authorized as vendor for this case (the fixture
+# equivalent of "the project signs the broker"; the mediation under test is identical).
+suite_vendor_trust_suite_key
 
 # The operator's real session bus — the same socket the legacy host-dbus path reaches. kenneld
 # (operator context) connects to it on the broker's behalf via the [[unix.allow]] leg.
 REAL_ADDR="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
 REAL_BUS="${REAL_ADDR#unix:path=}"
 REAL_BUS="${REAL_BUS%%,*}"
-if [ ! -S "$REAL_BUS" ]; then
+if [[ ! -S "$REAL_BUS" ]]; then
     echo "dbus-brokered: no session bus socket at $REAL_BUS (need a running user D-Bus)" >&2
     exit 2
 fi
 
-# 1. Materialise the provider policy with the real bus path, compile + sign it to its settled form,
-#    and enable it ONDEMAND — so the consumer's first connect socket-activates the broker (W6).
-mkdir -p "$ONDEMAND"
-PROVIDER_SRC="$SCRATCH/provider.toml"
-sed "s#__REAL_BUS__#$REAL_BUS#" "$CASE_DIR/provider.toml" >"$PROVIDER_SRC"
-"$KENNEL" policy compile "$PROVIDER_SRC" --key "$SUITE_KEY" --trust-dir "$KEYS" \
-    --no-lock --output "$BROKER_LINK"
-
-# 2. Refresh the catalogue so the daemon knows org.projectkennel.dbus{,-broker} (a Pending provider).
-"$KENNEL" daemon-reload
-
-# 3. Run the consumer: its workload's dbus-send drives the brokered round trip. Exit code is verdict.
-# No `exec`: the cleanup trap must fire when the consumer exits (exec would replace
-# the shell and leak the enabled provider link into the user tier for later cases).
-suite_compile "$CASE_DIR/consumer.toml" >/dev/null
-"$KENNEL" run dbus-consumer dbus-consumer </dev/null
-exit "$?"
+# Materialise the provider policy with the real bus path, enable it ONDEMAND (the consumer's
+# first connect socket-activates the broker), then run the consumer — dbus-send's exit
+# through the whole brokered round trip is the verdict.
+sed "s#__REAL_BUS__#$REAL_BUS#" "$CASE_DIR/provider.toml" >"$SCRATCH/provider.toml"
+suite_enable_ondemand "$SCRATCH/provider.toml" dbus-broker
+suite_run_consumer "$CASE_DIR/consumer.toml"
