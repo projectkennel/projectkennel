@@ -1,6 +1,6 @@
 {
   "crate_count": 30,
-  "total_sloc": 38417,
+  "total_sloc": 39167,
   "tcb_crate_count": 16,
   "tcb_sloc": 22754,
   "crates": [
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 4446,
+      "sloc": 5164,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -235,6 +235,16 @@
       "external_deps": ["bitflags", "libc"]
     },
     {
+      "name": "kennel-lib-cli",
+      "sloc": 215,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli", "facade"],
+      "first_party_deps": [],
+      "external_deps": []
+    },
+    {
       "name": "kennel-lib-scm",
       "sloc": 200,
       "uses_unsafe": true,
@@ -243,16 +253,6 @@
       "consumers": ["facade", "host-delegate", "syscall"],
       "first_party_deps": [],
       "external_deps": ["nix"]
-    },
-    {
-      "name": "kennel-lib-cli",
-      "sloc": 183,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": [],
-      "consumers": ["cli", "facade"],
-      "first_party_deps": [],
-      "external_deps": []
     },
     {
       "name": "kennel-bin-oci-entry",

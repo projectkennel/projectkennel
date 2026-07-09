@@ -97,9 +97,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: "template <list|show|clone|install|sign|lint> [...]",
     },
     CommandSpec {
-        name: "keygen",
-        summary: "generate a policy-signing key",
-        usage: "keygen <key-id> [--dir DIR] [--force]",
+        name: "key",
+        summary: "manage tier-bound signing keys (the key house)",
+        usage: "key <generate|list|show|trust|untrust|rotate> [...]",
     },
     CommandSpec {
         name: "audit",
@@ -207,6 +207,41 @@ pub const TEMPLATE_VERBS: &[CommandSpec] = &[
     },
 ];
 
+/// Sub-verbs of `kennel key` — the key house (tier-bound signing-key management; a key's
+/// tier is where it lives, and that is the only level it signs at).
+pub const KEY_VERBS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "generate",
+        summary: "generate a signing key at the invoking tier (user; as root: host)",
+        usage: "key generate <name> [--force]",
+    },
+    CommandSpec {
+        name: "list",
+        summary: "list keys across all tiers: name, tier, fingerprint, mine-vs-trusted",
+        usage: "key list",
+    },
+    CommandSpec {
+        name: "show",
+        summary: "show a key's fingerprint and everything it signs across the repos",
+        usage: "key show <name>",
+    },
+    CommandSpec {
+        name: "trust",
+        summary: "add a public key to the host trust store (root; host level only)",
+        usage: "key trust <file.pub> [--force]",
+    },
+    CommandSpec {
+        name: "untrust",
+        summary: "remove a key from the host trust store, impact report first (root)",
+        usage: "key untrust <name> [--yes]",
+    },
+    CommandSpec {
+        name: "rotate",
+        summary: "rotate a key: successor, re-sign what it signs, retire the old",
+        usage: "key rotate <name> [--yes]",
+    },
+];
+
 /// Render a command table as the aligned help body.
 ///
 /// One `  verb  summary` line per command, in table order (the program name lives in the caller's
@@ -281,6 +316,23 @@ mod tests {
                 "`policy` usage is missing sub-verb `{}`: {}",
                 verb.name,
                 policy.usage
+            );
+        }
+    }
+
+    /// Same pin for the `key` house: its usage line enumerates the live sub-verbs.
+    #[test]
+    fn key_usage_names_every_sub_verb() {
+        let key = COMMANDS
+            .iter()
+            .find(|c| c.name == "key")
+            .expect("a `key` top-level command");
+        for verb in KEY_VERBS {
+            assert!(
+                key.usage.contains(verb.name),
+                "`key` usage is missing sub-verb `{}`: {}",
+                verb.name,
+                key.usage
             );
         }
     }

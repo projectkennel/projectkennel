@@ -1,0 +1,18 @@
+# Minimal runnable leaf for the key-rotate case: the workload just exits 0 — the case's
+# verdict is that the daemon VERIFIES the artefact after rotation, not what runs inside.
+# @NAME@ is filled by run.sh (the same file serves the user- and host-tier legs).
+name = "@NAME@"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/true"]
+
+[workload]
+argv = ["/bin/sh", "-c", "true"]

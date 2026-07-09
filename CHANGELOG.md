@@ -66,6 +66,33 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   (`shadows vendor` / `shadowed by user`) plus the signing tier where it differs from
   placement (`vendor-signed` on a downward copy); `show` names the origin tier; `kennel run`
   reports which tier's artefact won resolution (`running claude [user tier]`).
+- **The `key` house lands, tier-bound, and `keygen` retires (0.7.0 W4).** Key management
+  becomes a noun group with the model rule built in — **a key's tier is where it lives, and
+  that is the only level it signs at**; no verb offers a cross-tier signing path.
+  `kennel key generate <name>` derives the tier from context: as a user it mints into
+  `~/.config/kennel/keys`, as root into the host trust store (`/etc/kennel/keys`) — which is
+  what the installer now uses to mint `kennel-host`. `key list` answers the inventory question
+  in one command (name, tier, mine-vs-trusted, SHA256 fingerprint via `ssh-keygen -lf` — no
+  new hash dependency); `key show <name>` adds the signed-object inventory across the policy
+  and template cascades (settled artefacts, source-signed templates, lockfile pins).
+  `key trust <file.pub>` / `key untrust <name>` exist **only at host level** (root): the user
+  tier needs no trust list, because `policy install` re-signs foreign objects under the user's
+  own key — that re-signing *is* user-level trust, per object. `untrust` prints the impact
+  report **before** acting — every artefact that stops verifying, spanning the host tier and
+  the user tier below it (acceptance is downward-inclusive) — and proceeds only with `--yes`.
+  `kennel key rotate <name> [--yes]` ships with the house: the supervised ceremony that
+  retires the old pair (the public half leaves the `.pub` namespace so the trust store stops
+  loading it), mints a successor under the same key id, re-signs every template the key
+  signs, and recompiles every leaf it signs — a settled artefact whose source ships in the
+  vendor tree (the reference-policy layout, `providers/` included) recompiles from that
+  source with the output pinned back onto the artefact's own path, and a lockfile pinning a
+  re-signed template is re-pinned in the same pass, so the four-gotcha manual ritual is one
+  verb. Out-of-tier objects riding the old signature are named as owed work, never silently
+  skipped. `keygen` answers with a pointer diagnostic for this release; the installer banner,
+  the e2e suite, and the perf scripts all speak `key generate`. New man page `kennel-key(1)`,
+  derived from the CLI definition; a self-driving `key-rotate` suite case e2e-asserts both
+  the user-tier rotation and the host-tier re-sign + re-pin cascade through a real
+  `kennel run` under the successor key.
 
 ## [0.6.0] — 2026-07-06
 

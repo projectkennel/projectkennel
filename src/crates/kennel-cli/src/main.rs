@@ -2,7 +2,7 @@
 //!
 //! Installed at `/usr/libexec/kennel/host` and reached through the `kennel` shim (which
 //! detects host-vs-cage context). Dispatches every operator verb — `run`, `attach`, `stop`,
-//! `list`, `review`, `release`, `daemon-reload`, `policy`, `template`, `oci`, `keygen`,
+//! `list`, `review`, `release`, `daemon-reload`, `policy`, `template`, `key`, `oci`,
 //! `audit` — over the `kennel_cli` library crate.
 
 #![forbid(unsafe_code)]
@@ -10,8 +10,8 @@
 use std::process::ExitCode;
 
 use kennel_cli::{
-    print_help, print_policy_help, print_template_help, usage_of, wants_help, COMMANDS,
-    POLICY_VERBS, TEMPLATE_VERBS,
+    print_help, print_key_help, print_policy_help, print_template_help, usage_of, wants_help,
+    COMMANDS, KEY_VERBS, POLICY_VERBS, TEMPLATE_VERBS,
 };
 
 fn main() -> ExitCode {
@@ -36,6 +36,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
     }
     if cmd != "policy"
         && cmd != "template"
+        && cmd != "key"
         && wants_help(rest)
         && COMMANDS.iter().any(|c| c.name == cmd)
     {
@@ -53,7 +54,13 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "daemon-reload" => kennel_cli::runtime::daemon_reload(),
         "policy" => dispatch_policy(rest),
         "template" => dispatch_template(rest),
-        "keygen" => kennel_cli::misc::keygen(rest),
+        "key" => dispatch_key(rest),
+        // Retired spelling: the key house owns key management (the 0.7.0 courtesy pointer).
+        "keygen" => Err(
+            "`kennel keygen` moved to the key house: `kennel key generate <name>` \
+             (as a user it writes your user key; as root, the host key)"
+                .to_owned(),
+        ),
         "audit" => kennel_cli::misc::audit(rest),
         other => Err(format!("unknown command `{other}` — run `kennel --help`")),
     }
@@ -129,6 +136,32 @@ fn dispatch_template(args: &[String]) -> Result<ExitCode, String> {
         "lint" => kennel_cli::policy::template_lint(rest),
         other => Err(format!(
             "unknown template verb `{other}` — run `kennel template --help`"
+        )),
+    }
+}
+
+fn dispatch_key(args: &[String]) -> Result<ExitCode, String> {
+    let Some((verb, rest)) = args.split_first() else {
+        print_key_help();
+        return Ok(ExitCode::SUCCESS);
+    };
+    if verb == "help" || verb == "--help" || verb == "-h" {
+        print_key_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    if wants_help(rest) && KEY_VERBS.iter().any(|c| c.name == verb) {
+        println!("{}", usage_of(KEY_VERBS, verb));
+        return Ok(ExitCode::SUCCESS);
+    }
+    match verb.as_str() {
+        "generate" => kennel_cli::key::generate(rest),
+        "list" => kennel_cli::key::list(rest),
+        "show" => kennel_cli::key::show(rest),
+        "trust" => kennel_cli::key::trust(rest),
+        "untrust" => kennel_cli::key::untrust(rest),
+        "rotate" => kennel_cli::key::rotate(rest),
+        other => Err(format!(
+            "unknown key verb `{other}` — run `kennel key --help`"
         )),
     }
 }

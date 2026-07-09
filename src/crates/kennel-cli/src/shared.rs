@@ -13,7 +13,7 @@ use std::process::ExitCode;
 // definition for dispatch, `--help`, and the generated man pages); re-exported
 // so the verb modules keep addressing them through `shared`.
 use kennel_lib_cli::{render_commands, CommandSpec};
-pub use kennel_lib_cli::{COMMANDS, POLICY_VERBS, TEMPLATE_VERBS};
+pub use kennel_lib_cli::{COMMANDS, KEY_VERBS, POLICY_VERBS, TEMPLATE_VERBS};
 use kennel_lib_control::control::{self, Request};
 use kennel_lib_control::socket;
 
@@ -40,6 +40,16 @@ pub fn print_template_help() {
     println!(
         "\na template is a signed shared base, never runnable; author and run leaves with \
          `kennel policy` / `kennel run`."
+    );
+}
+
+/// Render `kennel key` help (its sub-verb list) to stdout.
+pub fn print_key_help() {
+    println!("usage: kennel key <verb> [args...]\n\nverbs:");
+    print!("{}", render_commands(KEY_VERBS));
+    println!(
+        "\na key's tier is where it lives, and that is the only level it signs at: \
+         user keys sign user objects, the host key signs host objects."
     );
 }
 
@@ -207,9 +217,9 @@ pub fn tier_of_key_id(key_id: &str) -> Option<&'static str> {
     None
 }
 
-/// Resolve a `--key` value: a key **name** in the user key dir (where `keygen` puts it), else a path.
+/// Resolve a `--key` value: a key **name** in the user key dir (where `key generate` puts it), else a path.
 ///
-/// Keys are name-addressed everywhere else — `keygen` writes `<key-id>` by name, the daemon trusts
+/// Keys are name-addressed everywhere else — `key generate` writes `<key-id>` by name, the daemon trusts
 /// by name — so `--key remco-dev` finds `~/.config/kennel/keys/remco-dev`. Only if no such key
 /// exists is the argument treated as a filesystem path (a key held elsewhere: `~/.ssh/id_ed25519`,
 /// an agent/token public key).
@@ -219,7 +229,7 @@ pub fn tier_of_key_id(key_id: &str) -> Option<&'static str> {
 /// Returns a message naming the keys that ARE in the key dir if the argument is neither a key there
 /// nor an existing file.
 pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
-    // Where `keygen` puts keys: the user key dir, by name. Look here first.
+    // Where `key generate` puts keys: the user key dir, by name. Look here first.
     let in_key_dir = default_key_dir().join(arg);
     if in_key_dir.is_file() {
         return Ok(in_key_dir);
@@ -244,7 +254,7 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
     names.sort();
     names.dedup();
     let avail = if names.is_empty() {
-        "none — generate one with `kennel keygen <key-id>`".to_owned()
+        "none — generate one with `kennel key generate <name>`".to_owned()
     } else {
         names.join(", ")
     };
@@ -360,7 +370,7 @@ fn is_legacy_raw_b64(text: &str) -> bool {
 /// Load a trust store: every `<key_id>.pub` under each directory.
 ///
 /// Each file must be an OpenSSH public-key line — `ssh-ed25519 <base64-blob>
-/// [comment]`, the format `ssh-keygen` and `kennel keygen` write. The key id is
+/// [comment]`, the format `ssh-keygen` and `kennel key generate` write. The key id is
 /// the file stem; the comment is informational. The raw-base64 legacy format was
 /// removed in 0.6.0; a file still in it is refused with a diagnostic naming the
 /// migration.
@@ -394,7 +404,7 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
             } else if is_legacy_raw_b64(&contents) {
                 return Err(format!(
                     "key {}: legacy raw-base64 public key (format removed in 0.6.0) — \
-                     regenerate with `kennel keygen`, or convert the pair once with \
+                     regenerate with `kennel key generate`, or convert the pair once with \
                      0.5.x's `kennel keygen migrate`",
                     path.display()
                 ));
@@ -541,13 +551,13 @@ pub fn default_signing_key() -> Result<PathBuf, String> {
     match found.as_slice() {
         [] if !legacy.is_empty() => Err(format!(
             "no OpenSSH signing key in {}, only legacy raw-base64 key(s) ({}) — the format \
-             was removed in 0.6.0: regenerate with `kennel keygen <key-id>`, or convert \
+             was removed in 0.6.0: regenerate with `kennel key generate <name>`, or convert \
              once with 0.5.x's `kennel keygen migrate`",
             dir.display(),
             legacy.join(", ")
         )),
         [] => Err(format!(
-            "no signing key in {} — generate one with `kennel keygen <key-id>`, or pass --key <path>",
+            "no signing key in {} — generate one with `kennel key generate <name>`, or pass --key <path>",
             dir.display()
         )),
         [only] => Ok(only.clone()),
@@ -850,7 +860,10 @@ mod signer_tests {
         let err = load_trust_store(std::slice::from_ref(&scratch.0))
             .map_or_else(|e| e, |_| "load unexpectedly succeeded".to_owned());
         assert!(err.contains("raw-base64"), "names the format: {err}");
-        assert!(err.contains("kennel keygen"), "names the migration: {err}");
+        assert!(
+            err.contains("kennel key generate"),
+            "names the migration: {err}"
+        );
     }
 
     /// A `.pub` that is neither OpenSSH nor the legacy shape gets the plain parse error.

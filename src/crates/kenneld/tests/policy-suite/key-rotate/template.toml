@@ -1,0 +1,8 @@
+# Minimal host-tier template for the key-rotate case: exists to be SIGNED by the host
+# key and PINNED by the leaf's lockfile, so the rotation's re-sign + re-pin cascade has
+# a real chain to drive. @NAME@ is filled by run.sh.
+template_name = "@NAME@"
+template_base = "base-confined"
+
+[net]
+mode = "none"
