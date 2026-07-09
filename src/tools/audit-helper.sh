@@ -39,9 +39,9 @@ usage() {
 # Pick a downloader once.
 download() { # <url> <dest>
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1" -o "$2"
+		curl -fsSL --proto '=https' --tlsv1.2 "$1" -o "$2"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -q "$1" -O "$2"
+		wget -q --https-only "$1" -O "$2"
 	else
 		echo "audit-helper: need curl or wget" >&2
 		exit 1

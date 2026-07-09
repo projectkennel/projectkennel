@@ -86,7 +86,7 @@ echo "published commit : $SHA${PATH_IN_VCS:+  (path: $PATH_IN_VCS)}"
 
 # --- fetch the upstream tree at that exact commit -------------------------
 echo "fetching github.com/$SLUG @ $SHA ..."
-curl -fsSL "https://codeload.github.com/$SLUG/tar.gz/$SHA" -o "$TMP/upstream.tgz"
+curl -fsSL --proto '=https' --tlsv1.2 "https://codeload.github.com/$SLUG/tar.gz/$SHA" -o "$TMP/upstream.tgz"
 mkdir "$TMP/upstream"
 tar -xzf "$TMP/upstream.tgz" -C "$TMP/upstream"
 TOP="$(find "$TMP/upstream" -maxdepth 1 -mindepth 1 -type d)"
@@ -142,7 +142,7 @@ fi
 tag_status="UNVERIFIED (no tag matched '$VER' or 'v$VER' — confirm manually)"
 tag_problem=0
 for tag in "$VER" "v$VER"; do
-	tag_sha="$(curl -fsSL "https://api.github.com/repos/$SLUG/commits/$tag" 2>/dev/null |
+	tag_sha="$(curl -fsSL --proto '=https' --tlsv1.2 "https://api.github.com/repos/$SLUG/commits/$tag" 2>/dev/null |
 		python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)"
 	[ -n "$tag_sha" ] || continue
 	if [ "$tag_sha" = "$SHA" ]; then
