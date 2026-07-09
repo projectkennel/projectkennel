@@ -23,12 +23,14 @@ suite_compile() {
 	cp "$src" "$SUITE_POLICY_REPO/$name/policy.toml"
 	"$KENNEL" policy compile "$name" --key "$SUITE_KEY" ${KEYS:+--trust-dir "$KEYS"} >&2 || return 1
 	echo "$name"
+	return 0
 }
 
 # suite_unstage <name> — remove a staged policy from the user repo (cleanup: a dirty repo
 # makes the NEXT run resolve stale artefacts).
 suite_unstage() {
-	rm -rf "${SUITE_POLICY_REPO:?}/$1"
+	local name="$1"
+	rm -rf "${SUITE_POLICY_REPO:?}/$name"
 }
 
 # ── The shared hook scaffolding (0.7.0) ─────────────────────────────────────
@@ -56,7 +58,8 @@ suite_case() {
 # (cleanup must never mask the case verdict). Composable: every fixture registers its
 # own teardown instead of growing one monolithic cleanup().
 suite_defer() {
-	SUITE_CLEANUPS+=("$*")
+	local command="$*"
+	SUITE_CLEANUPS+=("$command")
 }
 
 suite_run_cleanups() {
@@ -77,6 +80,7 @@ suite_enable_ondemand() {
 	"$KENNEL" policy compile "$src" --key "$SUITE_KEY" --trust-dir "$KEYS" 		--no-lock --output "$ONDEMAND/$name"
 	"$KENNEL" daemon-reload
 	suite_defer "\"$KENNEL\" stop $name >/dev/null 2>&1; rm -f \"$ONDEMAND/$name\"; \"$KENNEL\" daemon-reload >/dev/null 2>&1"
+	return 0
 }
 
 # suite_vendor_trust_suite_key — the vendor-provenance fixture (§7.13.5): a test provider
@@ -92,8 +96,9 @@ suite_vendor_trust_suite_key() {
 # and run it by name; the workload exit code — the suite verdict — passes through.
 # No `exec`: the cleanup trap must fire when the consumer exits.
 suite_run_consumer() {
-	local name
-	name="$(suite_compile "$1")" || return 1
+	local src="$1" name
+	name="$(suite_compile "$src")" || return 1
 	suite_defer "suite_unstage $name"
 	"$KENNEL" run "$name" "$name" </dev/null
+	return "$?"
 }
