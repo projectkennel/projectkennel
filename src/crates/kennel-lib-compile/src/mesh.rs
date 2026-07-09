@@ -48,7 +48,11 @@ pub struct ReservedAuthority<'a> {
 
 impl ReservedAuthority<'_> {
     /// The tier a reserved `name` requires, or `None` when it is unreserved (free to any signer).
-    fn required_tier(&self, name: &str) -> Option<Tier> {
+    ///
+    /// Public so the CLI ceremonies (`install`/`clone`) pre-flight an object's `[[provides]]`
+    /// against the SAME rule the compiler enforces — one implementation, no hand-copied list.
+    #[must_use]
+    pub fn required_tier(&self, name: &str) -> Option<Tier> {
         if name.starts_with(RESERVED_PREFIX) {
             Some(Tier::Vendor)
         } else if self.reserved.iter().any(|ns| name.starts_with(&ns.prefix)) {

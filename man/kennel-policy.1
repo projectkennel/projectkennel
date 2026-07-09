@@ -36,6 +36,37 @@ scaffold a new leaf policy
 Scaffold the leaf from this template (default base\-confined).
 .RE
 .TP
+\fBkennel policy clone <name> [<new\-name>] [\-\-key K]\fR
+fork a higher\-tier policy's source into the user house (your copy, your key)
+.RS
+.TP
+\fB<new\-name>\fR
+Clone to a different name; default keeps the name (your copy shadows the original, user\-first).
+.RE
+.RS
+.TP
+\fB\-\-key K\fR
+Sign the clone's compiled artefact with key K (default: the sole user key).
+.RE
+.TP
+\fBkennel policy install <file.toml> [\-\-host] [\-\-force] [\-\-key K]\fR
+place and sign a source policy at the invoking tier (receive → install → run)
+.RS
+.TP
+\fB\-\-host\fR
+Install at the host tier (/etc/kennel; needs root; signs with the host key).
+.RE
+.RS
+.TP
+\fB\-\-force\fR
+Replace an existing object of the same name.
+.RE
+.RS
+.TP
+\fB\-\-key K\fR
+Sign with key K instead of the tier's default.
+.RE
+.TP
 \fBkennel policy compile <policy> [\-\-output P] [\-\-key K | \-\-unsigned] [\-\-key\-id ID] [\-\-require\-signed] [\-\-no\-lock] [\-\-template\-dir D]... [\-\-trust\-dir D]...\fR
 compile a source policy into a signed settled artefact
 .RS

@@ -917,15 +917,24 @@ pub fn template_list(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// List one house's search dirs (`<dir>/<name>/…`, kind-classified). Returns whether
-/// anything was printed.
+/// List one house's search dirs (`<dir>/<name>/…`, kind-classified), with provenance.
+///
+/// Two facts per entry, shown where they carry information (W3): the **placement tier** (the
+/// dir block's tier) and, for a settled artefact, the **signing tier** where it differs from
+/// placement — a vendor-signed artefact copied down to user space reads `[vendor-signed]`,
+/// distinct from a user-signed clone. A name repeated across the cascade is marked on both
+/// sides: the earlier (higher-priority) entry `shadows` the later tier, the later one is
+/// `shadowed by` the winner — resolution is first-dir-wins, so the earlier entry is what runs.
+/// Returns whether anything was printed.
 fn list_house(label: &str, dirs: &[PathBuf]) -> bool {
-    let mut found = false;
+    // Pass 1: collect every entry per dir, in cascade order.
+    type Entry = (String, &'static str, PathBuf);
+    let mut blocks: Vec<(&PathBuf, &'static str, Vec<Entry>)> = Vec::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
-        let mut names: Vec<(String, &'static str)> = Vec::new();
+        let mut names: Vec<Entry> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
             if !path.is_dir() {
@@ -934,26 +943,74 @@ fn list_house(label: &str, dirs: &[PathBuf]) -> bool {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            let kind = if path.join(format!("{name}.settled.toml")).is_file() {
+            let settled = path.join(format!("{name}.settled.toml"));
+            let kind = if settled.is_file() {
                 "settled"
             } else if path.join("policy.toml").is_file() {
                 policy_kind(&path.join("policy.toml"))
             } else {
                 continue;
             };
-            names.push((name.to_owned(), kind));
+            names.push((name.to_owned(), kind, settled));
         }
         if names.is_empty() {
             continue;
         }
-        found = true;
         names.sort();
-        println!("{label}: {}", dir.display());
-        for (name, kind) in names {
-            println!("  {name}  ({kind})");
+        blocks.push((dir, crate::tier_of_path(dir), names));
+    }
+    // Pass 2: print, marking shadow relations across the cascade (earlier dir wins).
+    // Every (block-index, tier) a name occurs at, so block i can ask "does this name
+    // occur in any LATER block?" without a same-block self-match.
+    let mut occurrences: std::collections::BTreeMap<&str, Vec<(usize, &'static str)>> =
+        std::collections::BTreeMap::new();
+    for (i, (_, tier, names)) in blocks.iter().enumerate() {
+        for (name, _, _) in names {
+            occurrences
+                .entry(name.as_str())
+                .or_default()
+                .push((i, tier));
         }
     }
-    found
+    let mut seen: std::collections::BTreeMap<String, &'static str> =
+        std::collections::BTreeMap::new();
+    for (i, (dir, tier, names)) in blocks.iter().enumerate() {
+        println!("{label}: {} [{tier} tier]", dir.display());
+        for (name, kind, settled) in names {
+            let mut notes: Vec<String> = Vec::new();
+            // Signing provenance, where it differs from placement (settled artefacts only).
+            if *kind == "settled" {
+                match settled_key_id(settled).map(|id| (crate::tier_of_key_id(&id), id)) {
+                    Some((Some(kt), _)) if kt != *tier => notes.push(format!("{kt}-signed")),
+                    Some((None, id)) => notes.push(format!("signed by unknown key `{id}`")),
+                    _ => {}
+                }
+            }
+            if let Some(winner) = seen.get(name.as_str()) {
+                notes.push(format!("shadowed by {winner}"));
+            } else {
+                if let Some(occ) = occurrences.get(name.as_str()) {
+                    if let Some((_, t)) = occ.iter().find(|(j, _)| *j > i) {
+                        notes.push(format!("shadows {t}"));
+                    }
+                }
+                seen.insert(name.clone(), tier);
+            }
+            if notes.is_empty() {
+                println!("  {name}  ({kind})");
+            } else {
+                println!("  {name}  ({kind})  [{}]", notes.join(", "));
+            }
+        }
+    }
+    !blocks.is_empty()
+}
+
+/// The `key_id` a settled artefact is signed with, parsed without verification (display only).
+fn settled_key_id(settled: &Path) -> Option<String> {
+    let bytes = std::fs::read(settled).ok()?;
+    let doc = kennel_lib_policy::parse_signed_settled_unverified(&bytes).ok()?;
+    Some(doc.signature.key_id)
 }
 
 /// Classify a `policy.toml` as a `template` (has `template_name`) or `leaf` (has `name`),
@@ -1014,6 +1071,13 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
             Err(_) => return Err(e),
         },
     };
+    // Origin provenance (W3): which tier's object is being shown, so "which claude" is
+    // answered here and not by ls-ing three trees.
+    eprintln!(
+        "kennel: `{policy_arg}` from the {} tier ({})",
+        crate::tier_of_path(&policy_file),
+        policy_file.display()
+    );
     show_file(&policy_file, template_dirs, trust_dirs)
 }
 
@@ -1042,6 +1106,11 @@ pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
             Err(_) => return Err(e),
         },
     };
+    eprintln!(
+        "kennel: `{template_arg}` from the {} tier ({})",
+        crate::tier_of_path(&template_file),
+        template_file.display()
+    );
     show_file(&template_file, template_dirs, trust_dirs)
 }
 
@@ -1620,4 +1689,460 @@ fn print_unix_grants(policy: &kennel_lib_policy::SettledPolicy) {
         }
         println!();
     }
+}
+
+// ---- `kennel policy|template install` + `clone` (the W3 ceremonies) ------------
+
+/// Which house an `install`/`clone` ceremony was invoked from; each refuses the
+/// other's material with a pointer across.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum House {
+    /// `kennel policy …` — leaves and fragments-as-policy-material.
+    Policy,
+    /// `kennel template …` — shared bases (templates and fragments).
+    Template,
+}
+
+impl House {
+    const fn noun(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::Template => "template",
+        }
+    }
+    const fn repo_leaf(self) -> &'static str {
+        match self {
+            Self::Policy => "policies",
+            Self::Template => "templates",
+        }
+    }
+}
+
+/// The reserved-namespace pre-flight the ceremonies run: every `[[provides]]` name in
+/// `source` must be claimable at `declaring` tier, per the compiler's own rule
+/// ([`kennel_lib_compile::mesh::ReservedAuthority::required_tier`] — one implementation,
+/// never a hand-copied list). Returns the offending names.
+fn reserved_violations(
+    source: &kennel_lib_compile::SourcePolicy,
+    declaring: kennel_lib_compile::source_sig::Tier,
+) -> Vec<String> {
+    let deployment = kennel_lib_config::Deployment::load()
+        .unwrap_or_else(|_| kennel_lib_config::Deployment::defaults());
+    let authority = kennel_lib_compile::mesh::ReservedAuthority {
+        enforce: true,
+        declaring_tier: Some(declaring),
+        reserved: deployment.reserved(),
+    };
+    source
+        .provides
+        .iter()
+        .filter_map(|p| {
+            let name = p.name.as_str();
+            authority
+                .required_tier(name)
+                .is_some_and(|req| req > declaring)
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// `kennel policy install <file.toml> [--host] [--force] [--key K]`.
+///
+/// # Errors
+///
+/// See [`install_object`].
+pub fn policy_install(args: &[String]) -> Result<ExitCode, String> {
+    install_object(args, House::Policy)
+}
+
+/// `kennel template install <file.toml> [--host] [--force] [--key K]`.
+///
+/// # Errors
+///
+/// See [`install_object`].
+pub fn template_install(args: &[String]) -> Result<ExitCode, String> {
+    install_object(args, House::Template)
+}
+
+/// The install ceremony: classify, gate, place, and sign a source `.toml` at the invoking
+/// tier — receive → install → run, one verb.
+///
+/// The whole object must be signable at the destination tier: a `[[provides]]` name in a
+/// reserved family refuses at user tier (and `org.projectkennel.*` refuses at every install
+/// level — the vendor tier is package payload, never an install target). The check is a
+/// courtesy pre-flight of the compiler's own gate, never the enforcement (W9).
+///
+/// # Errors
+///
+/// Returns a message on: bad arguments; a settled artefact (a higher-tier signature just
+/// works when copied — install signs SOURCE); the other house's material; a reserved
+/// `[[provides]]` claim the tier cannot sign; `--host` without root or without the host
+/// key; a name collision without `--force`; or a placement/signing failure.
+#[allow(clippy::too_many_lines)]
+fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
+    use kennel_lib_compile::source_sig::Tier;
+    let mut file: Option<&str> = None;
+    let mut host = false;
+    let mut force = false;
+    let mut key: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--host" => host = true,
+            "--force" => force = true,
+            "--key" => key = Some(it.next().ok_or("--key needs a value")?),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if file.is_none() => file = Some(v),
+            _ => return Err("only one <file.toml> may be given".to_owned()),
+        }
+    }
+    let file = file.ok_or_else(|| {
+        format!(
+            "usage: kennel {} install <file.toml> [--host] [--force] [--key K]",
+            house.noun()
+        )
+    })?;
+    let bytes = std::fs::read(file).map_err(|e| format!("reading {file}: {e}"))?;
+
+    // A settled artefact is not install material: acceptance is downward-inclusive, so a
+    // vendor-/host-signed artefact just works wherever it is placed — plain `cp` it. The
+    // ceremony exists to sign SOURCE at this tier. "Actually settled" and "malformed
+    // source" are distinguished, so a typo gets the parser's real diagnostic, not the
+    // copy note.
+    if kennel_lib_policy::parse_signed_settled_unverified(&bytes).is_ok() {
+        return Err(format!(
+            "{file} is a compiled (settled) artefact, not source. A higher-tier-signed \
+             artefact verifies wherever it is placed — copy it into a `policies/` repo \
+             directly. `install` places and signs SOURCE at your tier"
+        ));
+    }
+    let source = kennel_lib_compile::parse_source(&bytes)
+        .map_err(|e| format!("{file} is not a source policy/template: {e}"))?;
+
+    // Classify + cross-house refusal: the object's identity says which house owns it.
+    let is_template = source.template_name.is_some();
+    match (house, is_template) {
+        (House::Policy, true) => {
+            return Err(format!(
+                "{file} is a template (a shared base) — install it with `kennel template \
+                 install {file}`"
+            ));
+        }
+        (House::Template, false) if source.is_leaf() => {
+            return Err(format!(
+                "{file} is a leaf policy — install it with `kennel policy install {file}`"
+            ));
+        }
+        _ => {}
+    }
+    let name = source
+        .template_name
+        .clone()
+        .or_else(|| source.name.clone())
+        .ok_or_else(|| format!("{file} has no `name`/`template_name`"))?;
+    if !crate::is_valid_policy_name(&name) {
+        return Err(format!("`{name}` is not a valid object name"));
+    }
+
+    // Tier + authority gate, the ceremony half (the compiler re-enforces at compile).
+    let tier = if host { Tier::Host } else { Tier::User };
+    let violations = reserved_violations(&source, tier);
+    if !violations.is_empty() {
+        let at = if host { "host" } else { "user" };
+        return Err(format!(
+            "{file} carries reserved [[provides]] claims a {at}-tier key cannot sign \
+             ({}) — reserved names belong to the tier that owns them; derive from the \
+             signed base instead (`kennel policy generate --from <template>`)",
+            violations.join(", ")
+        ));
+    }
+    if host && kennel_lib_syscall::unistd::effective_uid() != 0 {
+        return Err("`--host` installs into /etc/kennel and needs root".to_owned());
+    }
+
+    // Destination: the tier's canonical layout. Collision refuses (an admin edit is never
+    // silently clobbered); --force replaces.
+    let repo_root = if host {
+        PathBuf::from("/etc/kennel").join(house.repo_leaf())
+    } else {
+        // The user config root, derived from the pub key-dir accessor (its parent).
+        kennel_lib_config::user_key_dir()
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|d| d.join(house.repo_leaf()))
+            .ok_or("cannot resolve ~/.config/kennel (HOME unset)")?
+    };
+    let dest_dir = repo_root.join(&name);
+    let created_fresh = !dest_dir.exists();
+    if !created_fresh && !force {
+        return Err(format!(
+            "`{name}` already exists at {} — pass --force to replace it",
+            dest_dir.display()
+        ));
+    }
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
+    let placed = dest_dir.join("policy.toml");
+    std::fs::write(&placed, &bytes).map_err(|e| format!("writing {}: {e}", placed.display()))?;
+
+    // Sign at the tier's level: a leaf compiles (which signs), a template/fragment is
+    // source-signed. The host tier's key is the installer-provisioned `kennel-host`.
+    let tier_key: String = match key {
+        Some(k) => k.to_owned(),
+        None if host => {
+            let deployment = kennel_lib_config::Deployment::load()
+                .unwrap_or_else(|_| kennel_lib_config::Deployment::defaults());
+            let host_key = deployment.trust_dir().join("kennel-host");
+            if !host_key.is_file() {
+                return Err(format!(
+                    "no host signing key at {} (install.sh provisions it); pass --key",
+                    host_key.display()
+                ));
+            }
+            host_key.to_string_lossy().into_owned()
+        }
+        None => crate::default_signing_key()?.to_string_lossy().into_owned(),
+    };
+    let sign_args = [
+        placed.to_string_lossy().into_owned(),
+        "--key".to_owned(),
+        tier_key,
+    ];
+    let result = if is_template || !source.is_leaf() {
+        template_sign(&sign_args)
+    } else {
+        compile(&sign_args)
+    };
+    // The ceremony is place+sign, atomically from the operator's view: a failed sign must
+    // not leave a half-installed object (source with no artefact) in the repo.
+    let rollback = |result: &str| {
+        if created_fresh {
+            let _ = std::fs::remove_dir_all(&dest_dir);
+            eprintln!(
+                "kennel: install rolled back ({result}); {} removed",
+                dest_dir.display()
+            );
+        } else {
+            eprintln!(
+                "kennel: {result}; `{name}` at {} was replaced but not re-signed — fix and \
+                 re-run install",
+                dest_dir.display()
+            );
+        }
+    };
+    match result {
+        Ok(code) if code == ExitCode::SUCCESS => {}
+        Ok(code) => {
+            rollback("the sign step failed");
+            return Ok(code); // the sign/compile step's own diagnostic already printed
+        }
+        Err(e) => {
+            rollback("the sign step failed");
+            return Err(e);
+        }
+    }
+
+    let tier_word = if host { "host" } else { "user" };
+    eprintln!(
+        "kennel: installed `{name}` at the {tier_word} tier ({})",
+        dest_dir.display()
+    );
+    if is_template || !source.is_leaf() {
+        eprintln!("  next: derive a leaf from it — `kennel policy generate --from {name}`");
+    } else {
+        eprintln!("  next: `kennel run {name}`");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel policy clone <name> [<new-name>] [--key K]`.
+///
+/// # Errors
+///
+/// See [`clone_object`].
+pub fn policy_clone(args: &[String]) -> Result<ExitCode, String> {
+    clone_object(args, House::Policy)
+}
+
+/// `kennel template clone <name> [<new-name>] [--key K]`.
+///
+/// # Errors
+///
+/// See [`clone_object`].
+pub fn template_clone(args: &[String]) -> Result<ExitCode, String> {
+    clone_object(args, House::Template)
+}
+
+/// The clone ceremony: fork a higher-tier object into the user house — your copy, your
+/// name, your key, no inherited floor (vs `generate --from`, which *derives*).
+///
+/// Copies **source form only** (a settled artefact is a derived object carrying the old
+/// authority's signature; a lock likewise). The authority gate is content-total and renaming
+/// is no escape: an object whose `[[provides]]` claims a reserved family is not clonable to
+/// user space at all — the claim lives in the content, and a user key cannot re-sign it
+/// under any name. Default keeps the name (the user copy shadows the original, user-first);
+/// the optional second argument clones to a different name.
+///
+/// # Errors
+///
+/// Returns a message on: bad arguments; a name that does not resolve to SOURCE in this
+/// house's cascade (a settled-only entry names where the source lives); a reserved
+/// `[[provides]]` claim; a user-house collision; or a placement/signing failure.
+fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
+    use kennel_lib_compile::source_sig::Tier;
+    let mut src_arg: Option<&str> = None;
+    let mut new_name: Option<&str> = None;
+    let mut key: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--key" => key = Some(it.next().ok_or("--key needs a value")?),
+            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            v if src_arg.is_none() => src_arg = Some(v),
+            v if new_name.is_none() => new_name = Some(v),
+            _ => return Err("at most <name> and <new-name> may be given".to_owned()),
+        }
+    }
+    let src_arg = src_arg.ok_or_else(|| {
+        format!(
+            "usage: kennel {} clone <name> [<new-name>] [--key K]",
+            house.noun()
+        )
+    })?;
+    if src_arg.contains('/') {
+        return Err(format!(
+            "`clone` takes an object NAME from the {} cascade, not a path — `install` places \
+             a file you already hold",
+            house.repo_leaf()
+        ));
+    }
+
+    // Resolve SOURCE form across this house's cascade (a settled-only tier is skipped: its
+    // artefact is derived; the source is the clonable thing, wherever it ships).
+    let (src_file, src_tier) = match house {
+        House::Template => {
+            let (f, _) = resolve_template(src_arg)?;
+            let t = crate::tier_of_path(&f);
+            (f, t)
+        }
+        House::Policy => resolve_clonable_policy_source(src_arg)?,
+    };
+    let bytes =
+        std::fs::read(&src_file).map_err(|e| format!("reading {}: {e}", src_file.display()))?;
+    let source = kennel_lib_compile::parse_source(&bytes)
+        .map_err(|e| format!("{} is not clonable source ({e})", src_file.display()))?;
+
+    // The content-total authority gate: renaming is no escape.
+    let violations = reserved_violations(&source, Tier::User);
+    if !violations.is_empty() {
+        return Err(format!(
+            "`{src_arg}` carries reserved [[provides]] claims ({}) — the claim lives in the \
+             content, and a user key cannot re-sign it under any name. Not clonable; derive \
+             from it where it stands instead: `kennel policy generate --from {src_arg}`",
+            violations.join(", ")
+        ));
+    }
+
+    // The clone's name: default keeps it (the copy shadows the original user-first).
+    let target = new_name.unwrap_or(src_arg);
+    if !crate::is_valid_policy_name(target) {
+        return Err(format!("`{target}` is not a valid object name"));
+    }
+    let renamed = if target == src_arg {
+        String::from_utf8_lossy(&bytes).into_owned()
+    } else {
+        rename_source_object(&bytes, target)?
+    };
+
+    // Compose on the install backend at user tier: stage the (possibly renamed) source to a
+    // temp file, then run the same place+sign ceremony.
+    let staging =
+        std::env::temp_dir().join(format!("kennel-clone-{target}-{}.toml", std::process::id()));
+    std::fs::write(&staging, renamed.as_bytes()).map_err(|e| format!("staging the clone: {e}"))?;
+    let mut install_args: Vec<String> = vec![staging.to_string_lossy().into_owned()];
+    if let Some(k) = key {
+        install_args.extend(["--key".to_owned(), k.to_owned()]);
+    }
+    let result = install_object(&install_args, house);
+    let _ = std::fs::remove_file(&staging);
+    result?;
+
+    if src_tier != "user" && target == src_arg {
+        eprintln!(
+            "  note: your clone shadows the {src_tier} `{src_arg}` for your user \
+             (resolution is user-first; `kennel {} list` marks it)",
+            house.noun()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Rewrite the top-level `name`/`template_name` line to `target`, preserving every other
+/// byte (comments included). Exactly one identity line must match.
+fn rename_source_object(bytes: &[u8], target: &str) -> Result<String, String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut replaced = false;
+    let out: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if !replaced
+                && (trimmed.starts_with("name =") || trimmed.starts_with("template_name ="))
+            {
+                replaced = true;
+                let field = if trimmed.starts_with("template_name") {
+                    "template_name"
+                } else {
+                    "name"
+                };
+                format!("{field} = \"{target}\"")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    if !replaced {
+        return Err("no top-level `name`/`template_name` line to rename".to_owned());
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// Walk the policies cascade for `name`'s SOURCE (`<dir>/<name>/policy.toml`), skipping
+/// settled-only tiers — the clone resolver. Returns the source path and its tier.
+///
+/// # Errors
+///
+/// Returns a message when no tier ships source: naming the settled-only artefact if one
+/// exists (derived, not clonable), else the plain not-found with the `list` pointer.
+fn resolve_clonable_policy_source(name: &str) -> Result<(PathBuf, &'static str), String> {
+    let user = kennel_lib_config::User::load().unwrap_or_default();
+    let mut settled_hit: Option<PathBuf> = None;
+    for dir in user.policy_dirs() {
+        let base = dir.join(name);
+        let src = base.join("policy.toml");
+        if src.is_file() {
+            let tier = crate::tier_of_path(&src);
+            return Ok((src, tier));
+        }
+        let settled = base.join(format!("{name}.settled.toml"));
+        if settled_hit.is_none() && settled.is_file() {
+            settled_hit = Some(settled);
+        }
+    }
+    settled_hit.map_or_else(
+        || {
+            Err(format!(
+                "no policy named `{name}` in the policies cascade (`kennel policy list` shows \
+                 what is there)"
+            ))
+        },
+        |s| {
+            Err(format!(
+                "`{name}` exists only as compiled artefacts (e.g. {}) — a settled artefact is \
+                 derived, not clonable source, and no tier in the cascade ships this policy's \
+                 source",
+                s.display()
+            ))
+        },
+    )
 }
