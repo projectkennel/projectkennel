@@ -96,9 +96,11 @@ pub struct SourcePolicy {
     /// Top-level; each entry names a capability and its typed shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provides: Vec<ProvidesEntry>,
-    /// `[[consumes]]`: capabilities this kennel reaches over the mesh.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub consumes: Vec<ConsumesEntry>,
+    /// `[[consumes]]`: capabilities this kennel reaches over the mesh. Demand-side (it
+    /// claims no name authority), so it composes: replace or increment
+    /// (`[[consumes.add]]`), keyed by capability name (W6).
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub consumes: ListField<ConsumesEntry>,
     /// `[service]`: the supervision discipline for a service kennel: the restart policy
     /// `kenneld` applies once the operator enables this provider. Meaningful on a kennel with
     /// `[[provides]]`; folds scalar-wins up the chain like `[lifecycle]`.
@@ -215,9 +217,10 @@ pub struct SpawnSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The templates this grant may instantiate (`[[spawn.allow]]`), each optionally narrowed to a
-    /// subset of its manifest.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow: Vec<SpawnAllow>,
+    /// subset of its manifest. Replace or increment (`[[spawn.allow.add]]`), keyed by
+    /// template name (W6).
+    #[serde(default, skip_serializing_if = "ListField::is_empty")]
+    pub allow: ListField<SpawnAllow>,
 }
 
 /// One `[[spawn.allow]]` entry, a single signed template this grant may instantiate.
@@ -577,7 +580,121 @@ impl From<Vec<String>> for PathField {
     }
 }
 
-/// `[cap]`: capabilities and `no_new_privs`.
+/// One `[[identity.groups.add]]` / `[[identity.groups.remove]]` entry.
+///
+/// A supplementary group is a real privilege (device access rides on it), so a delta
+/// entry carries the same `reason` discipline as every other grant increment.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub struct GroupEntry {
+    /// The supplementary group name.
+    pub group: String,
+    /// Why (required on every delta entry; validated at compile).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// The `{ add, remove }` increment over the supplementary-group list.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
+pub struct GroupDelta {
+    /// Entries to add (`+=`), appended if not already present.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add: Vec<GroupEntry>,
+    /// Entries to remove (`-=`), dropped by matching `group`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<GroupEntry>,
+}
+
+/// The `[identity].groups` field: replace or increment at the same key (W6).
+///
+/// A bare list of names (`groups = ["dialout"]`) *replaces* the inherited set; an
+/// `{ add, remove }` of `{ group, reason }` entries (`[[identity.groups.add]]`)
+/// *increments* it. The [`PathField`] model over group names.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum GroupField {
+    /// The bare-list replace form.
+    Set(Vec<String>),
+    /// The `{ add, remove }` increment form.
+    Delta(GroupDelta),
+}
+
+impl Default for GroupField {
+    fn default() -> Self {
+        Self::Set(Vec::new())
+    }
+}
+
+impl GroupField {
+    /// The resolved group list (the `Set` slice; empty for an unfolded `Delta`).
+    #[must_use]
+    pub fn resolved(&self) -> &[String] {
+        match self {
+            Self::Set(v) => v,
+            Self::Delta(_) => &[],
+        }
+    }
+    /// Whether this is the absent sentinel (an empty `Set`).
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        matches!(self, Self::Set(v) if v.is_empty())
+    }
+    /// The delta entries (`add` ∪ `remove`), each of which carries a required `reason`.
+    pub fn delta_entries(&self) -> impl Iterator<Item = &GroupEntry> {
+        let (add, remove): (&[GroupEntry], &[GroupEntry]) = match self {
+            Self::Set(_) => (&[], &[]),
+            Self::Delta(d) => (&d.add, &d.remove),
+        };
+        add.iter().chain(remove)
+    }
+    /// Whether this field is additive-only (absent, or an add-only increment).
+    #[must_use]
+    pub const fn is_additive(&self) -> bool {
+        match self {
+            Self::Set(v) => v.is_empty(),
+            Self::Delta(d) => d.remove.is_empty(),
+        }
+    }
+    /// Iterate the resolved group list (the `Set` slice; empty for an unfolded `Delta`).
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        self.resolved().iter()
+    }
+}
+
+impl From<Vec<String>> for GroupField {
+    /// A bare list is the `Set` (replace) form — what a callsite building a concrete
+    /// group list means.
+    fn from(v: Vec<String>) -> Self {
+        Self::Set(v)
+    }
+}
+
+impl<'a> IntoIterator for &'a GroupField {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.resolved().iter()
+    }
+}
+
+#[cfg(feature = "schema")]
+impl kennel_schema::SchemaType for GroupField {
+    fn schema_node(defs: &mut kennel_schema::Defs) -> kennel_schema::Node {
+        kennel_schema::Node::OneOf(vec![
+            kennel_schema::Node::Array(Box::new(kennel_schema::Node::Str)),
+            <GroupDelta as kennel_schema::SchemaType>::schema_node(defs),
+        ])
+    }
+}
+
+/// `[cap]`: `no_new_privs`.
+///
+/// `bounding_set` retired in 0.7.0 (W6): it was parsed but never translated — the
+/// bounding set is dropped structurally by the spawn (userns + `no_new_privs`), so the
+/// key was dead documentation. An unknown-field refusal now names it.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
@@ -585,9 +702,6 @@ pub struct CapSection {
     /// `PR_SET_NO_NEW_PRIVS`. A framework invariant once resolved (must be true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_new_privs: Option<bool>,
-    /// The capability bounding set to retain (empty drops them all).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bounding_set: Option<Vec<String>>,
 }
 
 /// `[exec]`: what may be `execve`'d.
@@ -929,13 +1043,13 @@ pub struct NetSection {
     /// stored on a `threats.reinstated` field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// IPv4 proxy listen address as `"offset:port"` within the kennel's subnet. A
-    /// family is enabled iff its address is set (there is no separate on/off flag).
+    /// The proxy listen address as `"offset:port"` within the kennel's subnet (the one
+    /// settled `ProxyListen` — addressing is v6-only ULA since 0.6.0 W10, and the offset
+    /// is family-agnostic). Renamed in 0.7.0 (W6) from the vestigial
+    /// `proxy_listen_v4_address`/`proxy_listen_v6_address` split (the "v6" key was
+    /// parsed and ignored); an unknown-field refusal now names the retired spellings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_listen_v4_address: Option<String>,
-    /// IPv6 proxy listen address as `"offset:port"`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proxy_listen_v6_address: Option<String>,
+    pub proxy_listen_address: Option<String>,
     /// `[net.proxy]`: the user-space egress policy the per-kennel proxy enforces
     /// (`constrained`/`unconstrained`): by-name (+CIDR) allow/deny, resolve-and-pin, plus
     /// the non-removable `[[net.proxy.deny.invariant]]` floor. Not enforced in `mode=host`
@@ -1375,9 +1489,11 @@ pub struct IdentitySection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     /// Supplementary group names to retain (e.g. `["dialout", "plugdev"]`). The user
-    /// must be a member of each; resolved to GIDs at spawn.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub groups: Vec<String>,
+    /// must be a member of each; resolved to GIDs at spawn. Replace (`groups = […]`) or
+    /// increment (`[[identity.groups.add]]`, each entry `{ group, reason }`) at the same
+    /// key — a group is a privilege, so an add carries its reason (W6).
+    #[serde(default, skip_serializing_if = "GroupField::is_empty")]
+    pub groups: GroupField,
 }
 
 /// `[ssh]`: per-kennel SSH egress (source-only).
@@ -1801,6 +1917,16 @@ impl SourcePolicy {
 
     #[allow(clippy::too_many_lines)] // cohesive per-section reason checks; the fs.cwd check tipped it over.
     fn check_reasons(&self, errs: &mut Vec<String>) {
+        if let Some(identity) = &self.identity {
+            for e in identity.groups.delta_entries() {
+                if is_blank(e.reason.as_deref()) {
+                    errs.push(format!(
+                        "[[identity.groups.*]] \"{}\" is missing a `reason`",
+                        e.group
+                    ));
+                }
+            }
+        }
         if let Some(net) = &self.net {
             if let Some(proxy) = &net.proxy {
                 for a in proxy.allow.entries() {
@@ -2045,8 +2171,7 @@ impl SourcePolicy {
             // mode/listen/bind/ipv6/audit are overrides; the proxy allow + deny.policy and the bpf
             // ACLs must be add-only. The `[[net.proxy.deny.invariant]]` floor is additive (unioned).
             n.mode.is_none()
-                && n.proxy_listen_v4_address.is_none()
-                && n.proxy_listen_v6_address.is_none()
+                && n.proxy_listen_address.is_none()
                 && n.bind.is_none()
                 && n.ipv6.is_none()
                 && n.audit.is_none()
@@ -2076,7 +2201,7 @@ impl SourcePolicy {
         let top_ok = self.cap.is_none()
             && self.identity.is_none()
             && self.provides.is_empty()
-            && self.consumes.is_empty()
+            && self.consumes.is_additive()
             && self.service.is_none()
             && self.unsafe_section.is_none()
             && self.env.is_none()
@@ -2160,6 +2285,18 @@ pub(crate) fn bpf_key(a: &BpfRule) -> &str {
 #[must_use]
 pub(crate) const fn deny_key(a: &NetDenyRule) -> &str {
     a.cidr.as_str()
+}
+
+/// Unique key for a `[[consumes]]` entry (its capability name).
+#[must_use]
+pub(crate) const fn consumes_key(a: &ConsumesEntry) -> &str {
+    a.name.as_str()
+}
+
+/// Unique key for a `[[spawn.allow]]` entry (its target template name).
+#[must_use]
+pub(crate) fn spawn_key(a: &SpawnAllow) -> &str {
+    a.template.as_deref().unwrap_or("")
 }
 
 /// Validate a template/fragment reference — a bare `<name>`, `[a-z0-9][a-z0-9-]{0,63}`.
@@ -2376,7 +2513,6 @@ mod tests {
         assert!(pol.template_base.is_none(), "base-confined is the root");
         let cap = pol.cap.expect("cap section");
         assert_eq!(cap.no_new_privs, Some(true));
-        assert_eq!(cap.bounding_set.as_deref(), Some(&[][..]));
     }
 
     #[test]

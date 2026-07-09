@@ -282,16 +282,19 @@ diff. The pass:
 - **Decide the rule** — default to `ListField` for any inheritable list where a base contributes a
   floor; keep plain `Vec` only where replace-is-the-contract, and document *why* per field.
 - Apply it uniformly; document the set/delta/fold semantics in **one** place in the book.
-- **`proxy_listen_v4_address`/`proxy_listen_v6_address` collapse** rides the same bump: addressing
-  has been v6-only since 0.6.0 W10 (#156), the split is vestigial.
-- `SETTLED_SCHEMA_VERSION` bumps to **5** — a real shape change, not a re-pin. The MIN floor
-  follows the **variance rule**, now standing: the floor holds only while an artefact of the floor
-  version runs against the new schema **without variance** — v4 kept a credible v3 floor because a
-  v3 artefact runs identically under v4. This pass changes composition semantics, so the question
-  is asked per covered field, concretely: does a v3/v4 artefact still validate and behave
-  identically under v5? If any non-optional part cannot be validated against the previous floor,
-  **the floor goes up** — no grandfathering an artefact whose meaning shifted. The determination
-  and its receipts (the per-field variance check) are recorded with the bump.
+- **`proxy_listen_v4_address`/`proxy_listen_v6_address` collapse** rides the same bump. As-built
+  correction (found in the W6 survey): the settled artefact has carried a **single** `ProxyListen`
+  since 0.6.0 W10 (#156) — the split lived only in the source grammar, and the "v6" key was parsed
+  and ignored. The collapse is therefore a source-key **rename** (`proxy_listen_address`), and the
+  same sweep retires `[cap].bounding_set` (parsed, never translated — dead documentation).
+- `SETTLED_SCHEMA_VERSION` bumps to **5**. As-built correction to this item's original framing:
+  the SETTLED shape does not move at all (composition resolves at compile), so the bump is owed
+  not by the settled bytes but by the **authorable surface** — the schema-version lock fingerprints
+  the authorable schema, and its standing rule is that fields whose *use* an old reader cannot
+  parse owe a bump at release. The MIN floor follows the **variance rule** and **stays 3**: a
+  v3/v4 artefact validates and behaves identically under the v5 build (receipt: zero settled-shape
+  delta — the per-field changes are all compile-time composition). The determination and receipts
+  ride the lock's v5 entry and the CHANGELOG ABI note.
 
 **Exit:** every list-shaped field's composition semantics are deliberate, uniform where the rule
 says uniform, and documented in one place; a leaf can no longer silently drop an inherited floor

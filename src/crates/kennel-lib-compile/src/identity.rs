@@ -66,7 +66,11 @@ mod tests {
     fn policy_with(groups: &[&str]) -> SourcePolicy {
         SourcePolicy {
             identity: Some(IdentitySection {
-                groups: groups.iter().map(|s| (*s).to_owned()).collect(),
+                groups: groups
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect::<Vec<String>>()
+                    .into(),
                 ..IdentitySection::default()
             }),
             ..SourcePolicy::default()

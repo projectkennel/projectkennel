@@ -204,7 +204,7 @@ mod tests {
     fn policy_with(provides: Vec<ProvidesEntry>, consumes: Vec<ConsumesEntry>) -> SourcePolicy {
         SourcePolicy {
             provides,
-            consumes,
+            consumes: consumes.into(),
             ..SourcePolicy::default()
         }
     }

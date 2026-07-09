@@ -477,7 +477,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 intro: "The masked persona and supplementary groups.",
                 fields: &[
                     Field { name: "user / group", kind: "string", desc: "Masked user and primary group names (default kennel)." },
-                    Field { name: "groups", kind: "array", desc: "Supplementary groups to retain; the operator must be a member of each." },
+                    Field { name: "groups", kind: "array | {add,remove}", desc: "Supplementary groups to retain (the operator must be a member of each); bare list replaces, [[identity.groups.add]] increments with a reason per add." },
                     Field { name: "hostname", kind: "string", desc: "Opt-in masked hostname: the kennel gets its own UTS namespace and this name (uname -n, /etc/hostname, /etc/hosts agree). Unset: no masking, the host name shows through." },
                 ],
             },
@@ -520,7 +520,7 @@ path), \\fB/abs\\fR for host-absolute, \\fB<kennel>\\fR for the runtime id, and 
                 intro: "The remaining controls.",
                 fields: &[
                     Field { name: "lifecycle.ttl / .ttl_action", kind: "string", desc: "TTL (\"8h\") and action: exit (alias stop, default) / warn / renew." },
-                    Field { name: "cap.no_new_privs / .bounding_set", kind: "bool / array", desc: "no_new_privs (true) and the capability bounding set (empty drops all)." },
+                    Field { name: "cap.no_new_privs", kind: "bool", desc: "PR_SET_NO_NEW_PRIVS; a framework invariant (must resolve true). The bounding set is dropped structurally (no knob)." },
                     Field { name: "seccomp.profile / .deny / .allow", kind: "string / array / array", desc: "Baseline profile plus syscall deny/allow." },
                     Field { name: "[unsafe.ptrace] / [unsafe.signal]", kind: "tables", desc: "Advisory cross-boundary allowlists (allow_targets/allow_from); scoping is from PID-ns/seccomp \\(em these warn, they do not impose the control." },
                     Field { name: "[ulimits]", kind: "table", desc: "setrlimit pairs (nofile, nproc, as, cpu, ...)." },

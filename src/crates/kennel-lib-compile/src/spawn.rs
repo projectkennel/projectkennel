@@ -67,7 +67,7 @@ pub fn resolve_grant(
     let Some(spawn) = &effective.spawn else {
         return Ok(None);
     };
-    let mut allow = Vec::with_capacity(spawn.allow.len());
+    let mut allow = Vec::with_capacity(spawn.allow.resolved().len());
     for entry in &spawn.allow {
         // A missing `template` is already rejected by `translate::validate_spawn`; skip rather than
         // double-report.
