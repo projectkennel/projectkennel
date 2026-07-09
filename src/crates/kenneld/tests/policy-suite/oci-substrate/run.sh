@@ -19,7 +19,9 @@
 # not a failure, but it is reported, never a silent pass.
 set -uo pipefail
 
-CASE_DIR="$1"; KENNEL="$2"; KEY="$3"; SCRATCH="$4"
+# shellcheck source=../suite-lib.sh
+. "$1/../suite-lib.sh"
+suite_case "$@"
 NAME="ocie2e"
 # A private per-operator store under the scratch dir, so the case never touches the real store.
 export XDG_DATA_HOME="$SCRATCH/xdg"
@@ -62,20 +64,20 @@ grep -qE '^readonly = \["/usr"' "$ENTRY/policy.toml" || {
 # 4. Compile the completed store policy in the AUTHORING house (the dogfood flow: `oci run`
 #    boots only the settled artefact), then boot and self-check the slice from inside. `oci run`
 #    asserts the digest and drives the overlay-root spawn; it takes no key (the daemon verifies).
-"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
+"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$SUITE_KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
     echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
 "$KENNEL" oci run "$NAME" -- /bin/sh -c '
     uid=$(id -u)
-    [ "$uid" = 12345 ] && { echo "FAIL: image User was honored (uid=$uid)"; exit 21; }
-    [ -n "$uid" ] || { echo "FAIL: no uid"; exit 22; }
+    [[ "$uid" = 12345 ]] && { echo "FAIL: image User was honored (uid=$uid)"; exit 21; }
+    [[ -n "$uid" ]] || { echo "FAIL: no uid"; exit 22; }
     # closure-lock: /usr (and the FHS closure) must be read-only for a non-root image. The write
     # probe runs in a subshell so a failed redirect on a special built-in does not exit our shell.
     if ( echo x > /usr/_e2e_probe ) 2>/dev/null; then echo "FAIL: /usr writable (closure-lock absent)"; exit 23; fi
     # /usr still readable + executable (read+exec kept), or the image could not run at all.
-    [ -x /bin/sh ] || { echo "FAIL: /bin/sh not executable under the lock"; exit 24; }
+    [[ -x /bin/sh ]] || { echo "FAIL: /bin/sh not executable under the lock"; exit 24; }
     # the persona /tmp is writable (the DAC chown), and Kennel/etc wins by layer precedence.
     ( echo x > /tmp/_e2e_probe ) 2>/dev/null || { echo "FAIL: /tmp not writable"; exit 25; }
-    [ -f /etc/resolv.conf ] || { echo "FAIL: Kennel /etc/resolv.conf missing"; exit 26; }
+    [[ -f /etc/resolv.conf ]] || { echo "FAIL: Kennel /etc/resolv.conf missing"; exit 26; }
     echo "OCI_SLICE_OK uid=$uid"
     exit 0
 '

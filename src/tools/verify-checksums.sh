@@ -38,7 +38,7 @@ err() {
 # Assumes the documented field order (version before crate-sha256) within each
 # [crate."<name>"] block.
 parse_manifest() {
-	[ -f "$MANIFEST" ] || return 0
+	[[ -f "$MANIFEST" ]] || return 0
 	awk '
 		/^\[crate\."/      { name=$0; sub(/^\[crate\."/,"",name); sub(/"\].*$/,"",name); ver=""; sha=""; next }
 		/^version[ \t]*=/      { v=$0; sub(/^version[ \t]*=[ \t]*"/,"",v); sub(/".*/,"",v); sub(/^=/,"",v); ver=v }
@@ -49,7 +49,7 @@ parse_manifest() {
 
 # --- parse Cargo.lock registry packages -> "<name>\t<version>\t<checksum>" --
 parse_lock() {
-	[ -f "$LOCK" ] || return 0
+	[[ -f "$LOCK" ]] || return 0
 	awk '
 		/^\[\[package\]\]/ { name=""; ver=""; src=""; sum=""; inpkg=1; next }
 		inpkg && /^name = "/     { name=$0; sub(/^name = "/,"",name); sub(/".*/,"",name) }
@@ -67,25 +67,25 @@ declare -A claimed=()      # src/vendor filename -> 1 (matched a manifest entry)
 # Load the manifest and verify each entry's artefact (checks 2 and 3).
 n_entries=0
 while IFS=$'\t' read -r name ver sha; do
-	[ -n "$name" ] || continue
+	[[ -n "$name" ]] || continue
 	n_entries=$((n_entries + 1))
 	manifest_sha["$name $ver"]="$sha"
 	file="$ARCHIVE/$name-$ver.crate"
-	if [ ! -f "$file" ]; then
+	if [[ ! -f "$file" ]]; then
 		err "manifest entry $name $ver has no $name-$ver.crate in src/vendor/"
 		continue
 	fi
 	got="$(sha256sum "$file" | cut -d' ' -f1)"
-	if [ "$got" != "$sha" ]; then
+	if [[ "$got" != "$sha" ]]; then
 		err "hash mismatch for $name-$ver.crate: manifest $sha, computed $got"
 	fi
 	claimed["$name-$ver.crate"]=1
 done < <(parse_manifest)
 
 # Every artefact on disk must be claimed by a manifest entry (check 1).
-if [ -d "$ARCHIVE" ]; then
+if [[ -d "$ARCHIVE" ]]; then
 	while IFS= read -r path; do
-		[ -n "$path" ] || continue
+		[[ -n "$path" ]] || continue
 		base="$(basename "$path")"
 		if [ -z "${claimed[$base]:-}" ]; then
 			err "src/vendor/$base is not recorded in CHECKSUMS.toml"
@@ -96,17 +96,17 @@ fi
 # Cargo.lock cross-checks (checks 4 and 5).
 n_lock=0
 while IFS=$'\t' read -r name ver sum; do
-	[ -n "$name" ] || continue
+	[[ -n "$name" ]] || continue
 	n_lock=$((n_lock + 1))
 	want="${manifest_sha["$name $ver"]:-}"
-	if [ -z "$want" ]; then
+	if [[ -z "$want" ]]; then
 		err "Cargo.lock references $name $ver, which is not pinned in CHECKSUMS.toml"
-	elif [ -n "$sum" ] && [ "$sum" != "$want" ]; then
+	elif [[ -n "$sum" ]] && [[ "$sum" != "$want" ]]; then
 		err "Cargo.lock checksum for $name $ver disagrees with CHECKSUMS.toml"
 	fi
 done < <(parse_lock)
 
-if [ "$errors" -ne 0 ]; then
+if [[ "$errors" -ne 0 ]]; then
 	echo "verify-checksums: $errors problem(s) found" >&2
 	exit 1
 fi

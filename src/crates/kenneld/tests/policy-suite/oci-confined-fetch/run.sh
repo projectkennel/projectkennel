@@ -17,7 +17,9 @@
 # Exit 77 = SKIP (no skopeo/python3, or the registry is unreachable — a fetch needs egress).
 set -uo pipefail
 
-CASE_DIR="$1"; KENNEL="$2"; KEY="$3"; SCRATCH="$4"
+# shellcheck source=../suite-lib.sh
+. "$1/../suite-lib.sh"
+suite_case "$@"
 NAME="ocifetch"
 
 # The store MUST live under $HOME: the fetch writes it via `fs.write`, and the home-persona mapping
@@ -26,15 +28,14 @@ NAME="ocifetch"
 STORE="$HOME/.kennel-e2e-ocifetch-$$"
 export XDG_DATA_HOME="$STORE"
 ENTRY="$STORE/kennel/images/$NAME"
-cleanup() { "$KENNEL" oci revert "$NAME" >/dev/null 2>&1 || true; rm -rf "$STORE"; }
-trap cleanup EXIT
+suite_defer '"$KENNEL" oci revert "$NAME" >/dev/null 2>&1; rm -rf "$STORE"'
 
 command -v skopeo >/dev/null 2>&1 || { echo "SKIP: skopeo not installed"; exit 77; }
 command -v umoci  >/dev/null 2>&1 || { echo "SKIP: umoci not installed"; exit 77; }
 
 # The confined fetch: skopeo + python3 run inside a kennel under oci-fetch; the per-build leaf
 # (signed by the suite key) adds fs.write for the store entry. Offline ⇒ SKIP (a fetch needs egress).
-if ! "$KENNEL" oci build "$NAME" --image "docker.io/library/busybox:latest" --key "$KEY" --force \
+if ! "$KENNEL" oci build "$NAME" --image "docker.io/library/busybox:latest" --key "$SUITE_KEY" --force \
         >"$SCRATCH/build.log" 2>&1; then
     if grep -qiE "offline|temporary failure|could not resolve|name resolution|network|dial tcp|no route|connection refused|timeout|unreachable" "$SCRATCH/build.log"; then
         echo "SKIP: confined fetch could not reach the registry (offline?) — $(tail -1 "$SCRATCH/build.log")"
@@ -45,7 +46,7 @@ if ! "$KENNEL" oci build "$NAME" --image "docker.io/library/busybox:latest" --ke
 fi
 
 # The entry is populated by the confined fetch.
-[ -e "$ENTRY/rootfs/bin/busybox" ] || [ -e "$ENTRY/rootfs/bin/sh" ] || {
+[[ -e "$ENTRY/rootfs/bin/busybox" ]] || [[ -e "$ENTRY/rootfs/bin/sh" ]] || {
     echo "FAIL: rootfs not unpacked at $ENTRY/rootfs"; exit 1; }
 grep -q '"config"' "$ENTRY/config.json" 2>/dev/null || {
     echo "FAIL: config.json missing or not an image config"; exit 1; }
@@ -54,7 +55,7 @@ grep -q "@sha256:" "$ENTRY/digest" 2>/dev/null || {
 
 # Rootless flatten: every unpacked inode is owned by the operator (this uid), not the image's uids.
 owner="$(stat -c '%u' "$ENTRY/rootfs/bin" 2>/dev/null)"
-[ "$owner" = "$(id -u)" ] || { echo "FAIL: rootfs not flattened to the operator uid (got $owner)"; exit 1; }
+[[ "$owner" = "$(id -u)" ]] || { echo "FAIL: rootfs not flattened to the operator uid (got $owner)"; exit 1; }
 
 # Complete the scaffolded run policy's reason, then boot the fetched substrate. The boot's success
 # is its workload EXIT CODE (the suite's contract) — not stdout, which the in-kennel→CLI path does
@@ -62,16 +63,16 @@ owner="$(stat -c '%u' "$ENTRY/rootfs/bin" 2>/dev/null)"
 sed -i 's|^reason = .*|reason = "e2e: boot a confined-fetched busybox"|' "$ENTRY/policy.toml"
 # Compile the completed store policy in the authoring house (dogfood: `oci run` boots only the
 # settled artefact and takes no key — the daemon verifies).
-"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
+"$KENNEL" policy compile "$ENTRY/policy.toml" --key "$SUITE_KEY" --no-lock >"$SCRATCH/compile.log" 2>&1 || {
     echo "FAIL: policy compile — $(tail -2 "$SCRATCH/compile.log")"; exit 1; }
 "$KENNEL" oci run "$NAME" -- /bin/sh -c '
-    [ -e /bin/sh ] || exit 31            # the fetched substrate runs its own shell
-    [ -x /bin/busybox ] || [ -x /bin/cat ] || exit 32
-    [ -e /etc/resolv.conf ] || exit 33   # Kennel /etc is present over the image
+    [[ -e /bin/sh ]] || exit 31            # the fetched substrate runs its own shell
+    [[ -x /bin/busybox ]] || [[ -x /bin/cat ]] || exit 32
+    [[ -e /etc/resolv.conf ]] || exit 33   # Kennel /etc is present over the image
     exit 0
 ' >"$SCRATCH/run.log" 2>&1
 rc=$?
-[ "$rc" = 0 ] || {
+[[ "$rc" = 0 ]] || {
     echo "FAIL: confined-fetched image did not boot cleanly (rc=$rc) — $(tail -3 "$SCRATCH/run.log")"; exit 1; }
 
 echo "CONFINED_FETCH_OK (digest $(cat "$ENTRY/digest"))"

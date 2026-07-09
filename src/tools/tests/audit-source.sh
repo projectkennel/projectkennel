@@ -14,7 +14,7 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0
 fail=0
 check() { # <desc> <expected-rc> <actual-rc>
-	if [ "$2" -eq "$3" ]; then pass=$((pass + 1)); else
+	if [[ "$2" -eq "$3" ]]; then pass=$((pass + 1)); else
 		fail=$((fail + 1))
 		echo "FAIL: $1 (wanted rc $2, got $3)" >&2
 	fi
@@ -41,4 +41,4 @@ KENNEL_ROOT="$TMP" "$TOOL" foo 1.0.0 >/dev/null 2>&1 || rc=$?
 check "refuses a .crate with no .cargo_vcs_info.json" 1 "$rc"
 
 echo "audit-source tests: $pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[[ "$fail" -eq 0 ]]

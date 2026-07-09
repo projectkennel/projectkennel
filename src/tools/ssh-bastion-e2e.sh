@@ -29,23 +29,23 @@ SSHD=/usr/sbin/sshd
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 REORIGIN="${1:-$REPO_ROOT/target/debug/kennel-bin-ssh-reorigin}"
 
-[ -x "$SSHD" ]      || { echo "no sshd at $SSHD" >&2; exit 2; }
-[ -x "$REORIGIN" ]  || { echo "no kennel-bin-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
+[[ -x "$SSHD" ]]      || { echo "no sshd at $SSHD" >&2; exit 2; }
+[[ -x "$REORIGIN" ]]  || { echo "no kennel-bin-ssh-reorigin at $REORIGIN (build it first)" >&2; exit 2; }
 
 # Stage outside world-writable /tmp: sshd's safe-path check rejects an
 # AuthorizedKeysFile whose ancestor is world-writable (08 §8.1, finding 3). The
 # per-user runtime dir (0700) is the safe staging ground.
 STAGE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-[ -d "$STAGE" ] && [ -w "$STAGE" ] || { echo "no usable XDG_RUNTIME_DIR ($STAGE); run in a user session" >&2; exit 2; }
+[[ -d "$STAGE" ]] && [[ -w "$STAGE" ]] || { echo "no usable XDG_RUNTIME_DIR ($STAGE); run in a user session" >&2; exit 2; }
 WORK="$(mktemp -d "$STAGE/kennel-ssh-e2e.XXXXXX")"
 chmod 700 "$WORK"
 BASTION_PID="" DEST_PID="" AGENT_PID="" NETPROXY_PID=""
 
 cleanup() {
-    [ -n "$BASTION_PID" ]  && kill "$BASTION_PID"  2>/dev/null || true
-    [ -n "$DEST_PID" ]     && kill "$DEST_PID"     2>/dev/null || true
-    [ -n "$AGENT_PID" ]    && kill "$AGENT_PID"    2>/dev/null || true
-    [ -n "$NETPROXY_PID" ] && kill "$NETPROXY_PID" 2>/dev/null || true
+    [[ -n "$BASTION_PID" ]]  && kill "$BASTION_PID"  2>/dev/null || true
+    [[ -n "$DEST_PID" ]]     && kill "$DEST_PID"     2>/dev/null || true
+    [[ -n "$AGENT_PID" ]]    && kill "$AGENT_PID"    2>/dev/null || true
+    [[ -n "$NETPROXY_PID" ]] && kill "$NETPROXY_PID" 2>/dev/null || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -201,7 +201,7 @@ echo "=== 2. fixed dest: a hostile command cannot redirect or break out ==="
 OUT="$(client 'x; ssh evil.example "id"; $(touch '"$WORK"'/PWNED)' 2>/dev/null || true)"
 echo "    client saw: $OUT"
 echo "$OUT" | grep -q "DEST_REACHED" || fail "connection did not terminate at the fixed destination"
-[ ! -e "$WORK/PWNED" ] || fail "command-substitution executed on the bastion (injection!)"
+[[ ! -e "$WORK/PWNED" ]] || fail "command-substitution executed on the bastion (injection!)"
 pass "destination stays fixed; injected metacharacters did not execute on the bastion"
 
 echo

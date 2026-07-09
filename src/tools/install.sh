@@ -50,7 +50,8 @@ set -euo pipefail
 # The libexec dir holds the HOST-SIDE binaries only (daemon, privhelper, host delegates, the host
 # execution unit). This whole tree is blacklisted from constructed views (W10), so nothing a view
 # runs may live here. --prefix relocates it.
-libexec="/usr/libexec/kennel"
+default_libexec="/usr/libexec/kennel"
+libexec="$default_libexec"
 # The in-cage facade dir (W10): the binaries a constructed view legitimately runs (the conduit
 # facades, the spawn execution unit, the OCI launcher). A sibling of $libexec so the host tree can be
 # blacklisted while these stay reachable.
@@ -63,7 +64,7 @@ vendor_dir="/usr/lib/kennel"
 mandir="/usr/share/man"
 dry_run=0
 
-while [ $# -gt 0 ]; do
+while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--prefix) libexec="${2:?--prefix needs a directory}"; shift 2 ;;
 		--mandir) mandir="${2:?--mandir needs a directory}"; shift 2 ;;
@@ -79,7 +80,7 @@ done
 # source tree. No `bin/` beside it → not a release tree, so refuse rather than half-install.
 pkg_root="$(cd "$(dirname "$0")" && pwd)"
 bindir="$pkg_root/bin"
-if [ ! -d "$bindir" ]; then
+if [[ ! -d "$bindir" ]]; then
 	echo "install.sh: no bin/ beside this installer ($bindir)." >&2
 	echo "            Run it from an unpacked release tarball; build one from a source" >&2
 	echo "            checkout with src/tools/build-release.sh." >&2
@@ -91,7 +92,7 @@ units_dir="/usr/lib/systemd/user"
 
 # run CMD...: echo under --dry-run, else execute.
 run() {
-	if [ "$dry_run" -eq 1 ]; then
+	if [[ "$dry_run" -eq 1 ]]; then
 		printf 'DRY-RUN:'; printf ' %q' "$@"; printf '\n'
 	else
 		"$@"
@@ -99,8 +100,8 @@ run() {
 }
 
 require_root() {
-	[ "$dry_run" -eq 1 ] && return 0
-	if [ "$(id -u)" -ne 0 ]; then
+	[[ "$dry_run" -eq 1 ]] && return 0
+	if [[ "$(id -u)" -ne 0 ]]; then
 		echo "install.sh: the system install needs root; re-run with sudo" >&2
 		exit 1
 	fi
@@ -113,7 +114,7 @@ require_root() {
 # so its absence means this is not a real payload.)
 verify_payload() {
 	local manifest="$pkg_root/SHA256SUMS"
-	if [ ! -f "$manifest" ]; then
+	if [[ ! -f "$manifest" ]]; then
 		echo "install.sh: no SHA256SUMS beside the installer — refusing to install an unverifiable payload" >&2
 		exit 2
 	fi
@@ -204,22 +205,22 @@ install_config() {
 	# CLI resolve them at the standard path, never the source tree. Source `policy.toml`
 	# + meta; a spawn target's signed `<name>.settled.toml` is produced by `kennel policy compile`
 	# (the maintainer signs the reference set; the operator their own).
-	if [ -d "$pkg_root/templates" ]; then
+	if [[ -d "$pkg_root/templates" ]]; then
 		for tdir in "$pkg_root"/templates/*/; do
-			[ -d "$tdir" ] || continue
+			[[ -d "$tdir" ]] || continue
 			tname="$(basename "$tdir")"
 			run install -d -m 0755 "$vendor_dir/templates/$tname"
 			for f in "$tdir"*; do
-				[ -f "$f" ] || continue
+				[[ -f "$f" ]] || continue
 				run install -m 0644 "$f" "$vendor_dir/templates/$tname/$(basename "$f")"
 			done
 		done
 	fi
 	# The composable fragments share the template search dir (a leaf's `include = ["gui-desktop",
 	# …]` resolves them from template_dirs); ship them alongside the templates in the maintainer tree.
-	if [ -d "$pkg_root/fragments" ]; then
+	if [[ -d "$pkg_root/fragments" ]]; then
 		for fdir in "$pkg_root"/fragments/*/; do
-			[ -f "${fdir}policy.toml" ] || continue
+			[[ -f "${fdir}policy.toml" ]] || continue
 			fname="$(basename "$fdir")"
 			run install -d -m 0755 "$vendor_dir/templates/$fname"
 			run install -m 0644 "${fdir}policy.toml" "$vendor_dir/templates/$fname/policy.toml"
@@ -228,15 +229,15 @@ install_config() {
 	# The reference policy SOURCES — runnable leaves (policies/<name>) and service providers
 	# (policies/providers/<name>) — maintainer-signed, into the vendor policies tree. They are
 	# compiled to settled, host-signed artefacts at install (install_reference_policies).
-	if [ -d "$pkg_root/policies" ]; then
+	if [[ -d "$pkg_root/policies" ]]; then
 		for pdir in "$pkg_root"/policies/*/; do
-			[ -f "${pdir}policy.toml" ] || continue
+			[[ -f "${pdir}policy.toml" ]] || continue
 			pname="$(basename "$pdir")"
 			run install -d -m 0755 "$vendor_dir/policies/$pname"
 			run install -m 0644 "${pdir}policy.toml" "$vendor_dir/policies/$pname/policy.toml"
 		done
 		for pdir in "$pkg_root"/policies/providers/*/; do
-			[ -f "${pdir}policy.toml" ] || continue
+			[[ -f "${pdir}policy.toml" ]] || continue
 			pname="$(basename "$pdir")"
 			run install -d -m 0755 "$vendor_dir/policies/providers/$pname"
 			run install -m 0644 "${pdir}policy.toml" "$vendor_dir/policies/providers/$pname/policy.toml"
@@ -258,7 +259,7 @@ install_config() {
 	# vendor tree holds invariants exclusively.
 	local stale
 	for stale in system.toml config.toml kennel-sshd.conf; do
-		[ -f "$vendor_dir/$stale" ] && run rm -f "$vendor_dir/$stale"
+		[[ -f "$vendor_dir/$stale" ]] && run rm -f "$vendor_dir/$stale"
 	done
 	return 0
 }
@@ -271,10 +272,10 @@ install_units() {
 	run install -d -m 0755 "$units_dir"
 	run install -m 0644 "$pkg_root/dist/systemd/kenneld.socket" "$units_dir/kenneld.socket"
 	run install -m 0644 "$pkg_root/dist/systemd/kenneld.service" "$units_dir/kenneld.service"
-	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+	if [[ "$libexec" != "$default_libexec" ]]; then
 		local dropin_dir="/etc/systemd/user/kenneld.service.d"
 		run install -d -m 0755 "$dropin_dir"
-		if [ "$dry_run" -eq 1 ]; then
+		if [[ "$dry_run" -eq 1 ]]; then
 			echo "DRY-RUN: write $dropin_dir/kennel-prefix.conf (ExecStart=$libexec/kenneld)"
 		else
 			printf '[Service]\nExecStart=\nExecStart=%s/kenneld\n' "$libexec" > "$dropin_dir/kennel-prefix.conf"
@@ -286,12 +287,12 @@ install_units() {
 # The pages are generated by `gen-man` and committed; see man/README.md.
 install_man() {
 	local man_src="$pkg_root/man" page sect dest
-	if [ ! -d "$man_src" ]; then
+	if [[ ! -d "$man_src" ]]; then
 		echo "install.sh: no man/ directory; skipping man pages" >&2
 		return 0
 	fi
 	for page in "$man_src"/*.[1-9]; do
-		[ -e "$page" ] || continue          # nullglob-safe: skip if none matched
+		[[ -e "$page" ]] || continue          # nullglob-safe: skip if none matched
 		sect="${page##*.}"                  # the trailing digit = man section
 		dest="$mandir/man$sect"
 		run install -d -m 0755 "$dest"
@@ -303,9 +304,9 @@ install_apparmor() {
 	# Grant kenneld the unprivileged-userns capability on hosts that restrict it
 	# (Ubuntu 23.10+: kernel.apparmor_restrict_unprivileged_userns=1). The profile
 	# attaches to the kenneld binary by absolute path, so it must match libexec.
-	[ -d /etc/apparmor.d ] || { echo "install.sh: no /etc/apparmor.d; skipping AppArmor profile"; return 0; }
+	[[ -d /etc/apparmor.d ]] || { echo "install.sh: no /etc/apparmor.d; skipping AppArmor profile"; return 0; }
 	run install -m 0644 "$pkg_root/dist/apparmor/kenneld" /etc/apparmor.d/kenneld
-	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+	if [[ "$libexec" != "$default_libexec" ]]; then
 		run sed -i "s#/usr/libexec/kennel/kenneld#$libexec/kenneld#" /etc/apparmor.d/kenneld
 	fi
 	if command -v apparmor_parser >/dev/null 2>&1; then
@@ -318,10 +319,11 @@ install_apparmor() {
 # Seed a HOST config default into /etc/kennel, ONLY if absent — the standard /etc conffile
 # discipline, so a reinstall never clobbers an admin's edits. Under --dry-run, just report.
 seed_etc_config() {
-	local src="$pkg_root/$1" dest="$2"
-	if [ "$dry_run" -eq 1 ]; then
-		echo "DRY-RUN: seed $dest from $1 (only if absent)"
-	elif [ ! -f "$dest" ]; then
+	local rel="$1" dest="$2"
+	local src="$pkg_root/$rel"
+	if [[ "$dry_run" -eq 1 ]]; then
+		echo "DRY-RUN: seed $dest from $rel (only if absent)"
+	elif [[ ! -f "$dest" ]]; then
 		install -m 0644 "$src" "$dest"
 		echo "install.sh: seeded host config default $dest"
 	else
@@ -339,16 +341,16 @@ install_etc_skeleton() {
 	run install -d -m 0755 /etc/kennel /etc/kennel/keys /etc/kennel/templates /etc/kennel/policies
 	# Seed the host config defaults, install-if-ABSENT (the daemon/CLI read them from /etc via the
 	# kennel-lib-config cascade, falling back to the compiled defaults; a missing file is fine).
-	if [ "$dry_run" -eq 1 ] || [ -d /etc/kennel ]; then
+	if [[ "$dry_run" -eq 1 ]] || [[ -d /etc/kennel ]]; then
 		seed_etc_config dist/config/system.toml /etc/kennel/system.toml
 		seed_etc_config dist/config/config.toml /etc/kennel/config.toml
 		seed_etc_config dist/kennel-sshd.conf /etc/kennel/kennel-sshd.conf
 	fi
 	# A --prefix relocation is a HOST fact: set libexec_dir in the seeded /etc/kennel/system.toml
 	# (merge in place — an admin may keep other keys there).
-	if [ "$libexec" != "/usr/libexec/kennel" ]; then
+	if [[ "$libexec" != "$default_libexec" ]]; then
 		local sys=/etc/kennel/system.toml
-		if [ "$dry_run" -eq 1 ]; then
+		if [[ "$dry_run" -eq 1 ]]; then
 			echo "DRY-RUN: set libexec_dir = \"$libexec\" in $sys"
 		elif grep -q '^libexec_dir *=' "$sys" 2>/dev/null; then
 			sed -i "s#^libexec_dir *=.*#libexec_dir = \"$libexec\"#" "$sys"
@@ -367,9 +369,9 @@ install_keys() {
 	# admin /etc/kennel/keys (which holds org/customer keys an admin adds): an admin or
 	# user key cannot claim the project's own namespace. Private seeds are never in the
 	# repo (MAINTAINERS.md); only `*.pub` is shipped.
-	if [ -d "$pkg_root/keys" ]; then
+	if [[ -d "$pkg_root/keys" ]]; then
 		for pub in "$pkg_root"/keys/*.pub; do
-			[ -e "$pub" ] || continue
+			[[ -e "$pub" ]] || continue
 			run install -m 0644 "$pub" "$vendor_dir/keys/$(basename "$pub")"
 		done
 	fi
@@ -383,14 +385,14 @@ install_reference_policies() {
 	# key is minted once into the admin trust dir (/etc/kennel/keys) and reused on every reinstall; the
 	# `<name>.settled.toml` land under /etc/kennel/policies, which the policy search cascade resolves.
 	# A missing ssh-keygen or a single failing compile is non-fatal (warn + skip).
-	[ -d "$pkg_root/policies" ] || return 0
+	[[ -d "$pkg_root/policies" ]] || return 0
 	local kbin="$pathbin_dir/kennel" host_id="kennel-host" key_dir="/etc/kennel/keys"
-	if [ "$dry_run" -eq 1 ]; then
+	if [[ "$dry_run" -eq 1 ]]; then
 		echo "DRY-RUN: mint host key '$host_id' in $key_dir (if absent), then compile each policies/* +"
 		echo "         policies/providers/* source --key it into /etc/kennel/policies/<n>/<n>.settled.toml"
 		return 0
 	fi
-	[ -x "$kbin" ] || { echo "install.sh: $kbin not found; skipping reference-policy compile" >&2; return 0; }
+	[[ -x "$kbin" ]] || { echo "install.sh: $kbin not found; skipping reference-policy compile" >&2; return 0; }
 	if ! command -v ssh-keygen >/dev/null 2>&1; then
 		echo "install.sh: ssh-keygen absent — cannot mint a host signing key; skipping reference-policy compile" >&2
 		return 0
@@ -399,7 +401,7 @@ install_reference_policies() {
 	# host-tier pair (private + .pub) into the deployment trust dir (= /etc/kennel/keys);
 	# the daemon trusts the .pub, so host-signed policies verify. The private key stays
 	# root-only in the root-owned key dir.
-	if [ ! -f "$key_dir/$host_id" ]; then
+	if [[ ! -f "$key_dir/$host_id" ]]; then
 		echo "install.sh: minting host policy-signing key '$host_id' in $key_dir"
 		"$kbin" key generate "$host_id" >/dev/null 2>&1 \
 			|| { echo "install.sh: host key generate failed; skipping reference-policy compile" >&2; return 0; }
@@ -410,7 +412,7 @@ install_reference_policies() {
 	# signed templates/fragments it derives from against the vendor trust + template dirs.
 	local src rel name out count=0
 	for src in "$pkg_root"/policies/*/policy.toml "$pkg_root"/policies/providers/*/policy.toml; do
-		[ -f "$src" ] || continue
+		[[ -f "$src" ]] || continue
 		rel="${src#"$pkg_root"/policies/}"; rel="${rel%/policy.toml}"   # "gui-session" or "providers/gui-broker"
 		name="$(basename "$rel")"
 		out="/etc/kennel/policies/$rel/$name.settled.toml"
@@ -430,7 +432,7 @@ install_reference_policies() {
 	# consume), so a host with no D-Bus consumer still pays nothing. Installing IS the admin's
 	# act, and the link is the admin-tier enablement (§7.13.6); a per-user link overrides it.
 	local broker_settled="/etc/kennel/policies/providers/dbus-broker/dbus-broker.settled.toml"
-	if [ -f "$broker_settled" ]; then
+	if [[ -f "$broker_settled" ]]; then
 		install -d -m 0755 /etc/kennel/ondemand
 		ln -sf "$broker_settled" /etc/kennel/ondemand/dbus-broker
 		echo "install.sh: enabled the dbus-broker provider (ondemand, per-host)"
@@ -441,7 +443,7 @@ install_reference_policies() {
 	# consume, socket-activated on first consume (a host with no UDP consumer pays nothing). Same
 	# admin-tier enablement as the D-Bus broker; a per-user link overrides it.
 	local tun_settled="/etc/kennel/policies/providers/tun-broker/tun-broker.settled.toml"
-	if [ -f "$tun_settled" ]; then
+	if [[ -f "$tun_settled" ]]; then
 		install -d -m 0755 /etc/kennel/ondemand
 		ln -sf "$tun_settled" /etc/kennel/ondemand/tun-broker
 		echo "install.sh: enabled the tun-broker provider (ondemand, per-host)"
@@ -457,7 +459,7 @@ install_reference_policies() {
 	# D-Bus / UDP brokers; a per-user link overrides it. The broker holds the host-Wayland leg +
 	# render node, so it activates only where a display exists.
 	local gui_default="/etc/kennel/policies/providers/gui-broker-weston/gui-broker-weston.settled.toml"
-	if [ -f "$gui_default" ]; then
+	if [[ -f "$gui_default" ]]; then
 		install -d -m 0755 /etc/kennel/ondemand
 		ln -sf "$gui_default" /etc/kennel/ondemand/gui-broker
 		echo "install.sh: enabled the gui-broker-weston provider (ondemand, per-host; cage kiosk also shipped)"
@@ -466,7 +468,7 @@ install_reference_policies() {
 	# Kennel-authored app configs, served into a kennel's view by a W15 `source` redirect
 	# (`gui-session` overlays /etc/kennel/config/labwc at the view's /etc/xdg/labwc). Host-independent
 	# and identical everywhere; a confined desktop never inherits the host's compositor assumptions.
-	if [ -d "$pkg_root/dist/config/gui" ]; then
+	if [[ -d "$pkg_root/dist/config/gui" ]]; then
 		install -d -m 0755 /etc/kennel/config
 		cp -a "$pkg_root/dist/config/gui/." /etc/kennel/config/
 		echo "install.sh: installed the confined-GUI default configs (/etc/kennel/config)"
@@ -582,9 +584,9 @@ print_next_steps() {
 	perms="$(stat -c '%A' "$ph" 2>/dev/null || echo '?')"
 	owner="$(stat -c '%U' "$ph" 2>/dev/null || echo '?')"
 	caps="$(getcap "$ph" 2>/dev/null | sed 's|^[^ ]* ||')"
-	if [ -n "$caps" ]; then
+	if [[ -n "$caps" ]]; then
 		echo "  [ok]   privhelper factory has file caps ($caps)"
-	elif [ "$owner" = root ] && [ "${perms:3:1}" = s ]; then
+	elif [[ "$owner" = root ]] && [[ "${perms:3:1}" = s ]]; then
 		echo "  [ok]   privhelper factory is setuid-root ($perms $owner) — no-xattr fallback"
 	else
 		echo "  [ATTN] privhelper factory has NO privilege ($perms $owner) — kennels will fail to construct"
@@ -603,9 +605,9 @@ print_next_steps() {
 	fi
 
 	# 3. AppArmor userns restriction (Ubuntu 23.10+): our profile handles it, just report.
-	if [ -e /etc/apparmor.d/kenneld ]; then
+	if [[ -e /etc/apparmor.d/kenneld ]]; then
 		echo "  [ok]   AppArmor userns profile installed"
-	elif [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+	elif [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]]; then
 		echo "  [ATTN] unprivileged userns is AppArmor-restricted but no profile was installed"
 		echo "         (no /etc/apparmor.d on this host?) — kenneld may be denied CLONE_NEWUSER"
 	else
@@ -614,7 +616,7 @@ print_next_steps() {
 
 	# The invoking user (sudo) — tailor the per-user block to them; fall back to a placeholder.
 	local u="${SUDO_USER:-}" uid_line=""
-	if [ -n "$u" ]; then
+	if [[ -n "$u" ]]; then
 		local uid; uid="$(id -u "$u" 2>/dev/null || echo '<uid>')"
 		uid_line="  # for $u (uid $uid)"
 	fi
@@ -663,4 +665,4 @@ install_etc_skeleton
 install_keys
 sweep_retired_payload
 install_reference_policies
-[ "$dry_run" -eq 1 ] || print_next_steps
+[[ "$dry_run" -eq 1 ]] || print_next_steps

@@ -49,7 +49,7 @@ LIBEXEC="/usr/libexec/kennel"
 KENNEL="/usr/bin/kennel"
 
 UID_NUM="$(id -u)"
-if [ "$UID_NUM" = "0" ]; then
+if [[ "$UID_NUM" = "0" ]]; then
     echo "Run as the ordinary operator, not root — this proves the UNPRIVILEGED vertical." >&2
     exit 2
 fi
@@ -85,15 +85,15 @@ SYSTEM_TOML_SAVED=""        # prior /etc/kennel/system.toml contents (restored o
 SYSTEM_TOML_EXISTED=0
 
 cleanup() {
-    [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null || true
+    [[ -n "$ECHO_PID" ]] && kill "$ECHO_PID" 2>/dev/null || true
     # Un-stage every case this run placed in the user policy repo (a dirty repo makes the
     # NEXT run resolve stale artefacts — always clean up after tests).
     for staged in "${STAGED_CASES[@]:-}"; do
-        [ -n "$staged" ] && rm -rf "${POLICY_REPO:?}/$staged" 2>/dev/null || true
+        [[ -n "$staged" ]] && rm -rf "${POLICY_REPO:?}/$staged" 2>/dev/null || true
     done
     # Restore the system.toml we may have rewritten for --debug.
-    if [ "$DEBUG" = 1 ]; then
-        if [ "$SYSTEM_TOML_EXISTED" = 1 ]; then
+    if [[ "$DEBUG" = 1 ]]; then
+        if [[ "$SYSTEM_TOML_EXISTED" = 1 ]]; then
             printf '%s' "$SYSTEM_TOML_SAVED" | sudo tee "$SYSTEM_TOML" >/dev/null 2>&1 || true
         else
             sudo rm -f "$SYSTEM_TOML" 2>/dev/null || true
@@ -107,7 +107,7 @@ trap cleanup EXIT
 
 # 1. Build + install the real thing (the production path), unless told to use the
 #    already-installed kennel.
-if [ "$DO_INSTALL" = 1 ]; then
+if [[ "$DO_INSTALL" = 1 ]]; then
     echo "== build + install (dev-install.sh) =="
     # dev-install.sh is the ONE owner of the build routing (dynamic host set, static in-view
     # set, bpf-egress privhelper) and hands off to the same stage-tree.sh + install.sh a real
@@ -116,7 +116,7 @@ if [ "$DO_INSTALL" = 1 ]; then
     bash "$REPO_ROOT/src/tools/dev-install.sh" --with-test-bins \
         || { echo "dev-install failed" >&2; exit 1; }
 fi
-[ -x "$KENNEL" ] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
+[[ -x "$KENNEL" ]] || { echo "kennel not installed at $KENNEL — run without --no-install" >&2; exit 2; }
 
 # 2. The admin input install.sh deliberately does not fabricate: a signing key the
 #    daemon trusts. (The kennel's reserved subnet is derived from the uid — no
@@ -124,13 +124,13 @@ fi
 echo "== suite signing key (the daemon trusts the user key dir) =="
 # `kennel policy compile` signs each staged leaf; the daemon verifies against the user
 # key dir (trusted alongside /etc/kennel/keys). A dedicated key keeps `--key` unambiguous.
-if [ ! -f "$SUITE_KEY" ]; then
+if [[ ! -f "$SUITE_KEY" ]]; then
     "$KENNEL" key generate "$SUITE_KEY_ID" || { echo "key generate failed" >&2; exit 1; }
 fi
-[ -f "$SUITE_KEY" ] || { echo "suite key not at $SUITE_KEY after key generate" >&2; exit 1; }
+[[ -f "$SUITE_KEY" ]] || { echo "suite key not at $SUITE_KEY after key generate" >&2; exit 1; }
 
 # Optional: turn on spawn-path verbose logging for this run (restored on exit).
-if [ "$DEBUG" = 1 ]; then
+if [[ "$DEBUG" = 1 ]]; then
     echo "== enabling log_level=debug in $SYSTEM_TOML (sudo; restored on exit) =="
     if sudo test -e "$SYSTEM_TOML"; then
         SYSTEM_TOML_EXISTED=1
@@ -150,7 +150,7 @@ systemctl --user restart kenneld.service 2>/dev/null \
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$UID_NUM}/kennel/control.sock"
 ok=0
 for _ in $(seq 1 50); do [ -S "$SOCK" ] && { ok=1; break; }; sleep 0.1; done
-[ "$ok" = 1 ] || { echo "kenneld.service did not bind $SOCK; journalctl --user -u kenneld.service" >&2; exit 1; }
+[[ "$ok" = 1 ]] || { echo "kenneld.service did not bind $SOCK; journalctl --user -u kenneld.service" >&2; exit 1; }
 echo "  control socket: $SOCK"
 
 # 4. Shared fixtures a policy cannot carry.
@@ -181,7 +181,7 @@ while True:
 PY
 ECHO_PID=$!
 for _ in $(seq 1 20); do [ -S "$ECHO_SOCK" ] && break; sleep 0.1; done
-[ -S "$ECHO_SOCK" ] || { echo "echo listener did not bind $ECHO_SOCK" >&2; exit 1; }
+[[ -S "$ECHO_SOCK" ]] || { echo "echo listener did not bind $ECHO_SOCK" >&2; exit 1; }
 
 # The cases to run.
 if [ "${#CASES[@]}" -eq 0 ]; then
@@ -201,7 +201,7 @@ for name in "${CASES[@]}"; do
     printf "== %-16s " "$name"
     # A case is either a `policy.toml` (driven by `kennel run`) or a `run.sh` hook (self-driving,
     # e.g. the OCI-substrate case which uses `kennel oci run` and generates its policy).
-    if [ ! -f "$pol" ] && [ ! -x "$SUITE_DIR/$name/run.sh" ]; then
+    if [[ ! -f "$pol" ]] && [[ ! -x "$SUITE_DIR/$name/run.sh" ]]; then
         echo "?? (no such case)"; results="$results\n  ?? $name"; fail=$((fail+1)); continue
     fi
     # Per-case setup hook: a case needing host fixtures it cannot carry ships a setup.sh,
@@ -214,22 +214,22 @@ for name in "${CASES[@]}"; do
     # `kennel run` (the grammar partition refuses `[rootfs]` under `kennel run`), so it ships a
     # `run.sh` that owns the whole flow — fetch + build the store entry, boot, self-check — and
     # returns the verdict (exit 77 = SKIP, a missing prerequisite reported, never a silent pass).
-    if [ -x "$SUITE_DIR/$name/run.sh" ]; then
+    if [[ -x "$SUITE_DIR/$name/run.sh" ]]; then
         rm -rf "$scratch"; mkdir -p "$scratch"
         timeout 240 "$SUITE_DIR/$name/run.sh" "$SUITE_DIR/$name" "$KENNEL" "$SUITE_KEY" "$scratch" \
             </dev/null >"/tmp/kennel-suite-$name.log" 2>&1
         rc=$?
         rm -rf "$scratch"
-        if [ "$rc" = 77 ]; then
+        if [[ "$rc" = 77 ]]; then
             echo "SKIP — $(grep -m1 '^SKIP' "/tmp/kennel-suite-$name.log" | sed 's/^SKIP: *//' || echo 'prerequisite missing')"
             results="$results\n  SKIP  $name"; skip=$((skip+1)); continue
         fi
-        if [ "$rc" = 0 ]; then echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1));
-        elif [ "$rc" = 124 ]; then echo "FAIL (timeout) — see /tmp/kennel-suite-$name.log"; results="$results\n  FAIL(timeout) $name"; fail=$((fail+1));
+        if [[ "$rc" = 0 ]]; then echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1));
+        elif [[ "$rc" = 124 ]]; then echo "FAIL (timeout) — see /tmp/kennel-suite-$name.log"; results="$results\n  FAIL(timeout) $name"; fail=$((fail+1));
         else echo "FAIL (exit $rc) — see /tmp/kennel-suite-$name.log"; results="$results\n  FAIL($rc) $name"; fail=$((fail+1)); fi
         continue
     fi
-    if [ -x "$SUITE_DIR/$name/setup.sh" ]; then
+    if [[ -x "$SUITE_DIR/$name/setup.sh" ]]; then
         rm -rf "$scratch"; mkdir -p "$scratch"
         # Capture setup stdout to a FILE, not a `$(...)` pipe. A fixture that backgrounds a
         # daemon (host listener, sshd) which inherits stdout would hold a command-substitution
@@ -241,7 +241,7 @@ for name in "${CASES[@]}"; do
         else
             echo "FAIL (setup) — see /tmp/kennel-suite-$name.setup.log"
             results="$results\n  FAIL(setup) $name"; fail=$((fail+1))
-            [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+            [[ -x "$SUITE_DIR/$name/teardown.sh" ]] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
             continue
         fi
     fi
@@ -262,18 +262,18 @@ for name in "${CASES[@]}"; do
             >"/tmp/kennel-suite-$name.compile.log" 2>&1; then
         echo "FAIL (compile) — see /tmp/kennel-suite-$name.compile.log"
         results="$results\n  FAIL(compile) $name"; fail=$((fail+1))
-        [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+        [[ -x "$SUITE_DIR/$name/teardown.sh" ]] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
         rm -rf "$scratch"
         continue
     fi
     timeout 90 "$KENNEL" run "$name" "$name" </dev/null \
         >"/tmp/kennel-suite-$name.log" 2>&1
     rc=$?
-    [ -x "$SUITE_DIR/$name/teardown.sh" ] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
+    [[ -x "$SUITE_DIR/$name/teardown.sh" ]] && "$SUITE_DIR/$name/teardown.sh" "$scratch" 2>/dev/null || true
     rm -rf "$scratch"
-    if [ "$rc" = 0 ]; then
+    if [[ "$rc" = 0 ]]; then
         echo "PASS"; results="$results\n  PASS  $name"; pass=$((pass+1))
-    elif [ "$rc" = 124 ]; then
+    elif [[ "$rc" = 124 ]]; then
         echo "FAIL (timeout) — see /tmp/kennel-suite-$name.log"
         results="$results\n  FAIL(timeout) $name"; fail=$((fail+1))
     else
@@ -285,4 +285,4 @@ done
 echo
 echo "== suite summary: $pass passed, $fail failed, $skip skipped =="
 printf "%b\n" "$results"
-[ "$fail" = 0 ]
+[[ "$fail" = 0 ]]

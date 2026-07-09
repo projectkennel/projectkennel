@@ -28,7 +28,7 @@ set -euo pipefail
 ROOT="${KENNEL_ROOT:-$(git rev-parse --show-toplevel)}"
 ARCHIVE="$ROOT/src/vendor"
 
-[ $# -ge 2 ] || {
+[[ $# -ge 2 ]] || {
 	echo "usage: audit-source.sh <name> <version> [<org/repo>]" >&2
 	exit 2
 }
@@ -37,7 +37,7 @@ VER="$2"
 REPO_OVERRIDE="${3:-}"
 
 CRATE="$ARCHIVE/$NAME-$VER.crate"
-[ -f "$CRATE" ] || {
+[[ -f "$CRATE" ]] || {
 	echo "audit-source: $CRATE not vendored (run audit-helper.sh fetch first)" >&2
 	exit 1
 }
@@ -49,14 +49,14 @@ trap "rm -rf '$TMP'" EXIT
 # --- unpack the vendored .crate -------------------------------------------
 tar -xzf "$CRATE" -C "$TMP"
 CRATE_DIR="$TMP/$NAME-$VER"
-[ -d "$CRATE_DIR" ] || {
+[[ -d "$CRATE_DIR" ]] || {
 	echo "audit-source: unexpected .crate layout (no $NAME-$VER/ dir)" >&2
 	exit 1
 }
 
 # --- read the embedded upstream commit + path -----------------------------
 VCS="$CRATE_DIR/.cargo_vcs_info.json"
-[ -f "$VCS" ] || {
+[[ -f "$VCS" ]] || {
 	echo "audit-source: $NAME-$VER has no .cargo_vcs_info.json — cannot tie it to" \
 		"an upstream commit. Fall back to a manual tag comparison." >&2
 	exit 1
@@ -65,7 +65,7 @@ SHA="$(python3 -c "import json,sys; print(json.load(open('$VCS'))['git']['sha1']
 PATH_IN_VCS="$(python3 -c "import json; print(json.load(open('$VCS')).get('path_in_vcs',''))")"
 
 # --- determine the GitHub repo --------------------------------------------
-if [ -n "$REPO_OVERRIDE" ]; then
+if [[ -n "$REPO_OVERRIDE" ]]; then
 	SLUG="$REPO_OVERRIDE"
 else
 	# Read the repository from the NORMALISED Cargo.toml: cargo resolves
@@ -86,13 +86,13 @@ echo "published commit : $SHA${PATH_IN_VCS:+  (path: $PATH_IN_VCS)}"
 
 # --- fetch the upstream tree at that exact commit -------------------------
 echo "fetching github.com/$SLUG @ $SHA ..."
-curl -fsSL "https://codeload.github.com/$SLUG/tar.gz/$SHA" -o "$TMP/upstream.tgz"
+curl -fsSL --proto '=https' --tlsv1.2 "https://codeload.github.com/$SLUG/tar.gz/$SHA" -o "$TMP/upstream.tgz"
 mkdir "$TMP/upstream"
 tar -xzf "$TMP/upstream.tgz" -C "$TMP/upstream"
 TOP="$(find "$TMP/upstream" -maxdepth 1 -mindepth 1 -type d)"
 REPO_BASE="$TOP"
-[ -n "$PATH_IN_VCS" ] && REPO_BASE="$TOP/$PATH_IN_VCS"
-[ -d "$REPO_BASE" ] || {
+[[ -n "$PATH_IN_VCS" ]] && REPO_BASE="$TOP/$PATH_IN_VCS"
+[[ -d "$REPO_BASE" ]] || {
 	echo "audit-source: path '$PATH_IN_VCS' not found in the upstream tree" >&2
 	exit 1
 }
@@ -111,13 +111,13 @@ while IFS= read -r -d '' f; do
 	fi
 	up="$REPO_BASE/$rel"
 	root="$TOP/$rel"
-	if [ -f "$up" ] && cmp -s "$f" "$up"; then
+	if [[ -f "$up" ]] && cmp -s "$f" "$up"; then
 		matched=$((matched + 1))
-	elif [ "$REPO_BASE" != "$TOP" ] && [ -f "$root" ] && cmp -s "$f" "$root"; then
+	elif [[ "$REPO_BASE" != "$TOP" ]] && [[ -f "$root" ]] && cmp -s "$f" "$root"; then
 		# A repo-root file (README, LICENSE-*) that cargo pulls into a
 		# sub-crate's package from the workspace root.
 		matched=$((matched + 1))
-	elif [ -f "$up" ]; then
+	elif [[ -f "$up" ]]; then
 		mismatched+=("$rel")
 	else
 		missing+=("$rel")
@@ -127,7 +127,7 @@ done < <(find "$CRATE_DIR" -type f -print0)
 # Cargo.toml.orig is the upstream manifest cargo copied in verbatim: it must
 # match the repo's Cargo.toml. The normalised Cargo.toml is cargo's own output.
 manifest_note="(no Cargo.toml.orig)"
-if [ -f "$CRATE_DIR/Cargo.toml.orig" ]; then
+if [[ -f "$CRATE_DIR/Cargo.toml.orig" ]]; then
 	if cmp -s "$CRATE_DIR/Cargo.toml.orig" "$REPO_BASE/Cargo.toml"; then
 		manifest_note="Cargo.toml.orig == upstream Cargo.toml"
 	else
@@ -142,10 +142,10 @@ fi
 tag_status="UNVERIFIED (no tag matched '$VER' or 'v$VER' — confirm manually)"
 tag_problem=0
 for tag in "$VER" "v$VER"; do
-	tag_sha="$(curl -fsSL "https://api.github.com/repos/$SLUG/commits/$tag" 2>/dev/null |
+	tag_sha="$(curl -fsSL --proto '=https' --tlsv1.2 "https://api.github.com/repos/$SLUG/commits/$tag" 2>/dev/null |
 		python3 -c "import json,sys; print(json.load(sys.stdin).get('sha',''))" 2>/dev/null || true)"
-	[ -n "$tag_sha" ] || continue
-	if [ "$tag_sha" = "$SHA" ]; then
+	[[ -n "$tag_sha" ]] || continue
+	if [[ "$tag_sha" = "$SHA" ]]; then
 		tag_status="tag '$tag' -> the published commit"
 		TAG_USED="$tag"
 	else
@@ -161,19 +161,19 @@ echo "manifest                    : $manifest_note"
 echo "release tag                 : $tag_status"
 
 problem=0
-if [ "${#mismatched[@]}" -gt 0 ]; then
+if [[ "${#mismatched[@]}" -gt 0 ]]; then
 	problem=1
 	echo "DIFFERING files (${#mismatched[@]}):" >&2
 	printf '  %s\n' "${mismatched[@]}" >&2
 fi
-if [ "${#missing[@]}" -gt 0 ]; then
+if [[ "${#missing[@]}" -gt 0 ]]; then
 	problem=1
 	echo "files in .crate but NOT in upstream (${#missing[@]}):" >&2
 	printf '  %s\n' "${missing[@]}" >&2
 fi
 
 echo
-if [ "$problem" -ne 0 ] || [ "$tag_problem" -ne 0 ] || [[ "$manifest_note" == *DIFFERS* ]]; then
+if [[ "$problem" -ne 0 ]] || [[ "$tag_problem" -ne 0 ]] || [[ "$manifest_note" == *DIFFERS* ]]; then
 	echo "audit-source: PROBLEM — the .crate does not cleanly match the upstream source." >&2
 	echo "Do NOT record this dependency until the differences are explained." >&2
 	exit 1
@@ -184,7 +184,7 @@ echo "to github.com/$SLUG @ $SHA${TAG_USED:+ (tag $TAG_USED)}."
 echo
 echo "verified-against line for CHECKSUMS.toml:"
 echo "    \"github.com/$SLUG @ $SHA${TAG_USED:+ (tag $TAG_USED)} — $matched source files byte-identical via tools/audit-source.sh\","
-if [ -z "${TAG_USED:-}" ]; then
+if [[ -z "${TAG_USED:-}" ]]; then
 	echo "NOTE: the release tag was not auto-confirmed; verify the commit corresponds" >&2
 	echo "to the published version before recording." >&2
 fi

@@ -19,7 +19,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 KENNEL="$REPO_ROOT/target/debug/kennel"
-[ -x "$KENNEL" ] || cargo build -p kennel-cli --offline >/dev/null
+[[ -x "$KENNEL" ]] || cargo build -p kennel-cli --offline >/dev/null
 
 WORK="$(mktemp -d)"
 export XDG_DATA_HOME="$WORK/data"
@@ -84,20 +84,20 @@ pass "--list shows the per-path diff against the image pin"
 
 echo "== W14: selective restore of one path; the other persists =="
 "$KENNEL" oci revert app -- /etc/hostname
-[ -e "$STORE/upper/etc/hostname" ]                && fail "selective revert did not remove the upper entry"
-[ -e "$STORE/upper/opt/app/state" ]               || fail "selective revert removed an unrelated path"
+[[ -e "$STORE/upper/etc/hostname" ]]                && fail "selective revert did not remove the upper entry"
+[[ -e "$STORE/upper/opt/app/state" ]]               || fail "selective revert removed an unrelated path"
 pass "selective restore removed only the named path (the lower shows back through)"
 
 echo "== W14: a traversing path is refused =="
 if "$KENNEL" oci revert app -- ../../../etc/passwd >/dev/null 2>&1; then
     fail "a '..' path was not refused"
 fi
-[ -e "/etc/passwd" ] || fail "host /etc/passwd vanished (escape!)"  # paranoia: never touched the host
+[[ -e "/etc/passwd" ]] || fail "host /etc/passwd vanished (escape!)"  # paranoia: never touched the host
 pass "a '..' path is refused (no escape from the upper)"
 
 echo "== W14: total revert empties the upper =="
 "$KENNEL" oci revert app >/dev/null
-[ -e "$STORE/upper" ] && fail "total revert left the upper"
+[[ -e "$STORE/upper" ]] && fail "total revert left the upper"
 pass "total revert obliterated the managed upper"
 
 echo

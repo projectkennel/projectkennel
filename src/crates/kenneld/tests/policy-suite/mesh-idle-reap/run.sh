@@ -21,22 +21,9 @@
 #   $1 = case dir   $2 = KENNEL (installed CLI)   $3 = SUITE_KEY   $4 = scratch (unused)
 set -euo pipefail
 
-CASE_DIR="$1"
-KENNEL="$2"
-SUITE_KEY="$3"
-CFG="${XDG_CONFIG_HOME:-$HOME/.config}/kennel"
-KEYS="$CFG/keys"
 # shellcheck source=../suite-lib.sh
-. "$CASE_DIR/../suite-lib.sh"
-ONDEMAND="$CFG/ondemand"
-PROVIDER_LINK="$ONDEMAND/mesh-idle-provider"
-
-cleanup() {
-    suite_unstage mesh-idle-consumer
-    rm -f "$PROVIDER_LINK"
-    "$KENNEL" daemon-reload >/dev/null 2>&1 || true
-}
-trap cleanup EXIT
+. "$1/../suite-lib.sh"
+suite_case "$@"
 
 # The readiness of `test.mesh.idle` in the mesh section of `kennel list` (column 3 of its row); empty
 # if the provider is not catalogued. The capability name appears only in the mesh row, never the
@@ -50,41 +37,35 @@ provider_running() {
     "$KENNEL" list 2>/dev/null | grep -Eq '^mesh-idle-provider[[:space:]]'
 }
 
-# 1. Compile + sign the provider to its settled form and enable it ONDEMAND — the enablement entry IS
-#    the signed settled policy the daemon load-verifies (§7.13.6); ondemand so the consumer's first
-#    connect socket-activates it.
-mkdir -p "$ONDEMAND"
-"$KENNEL" policy compile "$CASE_DIR/provider.toml" --key "$SUITE_KEY" --trust-dir "$KEYS" \
-    --no-lock --output "$PROVIDER_LINK"
+# 1. Enable the provider ONDEMAND (the consumer's first connect socket-activates it).
+suite_enable_ondemand "$CASE_DIR/provider.toml" mesh-idle-provider
 
-# 2. Refresh the catalogue so the daemon knows `test.mesh.idle` (a Pending ondemand provider).
-"$KENNEL" daemon-reload
-
-# 3. Activate: the consumer's workload connects to its `at` socket; kenneld activates the cold provider
-#    and brokers the connector. Exit 0 iff the round-trip held.
+# 2. Activate: the consumer's workload connects to its `at` socket; kenneld activates the cold
+#    provider and brokers the connector. Exit 0 iff the round-trip held.
 suite_compile "$CASE_DIR/consumer.toml" >/dev/null
+suite_defer "suite_unstage mesh-idle-consumer"
 "$KENNEL" run mesh-idle-consumer mesh-idle-consumer </dev/null \
     || { echo "mesh-idle-reap: activation round-trip failed (consumer #1 did not read pong)" >&2; exit 1; }
 
 # The provider served, so it is ready and running right after activation (well inside its 4s TTL).
 r="$(readiness_of)"
-[ "$r" = "ready" ] || { echo "mesh-idle-reap: after activation readiness is '$r', expected 'ready'" >&2; exit 1; }
+[[ "$r" == "ready" ]] || { echo "mesh-idle-reap: after activation readiness is '$r', expected 'ready'" >&2; exit 1; }
 
-# 4. Idle past the TTL — no consumer kennel runs now, so the next TTL fire reaps the provider. Wait
+# 3. Idle past the TTL — no consumer kennel runs now, so the next TTL fire reaps the provider. Wait
 #    well beyond the TTL: long enough that a (buggy) crash-restart would have reconstructed back to
 #    ready+running, so a still-pending + not-running provider can only be a clean reap.
 sleep 12
 
-# 5. The provider is reaped: declared-but-pending AND no live kennel. A restart would show ready (or a
+# 4. The provider is reaped: declared-but-pending AND no live kennel. A restart would show ready (or a
 #    running kennel) instead — this is the assertion that distinguishes a reap from a mis-read crash.
 r="$(readiness_of)"
-[ "$r" = "pending" ] || { echo "mesh-idle-reap: after idle the readiness is '$r', expected 'pending' (reaped)" >&2; exit 1; }
+[[ "$r" == "pending" ]] || { echo "mesh-idle-reap: after idle the readiness is '$r', expected 'pending' (reaped)" >&2; exit 1; }
 if provider_running; then
     echo "mesh-idle-reap: the provider is still running after the idle reap (restarted, not reaped)" >&2
     exit 1
 fi
 
-# 6. Re-activate from cold: a fresh consume must socket-activate the reaped provider again and
+# 5. Re-activate from cold: a fresh consume must socket-activate the reaped provider again and
 #    round-trip — proving the reap returned it to a re-activatable state, not a dead one.
 "$KENNEL" run mesh-idle-consumer mesh-idle-consumer </dev/null \
     || { echo "mesh-idle-reap: re-activation round-trip failed (reaped provider did not come back)" >&2; exit 1; }

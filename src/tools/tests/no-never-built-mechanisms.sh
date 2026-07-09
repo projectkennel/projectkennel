@@ -31,14 +31,14 @@ for pat in "${patterns[@]}"; do
     # Search docs/ and src/, excluding the historical record.
     hits="$(grep -rn -- "$pat" docs/ src/ 2>/dev/null \
         | grep -vE 'docs/governance/ROADMAP-0\.2\.0\.md|CHANGELOG\.md|no-never-built-mechanisms\.sh' || true)"
-    if [ -n "$hits" ]; then
+    if [[ -n "$hits" ]]; then
         echo "FAIL: never-built mechanism '$pat' found (deleted outright, no tombstone):" >&2
         echo "$hits" >&2
         status=1
     fi
 done
 
-if [ "$status" -eq 0 ]; then
+if [[ "$status" -eq 0 ]]; then
     echo "ok: no never-built-mechanism residue (${patterns[*]})"
 fi
 exit "$status"
