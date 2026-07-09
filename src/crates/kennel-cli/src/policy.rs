@@ -1000,25 +1000,7 @@ pub fn policy_kind(path: &Path) -> &'static str {
 /// cannot be resolved or read, the trust store cannot be loaded, or the policy fails
 /// to compile (source form) or verify (settled form).
 pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
-    let mut policy_arg: Option<String> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
-        match arg {
-            lexopt::Arg::Long("template-dir") => {
-                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
-            }
-            lexopt::Arg::Long("trust-dir") => {
-                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
-            }
-            lexopt::Arg::Value(v) if policy_arg.is_none() => {
-                policy_arg = Some(v.to_string_lossy().into_owned());
-            }
-            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "show")),
-        }
-    }
-    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "show"))?;
+    let (policy_arg, template_dirs, trust_dirs) = parse_show_args(args, POLICY_VERBS)?;
     let policy_file = match resolve_policy(&policy_arg, false) {
         Ok((file, _name)) => file,
         // Cross-house courtesy: a template name misses the policies cascade; say what it is.
@@ -1046,25 +1028,7 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
 /// resolve in the template cascade (a leaf name points back at `policy show`), the trust
 /// store cannot be loaded, or the template fails to compile.
 pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
-    let mut template_arg: Option<String> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
-        match arg {
-            lexopt::Arg::Long("template-dir") => {
-                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
-            }
-            lexopt::Arg::Long("trust-dir") => {
-                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
-            }
-            lexopt::Arg::Value(v) if template_arg.is_none() => {
-                template_arg = Some(v.to_string_lossy().into_owned());
-            }
-            other => return Err(lexopt_unexpected(&other, crate::TEMPLATE_VERBS, "show")),
-        }
-    }
-    let template_arg = template_arg.ok_or_else(|| usage_of(crate::TEMPLATE_VERBS, "show"))?;
+    let (template_arg, template_dirs, trust_dirs) = parse_show_args(args, crate::TEMPLATE_VERBS)?;
     let template_file = match resolve_template(&template_arg) {
         Ok((file, _name)) => file,
         // Cross-house courtesy: a leaf/policy name misses the template cascade; say what it is.
@@ -1079,6 +1043,34 @@ pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
         },
     };
     show_file(&template_file, template_dirs, trust_dirs)
+}
+
+/// Parse the `show` argv shape shared by both houses: one positional plus repeatable
+/// `--template-dir`/`--trust-dir`. The `table` names the house for usage/unknown-flag errors.
+fn parse_show_args(
+    args: &[String],
+    table: &[kennel_lib_cli::CommandSpec],
+) -> Result<(String, Vec<PathBuf>, Vec<PathBuf>), String> {
+    let mut positional: Option<String> = None;
+    let mut template_dirs: Vec<PathBuf> = Vec::new();
+    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut p = lexopt::Parser::from_args(args.iter().cloned());
+    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+        match arg {
+            lexopt::Arg::Long("template-dir") => {
+                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
+            }
+            lexopt::Arg::Long("trust-dir") => {
+                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            }
+            lexopt::Arg::Value(v) if positional.is_none() => {
+                positional = Some(v.to_string_lossy().into_owned());
+            }
+            other => return Err(lexopt_unexpected(&other, table, "show")),
+        }
+    }
+    let positional = positional.ok_or_else(|| usage_of(table, "show"))?;
+    Ok((positional, template_dirs, trust_dirs))
 }
 
 /// The shared `show` body: read `policy_file`, compile (source) or verify (settled), render.
