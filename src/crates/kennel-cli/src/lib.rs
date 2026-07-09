@@ -1,12 +1,13 @@
 //! `kennel-cli` — the library crate backing the host-side `kennel` CLI.
 //!
 //! Provides the shared helpers (daemon connection, key loading, policy resolution, trust
-//! store) and the verb modules (`run`, `policy`, `oci`, `review`, `runtime`, `misc`). The
+//! store) and the verb modules (`run`, `policy`, `key`, `oci`, `review`, `runtime`, `misc`). The
 //! `kennel-host` execution unit dispatches them; the `kennel` shim execs it host-side.
 
 #![forbid(unsafe_code)]
 
 // The verb modules — the `kennel-host` unit dispatches into these.
+pub mod key;
 pub mod misc;
 pub mod oci;
 pub mod policy;

@@ -8,7 +8,7 @@ kennel is the command\-line front\-end to Project Kennel, a security sandbox tha
 .PP
 The CLI talks to the per\-user \fBkenneld\fR(8) daemon over a control socket; kenneld constructs and supervises the kennel. Policy authoring (compile, sign, validate, lint) is done locally by the CLI and needs no daemon.
 .PP
-Run \fBkennel \fIcommand\fB \-\-help\fR for a command's usage. The policy and template sub\-verbs have their own pages, \fBkennel\-policy\fR(1) and \fBkennel\-template\fR(1).
+Run \fBkennel \fIcommand\fB \-\-help\fR for a command's usage. The policy, template, and key sub\-verbs have their own pages, \fBkennel\-policy\fR(1), \fBkennel\-template\fR(1), and \fBkennel\-key\fR(1).
 .SH COMMANDS
 .TP
 \fBkennel run <policy> [<name>] [\-\-force] [\-\- <cmd...>]\fR
@@ -58,17 +58,12 @@ inspect and sign shared base templates and fragments (the template house)
 See kennel\-template(1) for list, show, clone, install, sign, lint.
 .RE
 .TP
-\fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
-generate a policy\-signing key
+\fBkennel key <generate|list|show|trust|untrust|rotate> [...]\fR
+manage tier\-bound signing keys (the key house)
 .RS
 .TP
-\fB\-\-dir DIR\fR
-Write the key pair to DIR instead of the default key store.
-.RE
-.RS
-.TP
-\fB\-\-force\fR
-Overwrite an existing key of the same id.
+\fB(sub\-verbs)\fR
+See kennel\-key(1) for generate, list, show, trust, untrust, rotate.
 .RE
 .TP
 \fBkennel audit <name> [\-\-resource CLASS] [\-\-since DUR] [\-\-novel\-only] [\-\-follow] [\-\-print\-journalctl\-command]\fR
@@ -163,4 +158,4 @@ Show running kennels.
 \fBkennel audit myjob \-\-follow\fR
 Stream myjob's audit log.
 .SH SEE ALSO
-\fBkennel\-policy\fR(1), \fBkennel\-template\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5)
+\fBkennel\-policy\fR(1), \fBkennel\-template\fR(1), \fBkennel\-key\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5)

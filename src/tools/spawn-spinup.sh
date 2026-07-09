@@ -100,7 +100,7 @@ fi
 
 # 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
 #    reserved subnet is uid-derived, so there is no allocation file to provision).
-[ -f "$SUITE_KEY" ] || "$KENNEL" keygen kennel-suite >/dev/null
+[ -f "$SUITE_KEY" ] || "$KENNEL" key generate kennel-suite >/dev/null
 
 # 3. Compile + SIGN the two spawn templates to their settled form (suite key the daemon trusts) and
 #    install into the standard user cascade — exactly the spawn-roundtrip case's fixture path.

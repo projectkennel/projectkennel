@@ -22,6 +22,8 @@ pub enum CommandSource {
     TemplateVerbs,
     /// The `kennel policy` sub-verbs ([`kennel_lib_cli::POLICY_VERBS`]).
     PolicyVerbs,
+    /// The `kennel key` sub-verbs ([`kennel_lib_cli::KEY_VERBS`]).
+    KeyVerbs,
 }
 
 impl CommandSource {
@@ -33,6 +35,7 @@ impl CommandSource {
             Self::TopLevel => kennel_lib_cli::COMMANDS,
             Self::PolicyVerbs => kennel_lib_cli::POLICY_VERBS,
             Self::TemplateVerbs => kennel_lib_cli::TEMPLATE_VERBS,
+            Self::KeyVerbs => kennel_lib_cli::KEY_VERBS,
         }
     }
 }
@@ -146,9 +149,9 @@ The CLI talks to the per-user \\fBkenneld\\fR(8) daemon over a control socket; \
 kenneld constructs and supervises the kennel. Policy authoring (compile, sign, \
 validate, lint) is done locally by the CLI and needs no daemon.
 
-Run \\fBkennel \\fIcommand\\fB --help\\fR for a command's usage. The policy and \
-template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
-\\fBkennel-template\\fR(1).",
+Run \\fBkennel \\fIcommand\\fB --help\\fR for a command's usage. The policy, \
+template, and key sub-verbs have their own pages, \\fBkennel-policy\\fR(1), \
+\\fBkennel-template\\fR(1), and \\fBkennel-key\\fR(1).",
         command_source: CommandSource::TopLevel,
         command_options: &[
             ("run", &[
@@ -161,9 +164,8 @@ template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
             ("template", &[
                 ("(sub-verbs)", "See kennel-template(1) for list, show, clone, install, sign, lint."),
             ]),
-            ("keygen", &[
-                ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
-                ("--force", "Overwrite an existing key of the same id."),
+            ("key", &[
+                ("(sub-verbs)", "See kennel-key(1) for generate, list, show, trust, untrust, rotate."),
             ]),
             ("audit", &[
                 ("--resource CLASS", "Filter to one class (network, filesystem, exec, ...)."),
@@ -192,7 +194,7 @@ template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
             ("kennel list", "Show running kennels."),
             ("kennel audit myjob --follow", "Stream myjob's audit log."),
         ],
-        see_also: &["kennel-policy(1)", "kennel-template(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)"],
+        see_also: &["kennel-policy(1)", "kennel-template(1)", "kennel-key(1)", "kenneld(8)", "policy.toml(5)", "config.toml(5)", "system.toml(5)"],
     },
     // -- kennel-policy(1) ---------------------------------------------------
     Page {
@@ -315,7 +317,68 @@ the template.",
             ("kennel template sign my-base --key host-key", "Sign a shared base template."),
             ("kennel template lint", "Check the template corpus for incoherences."),
         ],
-        see_also: &["kennel(1)", "kennel-policy(1)", "policy.toml(5)"],
+        see_also: &["kennel(1)", "kennel-policy(1)", "kennel-key(1)", "policy.toml(5)"],
+    },
+    // -- kennel-key(1) --------------------------------------------------------
+    Page {
+        name: "kennel-key",
+        section: 1,
+        summary: "manage Project Kennel's tier-bound signing keys (the key house)",
+        synopsis: "\\fBkennel key\\fR \\fIsub-verb\\fR [\\fIargs\\fR...]",
+        description: "\
+\\fBkennel key\\fR is the signing-key noun group of \\fBkennel\\fR(1). A key's \
+tier is where it lives, and that is the only level it signs at: a user key \
+(~/.config/kennel/keys) signs user objects, the host key (/etc/kennel/keys) \
+signs host objects, and the maintainer key never appears in shipped tooling. \
+No verb offers a cross-tier signing path. Acceptance runs the other way and is \
+downward-inclusive: an artefact verifies under a key from its own level or any \
+level above it, so a vendor- or host-signed artefact copied down just works.
+
+\\fBgenerate\\fR derives the tier from context: invoked as a user it mints a \
+user key; as root, the host key. \\fBtrust\\fR and \\fBuntrust\\fR exist only \
+at host level (root) - the user tier needs no trust list, because \
+\\fBkennel policy install\\fR re-signs foreign objects under the user's own \
+key, which is user-level trust conferred per object. \\fBuntrust\\fR names \
+every artefact that stops verifying, across the host tier and the user tiers \
+below it, before it acts.
+
+\\fBrotate\\fR is the supervised ceremony: it retires the old pair (the public \
+half leaves the .pub namespace, so the trust store stops loading it), mints a \
+successor under the same key id, re-signs every template the key signs, and \
+recompiles every leaf it signs - removing a lockfile whose pinned template was \
+re-signed, so the re-pin cascade is driven rather than folklore. Objects at \
+other tiers riding the old signature are named as owed work: a host rotation \
+cannot sign for a user, and says so.",
+        command_source: CommandSource::KeyVerbs,
+        command_options: &[
+            ("generate", &[
+                ("--force", "Overwrite an existing key of the same name blind; prefer rotate, which re-signs what the old key signed."),
+            ]),
+            ("trust", &[
+                ("--force", "Replace an existing trusted key of the same id."),
+            ]),
+            ("untrust", &[
+                ("--yes", "Proceed after the impact report; without it the report prints and nothing is removed."),
+            ]),
+            ("rotate", &[
+                ("--yes", "Proceed after the plan prints; without it the plan prints and nothing rotates."),
+            ]),
+        ],
+        fields: &[],
+        exit_status: EXIT_CODES,
+        files: &[
+            ("~/.config/kennel/keys/", "User-tier keys: your signing pairs (private + .pub)."),
+            ("/etc/kennel/keys/", "Host trust store: the host signing key and org/customer public keys (root-owned)."),
+            ("/usr/lib/kennel/keys/", "Vendor trust store: the maintainer public key (package payload, never an install target)."),
+        ],
+        examples: &[
+            ("kennel key generate remco-dev", "Mint a user-tier signing key."),
+            ("kennel key list", "Every key across the tiers: name, tier, role, fingerprint."),
+            ("kennel key show kennel-host", "The host key's fingerprint and everything it signs."),
+            ("sudo kennel key trust acme-2026.pub", "Trust an org key at the host tier."),
+            ("sudo kennel key rotate kennel-host --yes", "Rotate the host key and drive the re-sign/re-pin cascade."),
+        ],
+        see_also: &["kennel(1)", "kennel-policy(1)", "kennel-template(1)", "kenneld(8)"],
     },
     // -- kenneld(8) ---------------------------------------------------------
     Page {

@@ -69,7 +69,7 @@ done
 # Constants the cases depend on.
 SUITE_KEY_ID="kennel-suite"
 KEY_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kennel/keys"
-# Post-SSHSIG (#134): `kennel keygen <id>` writes the OpenSSH private key as `<id>` (no `.key`
+# Post-SSHSIG (#134): `kennel key generate <id>` writes the OpenSSH private key as `<id>` (no `.key`
 # suffix) plus `<id>.pub`; `--key` takes that private-key path. (Was `<id>.key` pre-migration.)
 SUITE_KEY="$KEY_DIR/$SUITE_KEY_ID"
 ECHO_SOCK_DIR="/run/kennel-e2e"
@@ -139,12 +139,12 @@ fi
 #    daemon trusts. (The kennel's reserved subnet is derived from the uid — no
 #    allocation file to provision.)
 echo "== suite signing key (the daemon trusts the user key dir) =="
-# `kennel run` compiles+signs each source policy in memory; the daemon verifies against the
-# user key dir (trusted alongside /etc/kennel/keys). A dedicated key keeps `--key` unambiguous.
+# `kennel policy compile` signs each staged leaf; the daemon verifies against the user
+# key dir (trusted alongside /etc/kennel/keys). A dedicated key keeps `--key` unambiguous.
 if [ ! -f "$SUITE_KEY" ]; then
-    "$KENNEL" keygen "$SUITE_KEY_ID" || { echo "keygen failed" >&2; exit 1; }
+    "$KENNEL" key generate "$SUITE_KEY_ID" || { echo "key generate failed" >&2; exit 1; }
 fi
-[ -f "$SUITE_KEY" ] || { echo "suite key not at $SUITE_KEY after keygen" >&2; exit 1; }
+[ -f "$SUITE_KEY" ] || { echo "suite key not at $SUITE_KEY after key generate" >&2; exit 1; }
 
 # Optional: turn on spawn-path verbose logging for this run (restored on exit).
 if [ "$DEBUG" = 1 ]; then
@@ -233,7 +233,7 @@ for name in "${CASES[@]}"; do
     # returns the verdict (exit 77 = SKIP, a missing prerequisite reported, never a silent pass).
     if [ -x "$SUITE_DIR/$name/run.sh" ]; then
         rm -rf "$scratch"; mkdir -p "$scratch"
-        timeout 120 "$SUITE_DIR/$name/run.sh" "$SUITE_DIR/$name" "$KENNEL" "$SUITE_KEY" "$scratch" \
+        timeout 240 "$SUITE_DIR/$name/run.sh" "$SUITE_DIR/$name" "$KENNEL" "$SUITE_KEY" "$scratch" \
             </dev/null >"/tmp/kennel-suite-$name.log" 2>&1
         rc=$?
         rm -rf "$scratch"

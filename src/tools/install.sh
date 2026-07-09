@@ -395,13 +395,14 @@ install_reference_policies() {
 		echo "install.sh: ssh-keygen absent — cannot mint a host signing key; skipping reference-policy compile" >&2
 		return 0
 	fi
-	# Reuse an existing host key, else mint one. keygen writes the private key + its .pub into key_dir;
-	# the daemon trusts the .pub (trust_dir = /etc/kennel/keys), so host-signed policies verify. The
-	# private key stays root-only in the root-owned key dir.
+	# Reuse an existing host key, else mint one. `key generate` invoked as root writes the
+	# host-tier pair (private + .pub) into the deployment trust dir (= /etc/kennel/keys);
+	# the daemon trusts the .pub, so host-signed policies verify. The private key stays
+	# root-only in the root-owned key dir.
 	if [ ! -f "$key_dir/$host_id" ]; then
 		echo "install.sh: minting host policy-signing key '$host_id' in $key_dir"
-		"$kbin" keygen "$host_id" --dir "$key_dir" >/dev/null \
-			|| { echo "install.sh: host keygen failed; skipping reference-policy compile" >&2; return 0; }
+		"$kbin" key generate "$host_id" >/dev/null 2>&1 \
+			|| { echo "install.sh: host key generate failed; skipping reference-policy compile" >&2; return 0; }
 	else
 		echo "install.sh: reusing host policy-signing key '$host_id'"
 	fi
@@ -549,7 +550,7 @@ $uid_line
 
   # 3. mint a personal policy-signing key (signs your own leaf policies at compile; when it
   #    is the only key in your key dir, 'kennel policy compile' picks it — no --key needed):
-  kennel keygen $u-dev
+  kennel key generate $u-dev
 
   # 4. scaffold an interactive shell policy from the shipped template, compile (= sign) it,
   #    then run the settled artefact by name ('kennel run' takes no key — the daemon verifies):

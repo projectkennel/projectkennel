@@ -1,0 +1,94 @@
+.TH "KENNEL-KEY" "1" "" "Project Kennel" "User Commands"
+.SH NAME
+kennel\-key \- manage Project Kennel's tier\-bound signing keys (the key house)
+.SH SYNOPSIS
+\fBkennel key\fR \fIsub-verb\fR [\fIargs\fR...]
+.SH DESCRIPTION
+\fBkennel key\fR is the signing\-key noun group of \fBkennel\fR(1). A key's tier is where it lives, and that is the only level it signs at: a user key (~/.config/kennel/keys) signs user objects, the host key (/etc/kennel/keys) signs host objects, and the maintainer key never appears in shipped tooling. No verb offers a cross\-tier signing path. Acceptance runs the other way and is downward\-inclusive: an artefact verifies under a key from its own level or any level above it, so a vendor\- or host\-signed artefact copied down just works.
+.PP
+\fBgenerate\fR derives the tier from context: invoked as a user it mints a user key; as root, the host key. \fBtrust\fR and \fBuntrust\fR exist only at host level (root) \- the user tier needs no trust list, because \fBkennel policy install\fR re\-signs foreign objects under the user's own key, which is user\-level trust conferred per object. \fBuntrust\fR names every artefact that stops verifying, across the host tier and the user tiers below it, before it acts.
+.PP
+\fBrotate\fR is the supervised ceremony: it retires the old pair (the public half leaves the .pub namespace, so the trust store stops loading it), mints a successor under the same key id, re\-signs every template the key signs, and recompiles every leaf it signs \- removing a lockfile whose pinned template was re\-signed, so the re\-pin cascade is driven rather than folklore. Objects at other tiers riding the old signature are named as owed work: a host rotation cannot sign for a user, and says so.
+.SH COMMANDS
+.TP
+\fBkennel key generate <name> [\-\-force]\fR
+generate a signing key at the invoking tier (user; as root: host)
+.RS
+.TP
+\fB\-\-force\fR
+Overwrite an existing key of the same name blind; prefer rotate, which re\-signs what the old key signed.
+.RE
+.TP
+\fBkennel key list\fR
+list keys across all tiers: name, tier, fingerprint, mine\-vs\-trusted
+.TP
+\fBkennel key show <name>\fR
+show a key's fingerprint and everything it signs across the repos
+.TP
+\fBkennel key trust <file.pub> [\-\-force]\fR
+add a public key to the host trust store (root; host level only)
+.RS
+.TP
+\fB\-\-force\fR
+Replace an existing trusted key of the same id.
+.RE
+.TP
+\fBkennel key untrust <name> [\-\-yes]\fR
+remove a key from the host trust store, impact report first (root)
+.RS
+.TP
+\fB\-\-yes\fR
+Proceed after the impact report; without it the report prints and nothing is removed.
+.RE
+.TP
+\fBkennel key rotate <name> [\-\-yes]\fR
+rotate a key: successor, re\-sign what it signs, retire the old
+.RS
+.TP
+\fB\-\-yes\fR
+Proceed after the plan prints; without it the plan prints and nothing rotates.
+.RE
+.SH EXIT STATUS
+.TP
+\fB0\fR
+Success. For kennel run, the workload's own exit code is passed through (clamped to a byte).
+.TP
+\fB1\fR
+Generic failure: the CLI could not reach kenneld, a file could not be read, or kenneld returned an error.
+.TP
+\fB3\fR
+Policy validation or resolution failure: schema, invariants, template inheritance, or include conflict.
+.TP
+\fB6\fR
+Signature or lockfile\-pin failure during resolution.
+.TP
+\fB7\fR
+kennel policy lint found at least one coherence finding across the template corpus.
+.SH FILES
+.TP
+\fI~/.config/kennel/keys/\fR
+User\-tier keys: your signing pairs (private + .pub).
+.TP
+\fI/etc/kennel/keys/\fR
+Host trust store: the host signing key and org/customer public keys (root\-owned).
+.TP
+\fI/usr/lib/kennel/keys/\fR
+Vendor trust store: the maintainer public key (package payload, never an install target).
+.SH EXAMPLES
+.TP
+\fBkennel key generate remco\-dev\fR
+Mint a user\-tier signing key.
+.TP
+\fBkennel key list\fR
+Every key across the tiers: name, tier, role, fingerprint.
+.TP
+\fBkennel key show kennel\-host\fR
+The host key's fingerprint and everything it signs.
+.TP
+\fBsudo kennel key trust acme\-2026.pub\fR
+Trust an org key at the host tier.
+.TP
+\fBsudo kennel key rotate kennel\-host \-\-yes\fR
+Rotate the host key and drive the re\-sign/re\-pin cascade.
+.SH SEE ALSO
+\fBkennel\fR(1), \fBkennel\-policy\fR(1), \fBkennel\-template\fR(1), \fBkenneld\fR(8)

@@ -141,7 +141,7 @@ fi
 
 # 2. Admin input install.sh does not fabricate: a trusted signing key (the kennel's
 #    reserved subnet is uid-derived, so there is no allocation file to provision).
-[ -f "$SUITE_KEY" ] || "$KENNEL" keygen kennel-suite >/dev/null
+[ -f "$SUITE_KEY" ] || "$KENNEL" key generate kennel-suite >/dev/null
 
 # 3. Turn on the timestamped spawn-path trace (restored on exit) and restart the service.
 echo "== enabling log_level=debug (restored on exit) =="
