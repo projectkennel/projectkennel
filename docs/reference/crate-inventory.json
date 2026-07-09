@@ -1,6 +1,6 @@
 {
   "crate_count": 30,
-  "total_sloc": 39585,
+  "total_sloc": 39626,
   "tcb_crate_count": 16,
   "tcb_sloc": 22843,
   "crates": [
@@ -106,7 +106,7 @@
     },
     {
       "name": "kennel-tun-broker",
-      "sloc": 927,
+      "sloc": 968,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["tun-broker", "tun-flow"],

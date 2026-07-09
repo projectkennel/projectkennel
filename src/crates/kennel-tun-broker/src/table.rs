@@ -117,6 +117,13 @@ impl FlowTable {
         self.flows.remove(&key).is_some()
     }
 
+    /// The set of synthetic destinations with a live flow — what the pool's rotating
+    /// window must never evict (W8). Recomputed per DNS query; flows are few (`max_flows`).
+    #[must_use]
+    pub fn live_synthetics(&self) -> std::collections::HashSet<Ipv6Addr> {
+        self.flows.keys().map(|k| k.synthetic).collect()
+    }
+
     /// The number of live flows.
     #[must_use]
     pub fn len(&self) -> usize {

@@ -29,6 +29,11 @@ name = "example.com"
 ports = [443]
 reason = "W2 tun-egress e2e: an allowed UDP destination the broker's naming shim mints a synthetic for"
 
+[[net.udp.allow]]
+name = ".fanout.example"
+ports = [443]
+reason = "W8 rotation e2e: a wildcard grant fanned out past the 32-mint window (rotating, not ever-capped)"
+
 # `/proc` (not `/proc/net/dev`): /proc/net is the per-task `/proc/self/net` symlink, so a Landlock
 # rule pinned to the specific inode does not match the workload's — the mount-rooted `/proc` grant does.
 [fs]
@@ -62,6 +67,26 @@ argv = [
     if getent ahostsv6 blocked.example.org >/dev/null 2>&1; then
         echo "denied name unexpectedly resolved (shim should NODATA it)" >&2; exit 1
     fi
+    # W8: the per-grant window ROTATES — a fan-out to 40 distinct subdomains of one
+    # wildcard grant keeps minting past the 32-mint window (the old ever-cap answered
+    # NODATA at #33). Every one of the 40 must resolve to a tun synthetic, and the
+    # first name must re-resolve afterwards (a re-mint on a fresh synthetic is fine;
+    # zero wire activity throughout - the shim mints, it never resolves).
+    i=0
+    while [ "$i" -lt 40 ]; do
+        set -- $(getent ahostsv6 "s$i.fanout.example" 2>/dev/null); f=$1
+        case "$f" in
+            fd6b:6e*) ;;
+            *) echo "fan-out name s$i.fanout.example did not mint (got '$f') - rotation broken" >&2; exit 1 ;;
+        esac
+        i=$((i+1))
+    done
+    set -- $(getent ahostsv6 s0.fanout.example 2>/dev/null); f=$1
+    case "$f" in
+        fd6b:6e*) ;;
+        *) echo "evicted name did not re-mint (got '$f')" >&2; exit 1 ;;
+    esac
+    echo "tun-egress: 40-subdomain fan-out minted across the rotating window" >&2
     exit 0
     """,
 ]
