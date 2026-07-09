@@ -81,20 +81,12 @@ trap cleanup EXIT
 
 # 1. Build + install the real thing (so the tracer carries the [t=] stamp), unless --no-install.
 if [ "$DO_INSTALL" = 1 ]; then
-    echo "== building + installing release (sudo install.sh) =="
-    HOST_TRIPLE="$(uname -m)-unknown-linux-gnu"
-    cargo build --release --offline --frozen --locked \
-        -p kenneld -p kennel-cli -p kennel-host-delegate >/dev/null
-    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --offline --frozen --locked \
-        --target "$HOST_TRIPLE" -p kennel-bin-oci-entry -p kennel-bin-init -p kennel-facade >/dev/null
-    cargo build --release --offline --frozen --locked -p kennel-privhelper --features bpf-egress >/dev/null
-    # install.sh is a pure tarball installer — stage the just-built bins into a flat payload
-    # (stage-tree.sh) and install that, like a user installs an unpacked release. --with-test-bins:
-    # the bench driver facade-spawn-bench is a test binary a release never ships.
-    STAGE="$(mktemp -d)"
-    bash "$REPO_ROOT/src/tools/stage-tree.sh" --dest "$STAGE" --with-test-bins >/dev/null || { echo "staging failed" >&2; exit 1; }
-    sudo bash "$STAGE/install.sh" >/dev/null || { echo "install failed" >&2; exit 1; }
-    rm -rf "$STAGE"
+    echo "== build + install (dev-install.sh) =="
+    # dev-install.sh owns the build routing and hands off to the same stage-tree.sh +
+    # install.sh a real install uses. --with-test-bins: the
+    # bench driver facade-spawn-bench is a test binary a release never ships.
+    bash "$REPO_ROOT/src/tools/dev-install.sh" --with-test-bins >/dev/null \
+        || { echo "dev-install failed" >&2; exit 1; }
 fi
 [ -x "$KENNEL" ] || { echo "kennel not installed — run without --no-install" >&2; exit 2; }
 
