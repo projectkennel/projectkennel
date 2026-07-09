@@ -1,10 +1,148 @@
-//! Miscellaneous verbs: `audit`.
+//! Miscellaneous verbs: `version`, `audit`.
 //!
 //! The smaller operator verbs that do not fit the run/policy/key/oci groups.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+// ─── version ─────────────────────────────────────────────────────────────────
+
+/// `kennel version` (also `kennel --version`) — the whole-stack skew report.
+///
+/// One number is not the interesting output; the *skew set* is: this CLI's build and
+/// settled-schema range, the **daemon's, queried live** (which instantly surfaces the
+/// old-binary-still-serving-after-reinstall trap), and the privhelper facts (present,
+/// and whether the bpf-egress sub-helper shipped — that feature is a separate binary,
+/// so its presence is a filesystem fact, no privileged probe). Always exits 0: the
+/// report is the product, skew included.
+///
+/// # Errors
+///
+/// Returns a message only on unexpected arguments — every stack fact, including an
+/// unreachable or older daemon, is reported, not errored.
+pub fn version(args: &[String]) -> Result<ExitCode, String> {
+    if let Some(arg) = args.first() {
+        return Err(format!(
+            "unexpected argument `{arg}` — usage: kennel version"
+        ));
+    }
+    let cli_build = env!("CARGO_PKG_VERSION");
+    println!(
+        "kennel CLI     : {cli_build} — settled schema v{} (min v{})",
+        kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+        kennel_lib_policy::MIN_SETTLED_SCHEMA_VERSION
+    );
+    let skew = report_daemon(cli_build);
+    report_privhelper();
+    match skew {
+        Some(note) => println!("skew           : {note}"),
+        None => println!("skew           : none — CLI and daemon builds match"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Query the live daemon and print its line; `Some(note)` if the stack is skewed.
+///
+/// Three degraded shapes, each still a report: unreachable (socket unit off), the
+/// handshake's typed refusal (a daemon too old to parse this CLI's schema), and a
+/// daemon that predates [`Request::Version`] (it drops the connection on the unknown
+/// tag — the additive-request contract).
+///
+/// [`Request::Version`]: kennel_lib_control::control::Request::Version
+fn report_daemon(cli_build: &str) -> Option<String> {
+    use kennel_lib_control::control::{self, HandshakeError, Request, Response};
+    use kennel_lib_control::socket;
+
+    let path = socket::socket_path();
+    let mut conn = match std::os::unix::net::UnixStream::connect(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("kenneld        : unreachable at {} ({e})", path.display());
+            return Some(
+                "daemon unreachable — is the kenneld.socket user unit enabled?".to_owned(),
+            );
+        }
+    };
+    match control::client_handshake(
+        &mut conn,
+        kennel_lib_policy::SETTLED_SCHEMA_VERSION,
+        cli_build,
+    ) {
+        Ok(()) => {}
+        Err(HandshakeError::Skew(s)) => {
+            println!(
+                "kenneld (live) : {} — settled schema v{} (older than this CLI's v{})",
+                s.daemon_build, s.daemon_schema, s.client_schema
+            );
+            return Some(
+                "the daemon is an older build — restart it to pick up the installed one: \
+                 `systemctl --user restart kenneld.service`"
+                    .to_owned(),
+            );
+        }
+        Err(HandshakeError::Io(e)) => {
+            println!("kenneld        : handshake failed ({e})");
+            return Some("the daemon spoke no control handshake — a pre-0.4 build?".to_owned());
+        }
+    }
+    if crate::send(&conn, &Request::Version, &[]).is_err() {
+        println!("kenneld (live) : version query failed to send");
+        return Some("the daemon dropped the version query".to_owned());
+    }
+    match control::recv_response(&mut conn) {
+        Ok(Response::Version {
+            build,
+            schema_version,
+            min_schema_version,
+        }) => {
+            println!(
+                "kenneld (live) : {build} — settled schema v{schema_version} (min v{min_schema_version})"
+            );
+            (build != cli_build).then(|| {
+                format!(
+                    "CLI {cli_build} vs daemon {build} — restart the daemon to pick up the \
+                     installed binary: `systemctl --user restart kenneld.service`"
+                )
+            })
+        }
+        // A pre-0.7.0 daemon drops the connection on the unknown request tag; the handshake
+        // above already succeeded, so the daemon is alive — it just predates the query.
+        Ok(other) => {
+            println!("kenneld (live) : unexpected response ({other:?})");
+            Some("the daemon answered the version query with the wrong shape".to_owned())
+        }
+        Err(_) => {
+            println!("kenneld (live) : predates the version query (a pre-0.7.0 build)");
+            Some(
+                "the running daemon predates `kennel version` — restart it to pick up the \
+                 installed binary: `systemctl --user restart kenneld.service`"
+                    .to_owned(),
+            )
+        }
+    }
+}
+
+/// Print the privhelper facts: the factory and its capability-split sub-helpers, by
+/// presence at the deployment paths. The bpf-egress feature builds a separate
+/// `kennel-privhelper-bpf` binary, so "was it shipped" is exactly "is it on disk".
+fn report_privhelper() {
+    let d = kennel_lib_config::Deployment::load()
+        .unwrap_or_else(|_| kennel_lib_config::Deployment::defaults());
+    let present = |p: &Path| if p.is_file() { "present" } else { "ABSENT" };
+    let factory = d.privhelper();
+    println!(
+        "privhelper     : {} ({})",
+        present(&factory),
+        factory.display()
+    );
+    println!(
+        "  sub-helpers  : mounts {}, net {}, bpf-egress {}",
+        present(&d.privhelper_mounts()),
+        present(&d.privhelper_net()),
+        present(&d.privhelper_bpf())
+    );
+}
 
 // ─── audit ───────────────────────────────────────────────────────────────────
 

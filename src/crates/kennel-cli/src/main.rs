@@ -34,6 +34,10 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         print_help();
         return Ok(ExitCode::SUCCESS);
     }
+    // Convention's sake: `--version`/`-V` carry the same whole-stack report as the verb.
+    if cmd == "--version" || cmd == "-V" {
+        return kennel_cli::misc::version(rest);
+    }
     if cmd != "policy"
         && cmd != "template"
         && cmd != "key"
@@ -61,6 +65,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
              (as a user it writes your user key; as root, the host key)"
                 .to_owned(),
         ),
+        "version" => kennel_cli::misc::version(rest),
         "audit" => kennel_cli::misc::audit(rest),
         other => Err(format!("unknown command `{other}` — run `kennel --help`")),
     }
