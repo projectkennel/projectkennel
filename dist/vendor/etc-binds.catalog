@@ -33,3 +33,8 @@
 # Without it the symlink dangles in the view and the tool is "command not found". Symlinks only
 # (no secrets); the targets live under /usr (bound).
 /etc/alternatives
+
+# --- fontconfig ---------------------------------------------------------------------------
+# Read-only distro font configuration: the confined GUI stack (the gui-desktop and
+# gui-session-runtime fragments) resolves fonts through it. Host-generic content.
+/etc/fonts

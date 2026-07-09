@@ -168,6 +168,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(
         &mut compiled.policy,
     ));
+    print_warnings(&uncatalogued_etc_warnings(&compiled.policy));
 
     let out =
         output_path.unwrap_or_else(|| default_settled_path(&policy_path, &compiled.policy.name));
@@ -287,6 +288,35 @@ impl Drop for TempSettled {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+/// The /etc-binds trap, compile half (W7): name every `/etc` grant the constructed view
+/// cannot serve — no `etc-binds.catalog` entry covers it and it is not a synthetic file —
+/// so the author's dead end surfaces at compile, not as a bare ENOENT inside the kennel.
+fn uncatalogued_etc_warnings(policy: &kennel_lib_policy::SettledPolicy) -> Vec<String> {
+    // An OCI substrate seeds its own /etc from the image; the catalogue does not apply.
+    if !policy.rootfs.is_empty() {
+        return Vec::new();
+    }
+    let fs = &policy.effective_policy.fs;
+    let grants: Vec<String> = fs.read.iter().chain(&fs.write).cloned().collect();
+    // A `source`-redirected view path is served from its redirect source — no catalogue
+    // entry involved, so it is never a dead end.
+    let served: Vec<String> = fs.redirect.iter().map(|r| r.path.clone()).collect();
+    kennel_lib_config::uncatalogued_etc_grants(
+        &grants,
+        &kennel_lib_config::essential_etc_subtrees_quiet(),
+        &served,
+    )
+    .into_iter()
+    .map(|g| {
+        format!(
+            "`{g}` is granted but not bindable — no etc-binds.catalog entry covers it, so \
+             it will not exist in the constructed view (an admin adds the subtree to \
+             /etc/kennel/etc-binds.catalog)"
+        )
+    })
+    .collect()
 }
 
 /// Print compile-time policy warnings to stderr, one `kennel: warning:` line each.
@@ -475,6 +505,7 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     match build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION")) {
         Ok(compiled) => {
             print_warnings(&compiled.warnings);
+            print_warnings(&uncatalogued_etc_warnings(&compiled.policy));
             eprintln!(
                 "valid: `{}` resolves cleanly ({} references, {} deferred substitutions)",
                 compiled.policy.name,

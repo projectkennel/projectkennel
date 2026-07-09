@@ -481,6 +481,88 @@ install_reference_policies() {
 # `lang-python` resolves out of the box from the vendor copy. `/etc/kennel/templates` is created
 # empty by install_etc_skeleton for an admin's own org templates.
 
+# ── The payload manifest (W7) ────────────────────────────────────────────────
+# The staged tree IS the manifest: anything in a FULLY KENNEL-MANAGED directory that the
+# incoming payload does not ship was placed by an earlier install and has since been
+# retired — remove it, and say so (the host-dbus class: retired binaries lingering on
+# upgraded hosts). /etc is NEVER swept (host config is the admin's); the vendor keys dir
+# IS swept to payload-exact, because a stray .pub there would hold vendor-tier
+# (org.projectkennel.*) authority. Under --dry-run the would-remove set prints via run().
+
+# sweep_flat <managed-dir> <payload-src-dir>...: remove files in managed-dir whose
+# basename no payload source dir ships.
+sweep_flat() {
+	local managed="$1"; shift
+	[[ -d "$managed" ]] || return 0
+	# A payload that ships NONE of the source dirs is declaring nothing about this
+	# managed dir — do not sweep it (e.g. a payload without keys/ must not empty the
+	# vendor trust store).
+	local any=0 src
+	for src in "$@"; do [[ -d "$src" ]] && any=1; done
+	[[ "$any" -eq 1 ]] || return 0
+	local f base found
+	for f in "$managed"/*; do
+		[[ -f "$f" ]] || continue
+		base="$(basename "$f")"
+		found=0
+		for src in "$@"; do
+			[[ -e "$src/$base" ]] && { found=1; break; }
+		done
+		if [[ "$found" -eq 0 ]]; then
+			echo "install.sh: removing retired $f (not in this payload)"
+			run rm -f "$f"
+		fi
+	done
+}
+
+# sweep_named_dirs <managed-dir> <payload-src-dir>...: remove per-name subdirs of
+# managed-dir that no payload source dir ships, and inside KEPT subdirs remove files the
+# payload's same-named dir does not ship. Non-name entries (files, `providers/`) are the
+# caller's to handle.
+sweep_named_dirs() {
+	local managed="$1"; shift
+	[[ -d "$managed" ]] || return 0
+	local any=0 src
+	for src in "$@"; do [[ -d "$src" ]] && any=1; done
+	[[ "$any" -eq 1 ]] || return 0
+	local d name srcdir f base
+	for d in "$managed"/*/; do
+		[[ -d "$d" ]] || continue
+		name="$(basename "$d")"
+		[[ "$name" = "providers" ]] && continue
+		srcdir=""
+		for src in "$@"; do
+			[[ -d "$src/$name" ]] && { srcdir="$src/$name"; break; }
+		done
+		if [[ -z "$srcdir" ]]; then
+			echo "install.sh: removing retired $managed/$name/ (not in this payload)"
+			run rm -rf "$managed/$name"
+			continue
+		fi
+		for f in "$d"*; do
+			[[ -f "$f" ]] || continue
+			base="$(basename "$f")"
+			if [[ ! -e "$srcdir/$base" ]]; then
+				echo "install.sh: removing retired $f (not in this payload)"
+				run rm -f "$f"
+			fi
+		done
+	done
+}
+
+sweep_retired_payload() {
+	echo "install.sh: sweeping the managed directories against the payload manifest"
+	sweep_flat "$libexec" "$bindir"
+	sweep_flat "$facades_dir" "$pkg_root/facades"
+	# ($pathbin_dir is /usr/bin — shared with the whole OS, never swept; the shim is one file.)
+	# Vendor trust anchors: payload-exact (a stray key here is vendor-tier authority).
+	sweep_flat "$vendor_dir/keys" "$pkg_root/keys"
+	# Vendor sources: templates + fragments share one dir; reference policies + providers.
+	sweep_named_dirs "$vendor_dir/templates" "$pkg_root/templates" "$pkg_root/fragments"
+	sweep_named_dirs "$vendor_dir/policies" "$pkg_root/policies"
+	sweep_named_dirs "$vendor_dir/policies/providers" "$pkg_root/policies/providers"
+}
+
 print_next_steps() {
 	# Run the post-install checks ourselves and report PASS/ATTN, rather than telling
 	# the operator what to go check. Then print a copy-pastable per-user bring-up block,
@@ -579,5 +661,6 @@ install_man
 install_apparmor
 install_etc_skeleton
 install_keys
+sweep_retired_payload
 install_reference_policies
 [ "$dry_run" -eq 1 ] || print_next_steps
