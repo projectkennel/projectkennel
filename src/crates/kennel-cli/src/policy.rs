@@ -895,48 +895,65 @@ pub fn policy_list(args: &[String]) -> Result<ExitCode, String> {
         return Err(usage_of(POLICY_VERBS, "list"));
     }
     let user = kennel_lib_config::User::load().unwrap_or_default();
-    let mut found = false;
-    for (label, dirs) in [
-        ("policies", user.policy_dirs()),
-        ("templates", user.template_dirs()),
-    ] {
-        for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            let mut names: Vec<(String, &'static str)> = Vec::new();
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
-                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                    continue;
-                };
-                let kind = if path.join(format!("{name}.settled.toml")).is_file() {
-                    "settled"
-                } else if path.join("policy.toml").is_file() {
-                    policy_kind(&path.join("policy.toml"))
-                } else {
-                    continue;
-                };
-                names.push((name.to_owned(), kind));
-            }
-            if names.is_empty() {
-                continue;
-            }
-            found = true;
-            names.sort();
-            println!("{label}: {}", dir.display());
-            for (name, kind) in names {
-                println!("  {name}  ({kind})");
-            }
-        }
-    }
-    if !found {
-        println!("no policies or templates found in the search path");
+    if !list_house("policies", &user.policy_dirs()) {
+        println!("no policies found in the search path (`kennel template list` shows the bases)");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `kennel template list` — the template house's half of the old combined listing.
+///
+/// # Errors
+///
+/// Returns the usage line on extra arguments.
+pub fn template_list(args: &[String]) -> Result<ExitCode, String> {
+    if !args.is_empty() {
+        return Err(crate::usage_of(crate::TEMPLATE_VERBS, "list"));
+    }
+    let user = kennel_lib_config::User::load().unwrap_or_default();
+    if !list_house("templates", &user.template_dirs()) {
+        println!("no templates found in the search path");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// List one house's search dirs (`<dir>/<name>/…`, kind-classified). Returns whether
+/// anything was printed.
+fn list_house(label: &str, dirs: &[PathBuf]) -> bool {
+    let mut found = false;
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut names: Vec<(String, &'static str)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let kind = if path.join(format!("{name}.settled.toml")).is_file() {
+                "settled"
+            } else if path.join("policy.toml").is_file() {
+                policy_kind(&path.join("policy.toml"))
+            } else {
+                continue;
+            };
+            names.push((name.to_owned(), kind));
+        }
+        if names.is_empty() {
+            continue;
+        }
+        found = true;
+        names.sort();
+        println!("{label}: {}", dir.display());
+        for (name, kind) in names {
+            println!("  {name}  ({kind})");
+        }
+    }
+    found
 }
 
 /// Classify a `policy.toml` as a `template` (has `template_name`) or `leaf` (has `name`),
@@ -983,7 +1000,58 @@ pub fn policy_kind(path: &Path) -> &'static str {
 /// cannot be resolved or read, the trust store cannot be loaded, or the policy fails
 /// to compile (source form) or verify (settled form).
 pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
-    let mut policy_arg: Option<String> = None;
+    let (policy_arg, template_dirs, trust_dirs) = parse_show_args(args, POLICY_VERBS)?;
+    let policy_file = match resolve_policy(&policy_arg, false) {
+        Ok((file, _name)) => file,
+        // Cross-house courtesy: a template name misses the policies cascade; say what it is.
+        Err(e) => match resolve_template(&policy_arg) {
+            Ok(_) => {
+                return Err(format!(
+                    "`{policy_arg}` is a template — the shared-base house; show it with \
+                     `kennel template show {policy_arg}`"
+                ));
+            }
+            Err(_) => return Err(e),
+        },
+    };
+    show_file(&policy_file, template_dirs, trust_dirs)
+}
+
+/// `kennel template show <template>` — resolve a template and print its effective floor.
+///
+/// The same renderer as `policy show`, entered through the template cascade: the fold is the
+/// template's own chain + includes, so the output is the floor a deriving leaf inherits.
+///
+/// # Errors
+///
+/// Returns a message if the arguments are invalid, no template is given, the name does not
+/// resolve in the template cascade (a leaf name points back at `policy show`), the trust
+/// store cannot be loaded, or the template fails to compile.
+pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
+    let (template_arg, template_dirs, trust_dirs) = parse_show_args(args, crate::TEMPLATE_VERBS)?;
+    let template_file = match resolve_template(&template_arg) {
+        Ok((file, _name)) => file,
+        // Cross-house courtesy: a leaf/policy name misses the template cascade; say what it is.
+        Err(e) => match resolve_policy(&template_arg, false) {
+            Ok(_) => {
+                return Err(format!(
+                    "`{template_arg}` is a policy, not a template — show it with \
+                     `kennel policy show {template_arg}`"
+                ));
+            }
+            Err(_) => return Err(e),
+        },
+    };
+    show_file(&template_file, template_dirs, trust_dirs)
+}
+
+/// Parse the `show` argv shape shared by both houses: one positional plus repeatable
+/// `--template-dir`/`--trust-dir`. The `table` names the house for usage/unknown-flag errors.
+fn parse_show_args(
+    args: &[String],
+    table: &[kennel_lib_cli::CommandSpec],
+) -> Result<(String, Vec<PathBuf>, Vec<PathBuf>), String> {
+    let mut positional: Option<String> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
@@ -995,15 +1063,23 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
             lexopt::Arg::Long("trust-dir") => {
                 trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
             }
-            lexopt::Arg::Value(v) if policy_arg.is_none() => {
-                policy_arg = Some(v.to_string_lossy().into_owned());
+            lexopt::Arg::Value(v) if positional.is_none() => {
+                positional = Some(v.to_string_lossy().into_owned());
             }
-            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "show")),
+            other => return Err(lexopt_unexpected(&other, table, "show")),
         }
     }
-    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "show"))?;
-    let (policy_file, _name) = resolve_policy(&policy_arg, false)?;
-    let bytes = std::fs::read(&policy_file)
+    let positional = positional.ok_or_else(|| usage_of(table, "show"))?;
+    Ok((positional, template_dirs, trust_dirs))
+}
+
+/// The shared `show` body: read `policy_file`, compile (source) or verify (settled), render.
+fn show_file(
+    policy_file: &Path,
+    mut template_dirs: Vec<PathBuf>,
+    mut trust_dirs: Vec<PathBuf>,
+) -> Result<ExitCode, String> {
+    let bytes = std::fs::read(policy_file)
         .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
 
     add_default_template_dirs(&mut template_dirs);
@@ -1279,7 +1355,7 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// `kennel policy lint` — check the templates in the search path for incoherences.
+/// `kennel template lint` — check the templates in the search path for incoherences.
 ///
 /// Compiles every `<name>/policy.toml` found in the template cascade (in memory, dev trust)
 /// and runs `lint_settled` on the resolved policy, reporting any finding — settings that
@@ -1290,7 +1366,7 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// Returns a message if the arguments are invalid or the trust store cannot be loaded.
 /// A template that fails to compile is reported and counted, not returned as an error.
-pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_lint(args: &[String]) -> Result<ExitCode, String> {
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
@@ -1302,7 +1378,7 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
             lexopt::Arg::Long("trust-dir") => {
                 trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
             }
-            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "lint")),
+            other => return Err(lexopt_unexpected(&other, crate::TEMPLATE_VERBS, "lint")),
         }
     }
     add_default_template_dirs(&mut template_dirs);
@@ -1380,7 +1456,7 @@ pub fn policy_lint(args: &[String]) -> Result<ExitCode, String> {
 /// argument is a leaf policy (not a template), the file cannot be read, the key cannot be
 /// loaded, the file already carries a `[signature]`, the file is not a signable source
 /// template or fragment, signing fails, or the output cannot be written.
-pub fn sign_template(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_sign(args: &[String]) -> Result<ExitCode, String> {
     let mut path: Option<&str> = None;
     let mut key_path: Option<&str> = None;
     let mut key_id: Option<&str> = None;
@@ -1397,7 +1473,7 @@ pub fn sign_template(args: &[String]) -> Result<ExitCode, String> {
         }
     }
     let path_arg = path.ok_or(
-        "usage: kennel policy sign-template <template> --key <key> [--key-id <id>] [--output <path>]",
+        "usage: kennel template sign <template> --key <key> [--key-id <id>] [--output <path>]",
     )?;
     // Resolve the template by NAME from the template cascade (user ~/.config/kennel/templates
     // first), or take a path — the same smart resolution `compile` gives a policy.
@@ -1423,7 +1499,7 @@ pub fn sign_template(args: &[String]) -> Result<ExitCode, String> {
             policy.name.as_deref().unwrap_or(path_arg)
         ));
     }
-    let key_arg = key_path.ok_or("sign-template needs --key <name-or-path>")?;
+    let key_arg = key_path.ok_or("template sign needs --key <name-or-path>")?;
     let key_path = resolve_key_arg(key_arg)?;
     if policy.signature.is_some() {
         return Err(format!(

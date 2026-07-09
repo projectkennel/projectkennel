@@ -8,16 +8,11 @@ kennel is the command\-line front\-end to Project Kennel, a security sandbox tha
 .PP
 The CLI talks to the per\-user \fBkenneld\fR(8) daemon over a control socket; kenneld constructs and supervises the kennel. Policy authoring (compile, sign, validate, lint) is done locally by the CLI and needs no daemon.
 .PP
-Run \fBkennel \fIcommand\fB \-\-help\fR for a command's usage. The policy sub\-verbs have their own page, \fBkennel\-policy\fR(1).
+Run \fBkennel \fIcommand\fB \-\-help\fR for a command's usage. The policy and template sub\-verbs have their own pages, \fBkennel\-policy\fR(1) and \fBkennel\-template\fR(1).
 .SH COMMANDS
 .TP
 \fBkennel run <policy> [<name>] [\-\-force] [\-\- <cmd...>]\fR
 run a workload confined by a policy or template, in the foreground
-.RS
-.TP
-\fB\-\-key K\fR
-Sign the in\-memory compiled policy with key K for the local\-dev run loop (auto\-compile).
-.RE
 .RS
 .TP
 \fB\-\-force\fR
@@ -27,16 +22,6 @@ Override a [workload] pinned argv with a CLI \-\- command.
 .TP
 \fB\-\- <cmd...>\fR
 The command to run inside the kennel (overrides [workload].argv unless pinned).
-.RE
-.RS
-.TP
-\fB\-\-template\-dir D\fR
-Add a directory to the template/fragment search path (repeatable). Overrides the config.toml default cascade.
-.RE
-.RS
-.TP
-\fB\-\-trust\-dir D\fR
-Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
 .TP
 \fBkennel attach <name>\fR
@@ -57,12 +42,20 @@ list running kennels and the cross\-kennel service mesh
 \fBkennel daemon\-reload\fR
 re\-derive the service catalogue from the enablement links
 .TP
-\fBkennel policy <list|show|edit|generate|compile|validate|sign\-template|lint|risks|diff|inspect> [...]\fR
-author, inspect, sign, and check policies
+\fBkennel policy <list|show|edit|generate|compile|validate|risks|diff|inspect> [...]\fR
+author, inspect, and check runnable policies (the leaf house)
 .RS
 .TP
 \fB(sub\-verbs)\fR
-See kennel\-policy(1) for list, show, edit, generate, compile, validate, sign\-template, lint, risks, diff, inspect.
+See kennel\-policy(1) for list, show, edit, generate, compile, validate, risks, diff, inspect.
+.RE
+.TP
+\fBkennel template <list|show|sign|lint> [...]\fR
+inspect and sign shared base templates and fragments (the template house)
+.RS
+.TP
+\fB(sub\-verbs)\fR
+See kennel\-template(1) for list, show, sign, lint.
 .RE
 .TP
 \fBkennel keygen <key\-id> [\-\-dir DIR] [\-\-force]\fR
@@ -115,8 +108,8 @@ Provision a named image store entry: record the provenance digest and scaffold a
 .RE
 .RS
 .TP
-\fBrun <name> [\-\-key K] [\-\- <cmd...>]\fR
-Boot a built store entry under its signed policy (the digest is checked against [rootfs].image).
+\fBrun <name> [\-\- <cmd...>]\fR
+Boot a built store entry's compiled artefact (the digest is checked against [rootfs].image; compile the store policy first).
 .RE
 .RS
 .TP
@@ -158,11 +151,11 @@ The helper binaries kenneld resolves (see kennel\-helpers via the .8 pages).
 User CLI conveniences (search paths). See config.toml(5).
 .SH EXAMPLES
 .TP
-\fBkennel run ai\-coding\-strict \-\- claude\fR
-Run Claude Code confined by the ai\-coding\-strict template.
+\fBkennel run claude\fR
+Run the shipped claude policy (a settled artefact resolved by name).
 .TP
-\fBkennel run ./policy.toml myjob\fR
-Auto\-compile and run a local source policy as kennel 'myjob'.
+\fBkennel policy compile myjob && kennel run myjob\fR
+Compile (= sign) a leaf in the policy repo, then run its settled artefact.
 .TP
 \fBkennel list\fR
 Show running kennels.
@@ -170,4 +163,4 @@ Show running kennels.
 \fBkennel audit myjob \-\-follow\fR
 Stream myjob's audit log.
 .SH SEE ALSO
-\fBkennel\-policy\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5)
+\fBkennel\-policy\fR(1), \fBkennel\-template\fR(1), \fBkenneld\fR(8), \fBpolicy.toml\fR(5), \fBconfig.toml\fR(5), \fBsystem.toml\fR(5)

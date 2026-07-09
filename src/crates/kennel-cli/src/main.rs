@@ -2,14 +2,17 @@
 //!
 //! Installed at `/usr/libexec/kennel/host` and reached through the `kennel` shim (which
 //! detects host-vs-cage context). Dispatches every operator verb — `run`, `attach`, `stop`,
-//! `list`, `review`, `release`, `daemon-reload`, `policy`, `oci`, `keygen`,
+//! `list`, `review`, `release`, `daemon-reload`, `policy`, `template`, `oci`, `keygen`,
 //! `audit` — over the `kennel_cli` library crate.
 
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
-use kennel_cli::{print_help, print_policy_help, usage_of, wants_help, COMMANDS, POLICY_VERBS};
+use kennel_cli::{
+    print_help, print_policy_help, print_template_help, usage_of, wants_help, COMMANDS,
+    POLICY_VERBS, TEMPLATE_VERBS,
+};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,7 +34,11 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         print_help();
         return Ok(ExitCode::SUCCESS);
     }
-    if cmd != "policy" && wants_help(rest) && COMMANDS.iter().any(|c| c.name == cmd) {
+    if cmd != "policy"
+        && cmd != "template"
+        && wants_help(rest)
+        && COMMANDS.iter().any(|c| c.name == cmd)
+    {
         println!("{}", usage_of(COMMANDS, cmd));
         return Ok(ExitCode::SUCCESS);
     }
@@ -45,6 +52,7 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "list" => kennel_cli::runtime::list(),
         "daemon-reload" => kennel_cli::runtime::daemon_reload(),
         "policy" => dispatch_policy(rest),
+        "template" => dispatch_template(rest),
         "keygen" => kennel_cli::misc::keygen(rest),
         "audit" => kennel_cli::misc::audit(rest),
         other => Err(format!("unknown command `{other}` — run `kennel --help`")),
@@ -71,20 +79,52 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "generate" => kennel_cli::policy::policy_generate(rest),
         "compile" => kennel_cli::policy::compile(rest),
         "validate" => kennel_cli::policy::validate(rest),
-        "sign-template" => kennel_cli::policy::sign_template(rest),
-        // The old `sign` signed only templates, not the policy you run — a renamed trap. Redirect.
+        // Retired spellings answer with the house pointer for one release (the 0.6.0 courtesy).
+        "sign-template" => Err(
+            "`kennel policy sign-template` moved to the template house: `kennel template sign \
+             <template> --key <key>`"
+                .to_owned(),
+        ),
         "sign" => Err(
             "`kennel policy sign` was renamed. To sign your own policy so you can run it, use \
              `kennel policy compile <policy> --key <key>`. To sign a shared base template, use \
-             `kennel policy sign-template <template> --key <key>`."
+             `kennel template sign <template> --key <key>`."
                 .to_owned(),
         ),
-        "lint" => kennel_cli::policy::policy_lint(rest),
+        "lint" => Err(
+            "`kennel policy lint` moved to the template house (it checks the template corpus): \
+             `kennel template lint`"
+                .to_owned(),
+        ),
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),
         "inspect" => kennel_cli::policy::policy_inspect(rest),
         other => Err(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
+        )),
+    }
+}
+
+fn dispatch_template(args: &[String]) -> Result<ExitCode, String> {
+    let Some((verb, rest)) = args.split_first() else {
+        print_template_help();
+        return Ok(ExitCode::SUCCESS);
+    };
+    if verb == "help" || verb == "--help" || verb == "-h" {
+        print_template_help();
+        return Ok(ExitCode::SUCCESS);
+    }
+    if wants_help(rest) && TEMPLATE_VERBS.iter().any(|c| c.name == verb) {
+        println!("{}", usage_of(TEMPLATE_VERBS, verb));
+        return Ok(ExitCode::SUCCESS);
+    }
+    match verb.as_str() {
+        "list" => kennel_cli::policy::template_list(rest),
+        "show" => kennel_cli::policy::template_show(rest),
+        "sign" => kennel_cli::policy::template_sign(rest),
+        "lint" => kennel_cli::policy::template_lint(rest),
+        other => Err(format!(
+            "unknown template verb `{other}` — run `kennel template --help`"
         )),
     }
 }

@@ -88,8 +88,13 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "policy",
-        summary: "author, inspect, sign, and check policies",
-        usage: "policy <list|show|edit|generate|compile|validate|sign-template|lint|risks|diff|inspect> [...]",
+        summary: "author, inspect, and check runnable policies (the leaf house)",
+        usage: "policy <list|show|edit|generate|compile|validate|risks|diff|inspect> [...]",
+    },
+    CommandSpec {
+        name: "template",
+        summary: "inspect and sign shared base templates and fragments (the template house)",
+        usage: "template <list|show|sign|lint> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -112,7 +117,7 @@ pub const COMMANDS: &[CommandSpec] = &[
 pub const POLICY_VERBS: &[CommandSpec] = &[
     CommandSpec {
         name: "list",
-        summary: "list policies and templates in the search path",
+        summary: "list policies in the search path",
         usage: "policy list",
     },
     CommandSpec {
@@ -141,16 +146,6 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         usage: "policy validate <policy> [--require-signed] [--template-dir D]... [--trust-dir D]...",
     },
     CommandSpec {
-        name: "sign-template",
-        summary: "sign a source template or fragment (a shared base; use `compile` for your own policy)",
-        usage: "policy sign-template <template> --key <key> [--key-id <id>] [--output <path>]",
-    },
-    CommandSpec {
-        name: "lint",
-        summary: "check the shipped template corpus for incoherences",
-        usage: "policy lint [--template-dir D]... [--trust-dir D]...",
-    },
-    CommandSpec {
         name: "risks",
         summary: "evaluate a policy against the threat catalogue (exposures, residuals)",
         usage: "policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
@@ -164,6 +159,31 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         name: "inspect",
         summary: "inspect grants in a settled policy (--unix: AF_UNIX sockets)",
         usage: "policy inspect <policy> --unix [--template-dir D]... [--trust-dir D]...",
+    },
+];
+
+/// Sub-verbs of `kennel template` — the template house (shared bases and fragments; a
+/// template is signed source others inherit, never a runnable policy).
+pub const TEMPLATE_VERBS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "list",
+        summary: "list templates and fragments in the search path",
+        usage: "template list",
+    },
+    CommandSpec {
+        name: "show",
+        summary: "show what a template resolves to (its effective floor)",
+        usage: "template show <template> [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "sign",
+        summary: "sign a source template or fragment (use `policy compile` for a policy you run)",
+        usage: "template sign <template> --key <key> [--key-id <id>] [--output <path>]",
+    },
+    CommandSpec {
+        name: "lint",
+        summary: "check the shipped template corpus for incoherences",
+        usage: "template lint [--template-dir D]... [--trust-dir D]...",
     },
 ];
 
