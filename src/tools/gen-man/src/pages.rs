@@ -205,7 +205,7 @@ template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
 A policy is a TOML file (see \\fBpolicy.toml\\fR(5)) that inherits from a signed \
 template chain and may compose signed fragments. These sub-verbs resolve, check, \
 and compile policies; none of them need the \\fBkenneld\\fR(8) daemon. The shared \
-bases a policy inherits from — templates and fragments — are managed by their own \
+bases a policy inherits from (templates and fragments) are managed by their own \
 noun group, \\fBkennel-template\\fR(1).
 
 Compilation resolves the inheritance chain and includes, verifies every \

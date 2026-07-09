@@ -4,7 +4,7 @@ kennel\-policy \- author, inspect, compile, and check Project Kennel policies (t
 .SH SYNOPSIS
 \fBkennel policy\fR \fIsub-verb\fR [\fIargs\fR...]
 .SH DESCRIPTION
-\fBkennel policy\fR is the policy\-authoring noun group of \fBkennel\fR(1). A policy is a TOML file (see \fBpolicy.toml\fR(5)) that inherits from a signed template chain and may compose signed fragments. These sub\-verbs resolve, check, and compile policies; none of them need the \fBkenneld\fR(8) daemon. The shared bases a policy inherits from — templates and fragments — are managed by their own noun group, \fBkennel\-template\fR(1).
+\fBkennel policy\fR is the policy\-authoring noun group of \fBkennel\fR(1). A policy is a TOML file (see \fBpolicy.toml\fR(5)) that inherits from a signed template chain and may compose signed fragments. These sub\-verbs resolve, check, and compile policies; none of them need the \fBkenneld\fR(8) daemon. The shared bases a policy inherits from (templates and fragments) are managed by their own noun group, \fBkennel\-template\fR(1).
 .PP
 Compilation resolves the inheritance chain and includes, verifies every referenced artefact's signature and lockfile pin, and emits a signed settled artefact that the daemon enforces at \fBkennel run\fR time.
 .SH COMMANDS
