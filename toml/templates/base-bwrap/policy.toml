@@ -29,7 +29,6 @@ template_name = "base-bwrap"
 # --- Capabilities (framework invariants) ------------------------------------
 [cap]
 no_new_privs = true
-bounding_set = []
 
 
 # --- Execution (permissive — the open posture) ------------------------------
@@ -115,7 +114,8 @@ deny = [
     "personality",
 ]
 
+
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQALSsBUL7Truhy+6bxGpmb2mvlvpBMQOqR\nURkWFiQOllLx810KBmNOnfSpU20kvRFaUNk3wsFXGroGKLTb5+wAc=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQI/J2vL+342P4bxTlnVFpsqc3Y57ofMThf\nWoB3jEzYiyv7neFfT6Ev9jMmrpH7MWlJ42uW/NukvuDD8WMdoKXw4=\n-----END SSH SIGNATURE-----\n"

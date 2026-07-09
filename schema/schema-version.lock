@@ -30,3 +30,13 @@
 2 81ad93dc4e2ac044aba0afa2c9ed9bdc7b0ecb395e65a92fd790e4bf00732c91
 3 b6fafc919d55fb9e4e616d34815a4990977463aeab3b05a99093fc88e93dd74d
 4 fecc8aa8d07089ba4366ebd53bb503bd425a82bec90eec1ac8cb6ec88ebf9996
+# v5: the 0.7.0 ABI (W6, the list-field consistency pass). The SETTLED shape did not move —
+#     composition resolves at compile, so a v3/v4 artefact loads and enforces identically and the
+#     MIN floor stays 3 (the variance rule, receipts per field in the CHANGELOG). What moved is the
+#     AUTHORABLE surface this fingerprint covers: new compose forms ([[consumes.add]],
+#     [[spawn.allow.add]], [[identity.groups.add]] with per-add reasons), exec.deny/env.deny/
+#     net.bpf.deny_families becoming add-only floors, the proxy_listen_address rename, and the
+#     retired dead keys (cap.bounding_set, proxy_listen_v6_address). An old CLI meeting a source
+#     that uses the new forms fails its parse legibly; an old daemon refuses a v5-stamped artefact
+#     as too-new.
+5 4a764871e14cb5088fda28215e74b2fa5b37dcdb40a1ae06cd3f833224974168

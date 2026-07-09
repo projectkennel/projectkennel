@@ -25,7 +25,8 @@ template_name = "base-confined"
 # --- Capabilities (framework invariants) ------------------------------------
 [cap]
 no_new_privs = true        # PR_SET_NO_NEW_PRIVS, always; cannot be set false
-bounding_set = []          # drop the entire capability bounding set
+# (the capability bounding set is dropped structurally by the spawn — userns + no_new_privs;
+# there is no [cap] knob for it)
 
 
 # --- Execution (deny-by-default) --------------------------------------------
@@ -145,7 +146,7 @@ mode = "constrained"
 # is enabled iff its address resolves (no separate on/off flag).
 # Listener address is computed from the kennel's uid-derived subnet and <ctx>
 # (§7.3.2), IPv6-only; override the host offset/port within the kennel's own subnet
-# with proxy_listen_v6_address = "offset:port" (offset 1..=14, default "1:1080").
+# with proxy_listen_address = "offset:port" (offset 1..=14, default "1:1080").
 # Project Kennel injects HTTPS_PROXY / HTTP_PROXY / ALL_PROXY pointing at the
 # computed proxy address.
 
@@ -252,7 +253,8 @@ deny = [
 #   nproc  = "512"
 #   core   = "0"
 
+
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQGIPqycWdMbCNFEGd2Kb5lXyAYdMdV/IiE\nzhDAgVFaxviJiI2D+phb5+7AurPAaUdFK65hHbjtvZAOb4ckl0GQo=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQNYZzKLn+Wq3rALr7au/zQUMxvDy1AkD3W\nlLzBfiqcA/KfeznXifZJRsoGQWOFD1X9HNL+Au8ZV70CQn9CUhEgA=\n-----END SSH SIGNATURE-----\n"

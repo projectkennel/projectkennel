@@ -82,15 +82,24 @@ pub use spawn::spawn_eligible;
 /// shape change to a real version: 0.6.0 artefacts are v4, and an old daemon refuses v4 cleanly as
 /// too-new. In-cycle re-pinning is a convenience; a shape that moved since the last release owes a
 /// bump *at release* (see `schema/schema-version.lock` and `docs/governance/RELEASE-CEREMONY.md`).
-pub const SETTLED_SCHEMA_VERSION: u32 = 4;
+///
+/// v5 (0.7.0, W6): the list-field consistency pass moved the AUTHORABLE surface — new delta
+/// forms (`[[consumes.add]]`, `[[spawn.allow.add]]`, `[[identity.groups.add]]`), the
+/// `proxy_listen_address` rename, and the retired dead keys (`bounding_set`,
+/// `proxy_listen_v6_address`). The SETTLED shape did not move (composition resolves at
+/// compile), so the bump is the authorable-surface lever only: an old CLI meeting a source
+/// using the new forms fails its parse legibly, and an old daemon refuses a v5-stamped
+/// artefact as too-new rather than guessing.
+pub const SETTLED_SCHEMA_VERSION: u32 = 5;
 
 /// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
 /// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.
 ///
-/// Stays at 3 across the v4 bump: the 0.6.0 additions are additive-optional, so a v3 artefact (which
-/// simply lacks them) still loads and enforces identically under this build — backward compatibility
-/// is preserved. Only the *forward* direction (an old daemon meeting a v4 artefact) is the break the
-/// bump guards, and that is the old daemon's to refuse.
+/// Stays at 3 across the v4 AND v5 bumps (the variance rule): the 0.6.0 additions are
+/// additive-optional, and the 0.7.0 (W6) pass changed the *authorable* surface only — the
+/// settled shape is untouched, so a v3/v4 artefact loads and enforces identically under this
+/// build. Only the *forward* direction (an old daemon meeting a newer-stamped artefact) is
+/// the break the bump guards, and that is the old daemon's to refuse.
 pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 3;
 
 /// Verify a settled-policy document and return its body.

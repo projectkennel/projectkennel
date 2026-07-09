@@ -959,7 +959,7 @@ fn translate_net(
                 .to_owned(),
         ));
     }
-    let proxy = resolve_proxy(mode, net.proxy_listen_v4_address.as_deref())?;
+    let proxy = resolve_proxy(mode, net.proxy_listen_address.as_deref())?;
 
     let (allow, allow_names, deny_invariant, deny_author) =
         translate_proxy(net.proxy.as_ref(), deferred)?;
@@ -2249,7 +2249,7 @@ mod tests {
                 reason: Some("test".to_owned()),
                 // A non-default proxy_listen so we can prove the engine FORCES the proxy off
                 // for the non-proxied modes (the host-mode composition-bug fix).
-                proxy_listen_v4_address: Some("2:1080".to_owned()),
+                proxy_listen_address: Some("2:1080".to_owned()),
                 ..crate::source::NetSection::default()
             }),
             ..SourcePolicy::default()
@@ -2594,7 +2594,7 @@ mod tests {
                 reason: Some("the display service".to_owned()),
                 ..ProvidesEntry::default()
             }],
-            consumes: vec![ConsumesEntry {
+            consumes: crate::source::ListField::Set(vec![ConsumesEntry {
                 name: "org.projectkennel.wayland".to_owned(),
                 shape: Shape::AfUnix,
                 at: Some("$XDG_RUNTIME_DIR/wayland-0".to_owned()),
@@ -2602,7 +2602,7 @@ mod tests {
                 required: true,
                 reason: Some("render the window".to_owned()),
                 ..ConsumesEntry::default()
-            }],
+            }]),
             ..SourcePolicy::default()
         };
         let mesh = translate_mesh(&src);
@@ -2931,7 +2931,7 @@ mod tests {
         };
         let src = SourcePolicy {
             identity: Some(IdentitySection {
-                groups: vec!["plugdev".to_owned(), "dialout".to_owned()],
+                groups: vec!["plugdev".to_owned(), "dialout".to_owned()].into(),
                 ..IdentitySection::default()
             }),
             fs: Some(FsSection {
@@ -2990,7 +2990,7 @@ mod tests {
                 user: Some("dev".to_owned()),
                 group: Some("staff".to_owned()),
                 hostname: None,
-                groups: Vec::new(),
+                groups: crate::source::GroupField::default(),
             }),
             ..SourcePolicy::default()
         };

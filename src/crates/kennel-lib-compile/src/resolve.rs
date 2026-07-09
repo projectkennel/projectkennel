@@ -44,12 +44,13 @@
 //! [`compile`](mod@crate::compile), after this stage folds the `template_base` chain.
 
 use crate::source::{
-    self, bpf_key, deny_key, dev_key, net_key, ssh_key, unix_key, BoundaryAcl, CapSection,
-    DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection, FsDev, FsHome, FsProc,
-    FsSection, FsTmp, IdentitySection, LifecycleSection, ListField, NetAudit, NetBind, NetBpf,
-    NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection, NetUdp, PathField, RedirectEntry,
-    RootfsSection, SeccompSection, ServiceSection, SourcePolicy, SpawnSection, SshSection,
-    TrustSection, TtySection, UnixSection, UnsafeSection, WorkloadSection,
+    self, bpf_key, consumes_key, deny_key, dev_key, net_key, spawn_key, ssh_key, unix_key,
+    BoundaryAcl, CapSection, DbusAudit, DbusBus, DbusRules, DbusSection, EnvSection, ExecSection,
+    FsDev, FsHome, FsProc, FsSection, FsTmp, GroupField, IdentitySection, LifecycleSection,
+    ListField, NetAudit, NetBind, NetBpf, NetBpfAcl, NetIpv6, NetProxy, NetProxyDeny, NetSection,
+    NetUdp, PathField, RedirectEntry, RootfsSection, SeccompSection, ServiceSection, SourcePolicy,
+    SpawnSection, SshSection, TrustSection, TtySection, UnixSection, UnsafeSection,
+    WorkloadSection,
 };
 use crate::source_sig::{Tier, Trust};
 use kennel_lib_policy::audit::{
@@ -99,6 +100,10 @@ pub struct ResolvedChain {
     /// Where the folded `[[provides]]` came from — the provenance the reserved-namespace
     /// gate keys on.
     pub provides_origin: ProvidesOrigin,
+    /// Non-fatal composition warnings raised while folding (W6): a bare-set clobber of a
+    /// non-empty inherited list is legal but never silent. `compile` surfaces these with
+    /// the rest of the compile warnings.
+    pub warnings: Vec<String>,
 }
 
 /// Where a resolved policy's effective `[[provides]]` originated.
@@ -219,11 +224,12 @@ pub fn resolve_verified(
     // artefact overrides it, and finally `entry`. `parents` is leaf-first, so the root
     // is its last element.
     // A root template with no parent resolves to itself.
+    let mut warnings = Vec::new();
     let mut acc = parents.pop().unwrap_or_else(|| entry.clone());
     while let Some(child) = parents.pop() {
-        acc = fold(&acc, &child);
+        acc = fold(&acc, &child, &mut warnings);
     }
-    acc = fold(&acc, entry);
+    acc = fold(&acc, entry, &mut warnings);
 
     // The `template_base` chain is fully folded; nothing left to inherit. The folded
     // `include` list is *kept* (not cleared): includes are applied separately by
@@ -239,6 +245,7 @@ pub fn resolve_verified(
         effective: acc,
         chain: links,
         provides_origin,
+        warnings,
     })
 }
 
@@ -250,7 +257,9 @@ pub fn resolve_verified(
 /// checked [`SourcePolicy::is_additive_only`].
 #[must_use]
 pub(crate) fn apply_fragment(base: &SourcePolicy, fragment: &SourcePolicy) -> SourcePolicy {
-    let mut folded = fold(base, fragment);
+    // A fragment is add-only (`is_additive_only`, checked by the caller), so a bare-set
+    // clobber cannot occur on this fold; the sink is a formality.
+    let mut folded = fold(base, fragment, &mut Vec::new());
     base.template_base.clone_into(&mut folded.template_base);
     base.template_name.clone_into(&mut folded.template_name);
     base.name.clone_into(&mut folded.name);
@@ -269,7 +278,7 @@ pub(crate) fn parse_reference(reference: &str) -> Result<String, PolicyError> {
 
 /// Fold `child` over `parent`, child overriding. Identity fields are settled by the
 /// caller after the full fold; here they take the child's value.
-fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
+fn fold(parent: &SourcePolicy, child: &SourcePolicy, warn: &mut Vec<String>) -> SourcePolicy {
     SourcePolicy {
         template_base: child.template_base.clone(),
         template_name: or(&child.template_name, &parent.template_name),
@@ -281,60 +290,76 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy) -> SourcePolicy {
         ),
         signature: None,
         cap: merge(&parent.cap, &child.cap, fold_cap),
-        exec: merge(&parent.exec, &child.exec, fold_exec),
-        fs: merge(&parent.fs, &child.fs, fold_fs),
-        net: merge(&parent.net, &child.net, fold_net),
-        unix: merge(&parent.unix, &child.unix, fold_unix),
-        ssh: merge(&parent.ssh, &child.ssh, fold_ssh),
-        identity: merge(&parent.identity, &child.identity, fold_identity),
-        // `[[provides]]` / `[[consumes]]` fold like a bare list (the SSH set model): a child's
-        // non-empty list replaces the inherited one, an absent one inherits.
-        provides: if child.provides.is_empty() {
-            parent.provides.clone()
-        } else {
-            child.provides.clone()
+        exec: merge(&parent.exec, &child.exec, |p, c| fold_exec(p, c, warn)),
+        fs: merge(&parent.fs, &child.fs, |p, c| fold_fs(p, c, warn)),
+        net: merge(&parent.net, &child.net, |p, c| fold_net(p, c, warn)),
+        unix: merge(&parent.unix, &child.unix, |p, c| fold_unix(p, c, warn)),
+        ssh: merge(&parent.ssh, &child.ssh, |p, c| fold_ssh(p, c, warn)),
+        identity: merge(&parent.identity, &child.identity, |p, c| {
+            fold_identity(p, c, warn)
+        }),
+        // `[[provides]]` folds set-replace DELIBERATELY (W6): the reserved-namespace gate
+        // attributes the effective provides set to ONE declaring layer (`provides_origin`)
+        // and resolves its tier from that layer's signature — per-entry delta composition
+        // would smear that authority attribution across layers. Renaming is no escape and
+        // neither is composition. The clobber is still never silent (the warning below).
+        provides: {
+            if !child.provides.is_empty() && !parent.provides.is_empty() {
+                warn_clobber(warn, "[[provides]]", parent.provides.len());
+            }
+            if child.provides.is_empty() {
+                parent.provides.clone()
+            } else {
+                child.provides.clone()
+            }
         },
-        consumes: if child.consumes.is_empty() {
-            parent.consumes.clone()
-        } else {
-            child.consumes.clone()
-        },
+        // `[[consumes]]` is demand-side (it claims no name authority), so it composes:
+        // replace or increment (`[[consumes.add]]`), keyed by capability name.
+        consumes: fold_listfield(
+            &child.consumes,
+            &parent.consumes,
+            consumes_key,
+            "consumes",
+            warn,
+        ),
         service: merge(&parent.service, &child.service, fold_service),
         unsafe_section: merge(&parent.unsafe_section, &child.unsafe_section, fold_unsafe),
         env: merge(&parent.env, &child.env, fold_env),
         seccomp: merge(&parent.seccomp, &child.seccomp, fold_seccomp),
         lifecycle: merge(&parent.lifecycle, &child.lifecycle, fold_lifecycle),
-        audit: merge(&parent.audit, &child.audit, fold_audit),
+        audit: merge(&parent.audit, &child.audit, |p, c| fold_audit(p, c, warn)),
         ulimits: merge(&parent.ulimits, &child.ulimits, fold_ulimits),
         workload: merge(&parent.workload, &child.workload, fold_workload),
         tty: merge(&parent.tty, &child.tty, fold_tty),
         trust: merge(&parent.trust, &child.trust, fold_trust),
         dbus: merge(&parent.dbus, &child.dbus, fold_dbus),
         rootfs: merge(&parent.rootfs, &child.rootfs, fold_rootfs),
-        spawn: merge(&parent.spawn, &child.spawn, fold_spawn),
-        // The `[[mutable]]` manifest folds like a bare list (the SSH set model): a child's
-        // non-empty manifest replaces the inherited one, an absent one inherits. In practice the
-        // manifest lives on the leaf spawn-target template.
-        mutable: if child.mutable.is_empty() {
-            parent.mutable.clone()
-        } else {
-            child.mutable.clone()
+        spawn: merge(&parent.spawn, &child.spawn, |p, c| fold_spawn(p, c, warn)),
+        // The `[[mutable]]` manifest folds set-replace DELIBERATELY (W6): it is the spawn
+        // target template's OWN contract about which of its fields a spawner may patch —
+        // letting an includer or child inject mutability additively would be a hole, not
+        // a feature. Never silent (the warning), but never composed either.
+        mutable: {
+            if !child.mutable.is_empty() && !parent.mutable.is_empty() {
+                warn_clobber(warn, "[[mutable]]", parent.mutable.len());
+            }
+            if child.mutable.is_empty() {
+                parent.mutable.clone()
+            } else {
+                child.mutable.clone()
+            }
         },
     }
 }
 
 /// Fold `[spawn]` down the chain: `max_instances` and `reason` are scalar-wins (child overriding);
-/// the `[[spawn.allow]]` set follows the SSH bare-list model — a child's non-empty list replaces
-/// the inherited one, an absent one inherits.
-fn fold_spawn(p: &SpawnSection, c: &SpawnSection) -> SpawnSection {
+/// the `[[spawn.allow]]` target set replaces or increments (`[[spawn.allow.add]]`), keyed by
+/// template name — a child extends the instantiable set without restating it (W6).
+fn fold_spawn(p: &SpawnSection, c: &SpawnSection, warn: &mut Vec<String>) -> SpawnSection {
     SpawnSection {
         max_instances: or(&c.max_instances, &p.max_instances),
         reason: or(&c.reason, &p.reason),
-        allow: if c.allow.is_empty() {
-            p.allow.clone()
-        } else {
-            c.allow.clone()
-        },
+        allow: fold_listfield(&c.allow, &p.allow, spawn_key, "spawn.allow", warn),
     }
 }
 
@@ -471,22 +496,50 @@ fn or<T: Clone>(child: &Option<T>, parent: &Option<T>) -> Option<T> {
 }
 
 /// Merge two optional sub-objects, applying `f(parent, child)` when both are present.
+/// `FnMut` so a caller's closure may capture the fold's warning sink mutably.
 #[allow(clippy::ref_option)]
-fn merge<T: Clone>(parent: &Option<T>, child: &Option<T>, f: impl Fn(&T, &T) -> T) -> Option<T> {
+fn merge<T: Clone>(
+    parent: &Option<T>,
+    child: &Option<T>,
+    mut f: impl FnMut(&T, &T) -> T,
+) -> Option<T> {
     match (parent, child) {
         (Some(p), Some(c)) => Some(f(p, c)),
         (p, c) => c.clone().or_else(|| p.clone()),
     }
 }
 
+/// Report a bare-set clobber: a child's non-empty set form replacing a non-empty inherited
+/// list. Legal (a template may define its own floor; a leaf may redefine wholesale) but
+/// NEVER silent (W6) — previously visible only in a compiled-artefact diff.
+fn warn_clobber(warn: &mut Vec<String>, field: &str, dropped: usize) {
+    warn.push(format!(
+        "`{field}` bare-set replaces {dropped} inherited entr{} — an `add` increment \
+         extends the inherited list instead",
+        if dropped == 1 { "y" } else { "ies" }
+    ));
+}
+
 /// Fold a path-list field one chain step (`fs.read`/`fs.write`/`fs.deny`/`exec.allow`): a child
 /// `Set` *replaces*, a child `Delta` *increments* the inherited value, an absent field inherits.
 /// The result is always a `Set` — the deltas have been folded into a concrete list.
 #[allow(clippy::ref_option)]
-fn fold_pathfield(child: &Option<PathField>, parent: &Option<PathField>) -> Option<PathField> {
+fn fold_pathfield(
+    child: &Option<PathField>,
+    parent: &Option<PathField>,
+    field: &str,
+    warn: &mut Vec<String>,
+) -> Option<PathField> {
     match child {
         None => parent.clone(),
-        Some(PathField::Set(v)) => Some(PathField::Set(v.clone())),
+        Some(PathField::Set(v)) => {
+            if let Some(PathField::Set(pv)) = parent {
+                if !v.is_empty() && !pv.is_empty() {
+                    warn_clobber(warn, field, pv.len());
+                }
+            }
+            Some(PathField::Set(v.clone()))
+        }
         Some(PathField::Delta(d)) => {
             let mut base: Vec<String> = match parent {
                 Some(PathField::Set(v)) => v.clone(),
@@ -512,10 +565,19 @@ fn fold_listfield<T: Clone>(
     child: &ListField<T>,
     parent: &ListField<T>,
     key: fn(&T) -> &str,
+    field: &str,
+    warn: &mut Vec<String>,
 ) -> ListField<T> {
     match child {
         ListField::Set(v) if v.is_empty() => parent.clone(),
-        ListField::Set(v) => ListField::Set(v.clone()),
+        ListField::Set(v) => {
+            if let ListField::Set(pv) = parent {
+                if !pv.is_empty() {
+                    warn_clobber(warn, field, pv.len());
+                }
+            }
+            ListField::Set(v.clone())
+        }
         ListField::Delta(d) => {
             let mut base: Vec<T> = match parent {
                 ListField::Set(v) => v.clone(),
@@ -528,6 +590,36 @@ fn fold_listfield<T: Clone>(
             }
             base.retain(|x| !d.remove.iter().any(|r| key(r) == key(x)));
             ListField::Set(base)
+        }
+    }
+}
+
+/// Fold the `[identity].groups` field one chain step: a non-empty bare set *replaces*
+/// (warned), an empty set inherits, an `{ add, remove }` of `{ group, reason }` entries
+/// *increments* — the [`fold_listfield`] model over the group-entry shape.
+fn fold_groupfield(child: &GroupField, parent: &GroupField, warn: &mut Vec<String>) -> GroupField {
+    match child {
+        GroupField::Set(v) if v.is_empty() => parent.clone(),
+        GroupField::Set(v) => {
+            if let GroupField::Set(pv) = parent {
+                if !pv.is_empty() {
+                    warn_clobber(warn, "identity.groups", pv.len());
+                }
+            }
+            GroupField::Set(v.clone())
+        }
+        GroupField::Delta(d) => {
+            let mut base: Vec<String> = match parent {
+                GroupField::Set(v) => v.clone(),
+                GroupField::Delta(_) => Vec::new(),
+            };
+            for e in &d.add {
+                if !base.contains(&e.group) {
+                    base.push(e.group.clone());
+                }
+            }
+            base.retain(|g| !d.remove.iter().any(|e| e.group == *g));
+            GroupField::Set(base)
         }
     }
 }
@@ -548,14 +640,15 @@ fn union_strings(parent: &[String], child: &[String]) -> Vec<String> {
 fn fold_cap(p: &CapSection, c: &CapSection) -> CapSection {
     CapSection {
         no_new_privs: or(&c.no_new_privs, &p.no_new_privs),
-        bounding_set: or(&c.bounding_set, &p.bounding_set),
     }
 }
 
-fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
+fn fold_exec(p: &ExecSection, c: &ExecSection, warn: &mut Vec<String>) -> ExecSection {
     ExecSection {
-        allow: fold_pathfield(&c.allow, &p.allow),
-        deny: or(&c.deny, &p.deny),
+        allow: fold_pathfield(&c.allow, &p.allow, "exec.allow", warn),
+        // exec.deny is a FLOOR (W6, the W14 seccomp model): a child ADDS paths, never
+        // replaces the chain's — a deny should never silently vanish under a bare-set.
+        deny: union_names(p.deny.as_deref(), c.deny.as_deref()),
         deny_setuid: or(&c.deny_setuid, &p.deny_setuid),
         deny_setgid: or(&c.deny_setgid, &p.deny_setgid),
         deny_setcap: or(&c.deny_setcap, &p.deny_setcap),
@@ -565,16 +658,16 @@ fn fold_exec(p: &ExecSection, c: &ExecSection) -> ExecSection {
     }
 }
 
-fn fold_fs(p: &FsSection, c: &FsSection) -> FsSection {
+fn fold_fs(p: &FsSection, c: &FsSection, warn: &mut Vec<String>) -> FsSection {
     FsSection {
-        read: fold_pathfield(&c.read, &p.read),
-        write: fold_pathfield(&c.write, &p.write),
+        read: fold_pathfield(&c.read, &p.read, "fs.read", warn),
+        write: fold_pathfield(&c.write, &p.write, "fs.write", warn),
         exclusive: or(&c.exclusive, &p.exclusive),
-        deny: fold_pathfield(&c.deny, &p.deny),
+        deny: fold_pathfield(&c.deny, &p.deny, "fs.deny", warn),
         home: merge(&p.home, &c.home, fold_fs_home),
         tmp: merge(&p.tmp, &c.tmp, fold_fs_tmp),
         proc: merge(&p.proc, &c.proc, fold_fs_proc),
-        dev: merge(&p.dev, &c.dev, fold_fs_dev),
+        dev: merge(&p.dev, &c.dev, |p, c| fold_fs_dev(p, c, warn)),
         // Scalar-wins: a child that declares `[fs.cwd]` redefines it wholesale (the grant is
         // an authority the leaf owns end-to-end, not a set to union into).
         cwd: or(&c.cwd, &p.cwd),
@@ -639,46 +732,51 @@ fn fold_fs_proc(p: &FsProc, c: &FsProc) -> FsProc {
     }
 }
 
-fn fold_fs_dev(p: &FsDev, c: &FsDev) -> FsDev {
+fn fold_fs_dev(p: &FsDev, c: &FsDev, warn: &mut Vec<String>) -> FsDev {
     FsDev {
         allow: or(&c.allow, &p.allow),
         // Replace or increment (`[[fs.dev.passthrough.add]]`), keyed by device path.
-        passthrough: fold_listfield(&c.passthrough, &p.passthrough, dev_key),
+        passthrough: fold_listfield(
+            &c.passthrough,
+            &p.passthrough,
+            dev_key,
+            "fs.dev.passthrough",
+            warn,
+        ),
     }
 }
 
-fn fold_net(p: &NetSection, c: &NetSection) -> NetSection {
+fn fold_net(p: &NetSection, c: &NetSection, warn: &mut Vec<String>) -> NetSection {
     NetSection {
         mode: or(&c.mode, &p.mode),
         reason: or(&c.reason, &p.reason),
-        proxy_listen_v4_address: or(&c.proxy_listen_v4_address, &p.proxy_listen_v4_address),
-        proxy_listen_v6_address: or(&c.proxy_listen_v6_address, &p.proxy_listen_v6_address),
-        proxy: merge(&p.proxy, &c.proxy, fold_net_proxy),
-        bpf: merge(&p.bpf, &c.bpf, fold_net_bpf),
+        proxy_listen_address: or(&c.proxy_listen_address, &p.proxy_listen_address),
+        proxy: merge(&p.proxy, &c.proxy, |p, c| fold_net_proxy(p, c, warn)),
+        bpf: merge(&p.bpf, &c.bpf, |p, c| fold_net_bpf(p, c, warn)),
         bind: merge(&p.bind, &c.bind, fold_net_bind),
         ipv6: merge(&p.ipv6, &c.ipv6, fold_net_ipv6),
         audit: merge(&p.audit, &c.audit, fold_net_audit),
-        udp: merge(&p.udp, &c.udp, fold_net_udp),
+        udp: merge(&p.udp, &c.udp, |p, c| fold_net_udp(p, c, warn)),
     }
 }
 
 /// Fold `[net.udp]`: compose the destination allowlist (fragments increment via
 /// `[[net.udp.allow.add]]`), keyed like `[[net.proxy.allow]]`.
-fn fold_net_udp(p: &NetUdp, c: &NetUdp) -> NetUdp {
+fn fold_net_udp(p: &NetUdp, c: &NetUdp, warn: &mut Vec<String>) -> NetUdp {
     NetUdp {
-        allow: fold_listfield(&c.allow, &p.allow, net_key),
+        allow: fold_listfield(&c.allow, &p.allow, net_key, "net.udp.allow", warn),
     }
 }
 
-fn fold_net_proxy(p: &NetProxy, c: &NetProxy) -> NetProxy {
+fn fold_net_proxy(p: &NetProxy, c: &NetProxy, warn: &mut Vec<String>) -> NetProxy {
     NetProxy {
         // Replace or increment (`[[net.proxy.allow.add]]`), keyed by name/cidr.
-        allow: fold_listfield(&c.allow, &p.allow, net_key),
-        deny: merge(&p.deny, &c.deny, fold_net_proxy_deny),
+        allow: fold_listfield(&c.allow, &p.allow, net_key, "net.proxy.allow", warn),
+        deny: merge(&p.deny, &c.deny, |p, c| fold_net_proxy_deny(p, c, warn)),
     }
 }
 
-fn fold_net_proxy_deny(p: &NetProxyDeny, c: &NetProxyDeny) -> NetProxyDeny {
+fn fold_net_proxy_deny(p: &NetProxyDeny, c: &NetProxyDeny, warn: &mut Vec<String>) -> NetProxyDeny {
     // Invariant denies UNION and never drop — invariants propagate down the chain.
     let mut invariant = p.invariant.clone();
     for d in &c.invariant {
@@ -687,25 +785,36 @@ fn fold_net_proxy_deny(p: &NetProxyDeny, c: &NetProxyDeny) -> NetProxyDeny {
         }
     }
     // The author denylist replaces or increments (`[[net.proxy.deny.policy.add]]`), keyed by cidr.
-    let policy = fold_listfield(&c.policy, &p.policy, deny_key);
+    let policy = fold_listfield(
+        &c.policy,
+        &p.policy,
+        deny_key,
+        "net.proxy.deny.policy",
+        warn,
+    );
     NetProxyDeny { invariant, policy }
 }
 
-fn fold_net_bpf(p: &NetBpf, c: &NetBpf) -> NetBpf {
+fn fold_net_bpf(p: &NetBpf, c: &NetBpf, warn: &mut Vec<String>) -> NetBpf {
     NetBpf {
-        // Socket-family shaping is scalar-wins (child overrides when set).
+        // The allow-shaped family list is scalar-wins (child overrides when set); the
+        // deny list is a FLOOR (W6, the W14 seccomp model): a child adds, never removes.
         families: or(&c.families, &p.families),
-        deny_families: or(&c.deny_families, &p.deny_families),
-        connect: merge(&p.connect, &c.connect, fold_net_bpf_acl),
-        bind: merge(&p.bind, &c.bind, fold_net_bpf_acl),
+        deny_families: union_names(p.deny_families.as_deref(), c.deny_families.as_deref()),
+        connect: merge(&p.connect, &c.connect, |p, c| {
+            fold_net_bpf_acl(p, c, "net.bpf.connect", warn)
+        }),
+        bind: merge(&p.bind, &c.bind, |p, c| {
+            fold_net_bpf_acl(p, c, "net.bpf.bind", warn)
+        }),
     }
 }
 
-fn fold_net_bpf_acl(p: &NetBpfAcl, c: &NetBpfAcl) -> NetBpfAcl {
+fn fold_net_bpf_acl(p: &NetBpfAcl, c: &NetBpfAcl, dir: &str, warn: &mut Vec<String>) -> NetBpfAcl {
     // Each direction's allow/deny replaces or increments (`[[net.bpf.connect.allow.add]]`), by cidr.
     NetBpfAcl {
-        allow: fold_listfield(&c.allow, &p.allow, bpf_key),
-        deny: fold_listfield(&c.deny, &p.deny, bpf_key),
+        allow: fold_listfield(&c.allow, &p.allow, bpf_key, &format!("{dir}.allow"), warn),
+        deny: fold_listfield(&c.deny, &p.deny, bpf_key, &format!("{dir}.deny"), warn),
     }
 }
 
@@ -734,13 +843,21 @@ fn fold_net_audit(p: &NetAudit, c: &NetAudit) -> NetAudit {
     }
 }
 
-fn fold_audit(p: &AuditSection, c: &AuditSection) -> AuditSection {
+fn fold_audit(p: &AuditSection, c: &AuditSection, warn: &mut Vec<String>) -> AuditSection {
     AuditSection {
-        // Bare-set: a child's non-empty sink list replaces the parent's.
-        sinks: if c.sinks.is_empty() {
-            p.sinks.clone()
-        } else {
-            c.sinks.clone()
+        // Bare-set replace DELIBERATELY (W6): the sink list is deployment configuration
+        // (where events go), not a capability floor, and `AuditSection` lives in the
+        // policy crate — importing the compose machinery there would grow the TCB for a
+        // config list. The clobber is warned, never silent.
+        sinks: {
+            if !c.sinks.is_empty() && !p.sinks.is_empty() {
+                warn_clobber(warn, "audit.sinks", p.sinks.len());
+            }
+            if c.sinks.is_empty() {
+                p.sinks.clone()
+            } else {
+                c.sinks.clone()
+            }
         },
         file: merge(&p.file, &c.file, fold_audit_file),
         syslog: merge(&p.syslog, &c.syslog, fold_audit_syslog),
@@ -775,35 +892,42 @@ fn fold_audit_class(p: &AuditClassSection, c: &AuditClassSection) -> AuditClassS
     }
 }
 
-fn fold_unix(p: &UnixSection, c: &UnixSection) -> UnixSection {
+fn fold_unix(p: &UnixSection, c: &UnixSection, warn: &mut Vec<String>) -> UnixSection {
     UnixSection {
         abstract_ns: or(&c.abstract_ns, &p.abstract_ns),
         // Replace or increment (`[[unix.allow.add]]`), keyed by name/real.
-        allow: fold_listfield(&c.allow, &p.allow, unix_key),
+        allow: fold_listfield(&c.allow, &p.allow, unix_key, "unix.allow", warn),
     }
 }
 
-fn fold_identity(p: &IdentitySection, c: &IdentitySection) -> IdentitySection {
-    // Bare-set: a child's non-empty group list replaces the parent's; the child's
-    // `user`/`hostname` override the parent's when set.
+fn fold_identity(
+    p: &IdentitySection,
+    c: &IdentitySection,
+    warn: &mut Vec<String>,
+) -> IdentitySection {
+    // `user`/`hostname` are scalar-wins; the supplementary-group list replaces or
+    // increments (`[[identity.groups.add]]`, each add carrying its reason — a group is a
+    // real privilege), so a leaf extends a template's group floor without restating it (W6).
     IdentitySection {
         user: or(&c.user, &p.user),
         group: or(&c.group, &p.group),
         hostname: or(&c.hostname, &p.hostname),
-        groups: if c.groups.is_empty() {
-            p.groups.clone()
-        } else {
-            c.groups.clone()
-        },
+        groups: fold_groupfield(&c.groups, &p.groups, warn),
     }
 }
 
-fn fold_ssh(p: &SshSection, c: &SshSection) -> SshSection {
+fn fold_ssh(p: &SshSection, c: &SshSection, warn: &mut Vec<String>) -> SshSection {
     SshSection {
         allow_headless: or(&c.allow_headless, &p.allow_headless),
         threats: or(&c.threats, &p.threats),
         // Replace or increment (`[[ssh.destinations.add]]`), keyed by destination.
-        destinations: fold_listfield(&c.destinations, &p.destinations, ssh_key),
+        destinations: fold_listfield(
+            &c.destinations,
+            &p.destinations,
+            ssh_key,
+            "ssh.destinations",
+            warn,
+        ),
     }
 }
 
@@ -836,7 +960,9 @@ fn fold_env(p: &EnvSection, c: &EnvSection) -> EnvSection {
     EnvSection {
         pass: or(&c.pass, &p.pass),
         set,
-        deny: or(&c.deny, &p.deny),
+        // env.deny is a FLOOR (W6, the W14 seccomp model): a child adds names, never
+        // removes the chain's — a denied variable never silently reappears.
+        deny: union_names(p.deny.as_deref(), c.deny.as_deref()),
     }
 }
 
@@ -920,7 +1046,7 @@ mod tests {
         .expect("parent");
         let pfs = parent.fs.as_ref().expect("p fs");
         // The entry's own fold step populates the carrier.
-        let folded = fold_fs(&FsSection::default(), pfs);
+        let folded = fold_fs(&FsSection::default(), pfs, &mut Vec::new());
         assert_eq!(folded.redirect.len(), 1);
         assert_eq!(
             folded.redirect.first().map(|r| r.source.as_str()),
@@ -930,14 +1056,18 @@ mod tests {
 
         // An absent child field inherits; a child re-adding the same path with its own
         // `source` overrides (child wins); a child removing the path drops the redirect.
-        let inherit = fold_fs(&folded, &FsSection::default());
+        let inherit = fold_fs(&folded, &FsSection::default(), &mut Vec::new());
         assert_eq!(inherit.redirect, folded.redirect);
 
         let override_child = parse(
             b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.read.add]]\npath = \"~/.app/cred.json\"\nsource = \"~/stores/b.json\"\nreason = \"retargeted\"\n",
         )
         .expect("override child");
-        let folded2 = fold_fs(&folded, override_child.fs.as_ref().expect("c fs"));
+        let folded2 = fold_fs(
+            &folded,
+            override_child.fs.as_ref().expect("c fs"),
+            &mut Vec::new(),
+        );
         assert_eq!(folded2.redirect.len(), 1);
         assert_eq!(
             folded2.redirect.first().map(|r| r.source.as_str()),
@@ -948,7 +1078,11 @@ mod tests {
             b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.read.remove]]\npath = \"~/.app/cred.json\"\nreason = \"dropped\"\n",
         )
         .expect("removing child");
-        let folded3 = fold_fs(&folded, removing_child.fs.as_ref().expect("c fs"));
+        let folded3 = fold_fs(
+            &folded,
+            removing_child.fs.as_ref().expect("c fs"),
+            &mut Vec::new(),
+        );
         assert!(folded3.redirect.is_empty());
 
         // A set-form replacement of the axis clobbers its redirects (bare strings carry no
@@ -956,7 +1090,11 @@ mod tests {
         let replacing_child =
             parse(b"name = \"k\"\ntemplate_base = \"p\"\n[fs]\nread = [\"/usr\"]\n")
                 .expect("replacing child");
-        let folded4 = fold_fs(&folded, replacing_child.fs.as_ref().expect("c fs"));
+        let folded4 = fold_fs(
+            &folded,
+            replacing_child.fs.as_ref().expect("c fs"),
+            &mut Vec::new(),
+        );
         assert!(folded4.redirect.is_empty());
     }
 
@@ -1091,20 +1229,123 @@ mod tests {
     }
 
     #[test]
-    fn bare_list_sets_and_absent_inherits() {
+    fn exec_deny_floors_and_absent_allow_inherits() {
         // parent sets exec.deny=[a,b] and exec.allow=[x]; child sets exec.deny=[c] only.
         let parent = "template_name = \"p\"\n[exec]\nallow = [\"/x\"]\ndeny = [\"/a\", \"/b\"]\n";
         let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[exec]\ndeny = [\"/c\"]\n";
         let src = MapSource::new().with("p", "v1", parent.as_bytes());
         let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
         let exec = resolved.effective.exec.as_ref().expect("exec");
-        // deny: child's bare list REPLACES the parent's.
-        assert_eq!(exec.deny.as_deref(), Some(&["/c".to_owned()][..]));
+        // deny is a FLOOR (W6, the W14 seccomp model): the child's list UNIONS onto the
+        // chain's — a deny never silently vanishes under a bare-set.
+        assert_eq!(
+            exec.deny.as_deref(),
+            Some(&["/a".to_owned(), "/b".to_owned(), "/c".to_owned()][..])
+        );
         // allow: child omitted it, so it INHERITS the parent's.
         assert_eq!(
             exec.allow.as_ref().and_then(PathField::set),
             Some(&["/x".to_owned()][..])
         );
+    }
+
+    /// The W6 floors: `env.deny` and `net.bpf.deny_families` union up the chain like
+    /// exec.deny and the W14 seccomp deny — a child adds, never removes.
+    #[test]
+    fn env_and_bpf_deny_floors_union_across_the_chain() {
+        let parent = "template_name = \"p\"\n[env]\ndeny = [\"LD_PRELOAD\"]\n[net.bpf]\ndeny_families = [\"packet\"]\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[env]\ndeny = [\"DOCKER_HOST\"]\n[net.bpf]\ndeny_families = [\"vsock\"]\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        let env = resolved.effective.env.as_ref().expect("env");
+        assert_eq!(
+            env.deny.as_deref(),
+            Some(&["LD_PRELOAD".to_owned(), "DOCKER_HOST".to_owned()][..])
+        );
+        let bpf = resolved
+            .effective
+            .net
+            .as_ref()
+            .and_then(|n| n.bpf.as_ref())
+            .expect("bpf");
+        assert_eq!(
+            bpf.deny_families.as_deref(),
+            Some(&["packet".to_owned(), "vsock".to_owned()][..])
+        );
+    }
+
+    /// A bare-set that discards a non-empty inherited list is legal but WARNED (W6):
+    /// the silent-floor-drop class closes by visibility on every covered field.
+    #[test]
+    fn bare_set_clobber_is_warned_never_silent() {
+        let parent =
+            "template_name = \"p\"\n[fs]\nread = [\"/usr/**\", \"/lib/**\"]\n[identity]\ngroups = [\"dialout\"]\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[fs]\nread = [\"/opt/**\"]\n[identity]\ngroups = [\"plugdev\"]\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("`fs.read` bare-set replaces 2 inherited entries")),
+            "fs.read clobber warned: {:?}",
+            resolved.warnings
+        );
+        assert!(
+            resolved
+                .warnings
+                .iter()
+                .any(|w| w.contains("`identity.groups` bare-set replaces 1 inherited entry")),
+            "groups clobber warned: {:?}",
+            resolved.warnings
+        );
+        // An increment raises no warning — that IS the recommended form.
+        let delta_child = "template_name = \"c\"\ntemplate_base = \"p\"\n[[fs.read.add]]\npath = \"/opt/**\"\nreason = \"tooling\"\n";
+        let resolved =
+            resolve(&parse(delta_child.as_bytes()).expect("parse"), &src).expect("resolve");
+        assert!(
+            resolved.warnings.is_empty(),
+            "no warning on an add increment: {:?}",
+            resolved.warnings
+        );
+    }
+
+    /// `[[identity.groups.add]]` extends the inherited group set (each add reasoned);
+    /// a remove drops one; the resolved form is the plain list.
+    #[test]
+    fn identity_groups_delta_extends_the_inherited_set() {
+        let parent = "template_name = \"p\"\n[identity]\ngroups = [\"dialout\", \"video\"]\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n\
+                     [[identity.groups.add]]\ngroup = \"plugdev\"\nreason = \"usb devices\"\n\
+                     [[identity.groups.remove]]\ngroup = \"video\"\nreason = \"no gpu\"\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        let groups = resolved
+            .effective
+            .identity
+            .as_ref()
+            .expect("identity")
+            .groups
+            .resolved()
+            .to_vec();
+        assert_eq!(groups, vec!["dialout".to_owned(), "plugdev".to_owned()]);
+    }
+
+    /// `[[consumes.add]]` composes demand-side down the chain, keyed by name.
+    #[test]
+    fn consumes_delta_extends_the_inherited_set() {
+        let parent = "template_name = \"p\"\n[[consumes]]\nname = \"org.x.a\"\nshape = \"af-unix\"\nreason = \"a\"\n";
+        let child = "template_name = \"c\"\ntemplate_base = \"p\"\n[[consumes.add]]\nname = \"org.x.b\"\nshape = \"af-unix\"\nreason = \"b\"\n";
+        let src = MapSource::new().with("p", "v1", parent.as_bytes());
+        let resolved = resolve(&parse(child.as_bytes()).expect("parse"), &src).expect("resolve");
+        let names: Vec<&str> = resolved
+            .effective
+            .consumes
+            .resolved()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["org.x.a", "org.x.b"]);
     }
 
     #[test]

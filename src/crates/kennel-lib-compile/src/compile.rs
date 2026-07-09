@@ -110,7 +110,10 @@ pub fn compile(
     // The `[ssh]` section is source-only (dropped in translate); validate it here,
     // on the resolved policy, while the cross-referenced `net.proxy.allow` is still visible.
     crate::ssh::validate(&effective)?;
-    let mut warnings = crate::unix::validate(&effective)?;
+    // The fold's own composition warnings first (W6): a bare-set clobber of a non-empty
+    // inherited list is legal but never silent.
+    let mut warnings = resolved.warnings;
+    warnings.extend(crate::unix::validate(&effective)?);
     warnings.extend(crate::mesh::validate(
         &effective,
         &reserved_authority(provides_origin, trust),

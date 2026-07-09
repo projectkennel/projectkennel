@@ -1,6 +1,6 @@
 {
   "crate_count": 30,
-  "total_sloc": 39310,
+  "total_sloc": 39500,
   "tcb_crate_count": 16,
   "tcb_sloc": 22782,
   "crates": [
@@ -15,6 +15,16 @@
       "external_deps": ["basic-toml", "serde"]
     },
     {
+      "name": "kennel-lib-compile",
+      "sloc": 5412,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": [],
+      "consumers": ["cli", "compose"],
+      "first_party_deps": ["kennel-lib-config", "kennel-lib-control", "kennel-lib-policy"],
+      "external_deps": ["basic-toml", "serde"]
+    },
+    {
       "name": "kennel-cli",
       "sloc": 5274,
       "uses_unsafe": false,
@@ -23,16 +33,6 @@
       "consumers": [],
       "first_party_deps": ["kennel-lib-audit", "kennel-lib-cli", "kennel-lib-compile", "kennel-lib-config", "kennel-lib-control", "kennel-lib-manifest", "kennel-lib-policy", "kennel-lib-syscall", "kennel-lib-term", "kennel-lib-text"],
       "external_deps": ["lexopt", "serde", "serde_json"]
-    },
-    {
-      "name": "kennel-lib-compile",
-      "sloc": 5222,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": [],
-      "consumers": ["cli", "compose"],
-      "first_party_deps": ["kennel-lib-config", "kennel-lib-control", "kennel-lib-policy"],
-      "external_deps": ["basic-toml", "serde"]
     },
     {
       "name": "kennel-lib-policy",

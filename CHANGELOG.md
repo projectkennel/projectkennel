@@ -105,6 +105,46 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   and a daemon that predates the version query each print their line plus the remedy, exit 0.
   Also carried on `--version`/`-V` for convention's sake; kennel(1) carries the verb.
 
+### Policy schema changes
+
+- **The list-field consistency pass (0.7.0 W6): composition is uniform-by-rule, and a floor
+  never silently drops.** Every policy field now falls into exactly one of three composition
+  classes, documented in one place (the book, Vol 2 §16.2):
+  - **List-shaped grants compose**: bare-set replaces, `add`/`remove` increments — now uniformly.
+    New this pass: `[[consumes.add]]` (demand-side mesh entries, keyed by name — and a fragment
+    may now carry an add-only `[[consumes.add]]`, e.g. a GUI fragment consuming the compositor
+    socket), `[[spawn.allow.add]]` (spawn targets, keyed by template), and
+    `[[identity.groups.add]]`/`.remove` (supplementary groups, each add carrying a `reason` — a
+    group is a privilege).
+  - **Deny floors union and never drop**: `exec.deny`, `env.deny`, and `net.bpf.deny_families`
+    join `[seccomp].deny` and the invariant denies as add-only floors — a child's bare-set can no
+    longer silently erase an inherited denylist (the W14 class, closed for every deny-shaped list).
+  - **Three fields stay set-replace deliberately, each with its stated why**: `[[provides]]` (the
+    reserved-namespace gate attributes the whole set to ONE declaring layer's signing tier —
+    per-entry composition would smear authority attribution), `[[mutable]]` (the spawn target's
+    own contract; composed mutability would be a hole), and `audit.sinks` (deployment
+    configuration, and its section lives in the policy crate — no compose machinery in the TCB).
+  - **A bare-set clobber is never silent**: replacing a non-empty inherited list on ANY covered
+    field now prints a compile warning naming the field and what was dropped ("use the `add`
+    increment to extend"). Previously visible only in a compiled-artefact diff.
+- **Source-key retirements**: `proxy_listen_v4_address` is renamed **`proxy_listen_address`**
+  (the settled artefact has carried a single family-agnostic `ProxyListen` since 0.6.0 W10; the
+  "v4" name was vestigial on the v6-only stack) and two dead keys are removed —
+  `proxy_listen_v6_address` (parsed, ignored) and `[cap].bounding_set` (parsed, never translated;
+  the bounding set is dropped structurally by the spawn). A source still using them gets the
+  parser's unknown-field refusal naming the key.
+- **ABI note: `SETTLED_SCHEMA_VERSION` bumps to 5; the MIN floor stays 3 (the variance rule).**
+  The settled shape did NOT move — composition resolves at compile, so a v3/v4 artefact loads and
+  enforces identically under a v5 build (the receipt: zero settled-shape delta). The bump covers
+  the **authorable surface** (the schema-version lock's standing rule): an old CLI meeting a
+  source that uses the new forms fails its parse legibly, and an old daemon refuses a v5-stamped
+  artefact cleanly as too-new — recompile, or restart the daemon to the new build
+  (`kennel version` names the skew).
+- **The base templates were re-signed.** Removing the dead keys changed `base-confined`,
+  `base-flatpak`, and `base-bwrap`'s canonical bytes, so all three carry fresh maintainer
+  signatures. A leaf lockfile pinning the old signatures re-pins on its next
+  `kennel policy compile` (remove the stale `<name>.lock` if the pin refuses).
+
 ### IPC protocol changes
 
 - **`Request::Version` (tag 10) / `Response::Version` (tag 11)** — the additive control-plane

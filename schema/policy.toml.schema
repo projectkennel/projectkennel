@@ -212,15 +212,8 @@
     },
     "cap": {
       "additionalProperties": false,
-      "description": "`[cap]`: capabilities and `no_new_privs`.",
+      "description": "`[cap]`: `no_new_privs`.",
       "properties": {
-        "bounding_set": {
-          "description": "The capability bounding set to retain (empty drops them all).",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
         "no_new_privs": {
           "description": "`PR_SET_NO_NEW_PRIVS`. A framework invariant once resolved (must be true).",
           "type": "boolean"
@@ -719,6 +712,45 @@
       },
       "type": "object"
     },
+    "group_delta": {
+      "additionalProperties": false,
+      "description": "The `{ add, remove }` increment over the supplementary-group list.",
+      "properties": {
+        "add": {
+          "description": "Entries to add (`+=`), appended if not already present.",
+          "items": {
+            "$ref": "#/definitions/group_entry"
+          },
+          "type": "array"
+        },
+        "remove": {
+          "description": "Entries to remove (`-=`), dropped by matching `group`.",
+          "items": {
+            "$ref": "#/definitions/group_entry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "group_entry": {
+      "additionalProperties": false,
+      "description": "One `[[identity.groups.add]]` / `[[identity.groups.remove]]` entry.",
+      "properties": {
+        "group": {
+          "description": "The supplementary group name.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why (required on every delta entry; validated at compile).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "group"
+      ],
+      "type": "object"
+    },
     "identity": {
       "additionalProperties": false,
       "description": "`[identity]`: the workload's identity inside the kennel.",
@@ -729,10 +761,17 @@
         },
         "groups": {
           "description": "Supplementary group names to retain (e.g. `[\"dialout\", \"plugdev\"]`). The user",
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
+          "oneOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "$ref": "#/definitions/group_delta"
+            }
+          ]
         },
         "hostname": {
           "description": "The kennel's masked hostname (opt-in persona coherence, W12).",
@@ -872,12 +911,8 @@
           ],
           "description": "`[net.proxy]`: the user-space egress policy the per-kennel proxy enforces"
         },
-        "proxy_listen_v4_address": {
-          "description": "IPv4 proxy listen address as `\"offset:port\"` within the kennel's subnet. A",
-          "type": "string"
-        },
-        "proxy_listen_v6_address": {
-          "description": "IPv6 proxy listen address as `\"offset:port\"`.",
+        "proxy_listen_address": {
+          "description": "The proxy listen address as `\"offset:port\"` within the kennel's subnet (the one",
           "type": "string"
         },
         "reason": {
@@ -1527,10 +1562,35 @@
       "properties": {
         "allow": {
           "description": "The templates this grant may instantiate (`[[spawn.allow]]`), each optionally narrowed to a",
-          "items": {
-            "$ref": "#/definitions/spawn_allow"
-          },
-          "type": "array"
+          "oneOf": [
+            {
+              "items": {
+                "$ref": "#/definitions/spawn_allow"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Increment ({ add, remove }) over the inherited typed list.",
+              "properties": {
+                "add": {
+                  "description": "Entries to append.",
+                  "items": {
+                    "$ref": "#/definitions/spawn_allow"
+                  },
+                  "type": "array"
+                },
+                "remove": {
+                  "description": "Entries to drop by key.",
+                  "items": {
+                    "$ref": "#/definitions/spawn_allow"
+                  },
+                  "type": "array"
+                }
+              },
+              "type": "object"
+            }
+          ]
         },
         "max_instances": {
           "description": "Concurrent-instance ceiling across this grant's spawns, the fork-bomb bound.",
@@ -1853,11 +1913,36 @@
       "description": "Capability section (`[cap]`)."
     },
     "consumes": {
-      "description": "`[[consumes]]`: capabilities this kennel reaches over the mesh.",
-      "items": {
-        "$ref": "#/definitions/consumes_entry"
-      },
-      "type": "array"
+      "description": "`[[consumes]]`: capabilities this kennel reaches over the mesh. Demand-side (it",
+      "oneOf": [
+        {
+          "items": {
+            "$ref": "#/definitions/consumes_entry"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Increment ({ add, remove }) over the inherited typed list.",
+          "properties": {
+            "add": {
+              "description": "Entries to append.",
+              "items": {
+                "$ref": "#/definitions/consumes_entry"
+              },
+              "type": "array"
+            },
+            "remove": {
+              "description": "Entries to drop by key.",
+              "items": {
+                "$ref": "#/definitions/consumes_entry"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      ]
     },
     "dbus": {
       "allOf": [
