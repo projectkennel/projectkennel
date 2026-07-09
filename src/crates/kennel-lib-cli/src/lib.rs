@@ -89,12 +89,12 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "policy",
         summary: "author, inspect, and check runnable policies (the leaf house)",
-        usage: "policy <list|show|edit|generate|compile|validate|risks|diff|inspect> [...]",
+        usage: "policy <list|show|edit|generate|clone|install|compile|validate|risks|diff|inspect> [...]",
     },
     CommandSpec {
         name: "template",
         summary: "inspect and sign shared base templates and fragments (the template house)",
-        usage: "template <list|show|sign|lint> [...]",
+        usage: "template <list|show|clone|install|sign|lint> [...]",
     },
     CommandSpec {
         name: "keygen",
@@ -136,6 +136,16 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
         usage: "policy generate <name> [--from <template>]",
     },
     CommandSpec {
+        name: "clone",
+        summary: "fork a higher-tier policy's source into the user house (your copy, your key)",
+        usage: "policy clone <name> [<new-name>] [--key K]",
+    },
+    CommandSpec {
+        name: "install",
+        summary: "place and sign a source policy at the invoking tier (receive, install, run)",
+        usage: "policy install <file.toml> [--host] [--force] [--key K]",
+    },
+    CommandSpec {
         name: "compile",
         summary: "compile a source policy into a signed settled artefact",
         usage: "policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
@@ -174,6 +184,16 @@ pub const TEMPLATE_VERBS: &[CommandSpec] = &[
         name: "show",
         summary: "show what a template resolves to (its effective floor)",
         usage: "template show <template> [--template-dir D]... [--trust-dir D]...",
+    },
+    CommandSpec {
+        name: "clone",
+        summary: "fork an unreserved template/fragment's source into the user house",
+        usage: "template clone <name> [<new-name>] [--key K]",
+    },
+    CommandSpec {
+        name: "install",
+        summary: "place and sign a source template/fragment at the invoking tier",
+        usage: "template install <file.toml> [--host] [--force] [--key K]",
     },
     CommandSpec {
         name: "sign",

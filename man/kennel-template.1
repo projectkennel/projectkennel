@@ -25,6 +25,37 @@ Add a directory to the template/fragment search path (repeatable). Overrides the
 Add a directory to the signing\-key trust store used while authoring (repeatable).
 .RE
 .TP
+\fBkennel template clone <name> [<new\-name>] [\-\-key K]\fR
+fork an unreserved template/fragment's source into the user house
+.RS
+.TP
+\fB<new\-name>\fR
+Clone to a different name; default keeps the name. An object whose [[provides]] claims a reserved family is not clonable (renaming is no escape) \- derive from it instead.
+.RE
+.RS
+.TP
+\fB\-\-key K\fR
+Sign the clone with key K (default: the sole user key).
+.RE
+.TP
+\fBkennel template install <file.toml> [\-\-host] [\-\-force] [\-\-key K]\fR
+place and sign a source template/fragment at the invoking tier
+.RS
+.TP
+\fB\-\-host\fR
+Install at the host tier (/etc/kennel; needs root; signs with the host key).
+.RE
+.RS
+.TP
+\fB\-\-force\fR
+Replace an existing object of the same name.
+.RE
+.RS
+.TP
+\fB\-\-key K\fR
+Sign with key K instead of the tier's default.
+.RE
+.TP
 \fBkennel template sign <template> \-\-key <key> [\-\-key\-id <id>] [\-\-output <path>]\fR
 sign a source template or fragment (use `policy compile` for a policy you run)
 .RS

@@ -71,6 +71,13 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
     // path, never source. The kennel instance `<name>` is optional and defaults to the policy
     // name (`07-paths`, resolve-by-name).
     let policy_file = resolve_settled_for_run(policy_arg)?;
+    // Origin provenance (W3): name the tier whose artefact won resolution — a user-tier
+    // clone shadowing the vendor `claude` is a different object than the vendor's, and the
+    // operator should never have to ls three trees to know which one is about to run.
+    eprintln!(
+        "kennel: running `{policy_arg}` [{} tier]",
+        crate::tier_of_path(&policy_file)
+    );
     let name = name_arg.map_or_else(|| policy_arg.to_owned(), str::to_owned);
     launch(policy_file, &name, command, force, None, policy_arg)
 }

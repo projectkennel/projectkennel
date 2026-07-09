@@ -170,6 +170,43 @@ pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, Strin
     ))
 }
 
+/// The trust tier a cascade path belongs to, by its root.
+///
+/// `/usr/lib/kennel` is the vendor tier, `/etc/kennel` the host tier, anything else (the
+/// user config dir, or an explicit override dir) the user tier. Display-side provenance
+/// only — enforcement never keys off placement (the W0-V1 contract).
+#[must_use]
+pub fn tier_of_path(path: &Path) -> &'static str {
+    if path.starts_with("/usr/lib/kennel") {
+        "vendor"
+    } else if path.starts_with("/etc/kennel") {
+        "host"
+    } else {
+        "user"
+    }
+}
+
+/// The trust tier whose key store carries `<key_id>.pub`, for signing-provenance display.
+///
+/// Searched vendor → host → user (the daemon's own precedence); `None` when no store carries
+/// it (an unknown or removed signer).
+#[must_use]
+pub fn tier_of_key_id(key_id: &str) -> Option<&'static str> {
+    let file = format!("{key_id}.pub");
+    if kennel_lib_config::vendor_key_dir().join(&file).is_file() {
+        return Some("vendor");
+    }
+    let deployment = kennel_lib_config::Deployment::load()
+        .unwrap_or_else(|_| kennel_lib_config::Deployment::defaults());
+    if deployment.trust_dir().join(&file).is_file() {
+        return Some("host");
+    }
+    if kennel_lib_config::user_key_dir().is_some_and(|d| d.join(&file).is_file()) {
+        return Some("user");
+    }
+    None
+}
+
 /// Resolve a `--key` value: a key **name** in the user key dir (where `keygen` puts it), else a path.
 ///
 /// Keys are name-addressed everywhere else — `keygen` writes `<key-id>` by name, the daemon trusts

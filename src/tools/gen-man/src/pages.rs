@@ -156,10 +156,10 @@ template sub-verbs have their own pages, \\fBkennel-policy\\fR(1) and \
                 ("-- <cmd...>", "The command to run inside the kennel (overrides [workload].argv unless pinned)."),
             ]),
             ("policy", &[
-                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, compile, validate, risks, diff, inspect."),
+                ("(sub-verbs)", "See kennel-policy(1) for list, show, edit, generate, clone, install, compile, validate, risks, diff, inspect."),
             ]),
             ("template", &[
-                ("(sub-verbs)", "See kennel-template(1) for list, show, sign, lint."),
+                ("(sub-verbs)", "See kennel-template(1) for list, show, clone, install, sign, lint."),
             ]),
             ("keygen", &[
                 ("--dir DIR", "Write the key pair to DIR instead of the default key store."),
@@ -215,6 +215,15 @@ artefact that the daemon enforces at \\fBkennel run\\fR time.",
         command_options: &[
             ("show", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
             ("generate", &[("--from <template>", "Scaffold the leaf from this template (default base-confined).")]),
+            ("clone", &[
+                ("<new-name>", "Clone to a different name; default keeps the name (your copy shadows the original, user-first)."),
+                ("--key K", "Sign the clone's compiled artefact with key K (default: the sole user key)."),
+            ]),
+            ("install", &[
+                ("--host", "Install at the host tier (/etc/kennel; needs root; signs with the host key)."),
+                ("--force", "Replace an existing object of the same name."),
+                ("--key K", "Sign with key K instead of the tier's default."),
+            ]),
             ("compile", &[
                 ("--output P", "Write the settled artefact to P."),
                 ("--key K", "Sign the settled artefact with key K."),
@@ -280,6 +289,15 @@ the template.",
         command_source: CommandSource::TemplateVerbs,
         command_options: &[
             ("show", &[TEMPLATE_DIR_OPT, TRUST_DIR_OPT]),
+            ("clone", &[
+                ("<new-name>", "Clone to a different name; default keeps the name. An object whose [[provides]] claims a reserved family is not clonable (renaming is no escape) - derive from it instead."),
+                ("--key K", "Sign the clone with key K (default: the sole user key)."),
+            ]),
+            ("install", &[
+                ("--host", "Install at the host tier (/etc/kennel; needs root; signs with the host key)."),
+                ("--force", "Replace an existing object of the same name."),
+                ("--key K", "Sign with key K instead of the tier's default."),
+            ]),
             ("sign", &[
                 ("--key <key>", "The signing key id (required)."),
                 ("--output <path>", "Write the signed artefact to path."),

@@ -47,6 +47,25 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `policy compile` deliberately still accepts template sources: compiling a template into a
   settled artefact is the spawn-target flow, not a house violation. New man page
   `kennel-template(1)`, derived from the CLI definition like the rest.
+- **The missing ceremonies land: `clone` and `install`, plus tier provenance everywhere
+  (0.7.0 W3).** `kennel policy|template install <file.toml> [--host]` places and signs a
+  source object at the invoking tier in one verb — receive → install → run. The whole object
+  must be signable at the destination: a `[[provides]]` claim in a reserved family refuses at
+  user tier, and `org.projectkennel.*` refuses at **every** install level (the vendor tier is
+  package payload) — pre-flighted by the compiler's own `reserved_authority` rule (now `pub`,
+  one implementation), and re-enforced at compile regardless: the ceremony is a courtesy,
+  never the gate. A settled artefact refuses with the copy note (acceptance is
+  downward-inclusive, so a higher-tier-signed artefact just works when placed — `install`
+  signs *source*); a failed sign rolls the placement back. `kennel policy|template clone
+  <name> [<new-name>]` forks a higher-tier object's **source** into the user house — your
+  copy, your key, versus `generate --from`, which *derives*. The gate is content-total and
+  renaming is no escape: a reserved `[[provides]]` claim is not clonable under any name (the
+  pointer says derive instead). By default the clone keeps its name and shadows the original,
+  user-first. What makes shadowing livable: **tier provenance is visible everywhere a policy
+  is used** — `list` labels each cascade dir with its tier and marks shadowing both directions
+  (`shadows vendor` / `shadowed by user`) plus the signing tier where it differs from
+  placement (`vendor-signed` on a downward copy); `show` names the origin tier; `kennel run`
+  reports which tier's artefact won resolution (`running claude [user tier]`).
 
 ## [0.6.0] — 2026-07-06
 

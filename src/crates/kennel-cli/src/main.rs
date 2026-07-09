@@ -77,6 +77,8 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "show" => kennel_cli::policy::policy_show(rest),
         "edit" => kennel_cli::policy::policy_edit(rest),
         "generate" => kennel_cli::policy::policy_generate(rest),
+        "clone" => kennel_cli::policy::policy_clone(rest),
+        "install" => kennel_cli::policy::policy_install(rest),
         "compile" => kennel_cli::policy::compile(rest),
         "validate" => kennel_cli::policy::validate(rest),
         // Retired spellings answer with the house pointer for one release (the 0.6.0 courtesy).
@@ -121,6 +123,8 @@ fn dispatch_template(args: &[String]) -> Result<ExitCode, String> {
     match verb.as_str() {
         "list" => kennel_cli::policy::template_list(rest),
         "show" => kennel_cli::policy::template_show(rest),
+        "clone" => kennel_cli::policy::template_clone(rest),
+        "install" => kennel_cli::policy::template_install(rest),
         "sign" => kennel_cli::policy::template_sign(rest),
         "lint" => kennel_cli::policy::template_lint(rest),
         other => Err(format!(
