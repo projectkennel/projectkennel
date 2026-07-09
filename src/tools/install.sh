@@ -493,22 +493,22 @@ install_reference_policies() {
 # basename no payload source dir ships.
 sweep_flat() {
 	local managed="$1"; shift
-	[ -d "$managed" ] || return 0
+	[[ -d "$managed" ]] || return 0
 	# A payload that ships NONE of the source dirs is declaring nothing about this
 	# managed dir — do not sweep it (e.g. a payload without keys/ must not empty the
 	# vendor trust store).
 	local any=0 src
-	for src in "$@"; do [ -d "$src" ] && any=1; done
-	[ "$any" -eq 1 ] || return 0
+	for src in "$@"; do [[ -d "$src" ]] && any=1; done
+	[[ "$any" -eq 1 ]] || return 0
 	local f base found
 	for f in "$managed"/*; do
-		[ -f "$f" ] || continue
+		[[ -f "$f" ]] || continue
 		base="$(basename "$f")"
 		found=0
 		for src in "$@"; do
-			[ -e "$src/$base" ] && { found=1; break; }
+			[[ -e "$src/$base" ]] && { found=1; break; }
 		done
-		if [ "$found" -eq 0 ]; then
+		if [[ "$found" -eq 0 ]]; then
 			echo "install.sh: removing retired $f (not in this payload)"
 			run rm -f "$f"
 		fi
@@ -521,28 +521,28 @@ sweep_flat() {
 # caller's to handle.
 sweep_named_dirs() {
 	local managed="$1"; shift
-	[ -d "$managed" ] || return 0
+	[[ -d "$managed" ]] || return 0
 	local any=0 src
-	for src in "$@"; do [ -d "$src" ] && any=1; done
-	[ "$any" -eq 1 ] || return 0
+	for src in "$@"; do [[ -d "$src" ]] && any=1; done
+	[[ "$any" -eq 1 ]] || return 0
 	local d name srcdir f base
 	for d in "$managed"/*/; do
-		[ -d "$d" ] || continue
+		[[ -d "$d" ]] || continue
 		name="$(basename "$d")"
-		[ "$name" = "providers" ] && continue
+		[[ "$name" = "providers" ]] && continue
 		srcdir=""
 		for src in "$@"; do
-			[ -d "$src/$name" ] && { srcdir="$src/$name"; break; }
+			[[ -d "$src/$name" ]] && { srcdir="$src/$name"; break; }
 		done
-		if [ -z "$srcdir" ]; then
+		if [[ -z "$srcdir" ]]; then
 			echo "install.sh: removing retired $managed/$name/ (not in this payload)"
 			run rm -rf "$managed/$name"
 			continue
 		fi
 		for f in "$d"*; do
-			[ -f "$f" ] || continue
+			[[ -f "$f" ]] || continue
 			base="$(basename "$f")"
-			if [ ! -e "$srcdir/$base" ]; then
+			if [[ ! -e "$srcdir/$base" ]]; then
 				echo "install.sh: removing retired $f (not in this payload)"
 				run rm -f "$f"
 			fi
