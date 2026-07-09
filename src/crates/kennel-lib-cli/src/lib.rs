@@ -142,7 +142,7 @@ pub const POLICY_VERBS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "install",
-        summary: "place and sign a source policy at the invoking tier (receive → install → run)",
+        summary: "place and sign a source policy at the invoking tier (receive, install, run)",
         usage: "policy install <file.toml> [--host] [--force] [--key K]",
     },
     CommandSpec {

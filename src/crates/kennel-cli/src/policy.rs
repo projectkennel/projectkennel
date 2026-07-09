@@ -1750,7 +1750,7 @@ fn reserved_violations(
 ///
 /// # Errors
 ///
-/// See [`install_object`].
+/// See the install ceremony (`install_object`).
 pub fn policy_install(args: &[String]) -> Result<ExitCode, String> {
     install_object(args, House::Policy)
 }
@@ -1759,7 +1759,7 @@ pub fn policy_install(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// # Errors
 ///
-/// See [`install_object`].
+/// See the install ceremony (`install_object`).
 pub fn template_install(args: &[String]) -> Result<ExitCode, String> {
     install_object(args, House::Template)
 }
@@ -1959,7 +1959,7 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
 ///
 /// # Errors
 ///
-/// See [`clone_object`].
+/// See the clone ceremony (`clone_object`).
 pub fn policy_clone(args: &[String]) -> Result<ExitCode, String> {
     clone_object(args, House::Policy)
 }
@@ -1968,7 +1968,7 @@ pub fn policy_clone(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// # Errors
 ///
-/// See [`clone_object`].
+/// See the clone ceremony (`clone_object`).
 pub fn template_clone(args: &[String]) -> Result<ExitCode, String> {
     clone_object(args, House::Template)
 }
