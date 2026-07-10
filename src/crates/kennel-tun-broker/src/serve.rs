@@ -184,7 +184,10 @@ impl Broker {
         let Some((payload, src_port)) = udp_payload_and_src_port(frame) else {
             return Egress::Nothing;
         };
-        let Some(reply) = shim::respond(payload, &self.allow, &mut self.pool) else {
+        // The live-flow set gates the pool's rotating window: eviction may only take a
+        // mint with no flow in flight (W8).
+        let live = self.table.live_synthetics();
+        let Some(reply) = shim::respond(payload, &self.allow, &mut self.pool, &live) else {
             return Egress::Nothing; // malformed query: dropped, never answered
         };
         forward::build_udp_datagram(

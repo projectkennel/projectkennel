@@ -9,7 +9,7 @@
 //! needs). **Zero wire activity in every case**: the shim mints, it never resolves. The real
 //! resolution happens host-side when a flow to the synthetic is dialled (the forwarder half).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
 
 use kennel_lib_policy::name_matches;
@@ -36,10 +36,14 @@ const SYNTH_TTL: u32 = 60;
 /// inflates its own fate-shared broker until then.
 const MAX_POOL: usize = 4096;
 
-/// Ceiling on distinct minted names per allowlist grant — the wildcard-exfil bound. A wildcard grant
-/// (`.example.com`) can mint at most this many distinct subdomains, so a DNS tunnel through it
-/// carries at most this many distinct labels; an exact grant mints one. Generous for real use (a
-/// service reaches a handful of subdomains); past it a new name under that grant is answered NODATA.
+/// Ceiling on **concurrent** minted names per allowlist grant — the wildcard-exfil bound as a
+/// rotating window (0.7.0 W8). A wildcard grant (`.example.com`) holds at most this many live
+/// subdomain mints at once; past it, minting a NEW name evicts the least-recently-used mint of
+/// the same grant that has **no live flow** — so a legitimate app fanning out to more than 32
+/// subdomains over its life keeps working, while a flow-spray holding 32 live flows still gets
+/// NODATA for a 33rd name (the concurrent bound holds where it matters). An evicted mint's
+/// synthetic address is never reused (the `/64` pool is monotonic), so a client holding a stale
+/// AAAA can never reach a different name's destination; it simply re-queries and re-mints.
 const MAX_PER_GRANT: usize = 32;
 
 // The pool must start strictly above the reserved interface (`::1`) and resolver (`::2`) suffixes,
@@ -94,16 +98,29 @@ fn port_permitted(ports: &[u16], port: u16) -> bool {
     ports.is_empty() || ports.contains(&port)
 }
 
+/// One minted name: its synthetic address, the grant it was minted under, and its recency
+/// (a monotonic tick, touched on every query) — what the per-grant rotating window evicts by.
+struct Mint {
+    addr: Ipv6Addr,
+    grant: usize,
+    last_use: u64,
+}
+
 /// The synthetic-address pool: one stable `name → synthetic IPv6` per allowed name.
 ///
-/// Mints in the tun's `/64` and remembers each for the kennel's life. `::1` (interface) and `::2`
-/// (resolver) are reserved; the pool starts at `::10`.
+/// Mints in the tun's `/64`. `::1` (interface) and `::2` (resolver) are reserved; the pool
+/// starts at `::10` and host suffixes are **monotonic, never reused** — an evicted mint's
+/// address stays dead, so a stale cached AAAA can never alias another name. Per grant the
+/// pool is a rotating window (`MAX_PER_GRANT` concurrent mints): eviction picks the least-recently-used
+/// mint of the same grant whose synthetic has no live flow.
 pub struct Pool {
     prefix: [u8; 8],
     next_host: u64,
-    mapping: HashMap<String, Ipv6Addr>,
-    /// Distinct names minted per allowlist grant index — the per-grant cap's counters.
+    mapping: HashMap<String, Mint>,
+    /// Live mints per allowlist grant index — the rotating window's occupancy counters.
     per_grant: HashMap<usize, usize>,
+    /// The recency clock: bumped on every mint and every repeat query.
+    tick: u64,
 }
 
 impl Pool {
@@ -115,48 +132,80 @@ impl Pool {
             next_host: FIRST_POOL_HOST,
             mapping: HashMap::new(),
             per_grant: HashMap::new(),
+            tick: 0,
         }
     }
 
-    /// The synthetic address for `name` (minted under allowlist grant `grant`), minting one on first
-    /// sight and returning the existing one thereafter (stable for the kennel's life). Returns `None`
-    /// when a NEW name would exceed the absolute pool ceiling (`MAX_POOL`) or the grant's own
-    /// per-grant ceiling (`MAX_PER_GRANT`).
+    /// The synthetic address for `name` (minted under allowlist grant `grant`), minting one on
+    /// first sight and returning (and recency-touching) the existing one thereafter. Returns
+    /// `None` when a NEW name is refused: the absolute pool ceiling (`MAX_POOL`, hard), or the
+    /// grant's window is full of mints whose synthetics all carry **live flows** (`live`, from
+    /// the flow table) — the concurrent wildcard-exfil bound.
     ///
-    /// A mint costs only a DNS AAAA query (cheap, zero-wire) and opens no flow, so the flow cap does
-    /// not bound it. The per-grant cap is the wildcard-exfil bound (a wildcard grant mints at most
-    /// `MAX_PER_GRANT` distinct subdomains); the pool cap is the absolute backstop across all grants.
-    /// Past either, a new name is answered NODATA, like a denied name; existing mints keep resolving.
-    pub fn mint(&mut self, name: &str, grant: usize) -> Option<Ipv6Addr> {
-        if let Some(addr) = self.mapping.get(name) {
-            return Some(*addr);
+    /// Past the per-grant window with an inactive mint available, the least-recently-used
+    /// inactive mint of the same grant is evicted to make room — the rotation (W8). A mint
+    /// costs only a DNS AAAA query (cheap, zero-wire) and opens no flow, so the flow cap does
+    /// not bound minting itself.
+    pub fn mint<S: std::hash::BuildHasher>(
+        &mut self,
+        name: &str,
+        grant: usize,
+        live: &HashSet<Ipv6Addr, S>,
+    ) -> Option<Ipv6Addr> {
+        self.tick = self.tick.saturating_add(1);
+        if let Some(m) = self.mapping.get_mut(name) {
+            m.last_use = self.tick;
+            return Some(m.addr);
         }
-        // A new name: bounded globally and per grant. Check before minting so a refused name leaves
-        // no counter or pool residue.
-        if self.mapping.len() >= MAX_POOL
-            || self
-                .per_grant
-                .get(&grant)
-                .is_some_and(|c| *c >= MAX_PER_GRANT)
-        {
+        // A new name: the absolute ceiling is hard (never rotated — it is the fate-shared
+        // broker's own memory bound, not a policy bound).
+        if self.mapping.len() >= MAX_POOL {
             return None;
         }
+        if self
+            .per_grant
+            .get(&grant)
+            .is_some_and(|c| *c >= MAX_PER_GRANT)
+        {
+            // The window is full: evict the least-recently-used mint of THIS grant whose
+            // synthetic has no live flow. All live ⇒ refuse (NODATA) — eviction never
+            // breaks a live flow.
+            let victim = self
+                .mapping
+                .iter()
+                .filter(|(_, m)| m.grant == grant && !live.contains(&m.addr))
+                .min_by_key(|(_, m)| m.last_use)
+                .map(|(n, _)| n.clone())?;
+            self.mapping.remove(&victim);
+            if let Some(count) = self.per_grant.get_mut(&grant) {
+                *count = count.saturating_sub(1);
+            }
+        }
         let addr = self.synthetic(self.next_host);
-        // Saturating so a mint never wraps into the reserved low suffixes (unreachable under the cap,
-        // but the invariant holds regardless).
+        // Monotonic and saturating: an evicted suffix is never re-minted (a stale cached AAAA
+        // must never alias another name), and a mint never wraps into the reserved low suffixes.
         self.next_host = self.next_host.saturating_add(1);
-        self.mapping.insert(name.to_owned(), addr);
+        self.mapping.insert(
+            name.to_owned(),
+            Mint {
+                addr,
+                grant,
+                last_use: self.tick,
+            },
+        );
         let count = self.per_grant.entry(grant).or_insert(0);
         *count = count.saturating_add(1);
         Some(addr)
     }
 
-    /// The name a synthetic address maps to, if it was minted (the forwarder's reverse lookup).
+    /// The name a synthetic address maps to, if it is currently minted (the forwarder's reverse
+    /// lookup). An evicted mint resolves to `None` — its flow attempt is refused like any
+    /// unknown synthetic, and the client re-queries.
     #[must_use]
     pub fn name_of(&self, addr: Ipv6Addr) -> Option<&str> {
         self.mapping
             .iter()
-            .find_map(|(n, a)| (*a == addr).then_some(n.as_str()))
+            .find_map(|(n, m)| (m.addr == addr).then_some(n.as_str()))
     }
 
     /// Build the `/64` address for `host` from the prefix.
@@ -175,7 +224,12 @@ impl Pool {
 /// AAAA for an allowed name → the minted synthetic; anything else → NODATA. Never `NXDOMAIN`, and
 /// never any wire lookup.
 #[must_use]
-pub fn respond(query: &[u8], allow: &Allowlist, pool: &mut Pool) -> Option<Vec<u8>> {
+pub fn respond<S: std::hash::BuildHasher>(
+    query: &[u8],
+    allow: &Allowlist,
+    pool: &mut Pool,
+    live: &HashSet<Ipv6Addr, S>,
+) -> Option<Vec<u8>> {
     let parsed = Packet::parse(query).ok()?;
     let question = parsed.questions.first()?;
     let name = question.qname.to_string();
@@ -188,7 +242,7 @@ pub fn respond(query: &[u8], allow: &Allowlist, pool: &mut Pool) -> Option<Vec<u
     // single wildcard grant.
     if u16::from(question.qtype) == QTYPE_AAAA {
         if let Some(grant) = allow.first_match(&name) {
-            if let Some(addr) = pool.mint(&name, grant) {
+            if let Some(addr) = pool.mint(&name, grant, live) {
                 let synth: u128 = addr.into();
                 reply.answers.push(ResourceRecord::new(
                     question.qname.clone(),
@@ -251,6 +305,7 @@ mod tests {
             &query("api.example.com", QTYPE::TYPE(TYPE::AAAA)),
             &allow,
             &mut pool,
+            &HashSet::new(),
         )
         .expect("reply");
         let (n, aaaa) = reply_summary(&bytes);
@@ -272,6 +327,7 @@ mod tests {
                 &query("example.com", QTYPE::TYPE(TYPE::AAAA)),
                 &allow,
                 &mut pool,
+                &HashSet::new(),
             )
             .expect("reply"),
         )
@@ -281,6 +337,7 @@ mod tests {
                 &query("example.com", QTYPE::TYPE(TYPE::AAAA)),
                 &allow,
                 &mut pool,
+                &HashSet::new(),
             )
             .expect("reply"),
         )
@@ -296,6 +353,7 @@ mod tests {
             &query("evil.test", QTYPE::TYPE(TYPE::AAAA)),
             &allow,
             &mut pool,
+            &HashSet::new(),
         )
         .expect("reply");
         let (n, _) = reply_summary(&bytes);
@@ -317,6 +375,7 @@ mod tests {
             &query("example.com", QTYPE::TYPE(TYPE::A)),
             &allow,
             &mut pool,
+            &HashSet::new(),
         )
         .expect("reply");
         assert_eq!(reply_summary(&bytes).0, 0, "no A answer; NODATA");
@@ -326,40 +385,85 @@ mod tests {
     fn junk_is_dropped() {
         let allow = Allowlist::new([grant("example.com")]);
         let mut pool = Pool::new(PREFIX);
-        assert_eq!(respond(&[], &allow, &mut pool), None);
-        assert_eq!(respond(&[0xff; 5], &allow, &mut pool), None);
+        assert_eq!(respond(&[], &allow, &mut pool, &HashSet::new()), None);
+        assert_eq!(
+            respond(&[0xff; 5], &allow, &mut pool, &HashSet::new()),
+            None
+        );
     }
 
+    /// The rotating window (W8): a wildcard grant holds `MAX_PER_GRANT` concurrent mints;
+    /// a fan-out past it keeps working by evicting the least-recently-used INACTIVE mint,
+    /// evicted synthetics are never reused, and a window full of live flows still refuses.
     #[test]
-    fn a_wildcard_grant_mints_at_most_max_per_grant_distinct_names() {
+    fn the_per_grant_window_rotates_without_breaking_live_flows() {
         let allow = Allowlist::new([grant(".example.com")]);
         let mut pool = Pool::new(PREFIX);
-        let aaaa = |n: &str, pool: &mut Pool| {
+        let mut live: HashSet<Ipv6Addr> = HashSet::new();
+        let aaaa = |n: &str, pool: &mut Pool, live: &HashSet<Ipv6Addr>| {
             reply_summary(
-                &respond(&query(n, QTYPE::TYPE(TYPE::AAAA)), &allow, pool).expect("reply"),
+                &respond(&query(n, QTYPE::TYPE(TYPE::AAAA)), &allow, pool, live).expect("reply"),
             )
-            .0
         };
-        // The first MAX_PER_GRANT distinct subdomains each mint a synthetic.
+
+        // Fill the window, capturing s0/s1's synthetics as minted (no recency side effects).
+        let mut minted = Vec::new();
         for i in 0..MAX_PER_GRANT {
+            let (n, addr) = aaaa(&format!("s{i}.example.com"), &mut pool, &live);
+            assert_eq!(n, 1);
+            minted.push(addr.expect("minted"));
+        }
+        let s0 = *minted.first().expect("s0 minted");
+        let s1 = *minted.get(1).expect("s1 minted");
+
+        // Touch s0 so s1 is the least-recently-used, then fan out past the window:
+        // each new name mints (the rotation), s1 goes first, s0 survives.
+        let _ = aaaa("s0.example.com", &mut pool, &live);
+        for j in 0..3 {
             assert_eq!(
-                aaaa(&format!("s{i}.example.com"), &mut pool),
+                aaaa(&format!("extra{j}.example.com"), &mut pool, &live).0,
                 1,
-                "distinct name {i}"
+                "fan-out past the window keeps minting (rotation)"
             );
         }
-        // The next distinct subdomain is NODATA — the wildcard-exfil bound (bounds distinct tunnelled
-        // labels through one grant).
         assert_eq!(
-            aaaa("overflow.example.com", &mut pool),
-            0,
-            "past per-grant cap = NODATA"
+            pool.name_of(s0),
+            Some("s0.example.com"),
+            "recently-used survives"
         );
-        // An already-minted name still resolves (the cap bounds distinct names, not queries).
+        assert_eq!(pool.name_of(s1), None, "the LRU mint was evicted");
+
+        // A re-mint of the evicted name gets a NEW synthetic — suffixes are never reused,
+        // so a stale cached AAAA can never alias another name.
+        let s1_again = aaaa("s1.example.com", &mut pool, &live).1.expect("re-mint");
+        assert_ne!(s1_again, s1, "evicted synthetic is never reused");
+
+        // Live-flow protection: with every current mint's synthetic carrying a live flow,
+        // a new name is NODATA — the CONCURRENT bound holds under the flow-spray case.
+        let mut all_live = Pool::new(PREFIX);
+        for i in 0..MAX_PER_GRANT {
+            let a = aaaa(&format!("l{i}.example.com"), &mut all_live, &live)
+                .1
+                .expect("mint");
+            live.insert(a);
+        }
         assert_eq!(
-            aaaa("s0.example.com", &mut pool),
+            aaaa("blocked.example.com", &mut all_live, &live).0,
+            0,
+            "all-live window refuses: eviction never breaks a live flow"
+        );
+        // Freeing ONE flow re-opens exactly one slot, and the freed mint is the victim.
+        let freed = aaaa("l5.example.com", &mut all_live, &live).1.expect("l5");
+        live.remove(&freed);
+        assert_eq!(
+            aaaa("unblocked.example.com", &mut all_live, &live).0,
             1,
-            "existing mint still resolves"
+            "one inactive mint = one rotation slot"
+        );
+        assert_eq!(
+            all_live.name_of(freed),
+            None,
+            "the inactive mint was the victim"
         );
     }
 }

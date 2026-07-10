@@ -63,11 +63,15 @@ pub fn fuzz_parsers(data: &[u8]) {
             ports: Vec::new(),
             protocol: kennel_lib_policy::settled::Protocol::Udp,
         };
-        let allow =
-            kennel_tun_broker::shim::Allowlist::new([grant("example.com"), grant(".test")]);
+        let allow = kennel_tun_broker::shim::Allowlist::new([grant("example.com"), grant(".test")]);
         let mut pool =
             kennel_tun_broker::shim::Pool::new([0xfd, 0x6b, 0x6e, 0x9c, 0x69, 0x1c, 0x80, 0x01]);
-        let _ = kennel_tun_broker::shim::respond(data, &allow, &mut pool);
+        let _ = kennel_tun_broker::shim::respond(
+            data,
+            &allow,
+            &mut pool,
+            &std::collections::HashSet::new(),
+        );
         let _ = kennel_tun_broker::query_question(data);
         // The flow forwarder reads an L3 frame facade-tun handed it (workload-derived bytes) to
         // extract the routed name/ports/payload; it must never panic on any frame.
@@ -298,7 +302,7 @@ mod tests {
             b"",
             &[0x00],
             &[0xff],
-            &[0x05, 0x01, 0x00],       // SOCKS5 greeting head
+            &[0x05, 0x01, 0x00],         // SOCKS5 greeting head
             b"CONNECT x:1 HTTP/1.1\r\n", // HTTP CONNECT head
             &[0xff; 1024],
         ];
@@ -325,7 +329,7 @@ mod tests {
     /// decoding it drives [`walk_dbus_value`] down every container arm. Returns the
     /// wire bytes; the encoder lays them out exactly as a real bus peer would.
     fn valid_dbus_message() -> Result<Vec<u8>, mini_sansio_dbus::EncodeError> {
-        use mini_sansio_dbus::{MessageType, SliceMessageEncoder, dbus_body};
+        use mini_sansio_dbus::{dbus_body, MessageType, SliceMessageEncoder};
         let mut buf = [0u8; 512];
         let mut encoder = SliceMessageEncoder::new(&mut buf, MessageType::MethodCall)?;
         encoder.set_path("/org/example/Object")?;
@@ -394,11 +398,11 @@ mod tests {
         // try to confuse a naive matcher into passing the sequence through.
         let seeds: &[&[u8]] = &[
             b"\x1b]52;c;cHduCg==\x07",
-            b"\x1b]52;c;cHduCg==\x1b\\",                 // ST-terminated
+            b"\x1b]52;c;cHduCg==\x1b\\", // ST-terminated
             b"text\x1b]52;c;AAAA\x07more",
-            b"\x1b]\x1b]52;c;AAAA\x07",                  // nested introducer
-            b"\x1b]52;\x1b]0;title\x07c;AAAA\x07",       // title spliced mid-OSC52
-            b"\x1b]052;c;AAAA\x07",                       // leading-zero param
+            b"\x1b]\x1b]52;c;AAAA\x07",            // nested introducer
+            b"\x1b]52;\x1b]0;title\x07c;AAAA\x07", // title spliced mid-OSC52
+            b"\x1b]052;c;AAAA\x07",                // leading-zero param
         ];
         for s in seeds {
             assert!(

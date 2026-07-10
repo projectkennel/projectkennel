@@ -2,7 +2,22 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Installer changes
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Runtime changes
+
+- **The UDP synthetic-pool per-grant cap is now a rotating window (0.7.0 W8).** The 32-mint
+  per-grant ceiling on the tun broker's naming shim bounded distinct subdomains per wildcard
+  grant *ever* — tight on exfil, but it broke a legitimate app fanning out to more than 32
+  subdomains of one granted domain over its life. The bound becomes 32 **concurrent**: minting
+  a new name past the window evicts the least-recently-used mint of the same grant that has
+  **no live flow** (the pool consults the flow table — eviction never breaks a flow in flight;
+  a window full of live flows still refuses with NODATA, so the concurrent bound holds under
+  flow-spray). An evicted mint's synthetic address is never reused — the `/64` suffix pool is
+  monotonic — so a client holding a stale cached AAAA can never reach another name's
+  destination; it re-queries and re-mints. The threat note (T1.15) records the
+  loosened-but-bounded exfil surface: per-moment 32 names, unlimited labels over time at
+  query rate, all zero-wire and all inside the granted family.
+
+### Installer changes
 
 - **The payload manifest (0.7.0 W7): an upgrade removes what the release no longer ships,
   and says so.** The staged tree is the manifest: anything in a fully kennel-managed
