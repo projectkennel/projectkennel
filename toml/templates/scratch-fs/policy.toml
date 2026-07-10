@@ -3,41 +3,42 @@
 # Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
-# A single-leg SPAWN target (§7.12): data shuffling WITHOUT reach. `net.mode =
-# "none"` (no egress leg) and no persistence; the one leg is a writable scratch
-# area. An agent holding [spawn] instantiates this to move/transform data on the
-# filesystem, with no way to reach the network.
+# The WRITE leg of the three-way spawn-target split (compute / write / net):
+# a sibling that PERSISTS to a scoped scratch directory and reaches no network
+# — `net.mode = "none"` (no egress leg). An agent spawns it to run a command
+# that produces files in a chosen scratch area; the write is confined to that
+# one directory and the network is off, so persisted data cannot exfil.
 #
-# Spawn-eligible (§7.12.8): no [spawn] of its own (depth-1), a self-reaping TTL,
+# Workload-optional cage (§7.12): the template fixes the CAGE (the file-tool
+# exec floor + the scratch-write axis + no net) and leaves `workload.argv` open,
+# so the caller brings the command that writes. There is no pinned workload.
+#
+# The fs.read floor is INHERITED from base-confined unchanged; the ONLY added
+# capability is the scratch WRITE, selected by the caller from a fixed signed set.
+#
+# Spawn-eligible (§7.12.8): no `[spawn]` of its own (depth-1), a self-reaping TTL,
 # explicit memory/pids/CPU ceilings.
-#
-# The mutable surface (§7.12.3) is `fs.write` under a ONEOF constraint: the agent
-# selects its working directory from a fixed, signed set. (The free-form
-# "predicate-bound workspace path" the roadmap envisions — a `relpath` constraint
-# resolved RESOLVE_IN_ROOT under a workspace root — lands once the applicator wires
-# the predicate `under` root; until then this closed set is the fully-enforced
-# form.) The residual is closed-set selection — zero agent free text (T3.9 R1 does
-# not attach).
 # ============================================================================
 
 template_base = "base-confined"
 template_name = "scratch-fs"
 
 
-# --- Network: frozen off. No egress leg. ------------------------------------
+# --- Network: frozen off. The write leg reaches no network. ------------------
 [net]
 mode = "none"
 
 
-# --- Execution: the constructed-view scratch entrypoint ----------------------
+# --- Execution: the file toolset — the shell, the coreutils file/text tools,
+#     and Python. No network binary. ------------------------------------------
 [exec]
-allow = ["/usr/libexec/kennel/mcp-scratch", "/bin/sh"]
-
-
-# --- Workload: the fixed entrypoint; the agent cannot override it ------------
-[workload]
-argv = ["/usr/libexec/kennel/mcp-scratch"]
-pinned = true
+allow = [
+    "/bin/sh",
+    "/usr/bin/cat", "/usr/bin/cp", "/usr/bin/mv", "/usr/bin/mkdir",
+    "/usr/bin/ls", "/usr/bin/tee", "/usr/bin/grep", "/usr/bin/sed",
+    "/usr/bin/sort", "/usr/bin/head", "/usr/bin/tail", "/usr/bin/wc",
+    "/usr/bin/python3",
+]
 
 
 # --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
@@ -53,12 +54,20 @@ nproc = "64"
 cpu = "30"
 
 
-# --- Mutable surface: the agent picks its working directory (closed set) ------
+# --- The mutable surface (§7.12.3): the single capability axis is the scratch
+#     WRITE — the caller picks its working directory from a fixed, signed set
+#     (ONEOF, zero free text). `workload.argv` is open so the caller supplies the
+#     command that writes there; the cage (no net) contains what it produces. --
 [[mutable]]
 field = "fs.write"
 oneof = ["~/scratch/work-a", "~/scratch/work-b"]
 
+[[mutable]]
+field = "workload.argv"
+freeform = true
+reason = "the caller runs a command that persists output into the granted scratch dir; no network, write scoped to the chosen scratch"
+
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQHvd6pxs4JKKj8HtxbHocof82+buRy/jWU\naRM2z6m0chtj6kIvLyfCvQljaIwKKMbklTIuZfCYXwgmQwy6OgfQI=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQBl6datiXJu/bcdkGstcQn0Oi/niDbKsyJ\n5GqIMdrMuA69B9OqXnaovKDhnFtfac+Mz3cOb3A001QuSYQe4WbwA=\n-----END SSH SIGNATURE-----\n"

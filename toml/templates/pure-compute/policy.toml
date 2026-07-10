@@ -3,39 +3,47 @@
 # Inherits: base-confined
 # Threat catalogue: THREATS.md v0.4
 #
-# A single-leg SPAWN target (§7.12): an agent holding [spawn] may instantiate
-# this to run untrusted code that REACHES NOTHING. `net.mode = "none"` (no egress
-# leg) and no workspace write grant (no filesystem leg); the constructed root is
-# ephemeral. The one capability it carries is execution of its fixed entrypoint —
-# with no net and no persistent fs there is no path to data or exfil.
+# The COMPUTE leg of the three-way spawn-target split (compute / write / net):
+# a sibling that RUNS CODE and reaches NOTHING beyond it — `net.mode = "none"`
+# (no egress leg) and no `fs.write` grant (no persistence leg). An agent spawns
+# it to run a text transform or a self-contained computation over stdin→stdout;
+# whatever it computes cannot escape the cage.
 #
-# Spawn-eligible by construction (§7.12.8): it carries no [spawn] of its own
-# (depth-1), a self-reaping TTL, and explicit memory/pids/CPU ceilings. It opens
-# NO mutable fields — the most fenced target; an agent spawns it exactly as signed,
-# so the delegated-spawn residual (T3.9 R1) does not attach.
+# Workload-optional cage (§7.12): the template fixes the CAGE (the exec floor +
+# the no-net/no-write axis) and leaves `workload.argv` open (mutable, freeform),
+# so the caller brings the command. There is no pinned workload — a spawn that
+# supplies no argv runs nothing. `argv[0]` is gated by `[exec].allow` under
+# Landlock execve default-deny regardless of what is written, so the caller
+# chooses the command WITHOUT widening what the sibling can reach.
+#
+# The fs.read floor is INHERITED from base-confined unchanged (the system dirs
+# the toolset + libc + CPython stdlib resolve from) — no override, nothing
+# clobbered.
+#
+# Spawn-eligible by construction (§7.12.8): no `[spawn]` of its own (depth-1),
+# a self-reaping TTL, explicit memory/pids/CPU ceilings.
 # ============================================================================
 
 template_base = "base-confined"
 template_name = "pure-compute"
 
 
-# --- Network: frozen off. No egress leg. ------------------------------------
+# --- Network: frozen off. The compute leg reaches no network. ----------------
 [net]
 mode = "none"
 
 
-# --- Execution: the constructed-view compute entrypoint ---------------------
-# A kennel-native stdio entrypoint the spawned image provides; everything else is
-# denied by base-confined's empty allowlist. The binary is resolved in the
-# constructed view at spawn (loaders are per-binary PT_INTERP, filled at spawn).
+# --- Execution: the compute toolset — the shell, the coreutils text tools, and
+#     the Python interpreter. No network binary, no writer beyond stdout. The
+#     compiler resolves each PT_INTERP (ld.so) and grants EXECUTE. -------------
 [exec]
-allow = ["/usr/libexec/kennel/mcp-compute", "/bin/sh"]
-
-
-# --- Workload: the fixed entrypoint; the agent cannot override it ------------
-[workload]
-argv = ["/usr/libexec/kennel/mcp-compute"]
-pinned = true
+allow = [
+    "/bin/sh",
+    "/usr/bin/cat", "/usr/bin/grep", "/usr/bin/sed", "/usr/bin/awk",
+    "/usr/bin/tr", "/usr/bin/sort", "/usr/bin/uniq", "/usr/bin/cut",
+    "/usr/bin/head", "/usr/bin/tail", "/usr/bin/wc",
+    "/usr/bin/python3",
+]
 
 
 # --- Lifecycle: a self-reaping TTL (§7.12.7) --------------------------------
@@ -50,9 +58,15 @@ as = "512M"      # address space (memory)
 nproc = "64"     # processes / threads
 cpu = "30"       # CPU-seconds
 
-# No [[mutable]] manifest: pure-compute opens nothing — the most fenced target.
+
+# --- The mutable surface (§7.12.3): the caller's command. FREEFORM — the cage
+#     (no net, no fs write), not the argument shape, is the containment. ------
+[[mutable]]
+field = "workload.argv"
+freeform = true
+reason = "the caller runs a computation/transform within the [exec].allow floor; the cage (no net, no fs write) contains it"
 
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIi6bRxrwYCmDub+rOPMYS44qYPMhl57RX\n+UZZ2g1ZtA+7xcUDcLCqlcnELyUVSR6JAdQsin9ejc3DHk9K1I3ww=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKWAQu16IvWUNvH7t4nFFZ6mo2m2M/CJF7\nBVNViTpbfEqy/KXERO/KmrSiJU8yo904ndUPNX1emw2UenGLXAYAg=\n-----END SSH SIGNATURE-----\n"
