@@ -115,6 +115,21 @@ documentation sweep.
 
 ## Candidate (promote-if-needed, not a workstream)
 
+- **The fold drops a `.add` delta over a fully-absent parent section (compiler footgun, found in 0.7.0 W10).**
+  When a leaf writes an increment (`[[net.udp.allow.add]]`) for a section the *whole chain* lacks —
+  `[net.udp]` is the live case, as `base-confined` carries no UDP section — the section-level `merge`
+  returns the child's *unfolded* `Delta`, which `.resolved()` reads as **empty**: the grant silently
+  vanishes while the section flag (`udp = true`) still lands. A bare `[[net.udp.allow]]` **Set** is
+  unaffected (which is why the tun-egress corpus and the W10 compose output both use Set, and why nothing
+  ships broken). The correct general fix is a compiler change: when a child section-field is a `Delta` and
+  the parent section is `None`, fold against an empty default rather than passing the delta through raw —
+  closing the last silent-drop the W6 pass did not reach (W6 closed bare-set *clobber*; this is
+  delta-over-absent). Scoped OUT of W10 deliberately: it is a fold/TCB-adjacent change that deserves its
+  own focused treatment with a variance check, not a rider on the compose revisit. The W10 fix is
+  local — compose emits the Set form, and a survival test (compile → assert the grant is in
+  `udp_allow_names`) guards the class. Promote into the next schema/compiler cycle; W9's ship-gate pass
+  should confirm no *shipped* path relies on the delta-over-absent shape.
+
 - **Cross-instance binder reach — a kennel offering a rich binder interface to other kennels.** The mesh's
   `binder-connector` shape (§7.13.2) is defined and the cross-instance mechanism is designed (§7.1.6,
   designed-not-built per 08-as-built §8.1), but no provider offers a binder node over the mesh today:

@@ -58,7 +58,7 @@ pub use lock::{LockEntry, Lockfile};
 pub use resolve::{resolve, resolve_verified, ChainLink, ResolvedChain, TemplateSource};
 pub use source::{
     parse as parse_source, BpfRule, Delta, ListField, NetAllow, NetBpf, NetBpfAcl, NetDenyRule,
-    NetProxy, NetProxyDeny, NetSection, PathDelta, PathEntry, PathField, SourcePolicy,
+    NetProxy, NetProxyDeny, NetSection, NetUdp, PathDelta, PathEntry, PathField, SourcePolicy,
 };
 pub use source_sig::{
     canonical_source, sign_source, verify_self, verify_source, Signable, SignatureMode, Trust,

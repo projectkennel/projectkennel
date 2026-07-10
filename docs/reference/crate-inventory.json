@@ -1,6 +1,6 @@
 {
   "crate_count": 30,
-  "total_sloc": 39626,
+  "total_sloc": 39682,
   "tcb_crate_count": 16,
   "tcb_sloc": 22843,
   "crates": [
@@ -146,7 +146,7 @@
     },
     {
       "name": "kennel-compose",
-      "sloc": 691,
+      "sloc": 747,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-compose"],
