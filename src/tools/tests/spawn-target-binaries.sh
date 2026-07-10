@@ -9,10 +9,11 @@
 # a spawn of any of them 127s at execve. This gate makes a dead-binary workload fail CI.
 #
 # For each shipped template that is a SPAWN TARGET (carries a `[[mutable]]` manifest — the
-# thing an agent instantiates), every ABSOLUTE path in `[exec].allow` and the `[workload].argv`
+# thing an agent instantiates), every ABSOLUTE path in `[exec].allow` and the `[workload]`
 # entrypoint must resolve to a real binary:
-#   * a host system binary (`/bin/*`, `/usr/bin/*`, …): exists on the build host; and
-#   * a kennel-shipped binary (`/usr/libexec/kennel*/*`): present in the staged payload tree.
+#   * a host system binary (`/bin/*`, `/usr/bin/*`, …): exists on the build/CI host; and
+#   * a kennel-shipped binary (`/usr/libexec/kennel*/*`): a real workspace binary target
+#     (checked against `cargo metadata`, no build — so mcp-* dangling refs fail).
 # A `~`/relative/`$VAR` path is a runtime-resolved value, not a build-time binary — skipped.
 
 set -euo pipefail
@@ -21,23 +22,25 @@ repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$repo_root"
 
 templates_dir="toml/templates"
-# The staged payload's kennel binary dirs (a kennel-shipped exec path must live here). The
-# stage tree is built on demand so the check does not depend on a prior `make`.
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-if ! bash "$repo_root/src/tools/stage-tree.sh" --dest "$stage" --with-test-bins >/dev/null 2>&1; then
-	echo "spawn-target-binaries: could not stage the payload tree" >&2
+
+# The set of kennel binary names the workspace produces (bin targets), read straight from the
+# Cargo manifests — `cargo metadata` does NOT build, so this runs in a shell-only CI job.
+kennel_bins="$(cargo metadata --no-deps --format-version 1 2>/dev/null \
+	| python3 -c 'import json,sys; d=json.load(sys.stdin); print("\n".join(t["name"] for p in d["packages"] for t in p["targets"] if "bin" in t["kind"]))' \
+	2>/dev/null || true)"
+if [[ -z "$kennel_bins" ]]; then
+	echo "spawn-target-binaries: could not enumerate workspace binary targets (cargo metadata)" >&2
 	exit 2
 fi
 
 # Is an absolute path a real binary? Host paths must exist on the host; kennel-libexec paths
-# must exist in the staged payload (bin/ or facades/, flattened by stage-tree).
+# must name a real workspace binary target.
 binary_exists() {
 	local path="$1" base
 	case "$path" in
 		/usr/libexec/kennel*/*)
 			base="$(basename "$path")"
-			[[ -e "$stage/bin/$base" || -e "$stage/facades/$base" || -e "$stage/pathbin/$base" ]]
+			grep -qxF "$base" <<<"$kennel_bins"
 			;;
 		/*)
 			[[ -e "$path" ]]
@@ -61,8 +64,8 @@ for dir in "$templates_dir"/*/; do
 	checked=$((checked + 1))
 
 	# Collect the absolute paths named by `[exec].allow` (bare-list or `.add` deltas) and
-	# the `[workload].argv[0]` entrypoint. A crude but faithful extractor: every quoted
-	# absolute path on an `allow`/`path`/`argv` line.
+	# the `[workload].argv[0]` entrypoint: every quoted absolute path on an
+	# `allow`/`path`/`argv` line.
 	paths="$(grep -E '^\s*(allow|argv|path)\s*=|^\s*"/' "$f" \
 		| grep -oE '"/[^"]+"' | tr -d '"' | sort -u)"
 
