@@ -785,7 +785,7 @@ mod tests {
             .expect("insert vendor");
         ks.insert(user.key_id(), &user.public_key_bytes())
             .expect("insert user");
-        let vendor_ids: BTreeSet<String> = [vendor.key_id().to_owned()].into_iter().collect();
+        let vendor_ids: BTreeSet<String> = std::iter::once(vendor.key_id().to_owned()).collect();
         let host_ids: BTreeSet<String> = BTreeSet::new();
 
         // A vendor-signed base-confined (the chain must verify under require).

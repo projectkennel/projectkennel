@@ -748,9 +748,11 @@ pub fn settled_with_sshsig(
     }
 }
 
-/// Resolve a `--key` value to the trust-store `key_id` that will stamp the signature — the
-/// same id `sshsig_sign` resolves after signing, computed **early** so the reserved-namespace
-/// gate can attribute an entry-origin `[[provides]]` to the signing key's tier (§7.13.5).
+/// Resolve a `--key` value to the trust-store `key_id` that will stamp the signature.
+///
+/// The same id `sshsig_sign` resolves after signing, computed **early** so the
+/// reserved-namespace gate can attribute an entry-origin `[[provides]]` to the signing
+/// key's tier (§7.13.5).
 ///
 /// Derives the signing key's public half (`ssh-keygen -y`, which reads a file key, an
 /// ssh-agent key, or a token) and matches it against the trust dirs. `None` when the key
