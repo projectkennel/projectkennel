@@ -16,8 +16,8 @@ use crate::review;
 use crate::{
     add_default_template_dirs, add_system_trust_dirs, default_settled_path, default_signing_key,
     is_valid_policy_name, lexopt_unexpected, lexopt_value, policy_error_code, resolve_key_arg,
-    resolve_policy, resolve_template, settled_with_sshsig, signing_trust_dirs, sshsig_sign,
-    usage_of, TrustContext, POLICY_VERBS,
+    resolve_policy, resolve_signing_key_id, resolve_template, settled_with_sshsig,
+    signing_trust_dirs, sshsig_sign, usage_of, TrustContext, POLICY_VERBS,
 };
 
 // ---- `kennel policy compile` ---------------------------------------------------
@@ -144,7 +144,17 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     // otherwise unsigned templates resolve (development), still verifying any present
     // signature against whatever keys are loaded.
     add_system_trust_dirs(&mut trust_dirs);
-    let tc = TrustContext::load(&trust_dirs)?;
+    // Wire the signing key's tier into the trust context BEFORE compiling, so the
+    // reserved-namespace gate (§7.13.5) enforces an entry-origin `[[provides]]` against the
+    // signing key's tier — a user key cannot claim `org.projectkennel.*` at compile, not just
+    // at the `install`/`clone` CLI courtesy (the W9 finding). `--unsigned` leaves it None: the
+    // artefact will not verify at spawn, so an unenforced reserved claim on it is inert.
+    let signing_key_id = if unsigned {
+        None
+    } else {
+        key_path.and_then(resolve_signing_key_id)
+    };
+    let tc = TrustContext::load(&trust_dirs)?.with_signing_key_id(signing_key_id);
     let trust = if require_signed {
         tc.require()
     } else {

@@ -2,7 +2,26 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Template changes
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Security fixes
+
+- **The reserved-namespace authority gate is now enforced at `kennel policy compile`, not only at
+  the `install`/`clone` courtesy (0.7.0 W9-F1).** A leaf's own `[[provides]]` claim on a reserved
+  name (`org.projectkennel.*`, or a host `[[reserved]]` family) was gated by the tier of the key
+  that signs it — but the compile CLI never told the trust context which key would sign, so the
+  gate was silently off for a leaf's own reserved claim. A **user key could compile+sign a leaf
+  claiming `org.projectkennel.*`**, enable it at the user tier, and the daemon would catalogue the
+  forged reserved capability (the daemon does not re-check — compile-time-sole by design). The
+  `install`/`clone` CLI checks were the only enforcement, and the W1 `run`→`compile` dev path
+  bypassed them. Blast radius is self-contained (the mesh is per-user; the forger's own consumers
+  only), but it broke the reserved-namespace integrity guarantee within a user's domain — a
+  confined workload trusting a vendor-reserved service (e.g. the shipped `claude` policy consuming
+  `org.projectkennel.wayland`) could be transparently impersonated. Fixed by resolving the `--key`'s
+  tier before compiling and wiring it into the compiler's own `reserved_authority` gate; the
+  ancestor-origin path (a leaf inheriting a maintainer-signed template's provide) was already
+  correct and is unchanged. Found and fixed in the W9 pre-ship pass
+  ([audit note](docs/governance/audits/2026-07-10-w9-enforcement-point-pass.md)).
+
+### Template changes
 
 - **The three capability spawn targets are now functional single-leg cages (compute /
   write / net).** `pure-compute`, `scratch-fs`, and `net-fetch` pointed their
