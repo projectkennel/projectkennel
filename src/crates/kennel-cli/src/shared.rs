@@ -460,6 +460,12 @@ pub struct TrustContext {
     vendor: BTreeSet<String>,
     host: BTreeSet<String>,
     reserved: Vec<kennel_lib_config::ReservedNamespace>,
+    /// The trust-store key-id that will sign the settled output (the resolved `--key`), if known.
+    /// It confers the tier for an **entry-origin** reserved `[[provides]]` — a name the leaf
+    /// authors itself — since the entry is not signature-checked during resolution. `None` ⇒ no
+    /// output signer known (an unsigned build, or a key whose `.pub` is in no trust dir), and an
+    /// entry-origin reserved name is then refused under enforcement.
+    signing_key_id: Option<String>,
 }
 
 impl TrustContext {
@@ -479,7 +485,20 @@ impl TrustContext {
             vendor,
             host,
             reserved,
+            signing_key_id: None,
         })
+    }
+
+    /// Record the trust-store key-id that will sign the settled output (§7.13.5).
+    ///
+    /// The compile CLI resolves the `--key` to its key-id ([`resolve_signing_key_id`]) and sets it
+    /// here so the reserved-namespace gate can attribute an entry-origin `[[provides]]` to the
+    /// signing key's tier — the fix for the W9 finding that `kennel policy compile` did not enforce
+    /// the gate for a leaf's own reserved claim (a user key could sign `org.projectkennel.*`).
+    #[must_use]
+    pub fn with_signing_key_id(mut self, key_id: Option<String>) -> Self {
+        self.signing_key_id = key_id;
+        self
     }
 
     /// The underlying trust store (for `verify_settled`, which checks a settled signature directly).
@@ -491,6 +510,7 @@ impl TrustContext {
     fn tiered<'a>(&'a self, base: kennel_lib_compile::Trust<'a>) -> kennel_lib_compile::Trust<'a> {
         base.with_tiers(&self.vendor, &self.host)
             .with_reserved(&self.reserved)
+            .with_signing_key(self.signing_key_id.as_deref())
     }
 
     /// A `require`-mode tier-aware trust context (attested: refuse unsigned ancestors).
@@ -726,6 +746,31 @@ pub fn settled_with_sshsig(
         },
         policy: policy.clone(),
     }
+}
+
+/// Resolve a `--key` value to the trust-store `key_id` that will stamp the signature — the
+/// same id `sshsig_sign` resolves after signing, computed **early** so the reserved-namespace
+/// gate can attribute an entry-origin `[[provides]]` to the signing key's tier (§7.13.5).
+///
+/// Derives the signing key's public half (`ssh-keygen -y`, which reads a file key, an
+/// ssh-agent key, or a token) and matches it against the trust dirs. `None` when the key
+/// cannot be resolved or its public half is in no trust dir (the tier is then unknown, and an
+/// entry-origin reserved name is refused under enforcement — the safe default).
+#[must_use]
+pub fn resolve_signing_key_id(key_arg: &str) -> Option<String> {
+    let key_path = resolve_key_arg(key_arg).ok()?;
+    let out = std::process::Command::new("ssh-keygen")
+        .arg("-y")
+        .arg("-f")
+        .arg(&key_path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pub_line = String::from_utf8(out.stdout).ok()?;
+    let (pubkey, _comment) = kennel_lib_policy::openssh::parse_public_key(pub_line.trim()).ok()?;
+    resolve_key_id(&signing_trust_dirs(), &pubkey)
 }
 
 /// The trust dirs a `run`/`compile` signature's `key_id` is resolved against — all

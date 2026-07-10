@@ -766,4 +766,62 @@ mod tests {
             "unsigned is not verifiable"
         );
     }
+
+    /// The W9 fix: a leaf's OWN (entry-origin) reserved `[[provides]]` is gated at compile by the
+    /// **signing key's** tier — set via [`Trust::with_signing_key`]. A user-tier signer cannot
+    /// claim `org.projectkennel.*`; a vendor-tier signer can. This is the authoritative gate the
+    /// `install`/`clone` CLI courtesy is layered over; before the fix the compile CLI never set the
+    /// signing tier, so a user key could sign a reserved leaf and the daemon catalogued it.
+    #[test]
+    fn entry_origin_reserved_provide_is_gated_by_the_signing_key_tier() {
+        use crate::source_sig::{sign_source, Tier, Trust};
+        use std::collections::BTreeSet;
+
+        // A vendor key (in the vendor tier set) and a user key (in neither set).
+        let vendor = SigningKey::from_seed("kennel-maint-2026", &[7u8; 32]).expect("vendor key");
+        let user = SigningKey::from_seed("user-dev", &[9u8; 32]).expect("user key");
+        let mut ks = KeySet::new();
+        ks.insert(vendor.key_id(), &vendor.public_key_bytes())
+            .expect("insert vendor");
+        ks.insert(user.key_id(), &user.public_key_bytes())
+            .expect("insert user");
+        let vendor_ids: BTreeSet<String> = [vendor.key_id().to_owned()].into_iter().collect();
+        let host_ids: BTreeSet<String> = BTreeSet::new();
+
+        // A vendor-signed base-confined (the chain must verify under require).
+        let base = basic_toml::to_string(
+            &sign_source(&parse(BASE_CONFINED.as_bytes()).expect("p"), &vendor).expect("sign"),
+        )
+        .expect("ser")
+        .into_bytes();
+        let source = MapSource(vec![("base-confined".to_owned(), "v1".to_owned(), base)]);
+
+        // A leaf declaring its OWN reserved provide (entry-origin, not signature-checked).
+        let leaf = parse(
+            b"name = \"grab\"\ntemplate_base = \"base-confined\"\n\
+              [[provides]]\nname = \"org.projectkennel.reserved-grab\"\nshape = \"af-unix\"\nreason = \"r\"\n",
+        )
+        .expect("parse leaf");
+
+        let as_user = Trust::require(&ks)
+            .with_tiers(&vendor_ids, &host_ids)
+            .with_signing_key(Some("user-dev"));
+        let as_vendor = Trust::require(&ks)
+            .with_tiers(&vendor_ids, &host_ids)
+            .with_signing_key(Some("kennel-maint-2026"));
+
+        // The signing tier resolves as expected.
+        assert_eq!(as_vendor.signing_tier(), Some(Tier::Vendor));
+        assert_eq!(as_user.signing_tier(), Some(Tier::User));
+
+        // A user-tier signer is REFUSED; a vendor-tier signer is ALLOWED.
+        assert!(
+            compile(&leaf, &source, &as_user, "v").is_err(),
+            "a user key must not claim org.projectkennel.* at compile"
+        );
+        assert!(
+            compile(&leaf, &source, &as_vendor, "v").is_ok(),
+            "a vendor key may claim org.projectkennel.*"
+        );
+    }
 }
