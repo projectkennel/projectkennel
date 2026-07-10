@@ -1,0 +1,50 @@
+# ============================================================================
+# Suite case: spawn-compute — a repointed functional spawn target runs real work.
+#
+# Proves the COMPUTE leg of the three-way spawn-target split is FUNCTIONAL (not the
+# old mcp-compute vaporware): a spawner instantiates `pure-compute` with a
+# caller-supplied command over its real coreutils + Python toolset and reads the
+# computed result back. The sibling reaches nothing (net.mode = none, no fs write) —
+# the cage — yet does genuine work: a Python arithmetic and a coreutils text
+# transform, both driven by the mutable `workload.argv`.
+#
+# The spawner is a `[spawn]`-granted kennel; it runs `kennel run pure-compute --
+# <argv>` (the argv override drives the sibling's mutable workload) and asserts the
+# two computed markers come back. Exit 0 iff both do — the verdict.
+# ============================================================================
+
+name = "spawn-compute"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/bin/sh"]
+
+[workload]
+argv = [
+  "/bin/sh", "-c",
+  '''
+  # Compute leg #1: Python arithmetic in the sibling (6*7 = 42).
+  a="$(/usr/bin/kennel run pure-compute -- /usr/bin/python3 -c 'print(6*7)')"
+  # Compute leg #2: a coreutils transform in the sibling (lower→upper).
+  b="$(/usr/bin/kennel run pure-compute -- /bin/sh -c 'echo kennel | /usr/bin/tr a-z A-Z')"
+  printf 'python=%s tr=%s\n' "$a" "$b"
+  case "$a$b" in
+    *42*KENNEL*) echo "OK: pure-compute ran a real Python computation and a coreutils transform" ;;
+    *) echo "FAIL: expected 42 + KENNEL back from the compute sibling"; exit 1 ;;
+  esac
+  ''',
+]
+pinned = true
+
+[spawn]
+max_instances = 4
+reason = "spawn-compute e2e: instantiate pure-compute and prove its real coreutils+Python toolset runs a caller-supplied computation"
+
+[[spawn.allow]]
+template = "pure-compute"

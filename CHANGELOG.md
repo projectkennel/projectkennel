@@ -2,7 +2,31 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Tooling changes
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Template changes
+
+- **The three capability spawn targets are now functional single-leg cages (compute /
+  write / net).** `pure-compute`, `scratch-fs`, and `net-fetch` pointed their
+  `[workload].argv` at `/usr/libexec/kennel/mcp-{compute,scratch,fetch}` binaries that
+  **never existed** — no source, no staged payload, no install. They compiled clean (the
+  loader-resolution pass silently skips a missing binary), so a spawn of any of them would
+  have 127'd at execve. Each is repointed to a real, workload-optional cage on its single
+  capability axis, inheriting base-confined's fs.read floor unchanged (no clobber):
+  - **`pure-compute`** (compute): the shell + coreutils text tools + Python; `net.mode =
+    none`, no write. Runs a caller-supplied computation that reaches nothing.
+  - **`scratch-fs`** (write): the shell + coreutils file tools; the mutable `fs.write`
+    scratch (a signed `oneof`) is the only added capability, no net.
+  - **`net-fetch`** (net): the shell + Python (`urllib`); constrained proxy egress with the
+    mutable `net.proxy.allow` match set, no write. TLS certs come from the inherited floor.
+
+  All three drop the pinned workload (templates are workload-optional): the template is the
+  cage — exec floor + capability axis + a mutable `workload.argv` — and the caller brings
+  the command. Re-signed under the maintainer key (canonical bytes changed).
+- **A new CI gate keeps a dead-binary workload out of the corpus** (`spawn-target-binaries.sh`):
+  every spawn target's `[exec].allow` and `[workload]` absolute paths must resolve to a real
+  binary (a host system binary, or a kennel binary present in the staged payload). This is
+  the class the `mcp-*` rot slipped through.
+
+### Tooling changes
 
 - **`kennel-compose` gains the owed `[net.udp]` leg, and the compose session ends at the
   install ceremony (0.7.0 W10).** The interactive network dialogue asked only the proxied

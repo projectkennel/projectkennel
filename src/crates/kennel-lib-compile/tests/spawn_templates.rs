@@ -147,7 +147,14 @@ fn spawn_templates_compile_with_valid_manifests_and_are_eligible_unsigned() {
         // The manifest is carried onto the signed settled template (empty ⇒ most-fenced).
         let manifest = compiled.expect("compiled").policy.manifest;
         if *name == "pure-compute" {
-            assert!(manifest.is_empty(), "pure-compute opens no mutable fields");
+            // The compute cage opens only `workload.argv` (freeform): the caller brings the
+            // command, the cage (no net, no fs write) is the containment.
+            assert!(
+                manifest
+                    .iter()
+                    .any(|v| v.field == "workload.argv" && v.freeform),
+                "pure-compute opens workload.argv under a freeform constraint"
+            );
         } else if *name == "net-fetch" {
             assert!(
                 manifest
