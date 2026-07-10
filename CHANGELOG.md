@@ -2,7 +2,24 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Runtime changes
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Tooling changes
+
+- **`kennel-compose` gains the owed `[net.udp]` leg, and the compose session ends at the
+  install ceremony (0.7.0 W10).** The interactive network dialogue asked only the proxied
+  TCP leg; it now asks a second, distinct UDP leg — granted hostnames + ports minting a
+  `[[net.udp.allow]]` stanza (hostnames-only, no `protocol` — the tun endpoint implies it),
+  the raw-UDP path for QUIC/HTTP-3, DNS tooling, and VoIP. The emitted UDP grant is a bare
+  **Set**, not a `.add` delta, on purpose: `base-confined` carries no `[net.udp]` section, so
+  a delta would have no parent list to fold against and would silently resolve to empty — the
+  grant is asserted to *survive* into the settled artefact's `udp_allow_names`, not merely to
+  compile. The post-write next step now leads with the W3 install ceremony
+  (`kennel policy install <file>` — place + sign at your tier in one verb, then `kennel run`),
+  with `policy compile` kept for a leaf already in the repo. A compiler footgun found in the
+  process — a `.add` delta over a section the whole chain lacks resolves to empty — is recorded
+  in [BACKLOG.md](docs/governance/BACKLOG.md) for a focused compiler cycle (no shipped path
+  relies on the delta-over-absent shape; compose and the corpus both use Set).
+
+### Runtime changes
 
 - **The UDP synthetic-pool per-grant cap is now a rotating window (0.7.0 W8).** The 32-mint
   per-grant ceiling on the tun broker's naming shim bounded distinct subdomains per wildcard

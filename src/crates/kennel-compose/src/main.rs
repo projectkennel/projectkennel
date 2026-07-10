@@ -26,7 +26,7 @@ use std::process::ExitCode;
 
 use kennel_lib_compile::source::{ExecSection, FsSection, LifecycleSection, NetProxy, NetSection};
 use kennel_lib_compile::{
-    Delta, ListField, NetAllow, PathDelta, PathEntry, PathField, SourcePolicy,
+    Delta, ListField, NetAllow, NetUdp, PathDelta, PathEntry, PathField, SourcePolicy,
 };
 
 /// Append a path entry to a path field's add-increment (`[[….add]]`), creating the delta if absent.
@@ -39,6 +39,76 @@ fn push_add(field: &mut Option<PathField>, entry: PathEntry) {
                 remove: Vec::new(),
             });
         }
+    }
+}
+
+/// Apply the TCP/proxy network leg: mint a `[[net.proxy.allow.add]]` delta of `{name,
+/// ports=[443], protocol="tcp", reason}` for each host (no-op on an empty list). The proxy
+/// grammar carries an explicit per-entry `protocol`.
+fn apply_tcp_allow(leaf: &mut SourcePolicy, hosts: &[String]) {
+    if hosts.is_empty() {
+        return;
+    }
+    let add: Vec<NetAllow> = hosts
+        .iter()
+        .map(|host| NetAllow {
+            name: Some(host.clone()),
+            ports: vec![443],
+            protocol: Some("tcp".to_owned()),
+            reason: Some("operator-specified proxied TCP destination".to_owned()),
+            ..NetAllow::default()
+        })
+        .collect();
+    let net = leaf.net.get_or_insert_with(NetSection::default);
+    net.proxy = Some(NetProxy {
+        allow: ListField::Delta(Delta {
+            add,
+            remove: Vec::new(),
+        }),
+        deny: None,
+    });
+}
+
+/// Apply the UDP network leg: opt the leaf into `[net.udp]` with a `[[net.udp.allow]]`
+/// **bare set** of `{name, ports, reason}` per grant (no-op on an empty list). UDP grants
+/// are **hostnames-only** and carry **no** `protocol` — the tun endpoint's transport is
+/// implied, and setting it is a compile error.
+///
+/// A bare **Set**, not a `.add` delta, on purpose: `base-confined` (and every template a
+/// composed leaf derives) carries no `[net.udp]` section at all, so a delta would have no
+/// parent list to fold against — it stays unfolded and resolves to *empty*, silently
+/// dropping the grant while `udp = true` still lands. The leaf *defines* the UDP
+/// allowlist, so a Set is both correct and honest. (The TCP proxy leg keeps its delta:
+/// `base-confined` does carry `[net.proxy]`, so its delta folds.)
+fn apply_udp_allow(leaf: &mut SourcePolicy, grants: &[(String, Vec<u16>)]) {
+    if grants.is_empty() {
+        return;
+    }
+    let set: Vec<NetAllow> = grants
+        .iter()
+        .map(|(host, ports)| NetAllow {
+            name: Some(host.clone()),
+            ports: ports.clone(),
+            reason: Some("operator-specified UDP destination".to_owned()),
+            ..NetAllow::default()
+        })
+        .collect();
+    let net = leaf.net.get_or_insert_with(NetSection::default);
+    net.udp = Some(NetUdp {
+        allow: ListField::Set(set),
+    });
+}
+
+/// Parse a comma/space-separated port list; empty (or all-unparseable) defaults to `[443]`.
+fn parse_ports(raw: &str) -> Vec<u16> {
+    let ports: Vec<u16> = raw
+        .split([',', ' '])
+        .filter_map(|p| p.trim().parse::<u16>().ok())
+        .collect();
+    if ports.is_empty() {
+        vec![443]
+    } else {
+        ports
     }
 }
 
@@ -296,11 +366,14 @@ fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    // Network.
-    if ask_yn("Network access? (y/N): ")? {
-        let mut allows = Vec::new();
+    // Network — two legs, asked separately because they compose different stanzas:
+    // the TCP/proxy leg (`[[net.proxy.allow]]`, per-entry protocol) and the UDP leg
+    // (`[net.udp]` + `[[net.udp.allow]]`, hostnames-only, the tun endpoint's transport
+    // implied). Both are add-increments over the inherited proxied-mode floor.
+    if ask_yn("Network access (proxied TCP: HTTPS, APIs)? (y/N): ")? {
+        let mut hosts = Vec::new();
         loop {
-            let prompt = if allows.is_empty() {
+            let prompt = if hosts.is_empty() {
                 "  Allowed host (e.g. api.example.com, blank to finish): "
             } else {
                 "  Next host (blank to finish): "
@@ -309,26 +382,31 @@ fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
             if host.is_empty() {
                 break;
             }
-            allows.push(NetAllow {
-                name: Some(host),
-                ports: vec![443],
-                protocol: Some("tcp".to_owned()),
-                reason: Some("operator-specified network destination".to_owned()),
-                ..NetAllow::default()
-            });
+            hosts.push(host);
         }
-        if !allows.is_empty() {
-            leaf.net = Some(NetSection {
-                proxy: Some(NetProxy {
-                    allow: ListField::Delta(Delta {
-                        add: allows,
-                        remove: Vec::new(),
-                    }),
-                    deny: None,
-                }),
-                ..NetSection::default()
-            });
+        apply_tcp_allow(leaf, &hosts);
+    }
+
+    // The UDP leg (W2/W10): raw-UDP egress — QUIC/HTTP-3, DNS tooling, VoIP. Distinct
+    // from the proxied TCP leg above: it opts the leaf into `[net.udp]` (valid only on a
+    // proxied mode, which base-confined already is) and each grant is a hostname (no CIDR)
+    // resolved by the broker's naming shim to a synthetic in the tun `/64`.
+    if ask_yn("UDP egress (raw UDP: QUIC/HTTP-3, DNS tooling, VoIP)? (y/N): ")? {
+        let mut grants = Vec::new();
+        loop {
+            let prompt = if grants.is_empty() {
+                "  Allowed host (e.g. dns.example.com, blank to finish): "
+            } else {
+                "  Next host (blank to finish): "
+            };
+            let host = ask_line(prompt)?;
+            if host.is_empty() {
+                break;
+            }
+            let ports = ask_line("    Ports [443]: ")?;
+            grants.push((host, parse_ports(&ports)));
         }
+        apply_udp_allow(leaf, &grants);
     }
 
     // Home write.
@@ -458,9 +536,17 @@ fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
             eprintln!("wrote {}", path.display());
+            // The composed leaf is a source `.toml` the operator reviews, then places at
+            // their tier — exactly the W3 install ceremony (author → place → sign → run).
+            // `policy install` is the one-verb path (copies into the user policy repo and
+            // signs); `policy compile` remains for a leaf already sitting in the repo.
+            let name = leaf.name.as_deref().unwrap_or("<name>");
+            eprintln!("next: review it, then place and sign it at your tier in one step:");
+            eprintln!("  kennel policy install {}", path.display());
+            eprintln!("  kennel run {name}");
             eprintln!(
-                "next: `kennel policy compile {} --key <key>` to sign it, then `kennel run`",
-                path.display()
+                "(or, if you move it into your policy repo yourself: \
+                 `kennel policy compile {name} --key <key>`)"
             );
         }
         None => print!("{output}"),
@@ -598,4 +684,123 @@ fn print_usage() {
     eprintln!("  /etc/kennel/templates/        (system)");
     eprintln!("  /usr/lib/kennel/templates/    (vendor)");
     eprintln!("  (same pattern for fragments/)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kennel_lib_compile::TemplateSource;
+
+    /// The shipped `base-confined` root template — the floor every composed leaf derives.
+    const BASE_CONFINED: &str =
+        include_str!("../../../../toml/templates/base-confined/policy.toml");
+
+    /// A one-template source serving `base-confined` from the in-tree corpus, so the test
+    /// compiles against the real floor without touching the installed cascade.
+    struct OneTemplate;
+    impl TemplateSource for OneTemplate {
+        fn fetch(&self, name: &str) -> Option<Vec<u8>> {
+            (name == "base-confined").then(|| BASE_CONFINED.as_bytes().to_vec())
+        }
+        fn fetch_settled(&self, _name: &str) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    /// Compile a composed leaf against the real base-confined floor (unsigned dev trust),
+    /// returning the settled policy — so a test can assert not just that it compiles but
+    /// that the grant SURVIVES the fold (the silent-drop the delta form would cause).
+    fn compile_leaf(leaf: &SourcePolicy) -> Result<kennel_lib_policy::SettledPolicy, String> {
+        let bytes = basic_toml::to_string(leaf).map_err(|e| e.to_string())?;
+        let entry =
+            kennel_lib_compile::parse_source(bytes.as_bytes()).map_err(|e| e.to_string())?;
+        let trust = kennel_lib_compile::source_sig::Trust::dev();
+        kennel_lib_compile::compile(&entry, &OneTemplate, &trust, "0.0.0-test")
+            .map(|c| c.policy)
+            .map_err(|e| e.to_string())
+    }
+
+    fn base_leaf() -> SourcePolicy {
+        SourcePolicy {
+            name: Some("composed-net".to_owned()),
+            template_base: Some("base-confined".to_owned()),
+            ..SourcePolicy::default()
+        }
+    }
+
+    /// The owed W10 deliverable: a composed `[net.udp]` grant produces a leaf that compiles
+    /// AND whose grant survives the fold into the settled artefact.
+    #[test]
+    fn a_composed_udp_grant_survives_into_the_settled_artefact() {
+        let mut leaf = base_leaf();
+        apply_udp_allow(
+            &mut leaf,
+            &[
+                ("dns.example.com".to_owned(), vec![53]),
+                ("quic.example.com".to_owned(), vec![443, 8443]),
+            ],
+        );
+        // A bare Set, no `protocol` (the tun endpoint implies it — a `protocol` would fail
+        // to compile; a `.add` delta over base-confined's absent `[net.udp]` would silently
+        // resolve to empty, which is exactly what this test guards against).
+        let udp = leaf.net.as_ref().and_then(|n| n.udp.as_ref()).expect("udp");
+        assert!(matches!(udp.allow, ListField::Set(_)), "emits a bare set");
+        for e in udp.allow.entries() {
+            assert!(e.protocol.is_none(), "udp grant carries no protocol");
+            assert!(e.reason.is_some(), "each grant records a reason");
+        }
+        let settled = compile_leaf(&leaf).expect("a composed net.udp leaf compiles");
+        // The grant is present in the settled artefact — not silently dropped by the fold.
+        let names: Vec<&str> = settled
+            .effective_policy
+            .net
+            .udp_allow_names
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"dns.example.com") && names.contains(&"quic.example.com"),
+            "both udp grants survive into the settled artefact, got {names:?}"
+        );
+    }
+
+    /// Both legs together compile and both grants survive (proxied TCP beside `[net.udp]`).
+    #[test]
+    fn both_network_legs_survive_into_the_settled_artefact() {
+        let mut leaf = base_leaf();
+        apply_tcp_allow(&mut leaf, &["api.example.com".to_owned()]);
+        apply_udp_allow(&mut leaf, &[("voip.example.com".to_owned(), vec![10000])]);
+        let settled = compile_leaf(&leaf).expect("both legs compile together");
+        let net = &settled.effective_policy.net;
+        assert!(
+            net.udp_allow_names
+                .iter()
+                .any(|r| r.name == "voip.example.com"),
+            "udp grant survives, got {:?}",
+            net.udp_allow_names
+        );
+        // The proxied TCP grant lands in the by-name half of the proxy allowlist.
+        assert!(
+            net.allow_names.iter().any(|r| r.name == "api.example.com"),
+            "proxy grant survives, got {:?}",
+            net.allow_names
+        );
+    }
+
+    #[test]
+    fn ports_parse_with_a_443_default() {
+        assert_eq!(parse_ports(""), vec![443]);
+        assert_eq!(parse_ports("  "), vec![443]);
+        assert_eq!(parse_ports("53"), vec![53]);
+        assert_eq!(parse_ports("443, 8443 993"), vec![443, 8443, 993]);
+        assert_eq!(parse_ports("nonsense"), vec![443]);
+    }
+
+    #[test]
+    fn empty_legs_touch_nothing() {
+        let mut leaf = base_leaf();
+        apply_tcp_allow(&mut leaf, &[]);
+        apply_udp_allow(&mut leaf, &[]);
+        assert!(leaf.net.is_none(), "no grants ⇒ no [net] section");
+    }
 }
