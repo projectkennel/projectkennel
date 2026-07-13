@@ -23,6 +23,32 @@ it — one install ceremony, three delivery formats.
 
 ### Security fixes
 
+- **Fedora / enforcing-SELinux support, proven on a Fedora 44 aarch64 VM.** kennel now runs on
+  stock enforcing-SELinux Fedora, which surfaced two kernel-portability facts and one policy
+  boundary:
+  - **binderfs pre-population.** Current kernels ship `CONFIG_ANDROID_BINDER_DEVICES` non-empty
+    (`"binder,hwbinder,vndbinder"`, the upstream default), and binderfs pre-creates those devices
+    in *every* instance at mount time (per-instance since Linux 5.4). `add_binder_device` assumed a
+    fresh instance was empty and failed `EEXIST` on Fedora/Arch. It now adopts the pre-created
+    `binder` and sweeps any surplus, so a kennel's binderfs holds the single `binder` context on
+    every kernel — the empty-config kernels (Debian/Ubuntu) are unchanged.
+  - **The `kennel_t` / `kennel_workload_t` SELinux module** (`dist/selinux/kennel.cil`, CIL — no
+    build tooling on the target). Fedora's base policy withholds the `binder` object class from
+    every domain including `unconfined_t`, so `kenneld` could not become the context manager. The
+    module grants it — but as **two** domains, because a reference monitor must not be the same
+    SELinux subject as the code it confines: `kennel_t` for the trusted base (`kenneld` +
+    privhelper + `kennel-bin-init`), and `kennel_workload_t` for the untrusted workload —
+    `typebounds`-bounded by `kennel_t` (a compile-time subset assertion) with `binder call` only,
+    **no `set_context_mgr`**, no SELinux manipulation, no relabel. `kennel-bin-init` requests the
+    transition via `/proc/self/attr/exec` before the workload `execve` (the mechanism a container
+    runtime uses). Verified under enforcing: workload runs as `kennel_workload_t`, daemon as
+    `kennel_t`, zero denials.
+  - **The workload cannot reach the kernel binder driver directly (T5.1).** A confined workload can
+    create a nested user namespace (kennel does not deny `CLONE_NEWUSER`) and become root in it,
+    but the `base-confined` seccomp floor denies `mount` and the whole new-mount API on *every*
+    distro — so it cannot mount its own binderfs to reach a fresh context-manager surface. This is
+    the cross-distro primary control; the SELinux module is defence-in-depth on top.
+
 - **The reserved-namespace authority gate is now enforced at `kennel policy compile`, not only at
   the `install`/`clone` courtesy (0.7.0 W9-F1).** A leaf's own `[[provides]]` claim on a reserved
   name (`org.projectkennel.*`, or a host `[[reserved]]` family) was gated by the tier of the key
@@ -107,9 +133,8 @@ it — one install ceremony, three delivery formats.
   placing anything (a missing hard dependency aborts with the distro package name; a missing
   feature dependency warns — the feature refuses cleanly at use). Binder is declared for what it
   is: a **hard kernel requirement** — the kenneld↔kennel control plane and the entire service
-  mesh ride on it (Debian: the in-tree `binder_linux` module; Fedora kernels do not build
-  binder — the community binder kmod/akmod COPRs supply it, by maintainer ruling not vendored or
-  shipped by kennel; Secure Boot needs the MOK enrolled).
+  mesh ride on it (Debian and current Fedora/Arch kernels all ship `CONFIG_ANDROID_BINDERFS`
+  built in).
 - **The install ceremony is one code path (`install-lib.sh`).** setcap on the privhelpers, the
   binder module load, the host-key mint + reference-policy compile, and the post-install checks
   are a sourceable lib that `install.sh` uses and the `.deb` postinst embeds verbatim at package
@@ -118,8 +143,8 @@ it — one install ceremony, three delivery formats.
 - **`build-rpm.sh` builds an `.rpm` from the same two sources** — file list from the payload,
   `Requires`/`Recommends`/`Suggests` from the manifest's fedora names, `%post -p /bin/bash`
   embedding `install-lib.sh` verbatim, `%config(noreplace)` for `/etc`, and rpm's own ELF-derived
-  glibc floors on top. The Fedora gaps ride in the package description and the post-install check,
-  not in fine print: binder via the community kmod route, no AppArmor layer on SELinux.
+  glibc floors on top, and (Fedora) the `kennel_t`/`kennel_workload_t` SELinux module loaded in
+  `%post`.
 - **`build-deb.sh` builds a `.deb` from an unpacked release payload with no hand-maintained
   packaging manifest.** The file list is the release payload itself; `Depends`/`Recommends`/
   `Suggests` generate from `dist/dependencies.toml`; dpkg natively supplies what install.sh

@@ -295,6 +295,13 @@ install_apparmor() {
 	fi
 }
 
+# On a SELinux system, load the kenneld_t module (the binder-class grant the base policy
+# withholds). A no-op via kn_install_selinux_policy where `semodule` is absent (AppArmor
+# hosts), so this is called unconditionally alongside install_apparmor.
+install_selinux() {
+	kn_install_selinux_policy "$pkg_root/dist/selinux/kennel.cil"
+}
+
 # Seed a HOST config default into /etc/kennel, ONLY if absent — the standard /etc conffile
 # discipline, so a reinstall never clobbers an admin's edits. Under --dry-run, just report.
 seed_etc_config() {
@@ -536,6 +543,7 @@ install_config
 install_units
 install_man
 install_apparmor
+install_selinux
 install_etc_skeleton
 install_keys
 sweep_retired_payload

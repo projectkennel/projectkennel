@@ -103,6 +103,8 @@ if [[ -d "$payload/dist/config/gui" ]]; then
 	done < <(find "$payload/dist/config/gui" -type f -print0)
 fi
 install -d "$buildroot/etc/kennel/keys" "$buildroot/etc/kennel/templates" "$buildroot/etc/kennel/policies"
+# The SELinux policy module (loaded in %post); Fedora convention places it here.
+place 0644 "$payload/dist/selinux/kennel.cil" /usr/share/selinux/packages/kennel.cil
 
 # ── dependency fields from the manifest (fedora package names) ──────────────────────
 mapfile -t dep_rows < <(awk '
@@ -151,10 +153,11 @@ human-readable policies: filesystem views, seccomp/Landlock floors,
 brokered network egress, D-Bus and Wayland mediation, and a capability
 mesh between cages. Build $commit.
 
-Fedora notes: the binder kernel module is REQUIRED and Fedora kernels do
-not build it — install a community binder kmod (the waydroid-ecosystem
-binder_linux kmod/akmod COPRs; Secure Boot needs the MOK enrolled). The
-AppArmor defense-in-depth layer does not apply on SELinux systems.
+Fedora notes: binder is required (the kenneld<->kennel control plane) and
+current Fedora kernels ship it built in (CONFIG_ANDROID_BINDERFS). Under
+enforcing SELinux the base policy withholds the binder object class even
+from unconfined_t, so this package loads a kenneld_t policy module in %post
+that grants it. AppArmor (a Debian/Ubuntu layer) does not apply here.
 
 %install
 cp -a %{getenv:KENNEL_BUILDROOT}/. %{buildroot}/
@@ -165,6 +168,7 @@ DESC
 	cat <<'CEREMONY'
 kn_setcap_privhelpers /usr/libexec/kennel
 kn_binder_modload
+kn_install_selinux_policy /usr/share/selinux/packages/kennel.cil
 kn_compile_reference_policies /usr/lib/kennel /usr/bin/kennel
 echo "kennel: post-install checks:"
 kn_post_checks /usr/libexec/kennel
@@ -174,6 +178,7 @@ echo "        then: man kennel"
 %postun
 # On erase (not upgrade), remove what %post GENERATED — never the admin's own content.
 if [ "$1" -eq 0 ]; then
+	command -v semodule >/dev/null 2>&1 && semodule -r kennel 2>/dev/null || true
 	rm -f /etc/kennel/keys/kennel-host /etc/kennel/keys/kennel-host.pub
 	find /etc/kennel/policies -name '*.settled.toml' -delete 2>/dev/null || true
 	find /etc/kennel/policies -type d -empty -delete 2>/dev/null || true

@@ -301,6 +301,12 @@ fn spawn_all(
         .unwrap_or_else(|| PathBuf::from("/"));
 
     let seal = || -> io::Result<()> {
+        // SELinux (Fedora): request the domain transition to the bounded workload type BEFORE
+        // Landlock could gate `/proc/self/attr`. The confiner (kennel_t, the TCB) and the
+        // untrusted workload must not be the same SELinux subject; kennel_workload_t is
+        // typebounds-bounded by kennel_t, so this transition is NNP-compatible. A no-op where
+        // SELinux is absent or the TCB never entered kennel_t (then the current behaviour holds).
+        request_selinux_workload_domain()?;
         std::env::set_current_dir(&workload_cwd)?;
         // Controlling terminal FIRST, before Landlock/seccomp could gate the ioctls
         // (`07-9` §7.9.2). An interactive run allocates a pty in the view's devpts and returns
@@ -344,6 +350,49 @@ fn spawn_all(
         seal,
     )?;
     Ok((workload_pid, facade_pids))
+}
+
+/// The `SELinux` type the untrusted workload runs as — bounded by the `TCB`'s `kennel_t`.
+const SELINUX_WORKLOAD_TYPE: &str = "kennel_workload_t";
+/// The `TCB` (confiner) `SELinux` type; the workload transition fires only from here.
+const SELINUX_TCB_TYPE: &str = "kennel_t";
+
+/// Request the `SELinux` domain transition to [`SELINUX_WORKLOAD_TYPE`] for the coming `execve`.
+///
+/// Writes the target context to `/proc/self/attr/exec` (the raw `setexeccon` — no `libselinux`
+/// dependency), the same mechanism a container runtime uses to launch its payload in a distinct
+/// domain. The target is the current context with only its type field swapped, so it works for any
+/// login identity (`unconfined_r`, `staff_r`, `sysadm_r`) without hardcoding a role.
+///
+/// Fail-safe and idempotent by design:
+/// - no `/proc/self/attr/current` (`SELinux` absent) → nothing to do;
+/// - the `TCB` is not in `kennel_t` (module not loaded, or a login whose role has no transition
+///   into `kennel_t`) → leave the exec context untouched rather than force a type the policy may
+///   reject, so the run is never broken by `SELinux` state. The transition engages precisely when
+///   the chain is set up (module loaded, `kenneld` in `kennel_t`), the only case a kennel runs at
+///   all under enforcing.
+///
+/// # Errors
+///
+/// Only when `SELinux` is active and the `TCB` is in `kennel_t` but the context write fails — a
+/// misconfiguration that must fail closed (do not run the workload in the confiner's domain).
+fn request_selinux_workload_domain() -> io::Result<()> {
+    let Ok(current) = std::fs::read_to_string("/proc/self/attr/current") else {
+        return Ok(()); // no procattr ⇒ SELinux not in play
+    };
+    // `user:role:type[:level]` — swap only the type field (index 2).
+    let fields: Vec<&str> = current.trim_end_matches(['\0', '\n']).split(':').collect();
+    if fields.get(2) != Some(&SELINUX_TCB_TYPE) {
+        return Ok(()); // not in the TCB domain — do not force a transition
+    }
+    let target = fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| if i == 2 { SELINUX_WORKLOAD_TYPE } else { *f })
+        .collect::<Vec<_>>()
+        .join(":");
+    std::fs::write("/proc/self/attr/exec", target.as_bytes())
+        .map_err(|e| io::Error::new(e.kind(), format!("setexeccon {SELINUX_WORKLOAD_TYPE}: {e}")))
 }
 
 /// Whether a crashed facade may be re-forked: prune `starts` to those within

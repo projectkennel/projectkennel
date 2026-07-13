@@ -1,0 +1,129 @@
+; Project Kennel — SELinux policy module (CIL).
+;
+; The Fedora/SELinux analogue of dist/apparmor/kenneld: it lets the reference monitor's
+; binder control plane run under enforcing SELinux. Modern kernels (Fedora, Arch) ship
+; binder built in, but the base policy withholds the binder object class even from
+; unconfined_t, so kenneld's BINDER_SET_CONTEXT_MGR and the kennel↔kenneld transactions
+; are denied (the denials are dontaudit'd — see INSTALL.md, "SELinux on Fedora").
+;
+; TWO domains, because a reference monitor must not be the same SELinux subject as the code
+; it confines:
+;
+;   kennel_t          — the TRUSTED base (kenneld + the file-capped privhelper + kennel-bin-init).
+;                       Unconfined-equivalent: it constructs confinement (userns, mounts, cgroups,
+;                       binderfs, fexecve of capped helpers), so it is the trusted computing base,
+;                       not a sandboxed app. It holds the binder set the base policy withholds.
+;   kennel_workload_t — the UNTRUSTED workload. Bounded by kennel_t via `typebounds` (a compile-
+;                       time assertion its permission set is a SUBSET of the TCB's — "the TCB only
+;                       shrinks", enforced by the toolchain), which also makes the transition
+;                       NNP-compatible without a process-exemption. It may run and reach kenneld's
+;                       node 0 (binder `call`) but NOT become a context manager, relabel, touch
+;                       SELinux, or load policy. kennel-bin-init requests this transition via
+;                       /proc/self/attr/exec immediately before the workload execve.
+;
+; The workload's real confinement is the namespace/seccomp/Landlock cage (in particular the seccomp
+; floor denies mount + the new-mount API on EVERY distro, so it cannot mount its own binderfs to
+; reach the kernel driver — T5.1). This module is defence-in-depth at the MAC layer on top of that,
+; plus the checkable subset assertion; it is not the primary control.
+;
+; CIL is loaded directly by semodule (policycoreutils) — no refpolicy build tooling on the target.
+
+;; ── the trusted base: kennel_t ────────────────────────────────────────────────────────
+(type kennel_t)
+(type kenneld_exec_t)
+(typeattributeset exec_type (kenneld_exec_t))
+(typeattributeset file_type (kenneld_exec_t))
+(typeattributeset entry_type (kenneld_exec_t))
+(roletype object_r kenneld_exec_t)
+
+; Unconfined-equivalent: the standard refpolicy unconfined-domain attribute set (stable
+; identifiers). kennel_t reads the trust store and policies, mounts binderfs and constructs views,
+; drives the network, resolves names, and mediates dbus.
+(typeattributeset domain (kennel_t))
+(typeattributeset unconfined_domain_type (kennel_t))
+(typeattributeset kern_unconfined (kennel_t))
+(typeattributeset files_unconfined_type (kennel_t))
+(typeattributeset filesystem_unconfined_type (kennel_t))
+(typeattributeset selinux_unconfined_type (kennel_t))
+(typeattributeset storage_unconfined_type (kennel_t))
+(typeattributeset devices_unconfined_type (kennel_t))
+(typeattributeset corenet_unconfined_type (kennel_t))
+(typeattributeset corenet_unlabeled_type (kennel_t))
+(typeattributeset dbusd_unconfined (kennel_t))
+(typeattributeset nsswitch_domain (kennel_t))
+(typeattributeset can_change_object_identity (kennel_t))
+(typeattributeset process_uncond_exempt (kennel_t))
+; binder: set_context_mgr (kenneld becomes the per-kennel context manager), call/transfer (the
+; kennel↔kenneld transactions and fd passing). setexec: request the workload's exec transition.
+(allow kennel_t self (binder (call set_context_mgr transfer)))
+(allow kennel_t self (process (setexec)))
+; entrypoint on any executable — kennel_t itself is only ever entered via kenneld_exec_t, but it
+; must be a superset of kennel_workload_t for `typebounds` to permit the workload's entrypoint
+; (the bounds check strips any child permission the parent lacks; `entrypoint` is not covered by
+; the file attributes).
+(allow kennel_t exec_type (file (entrypoint execute read getattr open map)))
+; Inherited-stdio I/O to any peer domain (the launcher's pipes/sockets: unconfined_t on a desktop,
+; sshd_session_t over SSH, …). kennel_t already does this as the daemon; stated so it is a superset
+; of the workload's identical grant (typebounds).
+(allow kennel_t domain (fifo_file (read write getattr ioctl append)))
+(allow kennel_t domain (unix_stream_socket (read write)))
+(allow kennel_t domain (fd (use)))
+
+; Enter kennel_t when a user session executes the daemon. Cover the confined login roles too, so a
+; staff_r/sysadm_r operator (a hardened workstation — exactly the kennel user) is not silently left
+; without the transition and without binder.
+(typetransition unconfined_t kenneld_exec_t process kennel_t)
+(roletype unconfined_r kennel_t)
+(roletype staff_r kennel_t)
+(roletype sysadm_r kennel_t)
+(allow unconfined_t kenneld_exec_t (file (getattr read open execute map execute_no_trans)))
+(allow unconfined_t kennel_t (process (transition)))
+(allow kennel_t kenneld_exec_t (file (entrypoint getattr read open execute map)))
+(allow kennel_t unconfined_t (process (sigchld)))
+
+;; ── the untrusted workload: kennel_workload_t (bounded by kennel_t) ─────────────────────
+(type kennel_workload_t)
+; typebounds: kennel_workload_t's permissions MUST be a subset of kennel_t's — the toolchain
+; rejects the module otherwise. This is "the TCB only shrinks" as a checked assertion, and it lets
+; the transition proceed under no_new_privs.
+(typebounds kennel_t kennel_workload_t)
+
+; Functional attributes so arbitrary workload code runs (exec, files, devices, network, names) —
+; the cage (ns/seccomp/Landlock) is the real confinement. DELIBERATELY OMITTED, so the untrusted
+; workload cannot do them even though the TCB can: `selinux_unconfined_type` (no touching SELinux),
+; `can_change_object_identity` (no relabel), `process_uncond_exempt`, and — critically — the binder
+; `set_context_mgr`/`transfer` grants and `process setexec`. The workload gets binder `call` only.
+(typeattributeset domain (kennel_workload_t))
+(typeattributeset kern_unconfined (kennel_workload_t))
+(typeattributeset files_unconfined_type (kennel_workload_t))
+(typeattributeset filesystem_unconfined_type (kennel_workload_t))
+(typeattributeset devices_unconfined_type (kennel_workload_t))
+(typeattributeset corenet_unconfined_type (kennel_workload_t))
+(typeattributeset corenet_unlabeled_type (kennel_workload_t))
+(typeattributeset nsswitch_domain (kennel_workload_t))
+(allow kennel_workload_t self (binder (call)))
+; Inherited-stdio I/O to any peer domain — the workload writes its stdout/stderr and reads stdin
+; over pipes/sockets from whatever launched the kennel (the CLI as unconfined_t, an SSH session,
+; cron, …), and speaks to kenneld over the control socket. Scoped to the I/O classes, NOT broad
+; system access; a subset of kennel_t's grant above, so typebounds holds.
+(allow kennel_workload_t domain (fifo_file (read write getattr ioctl append)))
+(allow kennel_workload_t domain (unix_stream_socket (read write)))
+(allow kennel_workload_t domain (fd (use)))
+
+; The workload is arbitrary code, so it is entered from any executable file type (bin_t,
+; shell_exec_t, user binaries, …) — grant entrypoint on the exec_type attribute. A subset of
+; kennel_t's file access (files_unconfined_type), so typebounds still holds.
+(allow kennel_workload_t exec_type (file (entrypoint execute read getattr open map)))
+
+; The workload keeps the login role; permit the type under each covered role, and let kennel_t
+; make the setexec transition into it. The workload runs under no_new_privs, so the transition
+; also needs process2:nnp_transition — typebounds makes it a legal (subset) transition; this
+; permits it. (kennel-bin-init sets the exec context via /proc/self/attr/exec.)
+(roletype unconfined_r kennel_workload_t)
+(roletype staff_r kennel_workload_t)
+(roletype sysadm_r kennel_workload_t)
+(allow kennel_t kennel_workload_t (process (transition dyntransition)))
+(allow kennel_t kennel_workload_t (process2 (nnp_transition)))
+(allow kennel_workload_t kennel_t (process (sigchld)))
+
+(filecon "/usr/libexec/kennel/kenneld" file (system_u object_r kenneld_exec_t ((s0) (s0))))

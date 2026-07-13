@@ -100,6 +100,24 @@ kn_binder_modload() {
 	return 0
 }
 
+# kn_install_selinux_policy <cil>: load the kenneld_t SELinux module + label the daemon.
+# The Fedora analogue of the AppArmor userns profile: on a SELinux system the base policy
+# withholds the binder object class even from unconfined_t, so kenneld cannot become the
+# per-kennel binder context manager. The module grants the scoped binder set. A no-op where
+# `semodule` is absent (AppArmor systems), so install.sh calls it unconditionally.
+kn_install_selinux_policy() {
+	local cil="$1"
+	command -v semodule >/dev/null 2>&1 || return 0
+	[[ -f "$cil" ]] || return 0
+	if run semodule -i "$cil" 2>/dev/null; then
+		command -v restorecon >/dev/null 2>&1 && run restorecon -F /usr/libexec/kennel/kenneld 2>/dev/null
+		echo "install: loaded the SELinux policy module (kenneld_t) and labeled the daemon"
+	else
+		echo "install: WARNING: semodule could not load the SELinux module — under enforcing SELinux a kennel cannot become the binder context manager (the mesh will be dead)" >&2
+	fi
+	return 0
+}
+
 # kn_compile_reference_policies <vendor_dir> <kennel_bin>: mint the host signing key
 # (once) and compile every vendor reference source — leaves (policies/<n>) and providers
 # (policies/providers/<n>) — into host-signed settled artefacts under
@@ -184,22 +202,27 @@ kn_post_checks() {
 		echo "  [ok]   binder_linux module available (loaded on first kennel)"
 	else
 		echo "  [ATTN] no binder filesystem and no binder_linux module — kennel DOES NOT FUNCTION"
-		echo "         without binder (the kenneld<->kennel control plane rides on it)."
-		if [[ "$(kn_detect_family)" = fedora ]]; then
-			echo "         Fedora kernels do not build binder: install a community binder kmod"
-			echo "         (the waydroid-ecosystem binder_linux kmod/akmod COPRs; Secure Boot:"
-			echo "         enroll the MOK or the module will not load)."
-		else
-			echo "         The kernel needs CONFIG_ANDROID_BINDERFS."
-		fi
+		echo "         without binder (the kenneld<->kennel control plane rides on it). The kernel"
+		echo "         needs CONFIG_ANDROID_BINDERFS (current Fedora/Arch and Debian/Ubuntu ship it;"
+		echo "         a stripped or old kernel may not)."
 	fi
-	if [[ -e /etc/apparmor.d/kenneld ]]; then
+	# The confinement substrate must permit kennel's mechanism: AppArmor (Debian/Ubuntu) grants
+	# the userns; SELinux (Fedora) grants the binder class the base policy withholds.
+	if command -v getenforce >/dev/null 2>&1 && [[ "$(getenforce 2>/dev/null)" != "Disabled" ]]; then
+		if command -v semodule >/dev/null 2>&1 && semodule -l 2>/dev/null | grep -q '^kennel$'; then
+			echo "  [ok]   SELinux is $(getenforce) and the kenneld_t policy module is loaded"
+		else
+			echo "  [ATTN] SELinux is $(getenforce) but the kenneld_t module is NOT loaded — a kennel"
+			echo "         cannot become the binder context manager (the mesh will be dead). Load it:"
+			echo "         sudo semodule -i /usr/share/selinux/packages/kennel.cil"
+		fi
+	elif [[ -e /etc/apparmor.d/kenneld ]]; then
 		echo "  [ok]   AppArmor userns profile installed"
 	elif [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]]; then
 		echo "  [ATTN] unprivileged userns is AppArmor-restricted but no profile was installed"
 		echo "         (no /etc/apparmor.d on this host?) — kenneld may be denied CLONE_NEWUSER"
 	else
-		echo "  [ok]   unprivileged userns is not AppArmor-restricted"
+		echo "  [ok]   no AppArmor/SELinux userns or binder restriction in effect"
 	fi
 	return 0
 }

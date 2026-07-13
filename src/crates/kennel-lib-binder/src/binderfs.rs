@@ -39,20 +39,67 @@ pub fn mount_instance(dir: &Path, max: u32) -> io::Result<()> {
     crate::sys::mount_binderfs(&cpath, max)
 }
 
-/// Allocate the standard `binder` device on this instance's control node,
-/// returning its `(major, minor)`. The device then appears at `dir/binder`.
+/// Ensure this instance holds exactly the standard `binder` device, returning its
+/// `(major, minor)`. The device then appears at `dir/binder`.
+///
+/// Normally `BINDER_CTL_ADD` allocates it. On a kernel whose non-empty
+/// `CONFIG_ANDROID_BINDER_DEVICES` (or `binder.devices=` module parameter) names the
+/// standard set — now the upstream default `"binder,hwbinder,vndbinder"`, shipped by
+/// current Fedora/Arch kernels — the kernel pre-creates those devices in *every*
+/// binderfs instance at mount time (per-instance since Linux 5.4), so the add returns
+/// `EEXIST`. binderfs devices are per-instance, so the pre-created `binder` is this
+/// instance's own and is adopted. Any surplus pre-created devices are then removed, so
+/// a kennel's binderfs holds the single `binder` context on every kernel — no unused
+/// context is left reachable in the view. A kernel with an empty devices list (older
+/// Debian/Ubuntu) pre-creates nothing, so the add succeeds and the sweep is a no-op.
 ///
 /// # Errors
 ///
-/// Returns the OS error if the control device cannot be opened or `BINDER_CTL_ADD`
-/// fails (the device cap is reached, or `binder` already exists).
+/// Returns the OS error if the control device cannot be opened, `BINDER_CTL_ADD`
+/// fails for any reason other than a pre-existing `binder`, the adopted device
+/// cannot be stat'd, or a surplus device cannot be removed.
 pub fn add_binder_device(dir: &Path) -> io::Result<(u32, u32)> {
     let control = OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_CLOEXEC)
         .open(dir.join(CONTROL_DEVICE))?;
-    crate::sys::ctl_add(control.as_fd(), BINDER_DEVICE)
+    let device = match crate::sys::ctl_add(control.as_fd(), BINDER_DEVICE) {
+        Ok(device) => device,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            device_numbers(&dir.join(BINDER_DEVICE))?
+        }
+        Err(e) => return Err(e),
+    };
+    remove_surplus_devices(dir)?;
+    Ok(device)
+}
+
+/// The `(major, minor)` of an existing device node (the `EEXIST`-adopt path).
+fn device_numbers(node: &Path) -> io::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let rdev = std::fs::metadata(node)?.rdev();
+    Ok((libc::major(rdev), libc::minor(rdev)))
+}
+
+/// Remove every device the kernel pre-created beyond `binder`/`binder-control`, so a
+/// kennel's binderfs matches an empty-`CONFIG_ANDROID_BINDER_DEVICES` kernel exactly.
+///
+/// A no-op where nothing was pre-created (the empty-config kernels). `features` is a
+/// directory, not a device, and is left untouched.
+fn remove_surplus_devices(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::FileTypeExt as _;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == BINDER_DEVICE || name == CONTROL_DEVICE {
+            continue;
+        }
+        if entry.file_type()?.is_char_device() {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Open the `binder` device of the instance at `dir` for read/write.
