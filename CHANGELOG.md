@@ -92,13 +92,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   placing anything (a missing hard dependency aborts with the distro package name; a missing
   feature dependency warns — the feature refuses cleanly at use). Binder is declared for what it
   is: a **hard kernel requirement** — the kenneld↔kennel control plane and the entire service
-  mesh ride on it (Debian: the in-tree `binder_linux` module; Fedora needs a dkms build detour,
-  packaging to follow).
+  mesh ride on it (Debian: the in-tree `binder_linux` module; Fedora kernels do not build
+  binder — the community binder kmod/akmod COPRs supply it, by maintainer ruling not vendored or
+  shipped by kennel; Secure Boot needs the MOK enrolled).
 - **The install ceremony is one code path (`install-lib.sh`).** setcap on the privhelpers, the
   binder module load, the host-key mint + reference-policy compile, and the post-install checks
   are a sourceable lib that `install.sh` uses and the `.deb` postinst embeds verbatim at package
   build — the tarball and package installs cannot drift. The reference-policy compile now reads
   the installed vendor tree (identical content; one path for both callers).
+- **`build-rpm.sh` builds an `.rpm` from the same two sources** — file list from the payload,
+  `Requires`/`Recommends`/`Suggests` from the manifest's fedora names, `%post -p /bin/bash`
+  embedding `install-lib.sh` verbatim, `%config(noreplace)` for `/etc`, and rpm's own ELF-derived
+  glibc floors on top. The Fedora gaps ride in the package description and the post-install check,
+  not in fine print: binder via the community kmod route, no AppArmor layer on SELinux.
 - **`build-deb.sh` builds a `.deb` from an unpacked release payload with no hand-maintained
   packaging manifest.** The file list is the release payload itself; `Depends`/`Recommends`/
   `Suggests` generate from `dist/dependencies.toml`; dpkg natively supplies what install.sh
