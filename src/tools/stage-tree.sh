@@ -104,6 +104,7 @@ if [[ "$WITH_TEST_BINS" = 1 ]]; then
 fi
 
 install -m 0755 "$ROOT/src/tools/install.sh" "$DEST/install.sh"
+install -m 0644 "$ROOT/src/tools/install-lib.sh" "$DEST/install-lib.sh"
 
 # Everything under dist/ that install.sh consumes (config, systemd, apparmor, threats, vendor,
 # kennel-sshd.conf) — all of dist/ except the release/ output dir, so this never drifts.

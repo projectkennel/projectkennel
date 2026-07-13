@@ -1,0 +1,178 @@
+# External dependencies — the single source of truth.
+#
+# Everything kennel's own code, installer, and shipped provider policies invoke on the
+# host, with the package that supplies it per distro family. The packaging manifests
+# (dist/debian, dist/rpm) and the install.sh pre-flight derive from this file; the
+# external-deps guard (src/tools/tests/external-deps-manifest.sh) cross-checks it
+# against the real call sites so a new shell-out cannot ship undeclared.
+#
+# What does NOT belong here: binaries referenced only by shipped *workload* policies
+# (an [exec].allow granting /usr/bin/git makes git a requirement of that policy, not of
+# kennel — the policy refuses cleanly without it). Provider policies are the exception:
+# kenneld spawns those itself, so their workloads are kennel's own dependencies.
+#
+# tier = "hard"     kennel does not function without it            → Depends / Requires
+#        "install"  the install ceremony needs it                  → Depends / Requires
+#        "feature"  a named feature is unavailable without it      → Recommends
+#        "provider" a shipped provider policy's workload           → Recommends/Suggests
+#        "build"    compile-time only, never on a user machine     → Build-Depends only
+#
+# Package-name fields: `debian` and `fedora`. An empty string means the binary is part
+# of the distro's essential set (always present, no dependency line emitted).
+
+# ── runtime: hard ────────────────────────────────────────────────────────────────────
+
+[[dep]]
+bin = "ssh-keygen"
+tier = "hard"
+serves = "policy signing and verification (sshsig) — every compile/sign/verify ceremony"
+debian = "openssh-client"
+fedora = "openssh-clients"
+
+[[dep]]
+bin = "sha256sum"
+tier = "hard"
+serves = "artefact digests (kenneld, workspace manifests)"
+debian = "coreutils"
+fedora = "coreutils"
+
+[[dep]]
+bin = "diff"
+tier = "hard"
+serves = "kennel review — manifest pin drift rendering"
+debian = "diffutils"
+fedora = "diffutils"
+
+[[dep]]
+bin = "gzip"
+tier = "hard"
+serves = "audit log rotation"
+debian = "gzip"
+fedora = "gzip"
+
+[[dep]]
+bin = "ip"
+tier = "hard"
+serves = "net egress — TUN interface bring-up"
+debian = "iproute2"
+fedora = "iproute"
+
+[[dep]]
+bin = "sh"
+tier = "hard"
+serves = "embedded ceremony scripts (OCI fetch, key derivation)"
+debian = ""
+fedora = ""
+
+# ── install ceremony ─────────────────────────────────────────────────────────────────
+
+[[dep]]
+bin = "systemctl"
+tier = "install"
+serves = "unit install/enable; kenneld runs as a systemd service"
+debian = "systemd"
+fedora = "systemd"
+
+[[dep]]
+bin = "setcap"
+tier = "install"
+serves = "file capabilities on the privhelpers"
+debian = "libcap2-bin"
+fedora = "libcap"
+
+[[dep]]
+bin = "modprobe"
+tier = "install"
+serves = "binder module load (+ modules-load.d persistence)"
+debian = "kmod"
+fedora = "kmod"
+
+[[dep]]
+bin = "apparmor_parser"
+tier = "feature"
+feature = "apparmor-layer"
+serves = "the AppArmor defense-in-depth layer (kenneld userns grant, workload profiles) — the install ceremony skips it cleanly when absent"
+debian = "apparmor"
+fedora = ""
+note = "Fedora is SELinux: the AppArmor layer does not load there — a named gap, not a refusal. No SELinux policy is shipped yet."
+
+# ── features ─────────────────────────────────────────────────────────────────────────
+
+[[dep]]
+bin = "skopeo"
+tier = "feature"
+feature = "oci"
+serves = "kennel oci — image pull into a local OCI layout"
+debian = "skopeo"
+fedora = "skopeo"
+
+[[dep]]
+bin = "umoci"
+tier = "feature"
+feature = "oci"
+serves = "kennel oci — rootless layer unpack into the run bundle"
+debian = "umoci"
+fedora = "umoci"
+
+# ── provider policy workloads (kenneld spawns these) ─────────────────────────────────
+
+[[dep]]
+bin = "cage"
+tier = "provider"
+feature = "gui"
+serves = "gui-broker (default display provider) — kiosk compositor under compositor-broker"
+debian = "cage"
+fedora = "cage"
+
+[[dep]]
+bin = "weston"
+tier = "provider"
+feature = "gui"
+serves = "gui-broker-weston (alternate display provider)"
+debian = "weston"
+fedora = "weston"
+
+# ── build-time only ──────────────────────────────────────────────────────────────────
+
+[[dep]]
+bin = "clang"
+tier = "build"
+serves = "BPF egress programs (kennel-lib-bpf build.rs; the in-crate runtime call site is test scaffolding)"
+debian = "clang"
+fedora = "clang"
+
+# ── kernel requirements ──────────────────────────────────────────────────────────────
+# Not packages on Debian (all in-tree/enabled); on Fedora, binder needs the dkms detour.
+
+[[kernel]]
+name = "binder"
+tier = "hard"
+config = "CONFIG_ANDROID_BINDERFS"
+serves = "the kenneld<->kennel control plane and the entire service mesh — kennel does not function without it"
+debian = ""                       # in-tree module binder_linux, loaded via modules-load.d
+fedora = "kennel-binder-dkms"     # Fedora kernels do not enable binder; dkms build of the in-tree source
+note = "Secure Boot: a dkms-built module will not load until the MOK is enrolled — front-of-box in the Fedora docs."
+
+[[kernel]]
+name = "landlock"
+tier = "hard"
+config = "CONFIG_SECURITY_LANDLOCK"
+serves = "filesystem sandboxing"
+debian = ""
+fedora = ""
+
+[[kernel]]
+name = "userns"
+tier = "hard"
+config = "CONFIG_USER_NS"
+serves = "unprivileged namespace construction (also: unprivileged_userns_clone / AppArmor userns policy must permit kenneld)"
+debian = ""
+fedora = ""
+
+[[kernel]]
+name = "seccomp"
+tier = "hard"
+config = "CONFIG_SECCOMP_FILTER"
+serves = "syscall filtering"
+debian = ""
+fedora = ""

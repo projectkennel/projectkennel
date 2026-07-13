@@ -2,7 +2,11 @@
 
 All notable changes to Project Kennel are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/); the project follows semantic versioning from 0.1.0, its first versioned cut.
 
-Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Security fixes
+Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
+
+## [Unreleased]
+
+### Security fixes
 
 - **The reserved-namespace authority gate is now enforced at `kennel policy compile`, not only at
   the `install`/`clone` courtesy (0.7.0 W9-F1).** A leaf's own `[[provides]]` claim on a reserved
@@ -79,6 +83,27 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Installer changes
 
+- **The external-dependency contract is explicit, and `.deb` packaging derives from it (0.7.0
+  W11).** Everything kennel's own code, installer, and shipped provider policies invoke on the
+  host is now declared in `dist/dependencies.toml` — tiered (hard / install / feature / provider /
+  build / kernel), with per-family package names — and a CI guard (`external-deps-manifest.sh`)
+  cross-checks the manifest against the real call sites in both directions: a new shell-out cannot
+  ship undeclared, a stale entry cannot linger. The installer pre-flights the manifest before
+  placing anything (a missing hard dependency aborts with the distro package name; a missing
+  feature dependency warns — the feature refuses cleanly at use). Binder is declared for what it
+  is: a **hard kernel requirement** — the kenneld↔kennel control plane and the entire service
+  mesh ride on it (Debian: the in-tree `binder_linux` module; Fedora needs a dkms build detour,
+  packaging to follow).
+- **The install ceremony is one code path (`install-lib.sh`).** setcap on the privhelpers, the
+  binder module load, the host-key mint + reference-policy compile, and the post-install checks
+  are a sourceable lib that `install.sh` uses and the `.deb` postinst embeds verbatim at package
+  build — the tarball and package installs cannot drift. The reference-policy compile now reads
+  the installed vendor tree (identical content; one path for both callers).
+- **`build-deb.sh` builds a `.deb` from an unpacked release payload with no hand-maintained
+  packaging manifest.** The file list is the release payload itself; `Depends`/`Recommends`/
+  `Suggests` generate from `dist/dependencies.toml`; dpkg natively supplies what install.sh
+  hand-builds for the tarball path (upgrade removal of retired files = the W7 sweep; conffile
+  discipline = seed-if-absent `/etc`).
 - **The payload manifest (0.7.0 W7): an upgrade removes what the release no longer ships,
   and says so.** The staged tree is the manifest: anything in a fully kennel-managed
   directory (`/usr/libexec/kennel`, `/usr/libexec/kennel-facades`, and the vendor tree's
@@ -105,10 +130,6 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   shipped catalogue gains `/etc/fonts` (the confined GUI's fontconfig — the gui fragments
   granted it, the catalogue never bound it: the trap's own live receipt, caught by the
   new diagnostic).
-
-### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
-
-## [Unreleased]
 
 ### CLI changes
 
