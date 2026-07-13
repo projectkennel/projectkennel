@@ -6,6 +6,21 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-13
+
+**The operator-UX release: the CLI reads as the model, and the release knows its own dependencies.**
+0.7.0 spends no capacity on new confinement surface; it makes the surface that exists **legible and
+operable**. The load-bearing distinctions — settled vs source, template vs leaf, user vs host vs
+vendor authority — were all real and enforced, but enforced by *failure*: the CLI let you hold the
+wrong object at the wrong verb and told you at the end. The release restructures the verb set so
+each house owns its material (**run** touches only settled artefacts; **authoring** owns
+source/templates/keys), adds the missing ceremonies (`clone`, `install`, key management), and lands
+the list-field consistency pass (schema v5) — the biggest policy-authoring footgun left. A pre-ship
+adversarial pass proved the new ceremonies never became enforcement points, and caught one real
+hole where they nearly did (the reserved gate off at `kennel policy compile`, W9-F1). Finally, the
+release's external-dependency contract is made explicit and `.deb`/`.rpm` packaging derives from
+it — one install ceremony, three delivery formats.
+
 ### Security fixes
 
 - **The reserved-namespace authority gate is now enforced at `kennel policy compile`, not only at
@@ -284,6 +299,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   daemon drops the connection on the unknown request tag (after a successful W17 handshake),
   which the CLI reports as "the running daemon predates `kennel version`" — the skew report
   degrades, never breaks, against every older daemon.
+
+### Threat catalogue
+
+- **Unchanged this release — `catalogue_version` stays `0.6`.** The threat catalogue
+  (`docs/reference/THREATS.md` and its machine mirror `dist/threats/catalogue.toml`) is
+  byte-identical to 0.6.0. The catalogue version tracks the catalogue's own content revisions, not
+  the package minor, so it stays `0.6` here rather than bumping in lockstep — nothing in the model
+  changed to renumber.
 
 ## [0.6.0] — 2026-07-06
 
