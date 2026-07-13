@@ -11,7 +11,12 @@
 # Callers define run() (install.sh: dry-run aware). Absent one, commands run directly.
 # shellcheck shell=bash
 
-type run >/dev/null 2>&1 || run() { "$@"; }
+if ! type run >/dev/null 2>&1; then
+	run() {
+		"$@"
+		return
+	}
+fi
 
 # kn_detect_family: echo "debian" | "fedora" | "" from os-release.
 kn_detect_family() {
@@ -23,6 +28,7 @@ kn_detect_family() {
 		*fedora*|*rhel*|*centos*) echo fedora ;;
 		*) echo "" ;;
 	esac
+	return 0
 }
 
 # kn_check_deps <dependencies.toml>: pre-flight the external dependencies.
@@ -32,7 +38,7 @@ kn_check_deps() {
 	local manifest="$1"
 	[[ -f "$manifest" ]] || { echo "install: no $manifest — cannot pre-flight dependencies" >&2; return 0; }
 	local fam; fam="$(kn_detect_family)"
-	local missing_hard=0 line bin tier pkg
+	local missing_hard=0 bin tier pkg
 	# The manifest's [[dep]] entries, flattened to "bin<TAB>tier<TAB>package-for-family".
 	while IFS=$'\t' read -r bin tier pkg; do
 		[[ -n "$bin" ]] || continue
@@ -43,6 +49,7 @@ kn_check_deps() {
 				missing_hard=1 ;;
 			feature|provider)
 				echo "  [absent]  $bin (${pkg:-$bin}) — optional; the feature it serves refuses without it" ;;
+			*) ;; # build/unknown tiers are not host requirements
 		esac
 	done < <(awk -v fam="${fam:-debian}" '
 		function flush() { if (bin != "") printf "%s\t%s\t%s\n", bin, tier, pkg[fam]; bin=""; tier=""; delete pkg }
@@ -80,6 +87,7 @@ kn_setcap_privhelpers() {
 	run setcap cap_net_admin+ep "$libexec/kennel-privhelper-net"
 	run setcap cap_bpf,cap_net_admin,cap_perfmon+ep "$libexec/kennel-privhelper-bpf"
 	run setcap cap_sys_admin+ep "$libexec/kennel-privhelper-mounts"
+	return 0
 }
 
 # kn_binder_modload: load the binder module now and on every boot. The factory does not
@@ -89,6 +97,7 @@ kn_setcap_privhelpers() {
 kn_binder_modload() {
 	run modprobe binder_linux 2>/dev/null || true
 	run sh -c 'echo binder_linux > /etc/modules-load.d/kennel.conf' 2>/dev/null || true
+	return 0
 }
 
 # kn_compile_reference_policies <vendor_dir> <kennel_bin>: mint the host signing key
@@ -191,4 +200,5 @@ kn_post_checks() {
 	else
 		echo "  [ok]   unprivileged userns is not AppArmor-restricted"
 	fi
+	return 0
 }

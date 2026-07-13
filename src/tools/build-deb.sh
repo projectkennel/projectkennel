@@ -52,7 +52,8 @@ trap 'rm -rf "$root"' EXIT
 pkg="$root/pkg"
 
 place() { # place <mode> <src> <dest-under-pkg>
-	install -D -m "$1" "$2" "$pkg$3"
+	local mode="$1" src="$2" dest="$3"
+	install -D -m "$mode" "$src" "$pkg$dest"
 }
 
 # ── the file payload, mapped exactly as install.sh maps it ──────────────────────────
@@ -128,6 +129,7 @@ for row in "${dep_rows[@]}"; do
 		hard|install) [[ ", $depends,"    == *", $pkgname,"* ]] || depends="$depends, $pkgname" ;;
 		feature)      [[ ", $recommends," == *", $pkgname,"* ]] || recommends="${recommends:+$recommends, }$pkgname" ;;
 		provider)     [[ ", $suggests,"   == *", $pkgname,"* ]] || suggests="${suggests:+$suggests, }$pkgname" ;;
+		*) ;; # build-tier deps never reach a runtime package field
 	esac
 done
 
