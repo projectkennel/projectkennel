@@ -142,16 +142,16 @@ debian = "clang"
 fedora = "clang"
 
 # ── kernel requirements ──────────────────────────────────────────────────────────────
-# Not packages on Debian (all in-tree/enabled); on Fedora, binder needs the dkms detour.
+# Not packages on Debian (all in-tree/enabled); on Fedora, binder needs a kmod detour.
 
 [[kernel]]
 name = "binder"
 tier = "hard"
 config = "CONFIG_ANDROID_BINDERFS"
 serves = "the kenneld<->kennel control plane and the entire service mesh — kennel does not function without it"
-debian = ""                       # in-tree module binder_linux, loaded via modules-load.d
-fedora = "kennel-binder-dkms"     # Fedora kernels do not enable binder; dkms build of the in-tree source
-note = "Secure Boot: a dkms-built module will not load until the MOK is enrolled — front-of-box in the Fedora docs."
+debian = ""   # in-tree module binder_linux, loaded via modules-load.d
+fedora = ""   # not built by Fedora kernels; the community binder kmod/akmod COPRs supply it (maintainer ruling: not vendored/shipped by kennel)
+note = "Secure Boot: an out-of-tree-built module will not load until the MOK is enrolled — front-of-box in the Fedora docs."
 
 [[kernel]]
 name = "landlock"

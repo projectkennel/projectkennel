@@ -186,8 +186,9 @@ kn_post_checks() {
 		echo "  [ATTN] no binder filesystem and no binder_linux module — kennel DOES NOT FUNCTION"
 		echo "         without binder (the kenneld<->kennel control plane rides on it)."
 		if [[ "$(kn_detect_family)" = fedora ]]; then
-			echo "         Fedora kernels do not enable binder: install kennel-binder-dkms"
-			echo "         (Secure Boot: enroll the MOK or the module will not load)."
+			echo "         Fedora kernels do not build binder: install a community binder kmod"
+			echo "         (the waydroid-ecosystem binder_linux kmod/akmod COPRs; Secure Boot:"
+			echo "         enroll the MOK or the module will not load)."
 		else
 			echo "         The kernel needs CONFIG_ANDROID_BINDERFS."
 		fi
