@@ -99,6 +99,12 @@ run() {
 	fi
 }
 
+# The shared install CEREMONY (setcap, binder modload, dependency pre-flight, the
+# host-specific reference-policy compile) — one code path with the package maintainer
+# scripts, which embed the same lib at package build.
+# shellcheck source=install-lib.sh
+. "$pkg_root/install-lib.sh"
+
 require_root() {
 	[[ "$dry_run" -eq 1 ]] && return 0
 	if [[ "$(id -u)" -ne 0 ]]; then
@@ -135,49 +141,22 @@ install_binaries() {
 	for f in "$bindir"/*;          do [ -f "$f" ] && run install -m 0755 "$f" "$libexec/$(basename "$f")"; done
 	for f in "$pkg_root/facades"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$facades_dir/$(basename "$f")"; done
 	for f in "$pkg_root/pathbin"/*; do [ -f "$f" ] && run install -m 0755 "$f" "$pathbin_dir/$(basename "$f")"; done
-	# The privhelper factory: file capabilities cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin.
-	# The identity caps write the kennel's uid/gid maps; cap_sys_admin is what the kernel requires
-	# to write a userns map that maps host uid 0 (the `0 0 1` line giving the kennel a real uid 0
-	# for its binderfs and root-owned view) — the map-write gate checks CAP_SYS_ADMIN over the new
-	# namespace. The namespace/view/binderfs work is userns-scoped, and the host-context steps
-	# (host-lo mirror, egress BPF, exclusive over-mount) are delegated to the capability-split
-	# sub-helpers, so cap_net_admin/cap_bpf/cap_perfmon never ride the factory. Where the filesystem
-	# cannot carry file capabilities (no xattr support), fall back to setuid-root.
+	# The four privilege-bearing helpers are placed root-owned here; the capability
+	# ceremony itself (file caps per helper, setuid fallback) is the shared lib's
+	# (kn_setcap_privhelpers) — one code path with the package postinst, which cannot
+	# ship xattrs in the data archive. Rationale per helper lives with the ceremony.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper" "$libexec/kennel-privhelper"
-	if setcap cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin+ep "$libexec/kennel-privhelper" 2>/dev/null; then
-		echo "   kennel-privhelper: file caps cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin (no setuid)"
-	else
-		echo "   kennel-privhelper: file caps unsupported here — setuid-root fallback" >&2
-		run chmod 4755 "$libexec/kennel-privhelper"
-	fi
-	# The bind-mirror network sub-helper: NOT setuid — it carries the single file capability
-	# cap_net_admin, the only privilege its one scoped op (add/remove a kennel's host-lo
-	# loopback address) needs. The main privhelper execs it only when a policy binds mirrored
-	# ports, so the common factory holds no network capability.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-net" "$libexec/kennel-privhelper-net"
-	run setcap cap_net_admin+ep "$libexec/kennel-privhelper-net"
-	# The host-mode egress sub-helper: cap_bpf (load), cap_net_admin (cgroup-network attach), and
-	# cap_perfmon (the cgroup-sockaddr programs read kernel context, which the verifier gates on
-	# CAP_PERFMON under kernel.unprivileged_bpf_disabled). The main privhelper execs it only for
-	# net.mode=host, so these stay off the common factory.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-bpf" "$libexec/kennel-privhelper-bpf"
-	run setcap cap_bpf,cap_net_admin,cap_perfmon+ep "$libexec/kennel-privhelper-bpf"
-	# The exclusive-bind sub-helper: cap_sys_admin (the host-mount-namespace over-mount that
-	# shadows an fs.exclusive path). The main privhelper execs it only for a policy with
-	# exclusive binds, so the near-root capability stays off the common factory.
 	run install -m 0755 -o root -g root "$bindir/kennel-privhelper-mounts" "$libexec/kennel-privhelper-mounts"
-	run setcap cap_sys_admin+ep "$libexec/kennel-privhelper-mounts"
+	kn_setcap_privhelpers "$libexec"
 	# The trusted init: the privhelper factory fexecves this as the kennel's uid-0
 	# PID 1, so it is a trust anchor — install it root-owned and not group/other
 	# writable (verify_trusted_init refuses any other owner or a 0o022 bit). It is
 	# NOT setuid: it gains uid 0 only inside the kennel's user namespace.
 	run install -m 0755 -o root -g root "$bindir/kennel-bin-init" "$libexec/kennel-bin-init"
-	# Load the binder kernel module the factory's per-kennel binderfs needs — now, and on every
-	# boot via modules-load.d. The factory does not modprobe at runtime (that needs CAP_SYS_MODULE,
-	# which the file-capability factory does not carry). Best-effort: a host with binder built-in
-	# already lists it; a genuinely binder-less host fails construction later with a clear error.
-	modprobe binder_linux 2>/dev/null || true
-	printf 'binder_linux\n' > /etc/modules-load.d/kennel.conf 2>/dev/null || true
+	# Binder module: now + every boot (kennel does not function without it).
+	kn_binder_modload
 }
 
 install_config() {
@@ -378,92 +357,17 @@ install_keys() {
 }
 
 install_reference_policies() {
-	# The reference policy SOURCES (policies/<n>, policies/providers/<n>) are maintainer-signed and
-	# ship to the vendor tree (install_config). Their SETTLED form is HOST-specific — the
-	# executable-closure loader pin embeds THIS host's library closure, so a settled policy cannot be
-	# shipped — so we compile each source HERE and sign it with a HOST key the daemon trusts. The host
-	# key is minted once into the admin trust dir (/etc/kennel/keys) and reused on every reinstall; the
-	# `<name>.settled.toml` land under /etc/kennel/policies, which the policy search cascade resolves.
-	# A missing ssh-keygen or a single failing compile is non-fatal (warn + skip).
-	[[ -d "$pkg_root/policies" ]] || return 0
-	local kbin="$pathbin_dir/kennel" host_id="kennel-host" key_dir="/etc/kennel/keys"
+	# The reference policy SOURCES are maintainer-signed and ship to the vendor tree
+	# (install_config); their SETTLED form is HOST-specific (the executable-closure loader
+	# pin), so the shared lib compiles them here, host-signed, and enables the standing
+	# brokers — one code path with the package postinst (kn_compile_reference_policies).
 	if [[ "$dry_run" -eq 1 ]]; then
-		echo "DRY-RUN: mint host key '$host_id' in $key_dir (if absent), then compile each policies/* +"
-		echo "         policies/providers/* source --key it into /etc/kennel/policies/<n>/<n>.settled.toml"
+		echo "DRY-RUN: mint host key 'kennel-host' in /etc/kennel/keys (if absent), then compile each"
+		echo "         vendor policies/* + policies/providers/* source into /etc/kennel/policies/<n>/"
+		echo "         <n>.settled.toml and enable the standing brokers ondemand"
 		return 0
 	fi
-	[[ -x "$kbin" ]] || { echo "install.sh: $kbin not found; skipping reference-policy compile" >&2; return 0; }
-	if ! command -v ssh-keygen >/dev/null 2>&1; then
-		echo "install.sh: ssh-keygen absent — cannot mint a host signing key; skipping reference-policy compile" >&2
-		return 0
-	fi
-	# Reuse an existing host key, else mint one. `key generate` invoked as root writes the
-	# host-tier pair (private + .pub) into the deployment trust dir (= /etc/kennel/keys);
-	# the daemon trusts the .pub, so host-signed policies verify. The private key stays
-	# root-only in the root-owned key dir.
-	if [[ ! -f "$key_dir/$host_id" ]]; then
-		echo "install.sh: minting host policy-signing key '$host_id' in $key_dir"
-		"$kbin" key generate "$host_id" >/dev/null 2>&1 \
-			|| { echo "install.sh: host key generate failed; skipping reference-policy compile" >&2; return 0; }
-	else
-		echo "install.sh: reusing host policy-signing key '$host_id'"
-	fi
-	# Compile every leaf + provider source → host-signed settled artefact, verifying the maintainer-
-	# signed templates/fragments it derives from against the vendor trust + template dirs.
-	local src rel name out count=0
-	for src in "$pkg_root"/policies/*/policy.toml "$pkg_root"/policies/providers/*/policy.toml; do
-		[[ -f "$src" ]] || continue
-		rel="${src#"$pkg_root"/policies/}"; rel="${rel%/policy.toml}"   # "gui-session" or "providers/gui-broker"
-		name="$(basename "$rel")"
-		out="/etc/kennel/policies/$rel/$name.settled.toml"
-		install -d -m 0755 "$(dirname "$out")"
-		if "$kbin" policy compile "$src" --key "$key_dir/$host_id" --key-id "$host_id" \
-				--trust-dir "$vendor_dir/keys" --template-dir "$vendor_dir/templates" \
-				--no-lock --output "$out" >/dev/null 2>&1; then
-			echo "  + $rel → $out"; count=$((count + 1))
-		else
-			echo "  ! $rel: compile failed (skipped)" >&2
-		fi
-	done
-	echo "install.sh: compiled $count reference policies into /etc/kennel/policies"
-	# Enable the standing D-Bus broker ondemand at the per-host layer (W4): with the legacy
-	# per-kennel host-dbus delegate retired, the broker is the ONE mediation home — a `[dbus]`
-	# kennel's bus is unserved without it. `ondemand/` is lazy (socket-activated on first
-	# consume), so a host with no D-Bus consumer still pays nothing. Installing IS the admin's
-	# act, and the link is the admin-tier enablement (§7.13.6); a per-user link overrides it.
-	local broker_settled="/etc/kennel/policies/providers/dbus-broker/dbus-broker.settled.toml"
-	if [[ -f "$broker_settled" ]]; then
-		install -d -m 0755 /etc/kennel/ondemand
-		ln -sf "$broker_settled" /etc/kennel/ondemand/dbus-broker
-		echo "install.sh: enabled the dbus-broker provider (ondemand, per-host)"
-	fi
-
-	# Enable the standing UDP-egress broker ondemand at the per-host layer (W2): a `[net.udp]`
-	# kennel's egress is unserved without it — the section implies the `org.projectkennel.tun-udp`
-	# consume, socket-activated on first consume (a host with no UDP consumer pays nothing). Same
-	# admin-tier enablement as the D-Bus broker; a per-user link overrides it.
-	local tun_settled="/etc/kennel/policies/providers/tun-broker/tun-broker.settled.toml"
-	if [[ -f "$tun_settled" ]]; then
-		install -d -m 0755 /etc/kennel/ondemand
-		ln -sf "$tun_settled" /etc/kennel/ondemand/tun-broker
-		echo "install.sh: enabled the tun-broker provider (ondemand, per-host)"
-	fi
-
-	# Enable ONE confined-GUI display broker ondemand at the per-host layer: a `gui-interactive` /
-	# `gui-session` kennel `[[consumes]]` org.projectkennel.wayland, unserved without it —
-	# socket-activated on first consume (a host with no GUI consumer pays nothing). Two brokers
-	# are shipped so the operator can pick the compositor: **weston** (default — a decorated,
-	# resizable host window) and **cage** (the `gui-broker` kiosk — a minimal borderless surface).
-	# Switch by repointing this link at the
-	# chosen provider's settled artefact, or build your own leaf. Same admin-tier enablement as the
-	# D-Bus / UDP brokers; a per-user link overrides it. The broker holds the host-Wayland leg +
-	# render node, so it activates only where a display exists.
-	local gui_default="/etc/kennel/policies/providers/gui-broker-weston/gui-broker-weston.settled.toml"
-	if [[ -f "$gui_default" ]]; then
-		install -d -m 0755 /etc/kennel/ondemand
-		ln -sf "$gui_default" /etc/kennel/ondemand/gui-broker
-		echo "install.sh: enabled the gui-broker-weston provider (ondemand, per-host; cage kiosk also shipped)"
-	fi
+	kn_compile_reference_policies "$vendor_dir" "$pathbin_dir/kennel"
 
 	# Kennel-authored app configs, served into a kennel's view by a W15 `source` redirect
 	# (`gui-session` overlays /etc/kennel/config/labwc at the view's /etc/xdg/labwc). Host-independent
@@ -576,43 +480,9 @@ print_next_steps() {
 	echo "  host config:      /etc/kennel (trust store + host templates = host-namespace authority; host-compiled policies; provider enablement; GUI configs; seeded system.toml/config.toml/kennel-sshd.conf)"
 	echo
 	echo "Post-install checks:"
-
-	# 1. privhelper factory privilege — the one thing that must be exactly right. Normally the
-	#    file caps cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin; setuid-root is the no-xattr
-	#    fallback. Either is acceptable; no privilege at all means kennels cannot construct.
-	local ph="$libexec/kennel-privhelper" perms owner caps
-	perms="$(stat -c '%A' "$ph" 2>/dev/null || echo '?')"
-	owner="$(stat -c '%U' "$ph" 2>/dev/null || echo '?')"
-	caps="$(getcap "$ph" 2>/dev/null | sed 's|^[^ ]* ||')"
-	if [[ -n "$caps" ]]; then
-		echo "  [ok]   privhelper factory has file caps ($caps)"
-	elif [[ "$owner" = root ]] && [[ "${perms:3:1}" = s ]]; then
-		echo "  [ok]   privhelper factory is setuid-root ($perms $owner) — no-xattr fallback"
-	else
-		echo "  [ATTN] privhelper factory has NO privilege ($perms $owner) — kennels will fail to construct"
-		echo "         fix: sudo setcap cap_setuid,cap_setgid,cap_setfcap,cap_sys_admin+ep $ph"
-	fi
-
-	# 2. binder filesystem available (the kennel bus). Loaded here and on boot
-	#    (/etc/modules-load.d/kennel.conf); flag it now so a binder-less kernel is obvious up front.
-	if grep -qw binder /proc/filesystems 2>/dev/null; then
-		echo "  [ok]   binder filesystem registered"
-	elif modinfo binder_linux >/dev/null 2>&1; then
-		echo "  [ok]   binder_linux module available (loaded on first kennel)"
-	else
-		echo "  [ATTN] no binder filesystem and no binder_linux module — the kernel needs"
-		echo "         CONFIG_ANDROID_BINDERFS; kennels cannot start without it"
-	fi
-
-	# 3. AppArmor userns restriction (Ubuntu 23.10+): our profile handles it, just report.
-	if [[ -e /etc/apparmor.d/kenneld ]]; then
-		echo "  [ok]   AppArmor userns profile installed"
-	elif [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]]; then
-		echo "  [ATTN] unprivileged userns is AppArmor-restricted but no profile was installed"
-		echo "         (no /etc/apparmor.d on this host?) — kenneld may be denied CLONE_NEWUSER"
-	else
-		echo "  [ok]   unprivileged userns is not AppArmor-restricted"
-	fi
+	# The make-or-break outcomes (privhelper privilege, binder, AppArmor userns) — the
+	# shared lib runs them so the package postinst reports identically.
+	kn_post_checks "$libexec"
 
 	# The invoking user (sudo) — tailor the per-user block to them; fall back to a placeholder.
 	local u="${SUDO_USER:-}" uid_line=""
@@ -655,6 +525,11 @@ EOF
 }
 
 verify_payload
+# Pre-flight the external dependencies (dist/dependencies.toml, verified above as part
+# of the payload): a missing hard/install-tier binary aborts with the distro package
+# name; a missing feature-tier binary warns and installs anyway.
+echo "install.sh: pre-flighting external dependencies"
+kn_check_deps "$pkg_root/dist/dependencies.toml"
 require_root
 install_binaries
 install_config
