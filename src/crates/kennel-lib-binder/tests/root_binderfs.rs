@@ -15,6 +15,7 @@
 #![cfg(feature = "e2e")]
 
 use std::os::fd::AsFd;
+use std::os::unix::fs::FileTypeExt as _;
 
 use kennel_lib_binder::{binderfs, proto, sys};
 
@@ -41,6 +42,27 @@ fn binderfs_mount_alloc_and_context_mgr() {
 
     let (major, _minor) = binderfs::add_binder_device(&dir).expect("allocate the binder device");
     assert_ne!(major, 0, "expected a real character-device major");
+
+    // The instance holds exactly the `binder` context afterwards, whatever the kernel's
+    // CONFIG_ANDROID_BINDER_DEVICES pre-created: no `hwbinder`/`vndbinder` surplus survives
+    // (on Fedora they are pre-created and add_binder_device sweeps them; on an empty-config
+    // kernel there was never any surplus). `features` is a directory, not a device.
+    let mut devices: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read binderfs")
+        .filter_map(|e| {
+            let e = e.ok()?;
+            e.file_type()
+                .ok()?
+                .is_char_device()
+                .then(|| e.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    devices.sort();
+    assert_eq!(
+        devices,
+        vec!["binder".to_owned(), "binder-control".to_owned()],
+        "a kennel binderfs must hold only binder + binder-control (surplus pre-created devices swept)",
+    );
 
     let fd = binderfs::open_binder_device(&dir).expect("open /dev/binderfs/binder");
 

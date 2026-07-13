@@ -52,7 +52,7 @@ mined_script="$({ grep -rhoP 'if ! \K[a-z][a-z0-9_-]+(?= )' src/crates --include
 
 # ── mine 3: installer ceremony binaries install.sh + install-lib.sh invoke ──────────
 # Command positions only (line start, `run` wrapper, && / || / if), not prose or paths.
-mined_install="$(grep -ohP '(^|\t| {2,}|run |&& |\|\| |if ! |if )\K(systemctl|setcap|modprobe|apparmor_parser|ssh-keygen)(?= )' \
+mined_install="$(grep -ohP '(^|\t| {2,}|run |&& |\|\| |if ! |if )\K(systemctl|setcap|modprobe|apparmor_parser|ssh-keygen|semodule|restorecon)(?= )' \
 	src/tools/install.sh src/tools/install-lib.sh | sort -u)"
 
 fail=0

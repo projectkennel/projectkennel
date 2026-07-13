@@ -104,6 +104,23 @@ sudo apparmor_parser -r -W /etc/apparmor.d/kenneld
 > [!NOTE]
 > If you used a custom `--prefix` during installation (for example, `/usr/libexec`), edit the profile path `/usr/libexec/kennel/kenneld` inside `/etc/apparmor.d/kenneld` to match the actual installed `kenneld` binary path.
 
+## 5. SELinux Policy (Fedora / RHEL, enforcing)
+
+SELinux is the confinement substrate on Fedora-family systems, the analogue of the AppArmor profile above. The base policy withholds the `binder` object class from *every* domain — including `unconfined_t` — so under enforcing SELinux `kenneld` cannot become the per-kennel binder context manager, and a kennel fails to start (`binder context manager not started: Permission denied`). The `.rpm` loads the policy module automatically in `%post`; installing from the tarball, load it by hand:
+
+```bash
+sudo semodule -i dist/selinux/kennel.cil
+sudo restorecon -F /usr/libexec/kennel/kenneld
+```
+
+The module defines two domains: `kennel_t` for the trusted base (`kenneld` + the file-capped privhelper + `kennel-bin-init`), and `kennel_workload_t` for the untrusted workload — bounded by `kennel_t` via `typebounds`, so a workload can talk to `kenneld` over binder but cannot become a context manager, relabel, or touch SELinux. The confiner and the confined are never the same SELinux subject.
+
+> [!IMPORTANT]
+> **Fedora silently `dontaudit`s binder denials.** If a kennel fails on an SELinux system and you see *no* AVC in `ausearch`/`journalctl`, that is expected — the denials are suppressed. Reveal them with `sudo semodule -DB` (disable `dontaudit`), reproduce, inspect `ausearch -m AVC -ts recent`, then `sudo semodule -B` to restore. The most common cause is simply that the module above is not loaded.
+
+> [!NOTE]
+> The `kennel_t` entry transition is defined from the `unconfined_r`, `staff_r`, and `sysadm_r` login roles (Fedora Workstation defaults to `unconfined_r`). If your operators log in under a custom confined role, add that role to the transition (`roletype <role> kennel_t` / `roletype <role> kennel_workload_t` in a local module) or they will get no binder and kennels will not start.
+
 ---
 
 ## Next steps

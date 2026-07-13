@@ -94,7 +94,24 @@ feature = "apparmor-layer"
 serves = "the AppArmor defense-in-depth layer (kenneld userns grant, workload profiles) — the install ceremony skips it cleanly when absent"
 debian = "apparmor"
 fedora = ""
-note = "Fedora is SELinux: the AppArmor layer does not load there — a named gap, not a refusal. No SELinux policy is shipped yet."
+note = "Debian/Ubuntu path. Fedora is SELinux — the AppArmor layer does not apply there; the binder grant it needs comes from the kenneld_t SELinux module (semodule below)."
+
+[[dep]]
+bin = "semodule"
+tier = "feature"
+feature = "selinux-layer"
+serves = "load the kenneld_t SELinux policy module (dist/selinux/kennel.cil) — the binder object class the base Fedora policy withholds even from unconfined_t; without it a kennel cannot become the binder context manager under enforcing SELinux"
+debian = ""
+fedora = "policycoreutils"
+note = "Fedora/SELinux path (the analogue of apparmor_parser). Absent on a Debian/AppArmor host, where the module is neither shipped nor loaded."
+
+[[dep]]
+bin = "restorecon"
+tier = "feature"
+feature = "selinux-layer"
+serves = "label the kenneld binary (kenneld_exec_t) so the SELinux domain transition into kenneld_t fires"
+debian = ""
+fedora = "policycoreutils"
 
 # ── features ─────────────────────────────────────────────────────────────────────────
 
