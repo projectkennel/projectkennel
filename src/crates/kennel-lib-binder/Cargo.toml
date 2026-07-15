@@ -11,6 +11,9 @@ repository.workspace = true
 
 [dependencies]
 libc = "=0.2.186"
+# kennel-lib-syscall: the shared low-level primitives; used here for the wake eventfd
+# (`kennel_lib_syscall::wake`) the looper pool polls alongside the binder device fd.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 
 [features]
 e2e = []

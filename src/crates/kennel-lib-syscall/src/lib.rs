@@ -76,6 +76,7 @@ pub mod seccomp;
 pub mod signal;
 pub mod spawn;
 pub mod tun;
+pub mod wake;
 
 // The safe (no-`unsafe`) primitives live in `kennel-lib-os` so this crate carries only genuinely
 // unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_lib_syscall::{path, unistd,

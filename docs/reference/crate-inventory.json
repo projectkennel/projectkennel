@@ -1,12 +1,12 @@
 {
   "crate_count": 30,
-  "total_sloc": 39758,
+  "total_sloc": 39780,
   "tcb_crate_count": 16,
-  "tcb_sloc": 22890,
+  "tcb_sloc": 22912,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7842,
+      "sloc": 7857,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -45,16 +45,6 @@
       "external_deps": ["basic-toml", "ed25519-compact", "hmac-sha512", "object", "serde"]
     },
     {
-      "name": "kennel-lib-binder",
-      "sloc": 2271,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn", "tun-broker"],
-      "first_party_deps": [],
-      "external_deps": ["libc"]
-    },
-    {
       "name": "kennel-lib-spawn",
       "sloc": 2241,
       "uses_unsafe": false,
@@ -63,6 +53,16 @@
       "consumers": ["bin-init", "kenneld", "privhelper"],
       "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-policy", "kennel-lib-syscall"],
       "external_deps": []
+    },
+    {
+      "name": "kennel-lib-binder",
+      "sloc": 2225,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn", "tun-broker"],
+      "first_party_deps": ["kennel-lib-syscall"],
+      "external_deps": ["libc"]
     },
     {
       "name": "kennel-privhelper",
@@ -96,11 +96,11 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1150,
+      "sloc": 1200,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
-      "consumers": ["bin-init", "cli", "control", "facade", "kenneld", "privhelper", "spawn", "tun-broker"],
+      "consumers": ["bin-init", "binder", "bpf", "cli", "control", "facade", "kenneld", "privhelper", "spawn", "tun-broker"],
       "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
       "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
     },
@@ -116,12 +116,12 @@
     },
     {
       "name": "kennel-lib-bpf",
-      "sloc": 813,
+      "sloc": 816,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
       "consumers": ["kenneld", "spawn"],
-      "first_party_deps": [],
+      "first_party_deps": ["kennel-lib-syscall"],
       "external_deps": ["libc", "object"]
     },
     {
