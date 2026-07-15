@@ -113,6 +113,30 @@ settled-schema is a **release gate**, not a "verify only" axis — read its row 
     and `gh release create v<x.y.z>` with the tarballs + a `SHA256SUMS.txt` and the corrected CHANGELOG
     section as the body.
 
+12. **Build the `.deb`/`.rpm` packages** from the published tarballs — `src/tools/build-deb.sh` and
+    `src/tools/build-rpm.sh` per arch (both derive from the payload + `dist/dependencies.toml`; no
+    hand-maintained manifest). Attach them (with `.sha256` sidecars) to the GitHub release too.
+
+13. **Publish the signed package repositories** (`packages.projectkennel.org`, a Cloudflare R2 bucket
+    behind a custom domain). This is the primary install path; the GitHub-release assets are storage,
+    the repo is distribution. **The signing key never touches CI, R2, or the CDN — sign locally, upload
+    already-signed bytes.**
+    - `GNUPGHOME=<release-keyring> src/tools/build-repo.sh --key <release-key-fpr>` — builds the signed
+      APT repo (reprepro-signed `InRelease`) and DNF repo (`rpm --addsign` per package + a detach-signed
+      `repomd.xml`) under `dist/repo/`, plus the public key, its fingerprint, and `index.html`.
+    - `AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… R2_ENDPOINT=… R2_BUCKET=kennel-packages
+      src/tools/publish-repo.sh` — syncs the tree into R2 over the S3 API (`--delete` prunes retired
+      objects). The R2 token *signs nothing*: a leak serves stale or denied content, never a forged
+      package (that needs the offline GPG key). R2 has no per-file size cap.
+    - **Cloudflare config on the custom domain (one-time):** (a) a **Cache Rule** matching `/deb/pool/*`
+      and `/rpm/*/*.rpm` → Edge TTL 1y + immutable (packages are content-addressed; publish-repo uploads
+      a safe `must-revalidate` baseline so metadata freshness is never wrong even without the rule);
+      (b) a **Redirect Rule** `/` → `/index.html` (R2 does not serve a root index); (c) Always-Use-HTTPS.
+    - **The release signing key is a distinct, long-lived secret** — separate from the maintainer
+      template/policy key, and higher blast radius (a forged repo update is arbitrary code as root on
+      every install). Offline custody; publish its fingerprint in ≥2 independent channels (this release's
+      notes, the repo `index.html`, a DNS TXT on the domain) so users cross-check before importing.
+
 ## Why these gotchas exist
 
 - **Two lockfiles.** `src/fuzz` is a separate cargo workspace that path-deps the kennel crates, so

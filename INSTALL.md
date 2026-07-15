@@ -1,8 +1,39 @@
 # Installing Project Kennel
 
-This document describes how to build, install, and configure Project Kennel from source on a Linux system.
+The recommended install is the **signed package repository** ([below](#packages-signed-apt--dnf-repositories)) — `apt install kennel` / `dnf install kennel` from repositories Project Kennel hosts and signs itself. The rest of this document covers building and installing from a release tarball or from source.
 
-Installing is two steps: build a self-contained release tarball with `src/tools/build-release.sh`, then install it with the `install.sh` bundled inside. `install.sh` is a **pure installer** — it places a prebuilt payload (the binaries, the vendor config, the systemd units, the AppArmor profile, the trust-store key, and the signed templates) and file-caps the privhelper factory (setuid-root only where the filesystem cannot carry file caps). It does **not** build, and it runs only from an unpacked release tree, never from the source checkout.
+Project Kennel is **never** installed by piping a URL into a shell (`curl … | sh`) — that is threat T1.4 in [THREATS.md](docs/reference/THREATS.md), and a confinement tool has no business asking you to run unverified code as your user to get it. Every supported path verifies a signature you can cross-check.
+
+## Packages (signed APT / DNF repositories)
+
+The packages live in repositories at `packages.projectkennel.org` that the project builds and GPG-signs itself — no third-party build service or community mirror in the trust path. You import **one** public key (whose fingerprint you cross-check against this page, the GitHub release, and the domain's DNS TXT record), and thereafter `apt`/`dnf` verify every package and every metadata refresh against it. The host (Cloudflare Pages) only ever serves already-signed bytes; it holds no key and cannot forge a package.
+
+**Debian / Ubuntu:**
+
+```bash
+curl -fsSL https://packages.projectkennel.org/kennel-archive-keyring.asc | gpg --dearmor | sudo tee /usr/share/keyrings/kennel.gpg >/dev/null
+# Cross-check the fingerprint BEFORE trusting it (compare against the GitHub release notes):
+gpg --show-keys /usr/share/keyrings/kennel.gpg
+echo "deb [signed-by=/usr/share/keyrings/kennel.gpg] https://packages.projectkennel.org/deb stable main" | sudo tee /etc/apt/sources.list.d/kennel.list
+sudo apt update && sudo apt install kennel
+```
+
+**Fedora / RHEL:**
+
+```bash
+sudo curl -fsSL https://packages.projectkennel.org/rpm/kennel.repo -o /etc/yum.repos.d/kennel.repo
+sudo rpm --import https://packages.projectkennel.org/kennel-archive-keyring.asc   # then: rpm -qi gpg-pubkey-… to check the fingerprint
+sudo dnf install kennel
+```
+
+> [!NOTE]
+> The `curl` above fetches a **public key**, not a script — nothing executes, and apt/dnf reject the key unless its fingerprint matches what they later verify against. That is the difference between importing a cross-checkable trust anchor and `curl | sh`. After install, continue with [Admin Configuration](#2-admin-configuration-root) and the per-distro confinement-substrate step (AppArmor §4 on Debian/Ubuntu, SELinux §5 on Fedora — the `.rpm` loads the SELinux module for you).
+
+---
+
+## Building from a tarball or source
+
+Building is two steps: build a self-contained release tarball with `src/tools/build-release.sh`, then install it with the `install.sh` bundled inside. `install.sh` is a **pure installer** — it places a prebuilt payload (the binaries, the vendor config, the systemd units, the AppArmor profile, the trust-store key, and the signed templates) and file-caps the privhelper factory (setuid-root only where the filesystem cannot carry file caps). It does **not** build, and it runs only from an unpacked release tree, never from the source checkout.
 
 ---
 
