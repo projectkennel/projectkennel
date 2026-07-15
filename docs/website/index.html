@@ -1105,30 +1105,21 @@
                         host holds no key and cannot forge a package.</p>
                 </div>
 
-                <div class="grid rv" style="grid-template-columns:1fr 1fr">
-                    <div class="cell">
-                        <p class="snip-cap">Debian / Ubuntu</p>
-<pre class="snippet"><span class="k">curl</span> -fsSL https://packages.projectkennel.org/kennel-archive-keyring.asc \
+                <p class="snip-cap rv" style="margin:4px 0 10px">Debian / Ubuntu</p>
+<pre class="snippet rv"><span class="k">curl</span> -fsSL https://packages.projectkennel.org/kennel-archive-keyring.asc \
   | gpg --dearmor | <span class="k">sudo</span> tee /usr/share/keyrings/kennel.gpg &gt;/dev/null
 <span class="c"># cross-check the fingerprint before trusting it:</span>
 <span class="k">gpg</span> --show-keys /usr/share/keyrings/kennel.gpg
-<span class="k">echo</span> <span class="p">"deb [signed-by=/usr/share/keyrings/kennel.gpg] \
-  https://packages.projectkennel.org/deb stable main"</span> \
+<span class="k">echo</span> <span class="p">"deb [signed-by=/usr/share/keyrings/kennel.gpg] https://packages.projectkennel.org/deb stable main"</span> \
   | <span class="k">sudo</span> tee /etc/apt/sources.list.d/kennel.list
 <span class="k">sudo</span> apt update &amp;&amp; <span class="k">sudo</span> apt install kennel</pre>
-                    </div>
-                    <div class="cell">
-                        <p class="snip-cap">Fedora / RHEL <span style="text-transform:none;letter-spacing:0">(the .rpm loads the SELinux module for you)</span></p>
-<pre class="snippet"><span class="k">sudo</span> curl -fsSL https://packages.projectkennel.org/rpm/kennel.repo \
-  -o /etc/yum.repos.d/kennel.repo
-<span class="k">sudo</span> rpm --import \
-  https://packages.projectkennel.org/kennel-archive-keyring.asc
+                <p class="snip-cap rv" style="margin:22px 0 10px">Fedora / RHEL <span style="text-transform:none;letter-spacing:0">(the .rpm loads the SELinux module for you)</span></p>
+<pre class="snippet rv"><span class="k">sudo</span> curl -fsSL https://packages.projectkennel.org/rpm/kennel.repo -o /etc/yum.repos.d/kennel.repo
+<span class="k">sudo</span> rpm --import https://packages.projectkennel.org/kennel-archive-keyring.asc
 <span class="k">sudo</span> dnf install kennel</pre>
-                        <p style="font-size:14px;color:var(--blue-soft);margin:0">Signing key
-                            <code>663C 67B0 9FDD A9EE E57F A295 88D5 8446 1C4D 6EE9</code>. Verify out of band:
-                            <code>dig +short TXT _kennel-key.projectkennel.org</code>.</p>
-                    </div>
-                </div>
+                <p class="rv" style="font-size:14px;color:var(--blue-soft);margin:12px 0 0">Signing key
+                    <code>663C 67B0 9FDD A9EE E57F A295 88D5 8446 1C4D 6EE9</code>. Verify out of band:
+                    <code>dig +short TXT _kennel-key.projectkennel.org</code>.</p>
 
                 <div class="prose rv" style="margin:26px 0 10px">
                     <p class="snip-cap">then: enable the daemon &amp; run something inside a kennel</p>
