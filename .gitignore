@@ -3,9 +3,13 @@
 **/*.rs.bk
 # Release tarballs (src/tools/build-release.sh output; rebuilt, not committed).
 /dist/release/
+# Signed APT/DNF repo tree (src/tools/build-repo.sh output; published to R2, not committed).
+/dist/repo/
 # Verified CI tool binaries + download cache (tools/install-ci-tools.sh).
 /.ci-tools/
 # Private signing seeds never belong in the repo (keys/ holds *.pub only).
 *.key
 scratch/
 books/
+# Local secrets: R2 credentials for src/tools/publish-repo.sh. Never committed.
+.env
