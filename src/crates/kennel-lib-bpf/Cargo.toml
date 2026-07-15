@@ -11,6 +11,9 @@ repository.workspace = true
 
 [dependencies]
 libc = "=0.2.186"
+# kennel-lib-syscall: the shared low-level primitives; used here for the wake eventfd +
+# device-or-wake poll (`kennel_lib_syscall::wake`) the audit-ringbuf drain waits on.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 object = { version = "=0.36.7", default-features = false, features = ["read_core", "elf"] }
 
 [features]

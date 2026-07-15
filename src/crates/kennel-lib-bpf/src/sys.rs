@@ -394,3 +394,7 @@ pub fn map_freeze(map: BorrowedFd<'_>) -> io::Result<()> {
         Err(io::Error::last_os_error())
     }
 }
+
+// The wake eventfd + device-or-wake poll live in `kennel_lib_syscall::wake` (shared with the
+// binder looper pool); `RingBuffer::poll_or_wake` delegates there, and the drain in kenneld makes
+// and signals the eventfd via that crate directly.

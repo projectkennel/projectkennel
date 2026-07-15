@@ -15,7 +15,7 @@
 
 use std::ffi::CString;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -49,13 +49,14 @@ mod kind {
     pub const SENDMSG_DENY: u16 = 7;
 }
 
-/// A running drain: the worker thread plus the stop flag and the pin dir.
+/// A running drain: the worker thread plus its stop flag, wake eventfd, and pin dir.
 ///
 /// Dropping it without [`stop`](Self::stop) detaches the thread (it exits on its
 /// own next poll once the process tears down), but leaves the pins; callers should
 /// `stop()` at kennel teardown.
 pub struct Drain {
     stop: Arc<AtomicBool>,
+    wake: Arc<OwnedFd>,
     join: Option<JoinHandle<()>>,
     pin_dir: PathBuf,
 }
@@ -65,6 +66,11 @@ impl Drain {
     /// the per-kennel pin dir and its pinned maps. Best-effort cleanup.
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Release);
+        // Break the drain out of its poll now, so this join does not wait out a whole
+        // POLL_INTERVAL cycle: it runs on the kennel-teardown critical path, before the
+        // requester's exit status is sent (`server.rs` `run_kennel`). Mirrors the binder
+        // looper pool's wake.
+        let _ = kennel_lib_syscall::wake::signal_wake(self.wake.as_fd());
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -97,12 +103,27 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
 
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
+    // A wake eventfd the drain polls alongside the ringbuf, so `Drain::stop` breaks it out of its
+    // poll at once instead of after a POLL_INTERVAL cycle (mirrors the binder looper waker). If the
+    // eventfd cannot be made, there is no drain (the audit ringbuf is best-effort — as above).
+    let wake = Arc::new(kennel_lib_syscall::wake::make_wake_eventfd().ok()?);
+    let worker_wake = Arc::clone(&wake);
     let join = std::thread::Builder::new()
         .name(format!("kennel-lib-bpf-drain-{ctx}"))
-        .spawn(move || drain_loop(&fd, capacity, ctx, &writer, &worker_stop))
+        .spawn(move || {
+            drain_loop(
+                &fd,
+                capacity,
+                ctx,
+                &writer,
+                &worker_stop,
+                worker_wake.as_fd(),
+            );
+        })
         .ok()?;
     Some(Drain {
         stop,
+        wake,
         join: Some(join),
         pin_dir,
     })
@@ -111,18 +132,19 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
 /// The worker loop: poll the ringbuf and emit each event until stopped, then drain
 /// once more so events committed just before the stop are not lost.
 fn drain_loop(
-    fd: &std::os::fd::OwnedFd,
+    fd: &OwnedFd,
     capacity: usize,
     ctx: u16,
     writer: &Writer,
     stop: &AtomicBool,
+    wake: BorrowedFd<'_>,
 ) {
     let Ok(mut rb) = kennel_lib_bpf::RingBuffer::new(fd.as_fd(), capacity) else {
         return;
     };
     let poll_ms = i32::try_from(POLL_INTERVAL.as_millis()).unwrap_or(200);
     while !stop.load(Ordering::Acquire) {
-        match rb.poll(poll_ms) {
+        match rb.poll_or_wake(wake, poll_ms) {
             Ok(true) => drain_available(&mut rb, ctx, writer),
             Ok(false) => {}
             Err(_) => break,

@@ -338,90 +338,10 @@ pub fn poll_in(fd: BorrowedFd<'_>, timeout_ms: i32) -> io::Result<bool> {
     Ok(pfd.revents & libc::POLLIN != 0)
 }
 
-/// Wait up to `timeout_ms` for `fd` to be readable, breaking early if `wake` becomes readable.
-///
-/// `wake` is a never-drained eventfd ([`make_wake_eventfd`]): once [`signal_wake`] has fired it,
-/// every poller returns at once, so a looper observes a stop flag immediately instead of after a
-/// whole `timeout_ms` cycle. The return reflects only `fd` (the binder device): the caller loops
-/// to re-check its stop flag when only `wake` fired.
-///
-/// # Errors
-///
-/// Returns the OS error if `poll(2)` fails for a reason other than `EINTR` (reported as "not
-/// readable" so the caller loops).
-pub fn poll_in_or_wake(
-    fd: BorrowedFd<'_>,
-    wake: BorrowedFd<'_>,
-    timeout_ms: i32,
-) -> io::Result<bool> {
-    let mut pfds = [
-        libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-        libc::pollfd {
-            fd: wake.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        },
-    ];
-    // SAFETY: `pfds` is two live, initialised pollfds; `poll` reads/writes them and the count (2)
-    // matches the array length. No pointer is retained past the call.
-    //
-    // INVARIANTS UPHELD: exactly two pollfds are described to the kernel.
-    //
-    // FAILURE MODE: -1 + errno; EINTR is mapped to "not ready" so the caller retries.
-    let ret = unsafe { libc::poll(pfds.as_mut_ptr(), 2, timeout_ms) };
-    if ret < 0 {
-        let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::Interrupted {
-            return Ok(false);
-        }
-        return Err(err);
-    }
-    Ok(pfds[0].revents & libc::POLLIN != 0)
-}
-
-/// Create the looper pool's wake eventfd (`EFD_CLOEXEC | EFD_NONBLOCK`, initial count 0).
-///
-/// Level-triggered and never drained: [`signal_wake`] raises its count once at teardown and it
-/// stays readable, so all loopers waiting in [`poll_in_or_wake`] return together. Closed with the
-/// context manager.
-///
-/// # Errors
-///
-/// Returns the OS error if `eventfd(2)` fails.
-pub fn make_wake_eventfd() -> io::Result<OwnedFd> {
-    // SAFETY: `eventfd` takes a count and flags and returns a fresh owned fd or -1; no pointers.
-    let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `raw` is a fresh, exclusively-owned, open fd from a successful `eventfd`.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
-}
-
-/// Fire the wake eventfd: raise its count so every [`poll_in_or_wake`] returns at once.
-///
-/// # Errors
-///
-/// Returns the OS error if the `write(2)` fails (a full counter — `EAGAIN` on the non-blocking fd —
-/// is fine: it is already signalled, so it is reported as success).
-pub fn signal_wake(wake: BorrowedFd<'_>) -> io::Result<()> {
-    let one: u64 = 1;
-    let buf = one.to_ne_bytes();
-    // SAFETY: `buf` is a live 8-byte buffer; `write` reads exactly its length and retains nothing.
-    let ret = unsafe { libc::write(wake.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
-    if ret < 0 {
-        let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock {
-            return Ok(()); // counter already saturated — already signalled
-        }
-        return Err(err);
-    }
-    Ok(())
-}
+// The looper pool's wake mechanism (eventfd + the device-or-wake poll) lives in the shared
+// syscall crate so the BPF-audit drain shares one implementation: `kennel_lib_syscall::wake`.
+// Re-exported so the pool code below still spells them `sys::make_wake_eventfd` etc.
+pub use kennel_lib_syscall::wake::{make_wake_eventfd, poll_in_or_wake, signal_wake};
 
 /// Run one `BINDER_WRITE_READ`.
 ///

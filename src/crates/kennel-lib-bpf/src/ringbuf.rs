@@ -156,6 +156,20 @@ impl<'fd> RingBuffer<'fd> {
         Ok(rc > 0 && pfd.revents & libc::POLLIN != 0)
     }
 
+    /// Wait up to `timeout_ms` for the ring to become readable, returning early if `wake` does.
+    ///
+    /// `wake` is a never-drained eventfd ([`kennel_lib_syscall::wake::make_wake_eventfd`]): once
+    /// [`kennel_lib_syscall::wake::signal_wake`] has fired it, this returns at once, so a drain loop
+    /// observes its stop flag immediately instead of after a whole `timeout_ms` cycle. The return
+    /// reflects only the ring fd; a wake-only return is `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error if `poll(2)` fails (other than `EINTR`, reported as `false`).
+    pub fn poll_or_wake(&self, wake: BorrowedFd<'_>, timeout_ms: i32) -> io::Result<bool> {
+        kennel_lib_syscall::wake::poll_in_or_wake(self.fd, wake, timeout_ms)
+    }
+
     /// Drain all committed records, calling `f` with each sample's bytes.
     /// Returns the number of samples delivered (discarded records are skipped).
     ///

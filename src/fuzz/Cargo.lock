@@ -105,6 +105,7 @@ dependencies = [
 name = "kennel-lib-binder"
 version = "0.7.0"
 dependencies = [
+ "kennel-lib-syscall",
  "libc",
 ]
 
@@ -112,6 +113,7 @@ dependencies = [
 name = "kennel-lib-bpf"
 version = "0.7.0"
 dependencies = [
+ "kennel-lib-syscall",
  "libc",
  "object",
 ]
