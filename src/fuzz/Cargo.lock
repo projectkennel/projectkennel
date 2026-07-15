@@ -61,7 +61,7 @@ checksum = "019ece39bbefc17f13f677a690328cb978dbf6790e141a3c24e66372cb38588b"
 
 [[package]]
 name = "kennel-facade"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-cli",
@@ -89,21 +89,21 @@ dependencies = [
 
 [[package]]
 name = "kennel-host-delegate"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-scm",
 ]
 
 [[package]]
 name = "kennel-lib-audit"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-text",
 ]
 
 [[package]]
 name = "kennel-lib-binder"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-syscall",
  "libc",
@@ -111,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-bpf"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-syscall",
  "libc",
@@ -120,11 +120,11 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-cli"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "kennel-lib-config"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "basic-toml",
  "serde",
@@ -132,14 +132,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-control"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-syscall",
 ]
 
 [[package]]
 name = "kennel-lib-dbus"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-binder",
  "mini-sansio-dbus",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-landlock"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bitflags",
  "libc",
@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-os"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libc",
  "nix",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-policy"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "basic-toml",
  "ed25519-compact",
@@ -174,14 +174,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-scm"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "nix",
 ]
 
 [[package]]
 name = "kennel-lib-spawn"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-bpf",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-syscall"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bitflags",
  "kennel-lib-landlock",
@@ -204,18 +204,18 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-term"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "vte",
 ]
 
 [[package]]
 name = "kennel-lib-text"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "kennel-privhelper"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-lib-config",
  "kennel-lib-spawn",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-tun-broker"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "kennel-host-delegate",
  "kennel-lib-binder",
@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "kenneld"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "basic-toml",
  "kennel-host-delegate",

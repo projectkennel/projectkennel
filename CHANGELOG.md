@@ -6,6 +6,39 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-07-15
+
+**A maintenance release: the signed distribution path lands, and host-mode teardown stops paying a
+200 ms tax.** No confinement-surface change and no schema change (settled schema stays v5, threat
+catalogue stays 0.6); 0.7.1 makes the 0.7.x line faster to tear down and cleaner to install.
+
+### Runtime & enforcement
+
+- **Host-mode kennel teardown no longer stalls ~200 ms.** The per-kennel BPF-audit ring-buffer
+  drain polled its ring on a 200 ms interval and was joined synchronously at teardown — *before* the
+  requester's exit status was sent — so every host-mode run (e.g. the shipped `interactive` policy,
+  `net.mode = host`) waited out a poll cycle. The drain now shares the binder looper pool's wake
+  eventfd, so `Drain::stop()` breaks it out at once. Measured: `kennel run interactive` drops from
+  ~0.22 s to ~0.04 s wall (strace confirms no residual 200 ms poll); construction (~3.7 ms) and the
+  teardown span are unchanged. `none`/`constrained`/`unconstrained` kennels never attach the drain
+  (0.7.0 W11) and were unaffected. The waker mechanism (`eventfd` + a device-or-wake `poll`) is
+  hoisted into a single `kennel_lib_syscall::wake` used by both the binder pool and the drain — no
+  new `unsafe` crate; recorded in [UNSAFE-CRATES.md](supply-chain/UNSAFE-CRATES.md). (#209)
+
+### Distribution
+
+- **Signed APT + DNF package repositories are the primary install path.**
+  `packages.projectkennel.org` (a Cloudflare R2 bucket behind a custom domain) serves
+  `apt install kennel` / `dnf install kennel`, verifying every package and every metadata refresh
+  against **one** signing key whose fingerprint cross-checks against the repo, the GitHub release,
+  and a domain DNS `TXT` record. The project signs locally and uploads already-signed bytes; the CDN
+  holds no key and cannot forge a package (no `curl | sh` anywhere — threat T1.4). New tooling:
+  `src/tools/build-repo.sh` (reprepro-signed APT `InRelease` + `rpm --addsign` per package with a
+  detach-signed `repomd.xml`) and `src/tools/publish-repo.sh` (S3-API sync to R2, `--delete` pruning
+  retired objects). [INSTALL.md](INSTALL.md) leads with the signed-repo path and its rationale, and
+  [RELEASE-CEREMONY.md](docs/governance/RELEASE-CEREMONY.md) gains the build-repo/publish-repo +
+  Cloudflare cache/redirect steps and the release-key custody note. (#208)
+
 ## [0.7.0] — 2026-07-13
 
 **The operator-UX release: the CLI reads as the model, and the release knows its own dependencies.**
