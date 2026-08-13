@@ -6,6 +6,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Internal / supply chain
+
+- **`mini-sansio-dbus` 5.0.1 → 6.0.1; the one local vendor patch is dropped and byte-identical
+  vendoring is restored.** Upstream merged our header-field-decoder fix (the wire-reachable
+  `unreachable!()` on a bogus field-code byte, found by the kennel-fuzz harness and carried since
+  5.0.1 as `src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch`) and shipped it in
+  6.0.1, so `src/vendor/patches/` is empty again. The 5.0.1→6.0.1 delta was read in full (§5.5
+  delta-audit in `supply-chain/audits.toml`): the semver-major reworks the crate's canned
+  `messages/` encoders onto a `DBusEncode` trait and adds KSNI-client message types — all in the
+  `messages/` tree kennel never links; the marshalling core `kennel-lib-dbus` uses is unchanged
+  apart from added derives and `wants()` taking `&self`. No new dependencies; still
+  `#![forbid(unsafe_code)]`.
+
 ## [0.7.1] — 2026-07-15
 
 **A maintenance release: the signed distribution path lands, and host-mode teardown stops paying a

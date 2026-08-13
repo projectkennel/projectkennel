@@ -65,6 +65,6 @@ note          = "Direct dep of kennel-lib-bpf (ELF parsing). Pinned =0.36.7, fea
 name          = "mini-sansio-dbus"
 repo          = "https://github.com/iliabylich/mini-sansio-dbus"
 release-feed  = "https://github.com/iliabylich/mini-sansio-dbus/releases.atom"
-last-reviewed = "5.0.1"
+last-reviewed = "6.0.1"
 reviewed-by   = "remco"
-note          = "Direct dep of kennel-lib-dbus (the D-Bus mediation engine for facade-dbus, §7.7), the D-Bus wire marshalling. Pinned =5.0.1. CARRIES A LOCAL PATCH: src/vendor/patches/mini-sansio-dbus-5.0.1-header-field-panic.patch fixes a network-reachable unreachable!() in the header-field decoder (reported upstream). PRIORITY on the next release: if it carries the fix, drop the patch and restore byte-identical vendoring (§5.5); if not, re-apply and re-verify the patch. Young/single-author upstream — a maintenance-signal crate (§5.7)."
+note          = "Direct dep of kennel-lib-dbus (the D-Bus mediation engine for facade-dbus, §7.7), the D-Bus wire marshalling. Pinned =6.0.1, vendored byte-identical — v6.0.1 carries the header-field-decoder panic fix (merged upstream from our PR #1), so the 5.0.1 local patch is dropped. 5.0.2/5.0.3 were seen-and-skipped: reviewed 2026-08-13, neither carries the fix (PR #1 was merged 2026-07-20, after v5.0.3; both 5.0.x still panic). Young/single-author upstream — a maintenance-signal crate (§5.7)."

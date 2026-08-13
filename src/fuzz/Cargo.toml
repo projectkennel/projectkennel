@@ -46,7 +46,7 @@ kennel-tun-broker = { path = "../crates/kennel-tun-broker" }
 # The D-Bus facade's incoming-message decoder (07-7 §7.7): the workload's bus client
 # speaks raw D-Bus wire to facade-dbus, so the header/body decode reads fully
 # workload-controlled bytes. Driven through the public sans-IO read loop.
-mini-sansio-dbus = "=5.0.1"
+mini-sansio-dbus = "=6.0.1"
 # The D-Bus mediation parsers (07-7 §7.7): the facade's SASL handshake reads
 # workload-controlled auth bytes, and the typed-frame decoder reads frames the
 # untrusted in-kennel facade produced (the broker's mediate side). Both are bounded parsers.
