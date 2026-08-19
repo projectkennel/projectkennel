@@ -26,6 +26,21 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-08-19 — hmac-sha512 retired: ed25519-compact 2.4.2's public `sha512` is the SSHSIG hash
+
+- **Bears-on:** Kennel book Vol 2, the keys & signing chapter (§18 in the pre-book numbering)
+- **Change:** `kennel-lib-policy` computes the SSHSIG preimage hash via
+  `ed25519_compact::sha512::Hash::hash` — the dedicated `hmac-sha512` crate is removed from the
+  dependency set (Cargo.toml, vendor, CHECKSUMS, vet, deny ISC allow). The 2026-06-28 SSHSIG
+  entry's rationale for adding it ("the SHA-512 inside ed25519-compact is private; exposing it
+  would be a forbidden feature-add patch") is resolved the right way round: upstream made
+  `sha512` public API in 2.4.x at our request, so no patch and one fewer vendored crate in the
+  policy-signing surface. Signature bytes are unchanged (same SHA-512, same preimage);
+  ssh-keygen interop re-verified both directions.
+- **Why:** the crate existed only to reach a private module; the moment upstream exposed it, the
+  duplicate implementation became removable surface.
+- **Source:** 13d4bde (deps/ed25519-compact-2.4.2-drop-hmac-sha512)
+
 ## 2026-07-04 — D-Bus mediation has ONE home: the standing dbus-broker (host-dbus retired)
 
 - **Bears-on:** Kennel book Vol 2, the D-Bus mediation chapter (§7.7 in the pre-book numbering)
