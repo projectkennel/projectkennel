@@ -43,6 +43,12 @@ criteria = "safe-to-deploy"
 version = "2.3.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact at tag 2.3.0. Source read for backdoors — no FFI/asm/process/net/fs/env; the one unsafe is the volatile secret-wipe; verification rejects non-canonical S (malleability) and weak/identity keys. Built default-features=false, features=[std]; x25519.rs/pem.rs not compiled."
 
+[[audits.ed25519-compact]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.3.0 -> 2.4.2"
+notes = "§5.5 (DEPENDENCIES.md, 2026-08-19): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact @ eb269493b71c1363d1389ab9aa98e4a5bed8d7af (tag 2.4.2), via tools/audit-source.sh. Full 2.3.0->2.4.2 diff read. Substantive changes: `sha512` becomes a public module (the change we requested — replaces our hmac-sha512 dep for the SSHSIG preimage) plus a `reexports` module; point decompression gains a non-canonical-encoding rejection and signature verification a non-canonical-signature rejection (strictness increases — SSHSIG interop verified by the ssh-keygen crosscheck suite both directions); a precomputed-basepoint scalarmult path; a SigningState refactor caching R (behaviourally equivalent — same bytes hashed); SHA-512 IV as u64 constants (same values, checked); inline-attribute and formatting churn; unused fiat_25519_selectznz removed; wasm32 inline(never) for their #40 (not our arch). 2.4.0/2.4.1 were skipped: 2.4.0's reexports gated ct_codecs on the wrong feature and did not compile for our std-without-pem build (our upstream report, their #41, fixed in 2.4.2); 2.4.1 carried only the wasm fix. Manifest: getrandom target-specific tables collapsed to one optional dep (still not enabled by us) — feature table unchanged, still zero transitive deps for features=[std]. Still exactly one unsafe (the volatile secret-wipe); no build.rs, no proc-macro, no FFI/asm/process/net/fs/env. Source review performed by the assistant and accepted by the maintainer."
+
 [[audits.itoa]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"

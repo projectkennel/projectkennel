@@ -19,6 +19,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   apart from added derives and `wants()` taking `&self`. No new dependencies; still
   `#![forbid(unsafe_code)]`.
 
+- **`hmac-sha512` is removed; `ed25519-compact` 2.3.0 → 2.4.2 provides the SSHSIG SHA-512.**
+  The dedicated `hmac-sha512` crate existed only because `ed25519-compact`'s internal SHA-512 was
+  private; 2.4.x makes `sha512` public API (the exposure we requested upstream), so the two
+  `sshsig.rs` hash calls now use `ed25519_compact::sha512::Hash::hash` and the policy-signing
+  surface is one vendored crate smaller (ISC also leaves the licence allow-list). 2.4.0/2.4.1 were
+  skipped: 2.4.0 didn't compile for our `std`-without-`pem` build (a reexport gated on the wrong
+  feature — our report, upstream #41, fixed in 2.4.2); 2.4.1 carried only a wasm fix. The
+  2.3.0→2.4.2 delta was read in full (§5.5 delta-audit): the substantive changes are the public
+  `sha512` module and stricter rejection of non-canonical signature/point encodings — SSHSIG
+  interop re-verified against `ssh-keygen` in both directions. Zero transitive deps as before.
+
 ## [0.7.1] — 2026-07-15
 
 **A maintenance release: the signed distribution path lands, and host-mode teardown stops paying a

@@ -42,7 +42,7 @@
       "bins": [],
       "consumers": ["cli", "compile", "compose", "kenneld", "spawn", "tun-broker"],
       "first_party_deps": [],
-      "external_deps": ["basic-toml", "ed25519-compact", "hmac-sha512", "object", "serde"]
+      "external_deps": ["basic-toml", "ed25519-compact", "object", "serde"]
     },
     {
       "name": "kennel-lib-spawn",

@@ -159,7 +159,7 @@ impl SshSig {
                 String::from_utf8_lossy(&self.hash_alg)
             )));
         }
-        let digest = hmac_sha512::Hash::hash(message);
+        let digest = ed25519_compact::sha512::Hash::hash(message);
         let preimage = self.preimage(&digest);
         let signature = Signature::new(sig);
         trusted
@@ -194,7 +194,7 @@ impl SshSig {
 /// message, and verifies under both `ssh-keygen -Y verify` and [`SshSig::verify`].
 #[must_use]
 pub fn sign_ed25519(key: &SigningKey, message: &[u8]) -> String {
-    let digest = hmac_sha512::Hash::hash(message);
+    let digest = ed25519_compact::sha512::Hash::hash(message);
 
     // The preimage the signature covers (no version field — that is blob-only).
     let mut preimage = Vec::new();

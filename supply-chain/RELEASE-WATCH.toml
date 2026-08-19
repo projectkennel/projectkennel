@@ -68,3 +68,11 @@ release-feed  = "https://github.com/iliabylich/mini-sansio-dbus/releases.atom"
 last-reviewed = "6.0.1"
 reviewed-by   = "remco"
 note          = "Direct dep of kennel-lib-dbus (the D-Bus mediation engine for facade-dbus, §7.7), the D-Bus wire marshalling. Pinned =6.0.1, vendored byte-identical — v6.0.1 carries the header-field-decoder panic fix (merged upstream from our PR #1), so the 5.0.1 local patch is dropped. 5.0.2/5.0.3 were seen-and-skipped: reviewed 2026-08-13, neither carries the fix (PR #1 was merged 2026-07-20, after v5.0.3; both 5.0.x still panic). Young/single-author upstream — a maintenance-signal crate (§5.7)."
+
+[[watch]]
+name          = "ed25519-compact"
+repo          = "https://github.com/jedisct1/rust-ed25519-compact"
+release-feed  = "https://github.com/jedisct1/rust-ed25519-compact/releases.atom"
+last-reviewed = "2.4.2"
+reviewed-by   = "remco"
+note          = "Direct dep of kennel-lib-policy (Ed25519 verify on the spawn path; since 2.4.x also the SSHSIG SHA-512 via its public `sha512` module). Pinned =2.4.2. 2.4.0/2.4.1 seen-and-skipped: 2.4.0 broke the std-without-pem build (ct_codecs reexport gated on the wrong feature — our report, their #41, fixed in 2.4.2); 2.4.1 carried only a wasm inline fix. Entry added 2026-08-19; the crate previously had no watch entry (a gap against the one-per-direct-dep rule)."

@@ -352,26 +352,15 @@ verified-against = [
 notes = "Direct dep of kennel-lib-bpf (ELF parsing for the BPF loader). default-features = false, features = [\"read_core\", \"elf\"] — only new transitive is none (memchr already vendored). The bpf() syscalls, map creation, relocation patching and cgroup attach are hand-rolled over libc (object is used only for the generic, error-prone ELF mechanics, as seccompiler is for BPF bytecode)."
 
 [crate."ed25519-compact"]
-version = "=2.3.0"
-crate-sha256 = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
+version = "=2.4.2"
+crate-sha256 = "f05391a505666bdf2b5d2626f41b7f0f49052b1e33cceac960eaa818008141da"
 audited-by = "remco"
-audited-on = "2026-05-31"
+audited-on = "2026-08-19"
 verified-against = [
-    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical)",
-    "github.com/jedisct1/rust-ed25519-compact @ bbbb92975251bff440109513eb95a68471d398de (tag 2.3.0) — 15 source files byte-identical via tools/audit-source.sh",
+    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical via tools/audit-helper.sh confirm); crates.io index cksum agrees",
+    "github.com/jedisct1/rust-ed25519-compact @ eb269493b71c1363d1389ab9aa98e4a5bed8d7af (tag 2.4.2) — 15 source files byte-identical via tools/audit-source.sh",
 ]
-notes = "Direct dep of kennel-lib-policy (Ed25519 verify on the spawn path; sign+verify in the compiler). default-features = false, features = [\"std\"] — zero transitive deps (getrandom/ct-codecs/ed25519 all optional, not enabled; x25519.rs/pem.rs not compiled). Field arithmetic is fiat-crypto formally-verified code; single unsafe is volatile secret-wipe; verify rejects non-canonical S and weak keys."
-
-[crate."hmac-sha512"]
-version = "=1.1.12"
-crate-sha256 = "019ece39bbefc17f13f677a690328cb978dbf6790e141a3c24e66372cb38588b"
-audited-by = "remco"
-audited-on = "2026-06-28"
-verified-against = [
-    "crates.io static.crates.io .crate download — sha256 matches (independent re-download byte-identical)",
-    "github.com/jedisct1/rust-hmac-sha512 @ 597b57dccc5ef4ec21f6ea107fd4fa3d75c99759 (tag 1.1.12) — 5 source files byte-identical via tools/audit-source.sh",
-]
-notes = "Direct dep of kennel-lib-policy: bare SHA-512 for the SSHSIG signature preimage (the verifier hashes the canonical bytes before the Ed25519 check). default-features = false — the `sha384`/`traits` features and their optional `digest*` deps are NOT enabled, so zero transitive deps. Same author as ed25519-compact (jedisct1). The SHA-512 core (src/lib.rs) is self-contained; we call only `Hash::hash` (unkeyed) — SSHSIG hashes are unkeyed, the HMAC path is never invoked."
+notes = "Direct dep of kennel-lib-policy (Ed25519 verify on the spawn path; sign+verify in the compiler; since 2.4.x also the bare SHA-512 for the SSHSIG preimage via the now-public `sha512` module — replacing the dedicated hmac-sha512 crate). default-features = false, features = [\"std\"] — zero transitive deps (getrandom/ct-codecs/ed25519 all optional, not enabled; x25519.rs/pem.rs not compiled). Field arithmetic is fiat-crypto formally-verified code; single unsafe is volatile secret-wipe; verify rejects non-canonical S and weak keys, and 2.4.x also rejects non-canonical signature encodings."
 
 [crate."arbitrary"]
 version = "=1.4.1"
