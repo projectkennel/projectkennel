@@ -22,36 +22,10 @@ at `-p1`, repackage, and the result is the vendored `.crate` recorded in
 `supply-chain/CHECKSUMS.toml`. The CHECKSUMS `verified-against` entry records the
 divergence and the recorded sha256 is the **patched** artifact's, not upstream's.
 
-## mini-sansio-dbus-5.0.1-header-field-panic.patch
+No patches are currently carried: every vendored `.crate` is byte-identical to the
+upstream release it names.
 
-**Crate:** `mini-sansio-dbus` 5.0.1 (the D-Bus wire marshalling for `facade-dbus`, §7.7).
-
-**Defect:** `incoming/header_fields.rs` decodes each D-Bus header field by mapping its
-code byte through `HeaderFieldCode::from`, where any byte outside `1..=9` becomes
-`HeaderFieldCode::Invalid`. The match arm for `Invalid` is `unreachable!()` — but it
-is reachable: the code byte comes straight off the wire. A workload's in-kennel bus
-client sends a method call with one bogus header-field code and the decoder panics.
-The crate author already wrote the graceful path — the *caller* (`HeaderFields::cut`)
-has an `HeaderField::Invalid => Err(MalformedHeaderField)` arm — but it is dead code,
-because `HeaderField::cut` panics before returning.
-
-**Why this surface matters:** `facade-dbus` runs in-kennel and decodes fully
-workload-controlled bytes. Under `panic = "abort"` a panic there aborts the facade
-process — a one-byte denial of service against the workload's own D-Bus access, and
-exactly the class of robustness bug the §10.6 fuzz target exists to catch. The
-`kennel-fuzz` harness (`dbus_incoming_never_panics_on_mutated_messages`) found this
-before `facade-dbus` was built.
-
-**Fix:** return the error the caller already expects instead of panicking:
-
-```rust
--            HeaderFieldCode::Invalid => unreachable!(),
-+            HeaderFieldCode::Invalid => Err(DBusError::MalformedHeaderField),
-```
-
-(The vendored hunk carries an explanatory comment; the upstream submission is the
-bare one-line change.)
-
-**Upstream:** reported to `github.com/iliabylich/mini-sansio-dbus` as the same
-one-line change. Drop this patch and restore byte-identical vendoring when a release
-carrying the fix is vendored.
+(The one patch carried to date — `mini-sansio-dbus-5.0.1-header-field-panic.patch`,
+a wire-reachable `unreachable!()` in the D-Bus header-field decoder found by the
+kennel-fuzz harness — was merged upstream and shipped in mini-sansio-dbus 6.0.1;
+the patch was dropped when 6.0.1 was vendored. Git history has the full record.)
