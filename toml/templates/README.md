@@ -1,79 +1,52 @@
 # Project Kennel templates
 
-Operators do not write policy from scratch. They derive from the **templates**
-here: signed, versioned, threat-tagged baselines for recognisable workflows. A
-user's leaf policy is a short delta from a template (typically 5–15 lines with a
-`reason` on every addition). The template system is specified in
-`docs/archive/design/05-templates.md`; the fully-annotated reference is
-`TEMPLATE-ai-coding-strict.md` at the repo root.
+Templates are signed starting policies for common workloads. A leaf policy inherits one template, adds the access its task needs, and is compiled into the settled policy that `kennel run` accepts. The template sets the floor; the leaf names the particular project, command, or destination.
 
-## The set (this directory)
+Use `kennel template list` to see installed templates and `kennel template show <name>` to inspect the policy a leaf would inherit. [HOWTO.md](../../HOWTO.md) covers generating, compiling, and running a leaf policy. [The design](../../docs/archive/design/05-templates.md) explains inheritance and signature rules.
 
-| Template | For | Defends (THREATS.md) | Notable residuals |
-|---|---|---|---|
-| [`base-confined`](base-confined/) | The factored root of every confined template. Not used directly. | T3.1, baseline T1.1/T1.6/T2.1 | No fs/exec scope of its own |
-| [`ai-coding-strict`](ai-coding-strict/) | An AI coding agent on a single project. | T1.1, T1.2, T1.3, T1.6, T2.1, T2.3, T3.7 | T1.8 (exfil via the LLM API); T2.2 |
-| [`package-install`](package-install/) | Installing from a specific registry, time-bounded. | T1.2, T1.9 (partial) | TTL is the main T1.10 defence |
-| [`untrusted-build`](untrusted-build/) | Building from untrusted source, network-off. | T1.2, T1.5 (strong) | Needs offline mirrors for real deps |
-| [`inspect-only`](inspect-only/) | Read-only inspection of a directory; no build. | T1.2, T1.4, T1.5 (strong) | Cannot build/run/test |
-| [`containerised-service`](containerised-service/) | A long-lived local service (Postgres, …) confined directly by the kennel. | T3.3, T1.1 (partial) | Secrets via a run-time store; kernel/Landlock CVEs |
+## Templates for users
 
-Each template directory carries `policy.toml` (the template's policy), `meta.toml`
-(identity + signing reference), and `README.md` (the threat-model summary).
+| Template | Start here when you need to… |
+| --- | --- |
+| [`ai-coding-strict`](ai-coding-strict/) | Run an AI coding agent against one project. The leaf supplies the project path and model API destination. |
+| [`interactive`](interactive/) | Run an interactive shell with a selected toolset. |
+| [`inspect-only`](inspect-only/) | Read a directory without building or changing it. |
+| [`package-install`](package-install/) | Install packages from selected registries for a bounded task. |
+| [`untrusted-build`](untrusted-build/) | Build source with network access disabled. |
+| [`containerised-service`](containerised-service/) | Run a local service under Kennel's confinement. |
 
-## Spawn targets (§7.12)
+`base-confined` is the shared foundation for these templates. It defines the default boundary but has no useful workload or project access by itself. Templates may also include signed [fragments](../fragments/) for toolsets and other additive grants.
 
-A second, distinct set: **single-leg SPAWN targets** an agent holding `[spawn]` may
-instantiate as ephemeral sibling kennels (`docs/archive/design/07-12-dynamic-spawn.md`). Each holds
-**at most one** trifecta leg, declares a self-reaping TTL + memory/pids/CPU ceilings (a
-spawn-target must, §7.12.8), carries no `[spawn]` of its own (depth-1), and opens its mutable
-surface through a signed `[[mutable]]` manifest (§7.12.3). Composing two is a visible, signed
-operator act.
+For example, to start a policy for one coding project:
 
-| Spawn target | Leg | Mutable surface | Reaches |
-|---|---|---|---|
-| [`pure-compute`](pure-compute/) | execution | none (most-fenced) | nothing — no net, no fs write |
-| [`net-fetch`](net-fetch/) | network | `net.proxy.allow` (pattern — shaped destinations) | the proxy egress filter only |
-| [`scratch-fs`](scratch-fs/) | filesystem | `fs.write` (oneof — a working dir) | a writable scratch area, no net |
+```sh
+kennel policy generate myproject --from ai-coding-strict
+# Edit the generated policy to grant the project and required destinations.
+kennel policy validate myproject
+kennel policy compile myproject
+kennel run myproject
+```
 
-The entrypoints (`[workload].argv`) are constructed-view paths the spawned image provides; the
-templates govern the **policy**, not the tool binaries. Gated in CI by
-`kennel-lib-compile/tests/spawn_templates.rs` (signature + compile + spawn-eligibility + manifest).
+`kennel run` loads a compiled, signed policy by name. It does not compile source policies at launch. See [HOWTO.md](../../HOWTO.md) for key setup and the complete authoring flow.
 
-## Enforcement status
+## Templates used by the runtime
 
-> Templates are **source policies**: `kennel compile` resolves the template/include
-> chain, applies the `[[*.add]]`/`[[*.remove]]` deltas and `*.invariant` markings,
-> verifies signatures, and emits a signed *settled* policy plus `kennel.lock`, which
-> the runtime enforces. The settled schema covers **`net`, `fs`, `exec`, `proc`,
-> `cap`, `seccomp`, `lifecycle`**; the remaining policy sections are source-policy
-> concerns the compiler folds in. What each section enforces today:
+Some templates are installed to support Kennel's own workflows rather than as general starting points for a leaf policy:
 
-| Section | Enforced today? |
-|---|---|
-| `fs.read`/`write`/`deny`, `fs.home` (constructed `$HOME` view), `fs.tmp`, `fs.dev`, `fs.proc` | **Yes** — `pivot_root` view + Landlock + private `/tmp` + constructed `/dev` + `hidepid` (§7.2). |
-| `net.mode`, `net.proxy.allow` (by-CIDR **and** by-name → the egress proxy), `net.proxy.deny`, `[net.bpf]` (CIDR connect/bind ACL) | **Yes** — `host-netproxy` enforces the `[net.proxy]` allow/deny per destination (dual-stack); the cgroup BPF is the deny-first floor (a direct `connect()` reaches only the proxy) and is the egress *allow* gate only in `mode = host` via `[net.bpf]`. A `net.proxy.allow` rule never populates the BPF allow map. |
-| `exec.allow`, `exec.deny_setuid`/`setgid`/`setcap`/`deny_writable` | **Yes** — Landlock `EXECUTE` allowlist + the BPF/settled invariants + seccomp. |
-| `proc`, `cap.no_new_privs`, `seccomp` | **Yes**. |
-| `unix.abstract = "deny"`, signal isolation | **Yes, natively** — Landlock ABI-6 scoping (supersedes the AppArmor/seccomp fallback; design §7.4/§7.7). |
-| `fs.dev` `ioctl` on granted nodes | **Yes** — `IOCTL_DEV`. |
-| `lifecycle.ttl` | Schema-carried; the TTL *timer/reaping* enforcement is owed. |
-| `unix.allow` path sockets (per-kennel ssh-agent), `[dbus]`, `[x11]`, `[env]` curation, `[ptrace]`, `fs.home.sanitise`, `fs.scrub` per-file overlay | **Not yet** — design-level; the spawn builds a synthetic `/etc` + essential binds rather than arbitrary-file sanitise, and hides non-granted *names* (ENOENT) rather than per-pattern scrubbing inside granted dirs. |
-| `[net.dns]`, `tls.required`/`tls.pin_sha256` | **Dropped / not built.** DNS is resolved by the proxy via the OS resolver and the answers vetted by policy (no configurable resolver). TLS inspection is an enterprise/future layer. These do **not** appear in the templates. |
-| `[container]` | **Not built** — design-level language only (parse + compile-warn), in the same family as `[dbus]`/`[x11]`/`[ptrace]`. No shipped template uses it: `containerised-service` runs the service directly under the kennel (the kennel *is* the container). |
+| Group | Templates | Purpose |
+| --- | --- | --- |
+| Delegated tasks | [`pure-compute`](pure-compute/), [`net-fetch`](net-fetch/), [`scratch-fs`](scratch-fs/) | Bounded sibling kennels an agent can request through `[spawn]`. Each limits the access and fields a caller may supply. |
+| GUI | `gui-interactive`, `gui-session`, `gui-broker` | Confined Wayland sessions and their brokered connection to the host display. |
+| Network and services | `tun-broker`, `dbus-broker`, `oci-fetch` | Brokered network, D-Bus, and image-fetch workflows. |
+| Tool and test fixtures | `argv-tool`, `echo-tool`, `true-tool`, `pyhello-tool` | Narrow workloads used by runtime and policy tests. |
+| Substrate bases | `base-bwrap`, `base-flatpak` | Baselines for those integration paths. |
 
-## Conventions
+The three delegated-task templates separate execution, network access, and writable storage into different signed targets. A spawn request may fill only the fields its selected target marks mutable. Spawn eligibility and mutable fields are checked in [`spawn_templates.rs`](../../src/crates/kennel-lib-compile/tests/spawn_templates.rs).
 
-- `policy.toml` references its parent as `template_base = "<name>@v<version>"` and
-- Substitution variables (`<kennel>`, `<uid>`, `<user>`, `<group>`, `<home>`,
-  `<ctx>`) are expanded at spawn time (§5.4); a leftover variable is a
-  hard error.
-- Every grant carries a `reason`; capability-granting rules carry
-  `threats.exposed` (§5.6).
-- `[[<section>.deny.invariant]]` marks a rule no downstream delta may remove (§5.5).
+## Files and policy rules
 
-## Owed
+Each template directory contains `policy.toml` and `meta.toml`. Some also have a README with workload-specific guidance. `policy.toml` declares grants and, for derived templates, a `template_base`; `meta.toml` carries template identity and signing information. Included fragments are signed separately.
 
-Per-template `tests/allow.sh` + `tests/deny.sh` (and the `kennel test-template`
-harness that runs them against a live kernel) are not written here — they need a
-privileged test runner. They are the next deliverable for the template set.
+The compiler verifies the signed inheritance chain and included fragments, applies the leaf's grants, and emits a settled policy. It rejects changes that violate a template invariant. A new access grant should state its reason and identify the threats it exposes. For the resolved result, use `kennel template show <name>` before deriving and `kennel policy show <name>` for a leaf.
+
+The canonical threat IDs and residual risks are in [THREATS.md](../../docs/reference/THREATS.md). A grant can still be misused within its allowed scope: for example, code allowed to read a project and call an API can send project data to that API. Review the effective policy for the task you are running.
