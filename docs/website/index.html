@@ -4,12 +4,12 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Project Kennel: confinement, redefined</title>
+    <title>Project Kennel: confine code where you work</title>
     <meta name="description"
-        content="A reference monitor for the user level. The host learned to confine untrusted code decades ago; your account never did. Kennel keeps your uid and splits the authority off it: kernel-enforced, per-task, and installed from a repo the project signs itself. apt install kennel." />
-    <meta property="og:title" content="Project Kennel: confinement, redefined" />
+        content="Kennel uses familiar sandbox primitives as a reference monitor: remove unneeded access at construction, mediate necessary requests at runtime. Signed policy confines each task under your account." />
+    <meta property="og:title" content="Project Kennel: confine code where you work" />
     <meta property="og:description"
-        content="The reference monitor the user level never grew. Untrusted code — agents, postinstall scripts, fresh clones — runs under your name with only the authority a signed policy grants, checked one call at a time. Kernel-enforced on Linux; apt install kennel / dnf install kennel." />
+        content="Give an AI agent the repository, not your whole account. Project Kennel runs unvetted code with only the files, network destinations, and programs a signed policy grants. Kernel-enforced on Linux." />
     <meta property="og:type" content="website" />
     <meta name="theme-color" content="#f3efe4" />
     <link rel="icon"
@@ -859,14 +859,11 @@
             <div class="wrap hero-grid">
                 <div class="rv">
                     <p class="fig">A reference monitor for the user level</p>
-                    <h1>Confinement, <em>redefined</em>.</h1>
-                    <p class="lede"><b>Kennel runs code you haven't vetted</b> — an AI agent, an
-                        <code>npm install</code>, a freshly-cloned repo — under your own account, confined to just the
-                        files, network, and programs a signed policy allows. It's the enforcement the user level never
-                        had: the host has boxed untrusted code for decades (SELinux, AppArmor, seccomp), but your
-                        <b>account</b>, where agents now run, never did. Kennel keeps your uid and splits the
-                        <em>authority</em> off it, so the code runs as you with only what its policy grants, checked one
-                        access at a time.</p>
+                    <h1>Give the task access.<br /><em>Keep the boundary.</em></h1>
+                    <p class="lede">An AI agent needs your repo. A package install needs a registry. A development
+                        container needs your files. Broad mounts and open network access can give any of them much more
+                        than the job requires. <b>Kennel runs each task under your account with a signed access
+                        policy:</b> resources it does not need are absent; necessary connections are checked at runtime.</p>
                     <div class="cta">
                         <a class="btn btn-primary" href="#install">Install it</a>
                         <a class="btn btn-ghost" href="#what">How it works</a>
@@ -888,23 +885,24 @@
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">Why</p>
-                    <h2>Code under your account is no longer code you wrote.</h2>
+                    <h2>Unvetted code runs as you.</h2>
                 </div>
                 <div class="prose rv">
-                    <p>A modern <span class="mono">$HOME</span> runs npm and pip trees, build plugins, language servers,
-                        and AI agents that write and execute code for you, pulled in wholesale and mostly unread, all
-                        with your keys, your mail, and your source. Under Unix that access isn't a permission the code
-                        was granted; it <em>is</em> the code, because it runs as your uid.</p>
-                    <p>The kernel could always contain this (SELinux, AppArmor, Landlock), but those are the OS vendor's
-                        to author, so they get switched off rather than used. The boundary that matters moved inside your
-                        account; the means to defend it stayed outside. Kennel puts it back: a reference monitor that
-                        stays in the path and clears each access, where a sandbox or container draws its line once at
-                        launch and steps back.</p>
+                    <p>Package scripts, build plugins, language servers, and AI agents often run with your uid. Without
+                        a separate boundary, they can reach the files and services your account can reach, including
+                        credentials and unrelated projects.</p>
+                    <p>Kennel uses namespaces and other Linux controls also used by sandboxes. It arranges them as a
+                        <b>reference monitor</b> with two paths. Construction removes ungranted files, processes,
+                        devices, and routes; Landlock and seccomp restrict unused operations and kernel entry points.
+                        When the task needs a connection or service, a separate daemon checks each request against the
+                        signed policy before a host-side component acts. The workload cannot change that policy.</p>
+                    <p>The identity boundary holds inside the kennel too. Trusted setup uses a mapped root account to
+                        construct it; the workload starts as your UID, with no path back to that root account in the
+                        kennel's user namespace.</p>
                 </div>
                 <div class="beat rv">
-                    <p>The dog isn't the threat. It's a good boy that, left loose while you're out, will enthusiastically
-                        wreck the house. Not malicious, just eager — and the boundary never has to be right about which
-                        kind of dog it turns out to be.</p>
+                    <p>The workload can be useful and still make unsafe choices. Kennel enforces the access you chose
+                        without trying to judge its intent.</p>
                 </div>
             </div>
         </section>
@@ -914,37 +912,35 @@
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">The project</p>
-                    <h2>A threat catalogue, a design that answers it, and a runtime that proves it out.</h2>
+                    <h2>Threats, design, and a working Linux runtime.</h2>
                 </div>
 
                 <div class="grid rv">
                     <div class="cell">
                         <div class="n">01</div>
                         <h3>The threat catalogue</h3>
-                        <p>Every threat untrusted local code poses, with stable IDs, real incident citations, and
-                            MITRE / compliance mappings. Portable: cite it whether or not you run Kennel.</p>
+                        <p>Documented threats from untrusted local code, with stable IDs, incident citations, and
+                            MITRE and compliance mappings. The catalogue stands on its own.</p>
                     </div>
                     <div class="cell">
                         <div class="n">02</div>
                         <h3>The design</h3>
-                        <p>The reasoning that answers the catalogue: adversary model, trust boundary, policy surface.
-                            Substrate-neutral — any team could build a fresh runtime to it.</p>
+                        <p>The adversary model, trust boundaries, and policy model. It describes what the runtime must
+                            enforce without depending on Linux implementation details.</p>
                     </div>
                     <div class="cell">
                         <div class="n">03</div>
                         <h3>The runtime</h3>
-                        <p>A working Linux implementation, every control traceable to a threat. It ships:
-                            <code>apt install kennel</code>, proven unprivileged on Debian/Ubuntu and enforcing-SELinux
-                            Fedora.</p>
+                        <p>A Linux implementation whose controls map to the threat catalogue. Install it with
+                            <code>apt</code> or <code>dnf</code>.</p>
                     </div>
                 </div>
 
                 <div class="prose rv" style="margin-top:28px">
-                    <p style="color:var(--blue-soft);font-size:16px">Two of the three don't need you to run our code:
-                        <a href="https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md">cite
-                            the catalogue</a> in your own posture, or build a fresh runtime to
-                        <a href="https://github.com/projectkennel/books">the design</a>. The third, you
-                        <a href="#install">install</a>.</p>
+                    <p style="color:var(--blue-soft);font-size:16px">Read the <a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md">threat
+                            catalogue</a> and <a href="https://github.com/projectkennel/books">design</a>, or
+                        <a href="#install">install the runtime</a>.</p>
                 </div>
             </div>
         </section>
@@ -954,13 +950,12 @@
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">The runtime · Linux</p>
-                    <h2>A sandbox with teeth.</h2>
+                    <h2>What a kennel enforces.</h2>
                 </div>
                 <div class="prose rv" style="margin-bottom:6px">
-                    <p>Most sandboxes advise; this one enforces. Default-deny throughout: it bounds the files a
-                        workload can see, brokers and logs its network, and runs only the binaries you name, on the real
-                        kernel and on your actual files. Each capability below traces back to a threat in the catalogue.
-                    </p>
+                    <p>A kennel limits visible files, permitted programs, and network destinations. It uses your real
+                        workspace, brokers permitted connections, and records policy decisions. Each control has a
+                        corresponding threat in the catalogue.</p>
                 </div>
 
                 <figure class="rv">
@@ -1029,7 +1024,7 @@
                         <rect x="476" y="380" width="150" height="30" rx="6" class="s-allow-box" />
                         <text x="490" y="400" class="s-label">api.host:443 &#10003;</text>
                     </svg>
-                    <figcaption>Fig. 2 — granted in, everything else out, one audited way through the door</figcaption>
+                    <figcaption>Fig. 2 — a restricted view with brokered network access</figcaption>
                 </figure>
 
                 <div class="grid rv">
@@ -1054,36 +1049,32 @@
                     </div>
                     <div class="cell">
                         <div class="n">04</div>
-                        <h3>Hard to scout</h3>
-                        <p>Secrets and unrelated trees aren't just unreadable. Where the platform allows it, they aren't
-                            visible at all. There's nothing to map.</p>
+                        <h3>Less to discover</h3>
+                        <p>Paths the policy does not grant are absent from the constructed view. The workload cannot enumerate
+                            host files it cannot see.</p>
                     </div>
                     <div class="cell">
                         <div class="n">05</div>
-                        <h3>Policy as signed code</h3>
-                        <p>Policies are declarative, version-pinned, and signed. A template can't quietly weaken an
-                            invariant; resolution refuses it.</p>
+                        <h3>Signed policy</h3>
+                        <p>Policies are declarative, versioned, and signed. Compilation rejects a template that weakens
+                            a required constraint.</p>
                     </div>
                     <div class="cell">
                         <div class="n">06</div>
-                        <h3>An audit trail you can keep</h3>
-                        <p>Every security-relevant decision is written to an append-only, structured log: meant for a
-                            SIEM, not for grepping after something has already gone wrong.</p>
+                        <h3>Structured audit events</h3>
+                        <p>Policy decisions and denials are recorded as structured events that can be reviewed locally
+                            or sent to an audit system.</p>
                     </div>
                 </div>
                 <div class="prose rv" style="margin-top:26px">
-                    <p>The whole spawn runs <b>unprivileged</b>: <code>kenneld</code> is an ordinary user process holding
-                        no standing privilege, and a single small <b>file-capped helper</b> builds the namespaces,
-                        dropping to your uid <em>across</em> the <code>clone</code> so the user namespace is
-                        <em>operator-owned, not root</em>. There is no <code>sudo</code> anywhere in the spawn. Proven
-                        end-to-end on <b>Debian/Ubuntu</b> (AppArmor userns grant) and on <b>Fedora, enforcing
-                        SELinux</b>, where a two-domain module keeps the monitor and the workload from ever being the
-                        same SELinux subject.</p>
-                    <p style="color:var(--blue-soft);font-size:16px">The runtime is Linux, composing Landlock, cgroup
-                        BPF, seccomp and namespaces. It isn't the portable part: the threat catalogue and the design
-                        are, and a different team could build a runtime to them on another substrate entirely. Other
-                        backends (macOS Seatbelt, FreeBSD jails, a microVM) are designed-but-not-built future work, not
-                        a current claim.</p>
+                    <p><code>kenneld</code> runs as an ordinary user process. A small helper with file capabilities
+                        performs the setup that requires privilege. The kennel's user namespace maps UID 0 for trusted
+                        setup, but the workload runs as your UID and cannot regain UID 0 there. No subordinate UID range
+                        is delegated to it. End-to-end operation has been verified on Debian/Ubuntu with AppArmor and
+                        Fedora with enforcing SELinux.</p>
+                    <p style="color:var(--blue-soft);font-size:16px">The runtime uses Linux namespaces, Landlock,
+                        seccomp, and cgroup BPF. The threat catalogue and design can guide implementations on other
+                        systems; those runtimes have not been built.</p>
                 </div>
             </div>
         </section>
@@ -1093,16 +1084,12 @@
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">Install · on Linux</p>
-                    <h2>Installed from a repo the project signs itself: never <em>curl | sh</em>.</h2>
+                    <h2>Install from a signed package repository.</h2>
                 </div>
                 <div class="prose rv" style="margin-bottom:26px">
-                    <p>Kennel installs from <b>signed package repositories the project hosts and signs itself</b>. There
-                        is no <code>curl … | sh</code> anywhere in the trust path, on principle: a confinement tool has
-                        no business asking you to run unverified code as your user to get it. You import <b>one</b>
-                        public key, cross-check its fingerprint against three independent channels — this site, the
-                        GitHub release notes, and the domain's DNS <code>TXT</code> record — and thereafter
-                        <code>apt</code>/<code>dnf</code> verify every package and every metadata refresh against it. The
-                        host holds no key and cannot forge a package.</p>
+                    <p>Import the project's signing key and check its fingerprint against this site, the GitHub release,
+                        and the domain's DNS <code>TXT</code> record. Then install with <code>apt</code> or
+                        <code>dnf</code>; the package manager verifies later packages and repository metadata.</p>
                 </div>
 
                 <p class="snip-cap rv" style="margin:4px 0 10px">Debian / Ubuntu</p>
@@ -1135,9 +1122,8 @@
 <span class="k">kennel</span> attach interactive</pre>
 
                 <div class="prose rv" style="margin-top:30px">
-                    <p>A policy is declarative, signed, version-pinned <b>code</b>: not behaviour, but
-                        kernel-level constraint. A leaf policy over the shipped <code>ai-coding-strict</code> template,
-                        in part:</p>
+                    <p>A policy declares access rules, not expected behaviour. Here is part of a policy based on the
+                        shipped <code>ai-coding-strict</code> template:</p>
                 </div>
 <pre class="snippet rv"><span class="c"># exec: only these binaries may run, nothing else, even if present</span>
 [exec]
@@ -1154,11 +1140,10 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                 <div class="rv"
                     style="margin-top:30px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
                     <p class="fig" style="margin:0 0 4px">The CLI · two houses</p>
-                    <h3 style="margin:0 0 6px">Run touches settled artefacts; authoring owns source, templates, and keys.</h3>
-                    <p style="margin:0 0 18px;font-size:15px;color:var(--blue-soft);max-width:70ch">One binary, two contexts:
-                        <code>run</code> and its neighbours only ever start or manage a signed, settled kennel, while the
-                        <code>policy</code> / <code>template</code> / <code>key</code> houses author and sign the things you
-                        run. You can't hold the wrong object at the wrong verb.</p>
+                    <h3 style="margin:0 0 6px">Compile policy, then run it.</h3>
+                    <p style="margin:0 0 18px;font-size:15px;color:var(--blue-soft);max-width:70ch">The
+                        <code>policy</code>, <code>template</code>, and <code>key</code> commands prepare signed policy.
+                        <code>run</code> starts a workload from a compiled, signed policy.</p>
                     <div class="verbs">
                         <code>kennel run &lt;policy&gt; [-- &lt;cmd&gt;]</code>
                         <span>run · start a confined workload; an interactive run detaches with <code>Ctrl-\ d</code></span>
@@ -1182,7 +1167,7 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                 <div class="rv"
                     style="margin-top:30px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
                     <p class="fig" style="margin:0 0 4px">Status · 0.7.1</p>
-                    <h3 style="margin:0 0 18px">Built and shipping, versus what's still on the roadmap.</h3>
+                    <h3 style="margin:0 0 18px">Current features and planned work.</h3>
                     <div class="status" style="margin-top:0">
                         <div class="built">
                             <h4>Runs today</h4>
@@ -1206,10 +1191,9 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             </ul>
                         </div>
                     </div>
-                    <p style="margin:18px 0 0;font-size:13px;color:var(--blue-soft);max-width:78ch"><b>Declined on
-                        principle</b> (not deferred): a secrets or signing broker, a first-party OCI unpacker, and
-                        daemon-side protocol mediation — each would put a trust root or an untrusted parser where it
-                        doesn't belong. The reasoning is in the book.</p>
+                    <p style="margin:18px 0 0;font-size:13px;color:var(--blue-soft);max-width:78ch">The design excludes
+                        secrets and signing brokers, a first-party OCI unpacker, and daemon-side protocol parsers.
+                        The <a href="https://github.com/projectkennel/books">book</a> explains those boundaries.</p>
                 </div>
 
                 <div class="prose rv" style="margin-top:30px">
@@ -1226,17 +1210,16 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">How</p>
-                    <h2>Not a new sandbox: a careful arrangement of what your OS already ships.</h2>
+                    <h2>Sandbox primitives, arranged as a reference monitor.</h2>
                 </div>
                 <div class="prose rv">
                     <p>Kennel doesn't reimplement the kernel or sit in front of it. It composes the enforcement the
                         platform already provides — Landlock, cgroup BPF, seccomp, namespaces — and wires it to one
                         signed policy, everything starting from deny. A small file-capped helper does the few steps that
                         genuinely need root; the workload never does.</p>
-                    <p>Because it governs <b>what a workload can reach</b> rather than the host kernel's attack surface,
-                        it sits under stronger isolation when a job needs it: run a kennel inside a gVisor sandbox or a
-                        microVM to add host-kernel containment without losing the egress control, recon-resistance, or
-                        audit trail. Different layers, stacked only when it's worth it.</p>
+                    <p>These restrictions reduce the kernel interfaces a workload can exercise; they do not isolate it
+                        from the host kernel itself. When a job needs a stronger kernel boundary, run a kennel inside
+                        gVisor or a microVM and keep Kennel's per-task reach controls, brokering, and audit trail.</p>
                 </div>
             </div>
         </section>
@@ -1246,7 +1229,7 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
             <div class="wrap">
                 <div class="sec-head rv">
                     <p class="fig">Where it fits</p>
-                    <h2>Between two options that don't quite work.</h2>
+                    <h2>Where Kennel fits.</h2>
                 </div>
                 <div class="cols rv">
                     <div class="col">
@@ -1254,31 +1237,30 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <h3>Give it everything</h3>
                         <p>Hand the agent or the package your full account and trust that it — and everything it pulled
                             in — behaves. Convenient, and the way most of it runs today.</p>
-                        <div class="verdict">one bad actor reaches your keys</div>
+                        <div class="verdict">access follows the user account</div>
                     </div>
                     <div class="col">
                         <div class="k">Heavyweight</div>
                         <h3>Put it in a VM</h3>
-                        <p>Strong isolation, but a guest kernel to maintain, an image to keep current, and files moved
-                            in and out: enough friction that you stop using it for everyday work.</p>
-                        <div class="verdict">isolation you won't leave on</div>
+                        <p>A separate kernel gives stronger isolation. For short tasks, the guest image, file sharing,
+                            and startup cost can add work.</p>
+                        <div class="verdict">stronger boundary, more setup</div>
                     </div>
                     <div class="col win">
                         <div class="k">Project Kennel</div>
                         <h3>Contain it in place</h3>
-                        <p>Per-workload grants on your real files at native speed, brokered egress, and a full audit
-                            trail: light enough to leave on. Put a VM underneath only when you need to.</p>
-                        <div class="verdict">containment you'll actually run</div>
+                        <p>Per-task grants on your real files, brokered egress, and structured audit events. It can
+                            also run inside a VM when the workload needs a separate kernel.</p>
+                        <div class="verdict">task-level access control</div>
                     </div>
                 </div>
 
                 <div class="rv"
                     style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
-                    <p class="fig" style="margin:0 0 4px">Light enough to leave on, measured</p>
-                    <h3 style="margin:0 0 6px">Cheap enough to be disposable.</h3>
-                    <p style="margin:0 0 22px;max-width:62ch">Time to stand up a fresh, isolated execution context.
-                        Kennel builds confinement <b>per task</b>, not per session, so the cost has to be small enough
-                        to pay on every tool call, not just every login.</p>
+                    <p class="fig" style="margin:0 0 4px">Construction time</p>
+                    <h3 style="margin:0 0 6px">A new kennel takes milliseconds.</h3>
+                    <p style="margin:0 0 22px;max-width:62ch">Measured time from construction to workload execution.
+                        This cost matters when starting a new kennel for each task.</p>
                     <div
                         style="display:grid;grid-template-columns:max-content minmax(0,1fr) max-content;gap:12px 18px;align-items:center;font-family:var(--mono);font-size:13px">
                         <span style="color:var(--ink)">Project&nbsp;Kennel</span>
@@ -1291,29 +1273,26 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <span style="height:16px;background:var(--rule-2);width:100%;border-radius:3px"></span>
                         <b style="color:var(--blue-soft);white-space:nowrap">~ 600 ms</b>
                     </div>
-                    <p style="margin:22px 0 0;font-size:14px;max-width:76ch">Construction measures <b>≈ 3.7 ms</b>
-                        (median, timed to the <em>workload</em> running, <code>spawn-spinup.sh</code>): roughly
-                        <b>75×</b> under a Firecracker microVM and <b>150×</b> under Apple's container, all measured the
-                        same way. The boundaries differ, though: a microVM isolates the <em>box</em> (one tenant from the
-                        next) but says nothing about what code does <em>inside</em> it; Kennel governs what each workload
-                        reaches. So they compose — a microVM underneath for the hardware boundary, Kennel inside to bound
-                        reach. Faster still is Microsoft <a href="https://opensource.microsoft.com/blog/2025/02/11/hyperlight-creating-a-0-0009-second-micro-vm-execution-time/">Hyperlight</a>
-                        at ~0.9 ms, but that embeds a <em>single function</em> with no OS: a different job.</p>
+                    <p style="margin:22px 0 0;font-size:14px;max-width:76ch">In the project's benchmark,
+                        construction takes <b>≈ 3.7 ms</b> median (<code>spawn-spinup.sh</code>, measured until the
+                        workload runs). The Firecracker and Apple container figures use the same timing boundary but
+                        provide different forms of isolation. A VM can isolate the host kernel while Kennel controls
+                        what code inside the guest may reach.</p>
                 </div>
 
                 <div class="rv"
                     style="margin-top:38px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
-                    <p class="fig" style="margin:0 0 4px">The nearest neighbour</p>
+                    <p class="fig" style="margin:0 0 4px">Compared with bubblewrap</p>
                     <h3 style="margin:0 0 6px">"Isn't this just bubblewrap?"</h3>
-                    <p style="margin:0 0 22px;max-width:74ch">Kennel builds its sandbox with the mechanism bubblewrap
-                        pioneered; the difference is <b>reference-monitor discipline</b>. bwrap composes a view and
-                        <code>exec</code>s: it mediates <em>once, at launch,</em> then steps out. Kennel mediates at
-                        <em>every crossing, at runtime,</em> through kenneld. Same engine, different vehicle:</p>
+                    <p style="margin:0 0 22px;max-width:74ch">Both use namespaces, mounts, and seccomp to construct a
+                        restricted environment. bubblewrap configures that environment and launches the process.
+                        Kennel also keeps a policy decision point for connections and services that need runtime
+                        mediation. It removes other access by construction.</p>
                     <div class="status" style="margin-top:0">
                         <div class="built">
                             <h4>Same engine</h4>
                             <ul>
-                                <li>Unprivileged, identity-mapped user namespace: <code>CAP_SYS_ADMIN</code> only inside it, the workload never root on the host</li>
+                                <li>Identity-mapped user namespace: trusted setup uses mapped UID 0; the workload runs as the operator UID inside and outside</li>
                                 <li>Mount / PID / IPC / (opt.) net namespaces; <code>pivot_root</code></li>
                                 <li>A minimal bound view: present by construction, not denied</li>
                                 <li>seccomp on the syscall surface</li>
@@ -1332,13 +1311,13 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                             </ul>
                         </div>
                     </div>
-                    <p style="margin:20px 0 0;font-size:14px;max-width:78ch">The gap is real: a Claude Code agent
-                        blocked by a bubblewrap sandbox reasoned, unprompted, <em>"let me try disabling the sandbox …
-                        to bypass the deny rule"</em> (<a href="https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md">THREATS.md
-                        T2.1</a>); a launch-time view has no runtime mediator to catch that. bubblewrap is the right
-                        <em>primitive</em> — it's what Flatpak runs on — and Kennel is the policy-driven, audited,
-                        daemon-managed reference monitor built from it: one signed, reviewable policy instead of a wall
-                        of <code>bwrap</code> flags.</p>
+                    <p style="margin:20px 0 0;font-size:14px;max-width:78ch">The <a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/reference/THREATS.md">threat
+                            catalogue (T2.1)</a> records an agent trying to disable its own sandbox after a denied
+                        command. Kennel's policy is signed outside the workload and cannot be changed by it. For a
+                        detailed mechanism comparison, see the <a
+                            href="https://github.com/projectkennel/projectkennel/blob/main/docs/governance/bubblewrap-vs-kennel-mapping.md">bubblewrap
+                            mapping</a>.</p>
                 </div>
             </div>
         </section>
@@ -1349,14 +1328,14 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                 <div class="callout rv">
                     <div class="sec-head">
                         <p class="fig">Security</p>
-                        <h2>Made to be distrusted, and read.</h2>
+                        <h2>Review the security boundary.</h2>
                     </div>
                     <ul class="seclist">
                         <li><span class="mk">[+]</span>
                             <div>
-                                <h4>Auditable by construction</h4>
-                                <p>A small trusted core, held to a high bar for review. Apache-2.0, with the BPF
-                                    components under GPL-2.0. You can read every line.</p>
+                                <h4>Open implementation</h4>
+                                <p>Source and design are public. Userspace is Apache-2.0; the BPF components are
+                                    GPL-2.0.</p>
                             </div>
                         </li>
                         <li><span class="mk">[+]</span>
@@ -1369,8 +1348,8 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
                         <li><span class="mk">[+]</span>
                             <div>
                                 <h4>Structured audit</h4>
-                                <p>Append-only JSONL for every decision — policy loads, denied connects, signature
-                                    failures — ready to ship to a SIEM.</p>
+                                <p>JSONL records policy loads, denied connections, signature failures, and other
+                                    security decisions.</p>
                             </div>
                         </li>
                         <li><span class="mk">[+]</span>
