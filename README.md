@@ -1,17 +1,19 @@
 # Project Kennel
 
-**Kennel runs code you haven't vetted — an AI coding agent, an `npm install`, a freshly-cloned repo — under your own user account, confined to just the files, network, and programs a signed policy allows.** The agent that goes off-script, or the postinstall script hunting for credentials, reaches your project and nothing else: not `~/.ssh`, not your other repositories, not the open network.
+An AI coding agent needs your repository and a toolchain. A package install needs a registry. A development container needs access to your files. Each grant makes a sandbox useful, but a broad mount or open network can give unvetted code much more access than the job requires.
+
+**Project Kennel is a reference monitor for code running under your account.** It uses namespaces, Landlock, seccomp, and other Linux controls to confine an agent, an `npm install`, or code from a new repository. A signed policy grants each task the resources it needs. A task working on one project need not see `~/.ssh`, your other repositories, or the open network.
 
 ```bash
 apt install kennel        # Debian/Ubuntu   (dnf install kennel on Fedora/RHEL)
 kennel run claude         # run an agent confined to a repo, a toolchain, a few registries
 ```
 
-It's the enforcement the user level never grew. The host has confined untrusted code for decades (SELinux, AppArmor, seccomp, the LSM framework), but your *account* — where agents and unsigned code now run — never did. Kennel keeps your uid and splits the **authority** off it: the workload runs as you, with exactly what its policy grants, checked one access at a time. That is a **reference monitor**. Where a sandbox or container draws its line once at launch and steps back, the monitor stays in the path for as long as the workload runs — cheap enough (~3 ms to spawn) to do per task and throw away.
+Kennel uses the same scaffolding as a sandbox, then applies a different discipline. **Remove what the task does not need:** ungranted files, processes, devices, and routes are absent from its view; Landlock and seccomp restrict unused operations and kernel entry points. **Mediate what it does need:** for a network connection or service request, a separate daemon checks the signed policy before a host-side component acts. The first path enforces by construction; the second mediates each crossing at runtime. Together they form a reference monitor the workload cannot alter. A fresh kennel takes about 3 ms to construct, so it can be used per task.
 
 ## Install
 
-Signed package repositories the project hosts and signs itself: no `curl | sh` anywhere (that's threat T1.4). You import **one** key, cross-check its fingerprint against three independent channels (this repo, the GitHub release, the domain's DNS `TXT` record), and `apt`/`dnf` verify every package and metadata refresh against it thereafter.
+Kennel is available from project-signed package repositories. Import the signing key, check its fingerprint against this repository, the GitHub release, and the domain's DNS `TXT` record, then install with `apt` or `dnf`. The package manager verifies subsequent packages and repository metadata.
 
 **Debian / Ubuntu:**
 ```bash
@@ -30,24 +32,25 @@ Signing key **`663C 67B0 9FDD A9EE E57F A295 88D5 8446 1C4D 6EE9`** (also at `_k
 
 ## What it does
 
-- **Construction by absence.** The workload's world is built from nothing, granted paths only. What isn't granted is *absent*, not denied: nothing to enumerate, nothing to probe.
-- **Deny-by-default network**, four modes (`none` / proxied `constrained` / `unconstrained` / `host`), egress brokered and audited.
-- **SSH with no signing oracle.** A per-user re-origination bastion; the sandbox holds a disposable synthetic key bound to one `(host, key)` edge: never your real key, never an agent socket.
-- **Dynamic spawn + a service mesh.** A confined agent spawns scoped, signed-template sub-kennels and consumes brokered capabilities by name: deny-by-default, depth-1, reaped with the agent.
-- **Confined GUI** (a per-kennel nested Wayland compositor), **OCI images** (digest-pinned rootfs), and **workspace-trust pinning** (a masked manifest the agent can rewrite but cannot forge).
-- **Unprivileged by construction.** `kenneld` runs as you with no standing privilege; a single small file-capped helper builds the namespaces, operator-owned (not root). There is no `sudo` in the spawn.
-- **Confinement, not detection.** The boundary never judges intent, so being wrong about the code is not a breach. A unified, structured audit log records every decision, and the trusted base only shrinks — 30 crates, every line of `unsafe` quarantined to 5 small ones.
+- **Restricted view.** The workload sees the paths, processes, devices, and network routes its policy permits. Landlock and seccomp further restrict what it can do with them.
+- **Network policy.** Four modes (`none`, proxied `constrained`, `unconstrained`, and `host`) let a policy choose the required reach. Constrained egress is brokered and audited.
+- **SSH without exposing your agent.** A bastion uses a disposable key tied to a permitted destination; the workload never receives your real key or SSH agent socket.
+- **Scoped delegation.** An agent can start sub-kennels from signed templates and reach named services through the brokered mesh. The children are reaped with their parent.
+- **Other workloads.** Kennel supports a nested Wayland GUI, digest-pinned OCI root filesystems, and pinned workspace trust manifests.
+- **No root workload, even inside the kennel.** The user namespace maps UID 0 so trusted setup code can build the boundary. Before the workload starts, it drops to your UID and cannot regain UID 0 in that namespace. Kennel does not map a delegated range of subordinate UIDs into the workload.
+- **No standing root daemon.** `kenneld` runs as your user. A narrow file-capability helper performs the privileged setup; starting a kennel does not invoke `sudo`.
+- **Audit.** Structured events record policy decisions. Kennel enforces access rules; it does not decide whether the code's intent is benign.
 
-Policy is signed, versioned, and inheritable, and describes kernel-level constraints rather than behaviour: the same policy confines an AI agent, a Postgres container, or an `npm install`. The full treatment lives in the book (below).
+Policies are signed, versioned, and inheritable. They describe access rather than the identity of a particular tool, so the same policy model applies to an agent, a container, or a package install.
 
 ## Status
 
-**0.7.x**, versioned on a stable-surface cadence ([CHANGELOG](CHANGELOG.md)). It runs the full vertical **unprivileged** on stock Linux (kernel ≥ 6.10, Landlock ABI ≥ 6), proven end-to-end on **Debian/Ubuntu** (AppArmor is the userns substrate) and on **Fedora, enforcing SELinux** (a two-domain module keeps the monitor and the workload as distinct SELinux subjects). Pre-1.0: interfaces may still change.
+**0.7.x** ([CHANGELOG](CHANGELOG.md)). Kennel runs on Linux with kernel ≥ 6.10 and Landlock ABI ≥ 6. End-to-end runs have been verified on Debian/Ubuntu with AppArmor and Fedora with enforcing SELinux. Interfaces may change before 1.0.
 
 ## Read more
 
-- **The book** ([`books/`](https://github.com/projectkennel/books), separate repo) — the corpus: Vol 1 the platform-neutral design, Vol 2 the Linux realisation. The authoritative "what it is and why."
-- **[THREATS.md](docs/reference/THREATS.md)** — the threat catalogue (stable IDs, incident citations, MITRE/compliance mappings). The durable, portable contribution: cite it even if you never run the code.
+- **The book** ([`books/`](https://github.com/projectkennel/books), separate repo) — the design and its Linux implementation.
+- **[THREATS.md](docs/reference/THREATS.md)** — the threat catalogue, with stable IDs, incident citations, and MITRE/compliance mappings.
 - **Using it:** [INSTALL.md](INSTALL.md) → [HOWTO.md](HOWTO.md) → [HOWTO-admin.md](HOWTO-admin.md), and the installed man pages (`man kennel`, `man policy.toml`, `man kenneld`).
 - **Contributing:** [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
