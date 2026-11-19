@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 42869,
+  "total_sloc": 42937,
   "tcb_crate_count": 17,
-  "tcb_sloc": 25964,
+  "tcb_sloc": 26032,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7857,
+      "sloc": 7858,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 2487,
+      "sloc": 2540,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -196,7 +196,7 @@
     },
     {
       "name": "kennel-bin-init",
-      "sloc": 389,
+      "sloc": 394,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-bin-init"],
@@ -225,6 +225,16 @@
       "external_deps": []
     },
     {
+      "name": "kennel-lib-landlock",
+      "sloc": 273,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["syscall"],
+      "first_party_deps": [],
+      "external_deps": ["bitflags", "libc"]
+    },
+    {
       "name": "kennel-schema-derive",
       "sloc": 272,
       "uses_unsafe": false,
@@ -233,16 +243,6 @@
       "consumers": [],
       "first_party_deps": [],
       "external_deps": ["proc-macro2", "quote", "syn"]
-    },
-    {
-      "name": "kennel-lib-landlock",
-      "sloc": 264,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["syscall"],
-      "first_party_deps": [],
-      "external_deps": ["bitflags", "libc"]
     },
     {
       "name": "kennel-lib-cli",
