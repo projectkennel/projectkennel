@@ -4,6 +4,19 @@ All notable changes to Project Kennel are recorded here. The format follows [Kee
 
 Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
+## [Unreleased]
+
+### Fixed
+
+- **`kennel daemon-reload` no longer strands running providers.** A reload re-projected the
+  service catalogue with every provider `Pending`, but a provider that was already running never
+  reports in again, so it stayed `Pending` and every new consumer's connect waited out its
+  timeout and was refused. For example, a D-Bus kennel started after any reload failed with
+  `no dbus-broker provider is enabled` until the broker was stopped (#234). A reload now keeps a
+  running provider `Ready` when its definition (signer, tier, enablement and offers) is unchanged.
+  One that changed while running stays `Pending`, and kenneld logs that it takes effect once
+  restarted (`kennel stop <name>`). A reload still clears `Failed`.
+
 ## [0.8.0] — 2026-11-19
 
 **Multi-process and native-code workloads work inside a kennel, and writable space is never

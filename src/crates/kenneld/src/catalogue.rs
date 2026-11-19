@@ -118,6 +118,17 @@ pub struct CatalogueProvider {
     pub offers: Vec<ProvideRuntime>,
 }
 
+impl CatalogueProvider {
+    /// Whether `other` describes the same provider as `self`, apart from readiness: the same signing
+    /// key, tier, enablement and offers. This is what a running instance was constructed against.
+    fn same_definition(&self, other: &Self) -> bool {
+        self.signing_key_id == other.signing_key_id
+            && self.tier == other.tier
+            && self.enablement == other.enablement
+            && self.offers == other.offers
+    }
+}
+
 /// One candidate provider for a resolved `name`: what the broker (W5) needs to select and connect.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
@@ -285,8 +296,21 @@ impl Catalogue {
     /// running instance is not the definition the catalogue now describes. It is returned so the
     /// daemon can say it needs a restart to take effect.
     pub fn inherit_readiness(&mut self, previous: &Self) -> Vec<String> {
-        let _ = previous;
-        todo!("carry Ready across a reload for unchanged providers")
+        let mut changed = Vec::new();
+        for (id, now) in &mut self.providers {
+            let Some(was) = previous.providers.get(id) else {
+                continue; // newly enabled: Pending until it is constructed
+            };
+            if was.readiness != Readiness::Ready {
+                continue; // not running, or Failed (which a reload clears)
+            }
+            if was.same_definition(now) {
+                now.readiness = Readiness::Ready;
+            } else {
+                changed.push(id.clone());
+            }
+        }
+        changed
     }
 
     /// The catalogued capability names (the topology surface reads this, §7.13.7).

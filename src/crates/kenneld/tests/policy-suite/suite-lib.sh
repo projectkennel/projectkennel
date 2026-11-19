@@ -76,9 +76,12 @@ suite_run_cleanups() {
 # settled form AT the ondemand enablement link (the entry IS the signed settled policy the
 # daemon load-verifies, §7.13.6), refresh the catalogue, and defer the teardown: stop the
 # activated instance BEFORE unlinking (a still-running provider would sit on the name and
-# starve later cases), unlink, reload.
+# starve later cases), unlink, reload. A provider of the same name an earlier case left running
+# (an installed broker a consume activated) is stopped first: the fixture redefines it, and a
+# redefined provider only takes effect once restarted (#234).
 suite_enable_ondemand() {
 	local src="$1" name="$2"
+	"$KENNEL" stop "$name" >/dev/null 2>&1 || true
 	mkdir -p "$ONDEMAND"
 	"$KENNEL" policy compile "$src" --key "$SUITE_KEY" --trust-dir "$KEYS" 		--no-lock --output "$ONDEMAND/$name"
 	"$KENNEL" daemon-reload
