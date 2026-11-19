@@ -1349,7 +1349,7 @@ fn translate_fs(
                 Some(s) => parse_size_mib(s)?,
                 None => DEFAULT_TMP_MIB,
             },
-            mmap_exec: false, // placeholder (#218): carried in the feat commit
+            mmap_exec: t.mmap_exec.unwrap_or(false),
         },
         None => TmpPolicy {
             writable: false,

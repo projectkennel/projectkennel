@@ -235,8 +235,18 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
 /// exec allowlist no longer bounds which native code runs. A legitimate choice for runtimes that
 /// unpack and `dlopen` native code (footgun-warn-dont-forbid), never a silent one.
 fn tmp_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec<String> {
-    let _ = effective;
-    Vec::new() // placeholder (#218): the warning lands in the feat commit
+    if !effective.fs.tmp.mmap_exec {
+        return Vec::new();
+    }
+    vec![
+        "[fs.tmp] mmap_exec = true: /tmp allows executable mappings, so native code the \
+          workload writes there can be loaded — including a whole program run through the \
+          dynamic loader — and the exec allowlist no longer bounds which native code runs. \
+          execve from /tmp stays refused, /tmp does not outlive the kennel, and Landlock, the \
+          BPF network ACLs and seccomp still confine the process. Meant for runtimes that \
+          unpack and dlopen native code (Bun single-file executables, #218)."
+            .to_owned(),
+    ]
 }
 
 /// Freeform is the open footgun (any value the agent supplies is accepted), so it is
@@ -503,7 +513,7 @@ mod tests {
         assert_eq!(tmp_warnings(&native).len(), 1, "{:?}", native.warnings);
         assert!(tmp_warnings(&strict).is_empty(), "{:?}", strict.warnings);
         // Otherwise identical to strict.
-        let mut a = native.policy.effective_policy.clone();
+        let mut a = native.policy.effective_policy;
         a.fs.tmp.mmap_exec = false;
         assert_eq!(
             a, strict.policy.effective_policy,

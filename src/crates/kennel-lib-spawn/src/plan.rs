@@ -1432,7 +1432,7 @@ impl Plan {
             binds,
             dev_allow,
             tmp_size_mib: ep.fs.tmp.size_mib,
-            tmp_mmap_exec: false, // placeholder (#218): carried in the feat commit
+            tmp_mmap_exec: ep.fs.tmp.mmap_exec,
             proc_hidepid: ep.proc.hidepid,
             proc,
             binder: true,
