@@ -1,4 +1,10 @@
+// allow(unnecessary_box_returns): `Box<Error>` is this deserializer's serde error type
+// (`Deserializer::Error`), boxed so every `Result` in the parser stays one pointer wide; the
+// constructors return it boxed by design.
+#![allow(clippy::unnecessary_box_returns)]
+
 use crate::tokens::{Error as TokenError, Span, Token, Tokenizer};
+
 use serde::de;
 use serde::de::IntoDeserializer;
 use std::borrow::Cow;
@@ -16,6 +22,11 @@ type TablePair<'a> = ((Span, Cow<'a, str>), Value<'a>);
 ///
 /// This function will attempt to interpret `bytes` as UTF-8 data and then
 /// deserialize `T` from the TOML document provided.
+///
+/// # Errors
+///
+/// Returns an [`Error`](crate::Error) if `bytes` is not UTF-8, is not valid TOML, or does not
+/// match `T`.
 pub fn from_slice<'de, T>(bytes: &'de [u8]) -> Result<T, crate::Error>
 where
     T: de::Deserialize<'de>,
@@ -30,6 +41,10 @@ where
 ///
 /// This function will attempt to interpret `s` as a TOML document and
 /// deserialize `T` from the document.
+///
+/// # Errors
+///
+/// Returns an [`Error`](crate::Error) if `s` is not valid TOML or does not match `T`.
 pub fn from_str<'de, T>(s: &'de str) -> Result<T, crate::Error>
 where
     T: de::Deserialize<'de>,
@@ -39,7 +54,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) struct Error {
+pub struct Error {
     kind: ErrorKind,
     line: Option<usize>,
     col: usize,
@@ -156,7 +171,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
     {
         let mut tables = self.tables()?;
         let table_indices = build_table_indices(&tables);
-        let table_pindices = build_table_pindices(&tables);
+        let table_parent_indices = build_table_pindices(&tables);
 
         let res = visitor.visit_map(MapVisitor {
             values: Vec::new().into_iter().peekable(),
@@ -166,7 +181,7 @@ impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
             cur_parent: 0,
             max: tables.len(),
             table_indices: &table_indices,
-            table_pindices: &table_pindices,
+            table_parent_indices: &table_parent_indices,
             tables: &mut tables,
             array: false,
             de: self,
@@ -228,19 +243,66 @@ fn build_table_pindices<'de>(tables: &[Table<'de>]) -> HashMap<Vec<Cow<'de, str>
     for (i, table) in tables.iter().enumerate() {
         let header = table.header.iter().map(|v| v.1.clone()).collect::<Vec<_>>();
         for len in 0..=header.len() {
-            res.entry(header[..len].to_owned())
-                .or_insert_with(Vec::new)
-                .push(i);
+            if let Some(prefix) = header.get(..len) {
+                res.entry(prefix.to_owned())
+                    .or_insert_with(Vec::new)
+                    .push(i);
+            }
         }
     }
     res
 }
 
-fn headers_equal(hdr_a: &[(Span, Cow<str>)], hdr_b: &[(Span, Cow<str>)]) -> bool {
+fn headers_equal(hdr_a: &[(Span, Cow<'_, str>)], hdr_b: &[(Span, Cow<'_, str>)]) -> bool {
     if hdr_a.len() != hdr_b.len() {
         return false;
     }
     hdr_a.iter().zip(hdr_b.iter()).all(|(h1, h2)| h1.1 == h2.1)
+}
+
+/// An internal-invariant failure, surfaced as an `Error` rather than a panic: the parser runs on the
+/// TCB path, so even a bug must not take the daemon down (#228).
+fn internal(what: &str) -> Box<Error> {
+    Error::custom(
+        None,
+        format!("internal TOML parser invariant violated: {what}"),
+    )
+}
+
+/// `tables[i]`, or an internal error if `i` is out of range.
+fn table_at<'t, 'de>(tables: &'t [Table<'de>], i: usize) -> Result<&'t Table<'de>, Box<Error>> {
+    tables
+        .get(i)
+        .ok_or_else(|| internal("table index out of range"))
+}
+
+/// The `depth`-th header part of `table`, or an internal error.
+fn header_part<'t, 'de>(
+    table: &'t Table<'de>,
+    depth: usize,
+) -> Result<&'t (Span, Cow<'de, str>), Box<Error>> {
+    table
+        .header
+        .get(depth)
+        .ok_or_else(|| internal("header depth out of range"))
+}
+
+/// The first index in the sorted `entries` that is `>= from` and `< max` and whose table passes
+/// `pick`, by bisection (the lists are ordered).
+fn next_matching(
+    entries: &[usize],
+    from: usize,
+    max: usize,
+    tables: &[Table<'_>],
+    pick: impl Fn(&Table<'_>) -> bool,
+) -> Option<usize> {
+    let start = entries.binary_search(&from).unwrap_or_else(|v| v);
+    entries
+        .get(start..)?
+        .iter()
+        .copied()
+        .filter(|&i| i >= from && i < max)
+        .find(|&i| tables.get(i).is_some_and(&pick))
 }
 
 struct Table<'a> {
@@ -258,14 +320,14 @@ struct MapVisitor<'de, 'b> {
     cur_parent: usize,
     max: usize,
     table_indices: &'b HashMap<Vec<Cow<'de, str>>, Vec<usize>>,
-    table_pindices: &'b HashMap<Vec<Cow<'de, str>>, Vec<usize>>,
+    table_parent_indices: &'b HashMap<Vec<Cow<'de, str>>, Vec<usize>>,
     tables: &'b mut [Table<'de>],
     array: bool,
     de: &'b mut Deserializer<'de>,
     keys: HashSet<Cow<'de, str>>,
 }
 
-impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
+impl<'de> de::MapAccess<'de> for MapVisitor<'de, '_> {
     type Error = Box<Error>;
 
     fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Box<Error>>
@@ -277,7 +339,9 @@ impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
         }
 
         loop {
-            assert!(self.next_value.is_none());
+            if self.next_value.is_some() {
+                return Err(internal("next_key_seed called with a pending value"));
+            }
             if let Some(((span, key), value)) = self.values.next() {
                 if !self.keys.insert(key.clone()) {
                     return Err(Error::from_kind(
@@ -291,41 +355,35 @@ impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
             }
 
             let next_table = {
-                let prefix_stripped = self.tables[self.cur_parent].header[..self.depth]
+                let prefix_stripped = table_at(self.tables, self.cur_parent)?
+                    .header
+                    .get(..self.depth)
+                    .ok_or_else(|| internal("parent header shorter than depth"))?
                     .iter()
                     .map(|v| v.1.clone())
                     .collect::<Vec<_>>();
-                self.table_pindices
+                self.table_parent_indices
                     .get(&prefix_stripped)
                     .and_then(|entries| {
-                        let start = entries.binary_search(&self.cur).unwrap_or_else(|v| v);
-                        if start == entries.len() || entries[start] < self.cur {
-                            return None;
-                        }
-                        entries[start..]
-                            .iter()
-                            .filter_map(|i| if *i < self.max { Some(*i) } else { None })
-                            .map(|i| (i, &self.tables[i]))
-                            .find(|(_, table)| table.values.is_some())
-                            .map(|p| p.0)
+                        next_matching(entries, self.cur, self.max, self.tables, |t| {
+                            t.values.is_some()
+                        })
                     })
             };
 
-            let pos = match next_table {
-                Some(pos) => pos,
-                None => return Ok(None),
+            let Some(pos) = next_table else {
+                return Ok(None);
             };
             self.cur = pos;
 
             // Test to see if we're duplicating our parent's table, and if so
             // then this is an error in the toml format
             if self.cur_parent != pos {
-                if headers_equal(
-                    &self.tables[self.cur_parent].header,
-                    &self.tables[pos].header,
-                ) {
-                    let at = self.tables[pos].at;
-                    let name = self.tables[pos]
+                let parent = table_at(self.tables, self.cur_parent)?;
+                let current = table_at(self.tables, pos)?;
+                if headers_equal(&parent.header, &current.header) {
+                    let at = current.at;
+                    let name = current
                         .header
                         .iter()
                         .map(|k| k.1.clone())
@@ -338,20 +396,21 @@ impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
                 // the longer table was defined first then we want to narrow
                 // down our parent's length if possible to ensure that we catch
                 // duplicate tables defined afterwards.
-                let parent_len = self.tables[self.cur_parent].header.len();
-                let cur_len = self.tables[pos].header.len();
-                if cur_len < parent_len {
+                if current.header.len() < parent.header.len() {
                     self.cur_parent = pos;
                 }
             }
 
-            let table = &mut self.tables[pos];
+            let table = self
+                .tables
+                .get_mut(pos)
+                .ok_or_else(|| internal("table index out of range"))?;
 
             // If we're not yet at the appropriate depth for this table then we
             // just next the next portion of its header and then continue
             // decoding.
             if self.depth != table.header.len() {
-                let (span, key) = &table.header[self.depth];
+                let (span, key) = header_part(table, self.depth)?;
                 if !self.keys.insert(key.clone()) {
                     return Err(Error::from_kind(
                         Some(span.start),
@@ -374,7 +433,7 @@ impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
             self.values = table
                 .values
                 .take()
-                .expect("Unable to read table values")
+                .ok_or_else(|| internal("table values already consumed"))?
                 .into_iter()
                 .peekable();
         }
@@ -394,82 +453,87 @@ impl<'de, 'b> de::MapAccess<'de> for MapVisitor<'de, 'b> {
             }
         }
 
-        let array =
-            self.tables[self.cur].array && self.depth == self.tables[self.cur].header.len() - 1;
-        self.cur += 1;
+        let current = table_at(self.tables, self.cur)?;
+        // `checked_sub`: a header-less table is never "the last part of an array header" (the old
+        // `len() - 1` underflowed there — a debug-build panic, a wrapped compare in release).
+        let array = current.array && current.header.len().checked_sub(1) == Some(self.depth);
+        let parent = self.cur;
+        self.cur = self.cur.saturating_add(1);
         let res = seed.deserialize(MapVisitor {
             values: Vec::new().into_iter().peekable(),
             next_value: None,
-            depth: self.depth + if array { 0 } else { 1 },
-            cur_parent: self.cur - 1,
+            depth: self.depth.saturating_add(usize::from(!array)),
+            cur_parent: parent,
             cur: 0,
             max: self.max,
             array,
             table_indices: self.table_indices,
-            table_pindices: self.table_pindices,
+            table_parent_indices: self.table_parent_indices,
             tables: &mut *self.tables,
             de: &mut *self.de,
             keys: HashSet::new(),
         });
         res.map_err(|mut e| {
-            e.add_key_context(&self.tables[self.cur - 1].header[self.depth].1);
+            if let Some((_, key)) = self
+                .tables
+                .get(parent)
+                .and_then(|t| t.header.get(self.depth))
+            {
+                e.add_key_context(key);
+            }
             e
         })
     }
 }
 
-impl<'de, 'b> de::SeqAccess<'de> for MapVisitor<'de, 'b> {
+impl<'de> de::SeqAccess<'de> for MapVisitor<'de, '_> {
     type Error = Box<Error>;
 
     fn next_element_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Box<Error>>
     where
         K: de::DeserializeSeed<'de>,
     {
-        assert!(self.next_value.is_none());
-        assert!(self.values.next().is_none());
+        if self.next_value.is_some() || self.values.next().is_some() {
+            return Err(internal(
+                "next_element_seed called with pending map entries",
+            ));
+        }
 
         if self.cur_parent == self.max {
             return Ok(None);
         }
 
-        let header_stripped = self.tables[self.cur_parent]
+        let header_stripped = table_at(self.tables, self.cur_parent)?
             .header
             .iter()
             .map(|v| v.1.clone())
             .collect::<Vec<_>>();
-        let start_idx = self.cur_parent + 1;
+        let start_idx = self.cur_parent.saturating_add(1);
         let next = self
             .table_indices
             .get(&header_stripped)
             .and_then(|entries| {
-                let start = entries.binary_search(&start_idx).unwrap_or_else(|v| v);
-                if start == entries.len() || entries[start] < start_idx {
-                    return None;
-                }
-                entries[start..]
-                    .iter()
-                    .filter_map(|i| if *i < self.max { Some(*i) } else { None })
-                    .map(|i| (i, &self.tables[i]))
-                    .find(|(_, table)| table.array)
-                    .map(|p| p.0)
+                next_matching(entries, start_idx, self.max, self.tables, |t| t.array)
             })
             .unwrap_or(self.max);
 
+        let values = self
+            .tables
+            .get_mut(self.cur_parent)
+            .ok_or_else(|| internal("table index out of range"))?
+            .values
+            .take()
+            .ok_or_else(|| internal("table values already consumed"))?;
         let ret = seed.deserialize(MapVisitor {
-            values: self.tables[self.cur_parent]
-                .values
-                .take()
-                .expect("Unable to read table values")
-                .into_iter()
-                .peekable(),
+            values: values.into_iter().peekable(),
             next_value: None,
-            depth: self.depth + 1,
+            depth: self.depth.saturating_add(1),
             cur_parent: self.cur_parent,
             max: next,
             cur: 0,
             array: false,
             table_indices: self.table_indices,
-            table_pindices: self.table_pindices,
+            table_parent_indices: self.table_parent_indices,
             tables: self.tables,
             de: self.de,
             keys: HashSet::new(),
@@ -479,7 +543,7 @@ impl<'de, 'b> de::SeqAccess<'de> for MapVisitor<'de, 'b> {
     }
 }
 
-impl<'de, 'b> de::Deserializer<'de> for MapVisitor<'de, 'b> {
+impl<'de> de::Deserializer<'de> for MapVisitor<'de, '_> {
     type Error = Box<Error>;
 
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Box<Error>>
@@ -525,7 +589,7 @@ struct StrDeserializer<'a> {
 }
 
 impl<'a> StrDeserializer<'a> {
-    fn new(key: Cow<'a, str>) -> StrDeserializer<'a> {
+    const fn new(key: Cow<'a, str>) -> Self {
         StrDeserializer { key }
     }
 }
@@ -564,14 +628,14 @@ struct ValueDeserializer<'a> {
 }
 
 impl<'a> ValueDeserializer<'a> {
-    fn new(value: Value<'a>) -> ValueDeserializer<'a> {
+    const fn new(value: Value<'a>) -> Self {
         ValueDeserializer {
             value,
             validate_struct_keys: false,
         }
     }
 
-    fn with_struct_key_validation(mut self) -> Self {
+    const fn with_struct_key_validation(mut self) -> Self {
         self.validate_struct_keys = true;
         self
     }
@@ -704,8 +768,8 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     }
 }
 
-impl<'de, 'b> de::IntoDeserializer<'de, Box<Error>> for MapVisitor<'de, 'b> {
-    type Deserializer = MapVisitor<'de, 'b>;
+impl<'de> de::IntoDeserializer<'de, Box<Error>> for MapVisitor<'de, '_> {
+    type Deserializer = Self;
 
     fn into_deserializer(self) -> Self::Deserializer {
         self
@@ -741,9 +805,8 @@ impl<'de> de::MapAccess<'de> for InlineTableDeserializer<'de> {
     where
         K: de::DeserializeSeed<'de>,
     {
-        let ((span, key), value) = match self.values.next() {
-            Some(pair) => pair,
-            None => return Ok(None),
+        let Some(((span, key), value)) = self.values.next() else {
+            return Ok(None);
         };
         self.next_value = Some(value);
         if !self.keys.insert(key.clone()) {
@@ -772,17 +835,14 @@ impl<'de> de::EnumAccess<'de> for InlineTableDeserializer<'de> {
     where
         V: de::DeserializeSeed<'de>,
     {
-        let (key, value) = match self.values.next() {
-            Some(pair) => pair,
-            None => {
-                return Err(Error::from_kind(
-                    None, // FIXME: How do we get an offset here?
-                    ErrorKind::Wanted {
-                        expected: "table with exactly 1 entry",
-                        found: "empty table",
-                    },
-                ));
-            }
+        let Some((key, value)) = self.values.next() else {
+            return Err(Error::from_kind(
+                None, // FIXME: How do we get an offset here?
+                ErrorKind::Wanted {
+                    expected: "table with exactly 1 entry",
+                    found: "empty table",
+                },
+            ));
         };
 
         seed.deserialize(StrDeserializer::new(key.1))
@@ -892,7 +952,7 @@ impl<'de> de::VariantAccess<'de> for TableEnumDeserializer<'de> {
 }
 
 impl<'a> Deserializer<'a> {
-    fn new(input: &'a str) -> Deserializer<'a> {
+    fn new(input: &'a str) -> Self {
         Deserializer {
             tokens: Tokenizer::new(input),
             input,
@@ -933,10 +993,8 @@ impl<'a> Deserializer<'a> {
                     }
                 }
                 Line::KeyValue(key, value) => {
-                    if cur_table.values.is_none() {
-                        cur_table.values = Some(Vec::new());
-                    }
-                    self.add_dotted_key(key, value, cur_table.values.as_mut().unwrap())?;
+                    let values = cur_table.values.get_or_insert_with(Vec::new);
+                    self.add_dotted_key(key, value, values)?;
                 }
             }
         }
@@ -952,7 +1010,7 @@ impl<'a> Deserializer<'a> {
             if self.eat_comment()? {
                 continue;
             }
-            if self.eat(Token::Newline)? {
+            if self.eat(&Token::Newline)? {
                 continue;
             }
             break;
@@ -967,8 +1025,8 @@ impl<'a> Deserializer<'a> {
 
     fn table_header(&mut self) -> Result<Line<'a>, Box<Error>> {
         let start = self.tokens.current();
-        self.expect(Token::LeftBracket)?;
-        let array = self.eat(Token::LeftBracket)?;
+        self.expect(&Token::LeftBracket)?;
+        let array = self.eat(&Token::LeftBracket)?;
         let ret = Header::new(self.tokens.clone(), array);
         self.tokens.skip_to_newline();
         Ok(Line::Table {
@@ -981,7 +1039,7 @@ impl<'a> Deserializer<'a> {
     fn key_value(&mut self) -> Result<Line<'a>, Box<Error>> {
         let key = self.dotted_key()?;
         self.eat_whitespace();
-        self.expect(Token::Equals)?;
+        self.expect(&Token::Equals)?;
         self.eat_whitespace();
 
         let value = self.value()?;
@@ -1076,7 +1134,7 @@ impl<'a> Deserializer<'a> {
                 start,
                 end,
             })
-        } else if self.eat(Token::Period)? {
+        } else if self.eat(&Token::Period)? {
             let at = self.tokens.current();
             match self.next()? {
                 Some((Span { start, end }, Token::Keylike(after))) => {
@@ -1151,7 +1209,7 @@ impl<'a> Deserializer<'a> {
         let mut underscore = false;
         let mut end = s.len();
         for (i, c) in s.char_indices() {
-            let at = i + start;
+            let at = i.saturating_add(start);
             if i == 0 && (c == '+' || c == '-') && allow_sign {
                 continue;
             }
@@ -1196,7 +1254,7 @@ impl<'a> Deserializer<'a> {
         let mut exponent = None;
         if suffix.starts_with('e') || suffix.starts_with('E') {
             let (a, b) = if suffix.len() == 1 {
-                self.eat(Token::Plus)?;
+                self.eat(&Token::Plus)?;
                 match self.next()? {
                     Some((_, Token::Keylike(s))) => self.parse_integer(s, false, true, 10)?,
                     _ => return Err(self.error(start, ErrorKind::NumberInvalid)),
@@ -1242,22 +1300,22 @@ impl<'a> Deserializer<'a> {
     fn inline_table(&mut self) -> Result<(Span, Vec<TablePair<'a>>), Box<Error>> {
         let mut ret = Vec::new();
         self.eat_whitespace();
-        if let Some(span) = self.eat_spanned(Token::RightBrace)? {
+        if let Some(span) = self.eat_spanned(&Token::RightBrace)? {
             return Ok((span, ret));
         }
         loop {
             let key = self.dotted_key()?;
             self.eat_whitespace();
-            self.expect(Token::Equals)?;
+            self.expect(&Token::Equals)?;
             self.eat_whitespace();
             let value = self.value()?;
             self.add_dotted_key(key, value, &mut ret)?;
 
             self.eat_whitespace();
-            if let Some(span) = self.eat_spanned(Token::RightBrace)? {
+            if let Some(span) = self.eat_spanned(&Token::RightBrace)? {
                 return Ok((span, ret));
             }
-            self.expect(Token::Comma)?;
+            self.expect(&Token::Comma)?;
             self.eat_whitespace();
         }
     }
@@ -1267,10 +1325,10 @@ impl<'a> Deserializer<'a> {
     fn array(&mut self) -> Result<(Span, Vec<Value<'a>>), Box<Error>> {
         let mut ret = Vec::new();
 
-        let intermediate = |me: &mut Deserializer| -> Result<(), Box<Error>> {
+        let intermediate = |me: &mut Deserializer<'_>| -> Result<(), Box<Error>> {
             loop {
                 me.eat_whitespace();
-                if !me.eat(Token::Newline)? && !me.eat_comment()? {
+                if !me.eat(&Token::Newline)? && !me.eat_comment()? {
                     break;
                 }
             }
@@ -1279,18 +1337,18 @@ impl<'a> Deserializer<'a> {
 
         loop {
             intermediate(self)?;
-            if let Some(span) = self.eat_spanned(Token::RightBracket)? {
+            if let Some(span) = self.eat_spanned(&Token::RightBracket)? {
                 return Ok((span, ret));
             }
             let value = self.value()?;
             ret.push(value);
             intermediate(self)?;
-            if !self.eat(Token::Comma)? {
+            if !self.eat(&Token::Comma)? {
                 break;
             }
         }
         intermediate(self)?;
-        let span = self.expect_spanned(Token::RightBracket)?;
+        let span = self.expect_spanned(&Token::RightBracket)?;
         Ok((span, ret))
     }
 
@@ -1302,7 +1360,7 @@ impl<'a> Deserializer<'a> {
         let mut result = Vec::new();
         result.push(self.table_key()?);
         self.eat_whitespace();
-        while self.eat(Token::Period)? {
+        while self.eat(&Token::Period)? {
             self.eat_whitespace();
             result.push(self.table_key()?);
             self.eat_whitespace();
@@ -1355,14 +1413,13 @@ impl<'a> Deserializer<'a> {
             end: value.end,
         };
         values.push((key, table_values));
-        let last_i = values.len() - 1;
-        if let (
+        if let Some((
             _,
             Value {
                 e: E::DottedTable(ref mut v),
                 ..
             },
-        ) = values[last_i]
+        )) = values.last_mut()
         {
             self.add_dotted_key(key_parts, value, v)?;
         }
@@ -1383,23 +1440,23 @@ impl<'a> Deserializer<'a> {
             .map_err(|e| self.token_error(e))
     }
 
-    fn eat(&mut self, expected: Token<'a>) -> Result<bool, Box<Error>> {
+    fn eat(&mut self, expected: &Token<'a>) -> Result<bool, Box<Error>> {
         self.tokens.eat(expected).map_err(|e| self.token_error(e))
     }
 
-    fn eat_spanned(&mut self, expected: Token<'a>) -> Result<Option<Span>, Box<Error>> {
+    fn eat_spanned(&mut self, expected: &Token<'a>) -> Result<Option<Span>, Box<Error>> {
         self.tokens
             .eat_spanned(expected)
             .map_err(|e| self.token_error(e))
     }
 
-    fn expect(&mut self, expected: Token<'a>) -> Result<(), Box<Error>> {
+    fn expect(&mut self, expected: &Token<'a>) -> Result<(), Box<Error>> {
         self.tokens
             .expect(expected)
             .map_err(|e| self.token_error(e))
     }
 
-    fn expect_spanned(&mut self, expected: Token<'a>) -> Result<Span, Box<Error>> {
+    fn expect_spanned(&mut self, expected: &Token<'a>) -> Result<Span, Box<Error>> {
         self.tokens
             .expect_spanned(expected)
             .map_err(|e| self.token_error(e))
@@ -1409,7 +1466,7 @@ impl<'a> Deserializer<'a> {
         self.tokens.next().map_err(|e| self.token_error(e))
     }
 
-    fn peek(&mut self) -> Result<Option<(Span, Token<'a>)>, Box<Error>> {
+    fn peek(&self) -> Result<Option<(Span, Token<'a>)>, Box<Error>> {
         self.tokens.peek().map_err(|e| self.token_error(e))
     }
 
@@ -1450,15 +1507,16 @@ impl<'a> Deserializer<'a> {
     ///
     /// All indexes are 0-based.
     fn to_linecol(&self, offset: usize) -> (usize, usize) {
-        let mut cur = 0;
+        let mut cur: usize = 0;
         // Use split_terminator instead of lines so that if there is a `\r`, it
         // is included in the offset calculation. The `+1` values below account
         // for the `\n`.
         for (i, line) in self.input.split_terminator('\n').enumerate() {
-            if cur + line.len() + 1 > offset {
-                return (i, offset - cur);
+            let next = cur.saturating_add(line.len()).saturating_add(1);
+            if next > offset {
+                return (i, offset.saturating_sub(cur));
             }
-            cur += line.len() + 1;
+            cur = next;
         }
         (self.input.lines().count(), 0)
     }
@@ -1470,7 +1528,7 @@ impl Error {
     }
 
     fn from_kind(at: Option<usize>, kind: ErrorKind) -> Box<Self> {
-        Box::new(Error {
+        Box::new(Self {
             kind,
             line: None,
             col: 0,
@@ -1481,7 +1539,7 @@ impl Error {
     }
 
     fn custom(at: Option<usize>, s: String) -> Box<Self> {
-        Box::new(Error {
+        Box::new(Self {
             kind: ErrorKind::Custom,
             line: None,
             col: 0,
@@ -1520,12 +1578,12 @@ impl Error {
 
 impl std::convert::From<Error> for std::io::Error {
     fn from(e: Error) -> Self {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+        Self::new(std::io::ErrorKind::InvalidData, e.to_string())
     }
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             ErrorKind::UnexpectedEof => "unexpected eof encountered".fmt(f)?,
             ErrorKind::InvalidCharInString(c) => write!(
@@ -1543,7 +1601,7 @@ impl Display for Error {
                 "invalid hex escape character in string: `{}`",
                 c.escape_default().collect::<String>()
             )?,
-            ErrorKind::InvalidEscapeValue(c) => write!(f, "invalid escape value: `{}`", c)?,
+            ErrorKind::InvalidEscapeValue(c) => write!(f, "invalid escape value: `{c}`")?,
             ErrorKind::NewlineInString => "newline in string found".fmt(f)?,
             ErrorKind::Unexpected(ch) => write!(
                 f,
@@ -1553,23 +1611,23 @@ impl Display for Error {
             ErrorKind::UnterminatedString => "unterminated string".fmt(f)?,
             ErrorKind::NewlineInTableKey => "found newline in table key".fmt(f)?,
             ErrorKind::Wanted { expected, found } => {
-                write!(f, "expected {}, found {}", expected, found)?;
+                write!(f, "expected {expected}, found {found}")?;
             }
             ErrorKind::NumberInvalid => "invalid number".fmt(f)?,
             ErrorKind::DuplicateTable(ref s) => {
-                write!(f, "redefinition of table `{}`", s)?;
+                write!(f, "redefinition of table `{s}`")?;
             }
             ErrorKind::DuplicateKey(ref s) => {
-                write!(f, "duplicate key: `{}`", s)?;
+                write!(f, "duplicate key: `{s}`")?;
             }
             ErrorKind::RedefineAsArray => "table redefined as array".fmt(f)?,
             ErrorKind::MultilineStringKey => "multiline strings are not allowed for key".fmt(f)?,
             ErrorKind::Custom => self.message.fmt(f)?,
-            ErrorKind::ExpectedTuple(l) => write!(f, "expected table with length {}", l)?,
+            ErrorKind::ExpectedTuple(l) => write!(f, "expected table with length {l}")?,
             ErrorKind::ExpectedTupleIndex {
                 expected,
                 ref found,
-            } => write!(f, "expected table key `{}`, but was `{}`", expected, found)?,
+            } => write!(f, "expected table key `{expected}`, but was `{found}`")?,
             ErrorKind::ExpectedEmptyTable => "expected empty table".fmt(f)?,
             ErrorKind::DottedKeyInvalidType => {
                 "dotted key attempted to extend non-table type".fmt(f)?;
@@ -1579,8 +1637,7 @@ impl Display for Error {
                 available,
             } => write!(
                 f,
-                "unexpected keys in table: `{:?}`, available keys: `{:?}`",
-                keys, available
+                "unexpected keys in table: `{keys:?}`, available keys: `{available:?}`"
             )?,
             ErrorKind::UnquotedString => write!(
                 f,
@@ -1594,13 +1651,18 @@ impl Display for Error {
                 if i > 0 {
                     write!(f, ".")?;
                 }
-                write!(f, "{}", k)?;
+                write!(f, "{k}")?;
             }
             write!(f, "`")?;
         }
 
         if let Some(line) = self.line {
-            write!(f, " at line {} column {}", line + 1, self.col + 1)?;
+            write!(
+                f,
+                " at line {} column {}",
+                line.saturating_add(1),
+                self.col.saturating_add(1)
+            )?;
         }
 
         Ok(())
@@ -1631,7 +1693,7 @@ struct Header<'a> {
 }
 
 impl<'a> Header<'a> {
-    fn new(tokens: Tokenizer<'a>, array: bool) -> Header<'a> {
+    const fn new(tokens: Tokenizer<'a>, array: bool) -> Self {
         Header {
             first: true,
             array,
@@ -1642,14 +1704,14 @@ impl<'a> Header<'a> {
     fn next(&mut self) -> Result<Option<(Span, Cow<'a, str>)>, TokenError> {
         self.tokens.eat_whitespace();
 
-        if self.first || self.tokens.eat(Token::Period)? {
+        if self.first || self.tokens.eat(&Token::Period)? {
             self.first = false;
             self.tokens.eat_whitespace();
             self.tokens.table_key().map(Some)
         } else {
-            self.tokens.expect(Token::RightBracket)?;
+            self.tokens.expect(&Token::RightBracket)?;
             if self.array {
-                self.tokens.expect(Token::RightBracket)?;
+                self.tokens.expect(&Token::RightBracket)?;
             }
 
             self.tokens.eat_whitespace();
@@ -1679,8 +1741,8 @@ enum E<'a> {
     DottedTable(Vec<TablePair<'a>>),
 }
 
-impl<'a> E<'a> {
-    fn type_name(&self) -> &'static str {
+impl E<'_> {
+    const fn type_name(&self) -> &'static str {
         match *self {
             E::String(..) => "string",
             E::Integer(..) => "integer",

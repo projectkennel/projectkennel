@@ -66,10 +66,12 @@ dependencies = [
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-term",
+ "kennel-lib-toml",
  "kennel-privhelper",
  "kennel-tun-broker",
  "kenneld",
  "mini-sansio-dbus",
+ "serde",
 ]
 
 [[package]]

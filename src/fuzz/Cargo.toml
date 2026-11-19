@@ -30,6 +30,9 @@ arbitrary = { version = "=1.4.1", default-features = false }
 kenneld = { path = "../crates/kenneld" }
 kennel-privhelper = { path = "../crates/kennel-privhelper" }
 kennel-lib-policy = { path = "../crates/kennel-lib-policy" }
+# The TOML parser on the TCB path, fuzzed directly (#228).
+kennel-lib-toml = { path = "../crates/kennel-lib-toml" }
+serde = { version = "=1.0.228", default-features = false, features = ["std"] }
 kennel-lib-binder = { path = "../crates/kennel-lib-binder" }
 kennel-lib-term = { path = "../crates/kennel-lib-term" }
 # The enforcement-plan wire: kenneld-built bytes a *privileged* process decodes — the

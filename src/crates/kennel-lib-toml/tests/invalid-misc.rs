@@ -1,3 +1,12 @@
+// Upstream basic-toml 0.1.10 test, kept unchanged as the behavioural reference for the in-tree
+// parser (#228); the workspace's test-code lints are relaxed for these upstream files alone.
+#![allow(
+    missing_docs,
+    elided_lifetimes_in_paths,
+    clippy::unwrap_used,
+    clippy::indexing_slicing
+)]
+
 use serde_json::Value;
 
 macro_rules! bad {

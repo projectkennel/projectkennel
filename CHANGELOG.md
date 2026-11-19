@@ -102,6 +102,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **`kennel-lib-toml` meets the workspace lint standard** (#228). The parser on the TCB path now
+  builds under the full workspace set (clippy `pedantic` as deny, `indexing_slicing`,
+  `arithmetic_side_effects`, `unwrap_used`, `panic`). Indexing is checked, offsets saturate, and
+  the internal `assert!`/`expect` sites return an internal `Error` instead of panicking, so even a
+  parser bug cannot take the daemon down. Behaviour is unchanged: upstream's 134 tests pass
+  untouched. A new guard test feeds every prefix and rotating single-byte corruptions of every
+  fixture and asserts the parser never panics, and the fuzz harness now calls the parser directly.
 - **`ed25519-compact` 2.3.0 → 2.6.1; `hmac-sha512` removed.** 2.4.0 made the crate's internal
   SHA-512 public at our request (upstream #39), and our report #41 fixed its `std`-without-`pem`
   build, so the SSHSIG preimage hash now comes from `ed25519_compact::sha512` and the separate

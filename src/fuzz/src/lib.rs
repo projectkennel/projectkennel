@@ -104,6 +104,10 @@ pub fn fuzz_parsers(data: &[u8]) {
     let keys = kennel_lib_policy::KeySet::new();
     let _ = kennel_lib_policy::verify_settled(data, &keys);
 
+    // The TOML parser itself (#228), directly: `verify_settled` stops at the first schema mismatch,
+    // so deserialising into `IgnoredAny` drives every parser path on any document shape.
+    let _ = kennel_lib_toml::from_slice::<serde::de::IgnoredAny>(data);
+
     // The terminal-escape filter: `data` stands in for workload PTY output (fully
     // attacker-controlled). The filter runs the vte ANSI state machine over it; the
     // robustness property is "no panic / hang on any bytes". The *security* invariant

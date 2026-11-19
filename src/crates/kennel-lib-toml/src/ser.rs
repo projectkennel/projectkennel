@@ -5,7 +5,9 @@ use std::fmt::{self, Display, Write};
 
 /// Serialize the given data structure as a String of TOML.
 ///
-/// Serialization can fail if `T`'s implementation of `Serialize` decides to
+/// # Errors
+///
+/// Serialization fails if `T`'s implementation of `Serialize` decides to
 /// fail, if `T` contains a map with non-string keys, or if `T` attempts to
 /// serialize an unsupported datatype such as an enum, tuple, or tuple struct.
 pub fn to_string<T>(value: &T) -> Result<String, crate::Error>
@@ -18,7 +20,7 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) enum Error {
+pub enum Error {
     /// Indicates that a Rust type was requested to be serialized but it was not
     /// supported.
     ///
@@ -58,12 +60,12 @@ enum ArrayState {
 enum State<'a> {
     Table {
         key: &'a str,
-        parent: &'a State<'a>,
+        parent: &'a Self,
         first: &'a Cell<bool>,
         table_emitted: &'a Cell<bool>,
     },
     Array {
-        parent: &'a State<'a>,
+        parent: &'a Self,
         first: &'a Cell<bool>,
         type_: &'a Cell<Option<ArrayState>>,
         len: Option<usize>,
@@ -86,7 +88,7 @@ struct SerializeTable<'a, 'b> {
 }
 
 impl<'a> Serializer<'a> {
-    fn new(dst: &'a mut String) -> Serializer<'a> {
+    const fn new(dst: &'a mut String) -> Self {
         Serializer {
             dst,
             state: State::End,
@@ -95,7 +97,7 @@ impl<'a> Serializer<'a> {
 
     fn display<T: Display>(&mut self, t: T, type_: ArrayState) -> Result<(), Error> {
         self.emit_key(type_)?;
-        write!(self.dst, "{}", t).map_err(ser::Error::custom)?;
+        write!(self.dst, "{t}").map_err(ser::Error::custom)?;
         if let State::Table { .. } = self.state {
             self.dst.push('\n');
         }
@@ -109,7 +111,7 @@ impl<'a> Serializer<'a> {
     }
 
     // recursive implementation of `emit_key` above
-    fn do_emit_key(&mut self, state: &State) -> Result<(), Error> {
+    fn do_emit_key(&mut self, state: &State<'_>) -> Result<(), Error> {
         match *state {
             State::End => Ok(()),
             State::Array {
@@ -153,10 +155,9 @@ impl<'a> Serializer<'a> {
         }
     }
 
-    fn array_type(&mut self, type_: ArrayState) {
-        let prev = match self.state {
-            State::Array { type_, .. } => type_,
-            _ => return,
+    fn array_type(&self, type_: ArrayState) {
+        let State::Array { type_: prev, .. } = self.state else {
+            return;
         };
         if prev.get().is_none() {
             prev.set(Some(type_));
@@ -165,12 +166,11 @@ impl<'a> Serializer<'a> {
 
     fn escape_key(&mut self, key: &str) -> Result<(), Error> {
         let ok = !key.is_empty()
-            && key.chars().all(|c| match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => true,
-                _ => false,
-            });
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
         if ok {
-            write!(self.dst, "{}", key).map_err(ser::Error::custom)?;
+            write!(self.dst, "{key}").map_err(ser::Error::custom)?;
         } else {
             self.emit_str(key)?;
         }
@@ -198,7 +198,7 @@ impl<'a> Serializer<'a> {
         Ok(())
     }
 
-    fn emit_table_header(&mut self, state: &State) -> Result<(), Error> {
+    fn emit_table_header(&mut self, state: &State<'_>) -> Result<(), Error> {
         let array_of_tables = match *state {
             State::End => return Ok(()),
             State::Array { .. } => true,
@@ -262,7 +262,7 @@ impl<'a> Serializer<'a> {
         Ok(())
     }
 
-    fn emit_key_part(&mut self, key: &State) -> Result<bool, Error> {
+    fn emit_key_part(&mut self, key: &State<'_>) -> Result<bool, Error> {
         match *key {
             State::Array { parent, .. } => self.emit_key_part(parent),
             State::End => Ok(true),
@@ -496,7 +496,7 @@ impl<'a, 'b> ser::Serializer for &'b mut Serializer<'a> {
     }
 }
 
-impl<'a, 'b> ser::SerializeSeq for SerializeSeq<'a, 'b> {
+impl ser::SerializeSeq for SerializeSeq<'_, '_> {
     type Ok = ();
     type Error = Error;
 
@@ -534,7 +534,7 @@ impl<'a, 'b> ser::SerializeSeq for SerializeSeq<'a, 'b> {
     }
 }
 
-impl<'a, 'b> ser::SerializeTuple for SerializeSeq<'a, 'b> {
+impl ser::SerializeTuple for SerializeSeq<'_, '_> {
     type Ok = ();
     type Error = Error;
 
@@ -550,7 +550,7 @@ impl<'a, 'b> ser::SerializeTuple for SerializeSeq<'a, 'b> {
     }
 }
 
-impl<'a, 'b> ser::SerializeTupleStruct for SerializeSeq<'a, 'b> {
+impl ser::SerializeTupleStruct for SerializeSeq<'_, '_> {
     type Ok = ();
     type Error = Error;
 
@@ -566,7 +566,7 @@ impl<'a, 'b> ser::SerializeTupleStruct for SerializeSeq<'a, 'b> {
     }
 }
 
-impl<'a, 'b> ser::SerializeMap for SerializeTable<'a, 'b> {
+impl ser::SerializeMap for SerializeTable<'_, '_> {
     type Ok = ();
     type Error = Error;
 
@@ -608,7 +608,7 @@ impl<'a, 'b> ser::SerializeMap for SerializeTable<'a, 'b> {
     }
 }
 
-impl<'a, 'b> ser::SerializeStruct for SerializeTable<'a, 'b> {
+impl ser::SerializeStruct for SerializeTable<'_, '_> {
     type Ok = ();
     type Error = Error;
 
@@ -813,13 +813,13 @@ impl ser::Serializer for StringExtractor {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Error::UnsupportedType => "unsupported Rust type".fmt(f),
-            Error::KeyNotString => "map key was not a string".fmt(f),
-            Error::ValueAfterTable => "values must be emitted before tables".fmt(f),
-            Error::UnsupportedNone => "unsupported None value".fmt(f),
-            Error::Custom(ref s) => s.fmt(f),
+            Self::UnsupportedType => "unsupported Rust type".fmt(f),
+            Self::KeyNotString => "map key was not a string".fmt(f),
+            Self::ValueAfterTable => "values must be emitted before tables".fmt(f),
+            Self::UnsupportedNone => "unsupported None value".fmt(f),
+            Self::Custom(ref s) => s.fmt(f),
         }
     }
 }
@@ -827,7 +827,7 @@ impl Display for Error {
 impl error::Error for Error {}
 
 impl ser::Error for Error {
-    fn custom<T: Display>(msg: T) -> Error {
-        Error::Custom(msg.to_string())
+    fn custom<T: Display>(msg: T) -> Self {
+        Self::Custom(msg.to_string())
     }
 }
