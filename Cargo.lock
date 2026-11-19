@@ -34,9 +34,9 @@ checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "ed25519-compact"
-version = "2.3.0"
+version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5c0284a5d4b1a2fae017a9fe55fd7d01699711f1b572493f16593e173ea2801"
+checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
 
 [[package]]
 name = "gen-inventory"
@@ -57,12 +57,6 @@ dependencies = [
  "kennel-schema",
  "serde_json",
 ]
-
-[[package]]
-name = "hmac-sha512"
-version = "1.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "019ece39bbefc17f13f677a690328cb978dbf6790e141a3c24e66372cb38588b"
 
 [[package]]
 name = "itoa"
@@ -242,7 +236,6 @@ name = "kennel-lib-policy"
 version = "0.7.1"
 dependencies = [
  "ed25519-compact",
- "hmac-sha512",
  "kennel-lib-toml",
  "kennel-schema",
  "kennel-schema-derive",
