@@ -13,7 +13,8 @@ pinned it to the first process), a kennel's private loopback is open by default,
 denies TCP that the BPF ACL permits, and a new `ai-coding-native` template allows the exec-mappable
 `/tmp` that runtimes unpacking native code need. In the other direction, writable binds are now
 `noexec,nosuid,nodev` — the one **breaking** change. Landlock denials are now audit-logged, a
-workload no longer races its D-Bus and AF_UNIX facades at startup, and the
+workload no longer races its D-Bus and AF_UNIX facades at startup, a `daemon-reload` no longer
+strands running providers, and the
 supply chain is two third-party crates lighter on the TCB path (`basic-toml` is first-party, and
 `hmac-sha512` is gone).
 
@@ -60,6 +61,14 @@ supply chain is two third-party crates lighter on the TCB path (`basic-toml` is 
   has signalled, bounded at 5 s (then it starts anyway and traces it). The signal comes from the
   facade rather than from init checking the path, because init — the kennel's uid 0, mapped to host
   root only — cannot even search the operator's `0700` `/tmp`.
+- **`kennel daemon-reload` no longer strands running providers.** A reload re-projected the
+  service catalogue with every provider `Pending`, but a provider that was already running never
+  reports in again, so it stayed `Pending` and every new consumer's connect waited out its
+  timeout and was refused. For example, a D-Bus kennel started after any reload failed with
+  `no dbus-broker provider is enabled` until the broker was stopped (#234). A reload now keeps a
+  running provider `Ready` when its definition (signer, tier, enablement and offers) is unchanged.
+  One that changed while running stays `Pending`, and kenneld logs that it takes effect once
+  restarted (`kennel stop <name>`). A reload still clears `Failed`.
 
 ### Runtime & enforcement
 

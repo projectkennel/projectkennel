@@ -384,10 +384,20 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// Re-derive the service catalogue from the enablement links on disk (the `daemon-reload`
     /// analogue), returning the number of catalogued capability names. The set is the links on disk,
     /// never authored state, so this simply re-scans and re-projects.
+    ///
+    /// A provider that is already running keeps its `Ready` when its definition is unchanged
+    /// ([`Catalogue::inherit_readiness`](crate::catalogue::Catalogue::inherit_readiness)); without
+    /// that, a reload left every running provider `Pending` for good and its consumers timed out.
     pub fn rebuild_catalogue(&self) -> usize {
-        let cat = self.loader.build_catalogue();
+        let mut cat = self.loader.build_catalogue();
         let n = cat.len();
         if let Ok(mut guard) = self.catalogue.lock() {
+            for provider in cat.inherit_readiness(&guard) {
+                eprintln!(
+                    "kenneld: catalogue: `{provider}` changed while running; its new definition \
+                     takes effect once it is restarted (`kennel stop {provider}`)"
+                );
+            }
             *guard = cat;
         }
         n

@@ -118,6 +118,17 @@ pub struct CatalogueProvider {
     pub offers: Vec<ProvideRuntime>,
 }
 
+impl CatalogueProvider {
+    /// Whether `other` describes the same provider as `self`, apart from readiness: the same signing
+    /// key, tier, enablement and offers. This is what a running instance was constructed against.
+    fn same_definition(&self, other: &Self) -> bool {
+        self.signing_key_id == other.signing_key_id
+            && self.tier == other.tier
+            && self.enablement == other.enablement
+            && self.offers == other.offers
+    }
+}
+
 /// One candidate provider for a resolved `name`: what the broker (W5) needs to select and connect.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
@@ -269,6 +280,39 @@ impl Catalogue {
         Some(next)
     }
 
+    /// Carry the readiness of providers that are still running across a re-projection (the
+    /// `daemon-reload` path), returning the providers that were `Ready` but whose catalogued
+    /// definition changed.
+    ///
+    /// [`project`](Self::project) starts every provider `Pending`, which is right on daemon start
+    /// but wrong on a reload: a provider that is already constructed never raises
+    /// `ConstructionSucceeded` again (its supervision thread is live, so activation dedups), so it
+    /// would stay `Pending` and every new consumer's connect would wait out its timeout.
+    ///
+    /// Only `Ready` carries, and only for a provider whose definition is unchanged: the same signing
+    /// key, tier, enablement and offers. `Failed` is not carried, because a reload is the operator's
+    /// way to clear it (§7.13.7). A provider that was `Ready` but now has a different definition (for
+    /// example a per-user enablement now shadowing the running per-host one) stays `Pending`: the
+    /// running instance is not the definition the catalogue now describes. It is returned so the
+    /// daemon can say it needs a restart to take effect.
+    pub fn inherit_readiness(&mut self, previous: &Self) -> Vec<String> {
+        let mut changed = Vec::new();
+        for (id, now) in &mut self.providers {
+            let Some(was) = previous.providers.get(id) else {
+                continue; // newly enabled: Pending until it is constructed
+            };
+            if was.readiness != Readiness::Ready {
+                continue; // not running, or Failed (which a reload clears)
+            }
+            if was.same_definition(now) {
+                now.readiness = Readiness::Ready;
+            } else {
+                changed.push(id.clone());
+            }
+        }
+        changed
+    }
+
     /// The catalogued capability names (the topology surface reads this, §7.13.7).
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.by_name.keys().map(String::as_str)
@@ -381,6 +425,141 @@ mod tests {
         assert_eq!(e.readiness, Readiness::Pending); // resolvable before it is running
         assert_eq!(cat.len(), 1);
         assert!(cat.resolve("nope").is_empty()); // deny-on-no-match
+    }
+
+    fn broker(tier: Tier, key_id: &str) -> EnabledProvider {
+        enabled(
+            "dbus-broker",
+            key_id,
+            tier,
+            Enablement::Ondemand,
+            vec![provide(
+                "org.projectkennel.dbus",
+                Shape::DbusName,
+                "org.freedesktop.DBus",
+                None,
+            )],
+        )
+    }
+
+    fn readiness_of(cat: &Catalogue, provider: &str) -> Readiness {
+        cat.entries()
+            .find(|(id, _)| *id == provider)
+            .map(|(_, p)| p.readiness)
+            .expect("provider catalogued")
+    }
+
+    #[test]
+    fn a_reload_keeps_an_unchanged_running_provider_ready() {
+        // The #234 stall: a reload re-projected a running provider as Pending, and nothing ever
+        // raised it back to Ready, so every new consumer waited out its timeout.
+        let mut before = project_test(&[broker(Tier::Host, "maint-key")]);
+        assert_eq!(
+            before.note_constructed("dbus-broker"),
+            Some(Readiness::Ready)
+        );
+
+        let mut after = project_test(&[broker(Tier::Host, "maint-key")]);
+        let changed = after.inherit_readiness(&before);
+
+        assert_eq!(readiness_of(&after, "dbus-broker"), Readiness::Ready);
+        assert!(changed.is_empty(), "nothing changed: {changed:?}");
+    }
+
+    #[test]
+    fn a_reload_leaves_a_running_provider_pending_when_its_definition_changed() {
+        // A per-user enablement now shadows the running per-host one: the running instance is not
+        // what the catalogue describes, so it must not be reported Ready, and it is named.
+        let mut before = project_test(&[broker(Tier::Host, "maint-key")]);
+        before.note_constructed("dbus-broker");
+
+        for redefined in [
+            broker(Tier::User, "maint-key"), // tier
+            broker(Tier::Host, "other-key"), // signer
+            enabled(
+                "dbus-broker",
+                "maint-key",
+                Tier::Host,
+                Enablement::Autorun, // enablement
+                broker(Tier::Host, "maint-key").provides,
+            ),
+            enabled(
+                "dbus-broker",
+                "maint-key",
+                Tier::Host,
+                Enablement::Ondemand,
+                vec![provide(
+                    "org.projectkennel.dbus",
+                    Shape::DbusName,
+                    "org.example.Other",
+                    None,
+                )], // offers
+            ),
+        ] {
+            let mut after = project_test(&[redefined]);
+            let changed = after.inherit_readiness(&before);
+            assert_eq!(readiness_of(&after, "dbus-broker"), Readiness::Pending);
+            assert_eq!(changed, vec!["dbus-broker".to_owned()]);
+        }
+    }
+
+    #[test]
+    fn a_reload_clears_failed_and_ignores_providers_that_were_not_running() {
+        let mut before = project_test(&[
+            broker(Tier::Host, "maint-key"),
+            enabled(
+                "idle",
+                "maint-key",
+                Tier::Host,
+                Enablement::Ondemand,
+                vec![provide(
+                    "org.example.idle",
+                    Shape::AfUnix,
+                    "/run/i.sock",
+                    None,
+                )],
+            ),
+        ]);
+        before.set_readiness("dbus-broker", Readiness::Failed);
+
+        let mut after = project_test(&[
+            broker(Tier::User, "maint-key"), // changed, but it was not Ready: nothing to report
+            enabled(
+                "idle",
+                "maint-key",
+                Tier::Host,
+                Enablement::Ondemand,
+                vec![provide(
+                    "org.example.idle",
+                    Shape::AfUnix,
+                    "/run/i.sock",
+                    None,
+                )],
+            ),
+            broker_named("new-provider"),
+        ]);
+        let changed = after.inherit_readiness(&before);
+
+        // A reload is the operator's way to clear Failed (§7.13.7).
+        assert_eq!(readiness_of(&after, "dbus-broker"), Readiness::Pending);
+        assert_eq!(readiness_of(&after, "idle"), Readiness::Pending);
+        assert_eq!(readiness_of(&after, "new-provider"), Readiness::Pending);
+        assert!(changed.is_empty(), "nothing running changed: {changed:?}");
+    }
+
+    fn broker_named(who: &str) -> EnabledProvider {
+        enabled(
+            who,
+            "maint-key",
+            Tier::Host,
+            Enablement::Ondemand,
+            vec![provide(
+                "org.example.new",
+                Shape::AfUnix,
+                "/run/n.sock",
+                None,
+            )],
+        )
     }
 
     #[test]
