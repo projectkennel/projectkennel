@@ -1,0 +1,68 @@
+# ============================================================================
+# Suite case: net-loopback — an in-kennel client/server pair meets on the kennel's own lo (#218).
+#
+# mode = constrained gives the kennel its OWN network namespace, so its loopback is private: only
+# the kennel's processes listen there. An agent TUI that forks a local server on an ephemeral port
+# and dials it back (opencode) must work without the author naming ports. This case proves, from
+# the inside and with no [net.bpf] grants at all:
+#
+#   1. a server binds 127.0.0.1:0 and ::1:0 (ephemeral ports — no Landlock port rule can name them);
+#   2. a SEPARATE child process connects to each and round-trips a marker;
+#   3. egress stays proxy-only: a direct connect to a public address is still refused.
+#
+# The kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "net-loopback"
+template_base = "base-confined"
+
+[net]
+mode = "constrained"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import socket, subprocess, sys
+
+def serve(family, host):
+    s = socket.socket(family, socket.SOCK_STREAM)
+    s.bind((host, 0)); s.listen(1); s.settimeout(10)
+    port = s.getsockname()[1]
+    client = (
+        'import socket,sys;'
+        'c=socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=10);'
+        'c.sendall(b\\'LOOPBACK_OK\\'); print(c.recv(32).decode())'
+    )
+    p = subprocess.Popen([sys.executable, '-c', client, host, str(port)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        c, _ = s.accept()
+    except OSError as e:
+        raise SystemExit('%s: no connection from the child on port %d: %s (child stderr: %s)'
+                         % (host, port, e, p.communicate()[1].strip()))
+    data = c.recv(32); c.sendall(b'echo:' + data); c.close()
+    out, err = p.communicate(timeout=10)
+    if p.returncode != 0 or out.strip() != 'echo:LOOPBACK_OK':
+        raise SystemExit('%s: child failed (rc=%s): %s %s' % (host, p.returncode, out, err))
+
+serve(socket.AF_INET, '127.0.0.1')
+serve(socket.AF_INET6, '::1')
+
+# Egress is still the proxy only: a direct public connect must fail.
+try:
+    socket.create_connection(('1.1.1.1', 443), timeout=3)
+    raise SystemExit('direct egress to 1.1.1.1:443 unexpectedly succeeded')
+except OSError:
+    pass
+"
+    """,
+]

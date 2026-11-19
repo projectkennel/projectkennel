@@ -12,7 +12,7 @@ use std::ffi::CString;
 use std::path::PathBuf;
 
 use kennel_lib_spawn::build_ruleset;
-use kennel_lib_syscall::landlock::AccessFs;
+use kennel_lib_syscall::landlock::{AccessFs, AccessNet};
 use kennel_lib_syscall::process::{set_no_new_privs, wait_any, Reaped};
 use kennel_lib_syscall::spawn::fork_drop_exec_confined;
 
@@ -39,7 +39,13 @@ fn run_shell_under_landlock(grant_loader: bool) -> Option<i32> {
 
     let seal = move || -> std::io::Result<()> {
         set_no_new_privs()?;
-        build_ruleset(&grants, &[], true)?.restrict_current_process()
+        build_ruleset(
+            &grants,
+            &[],
+            AccessNet::BIND_TCP | AccessNet::CONNECT_TCP,
+            true,
+        )?
+        .restrict_current_process()
     };
     let path = CString::new(sh.as_os_str().as_encoded_bytes()).ok()?;
     let dash_c = CString::new("-c").ok()?;

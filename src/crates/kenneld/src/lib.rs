@@ -1512,6 +1512,7 @@ fn supervision_from(
         groups: plan.supplementary_groups.clone(),
         landlock_fs: plan.landlock_fs.clone(),
         landlock_net: plan.landlock_net.clone(),
+        landlock_net_handled: plan.landlock_net_handled,
         seccomp_deny: plan.seccomp_deny.clone(),
         seccomp_deny_action: plan.seccomp_deny_action,
         ulimits: plan.ulimits.clone(),

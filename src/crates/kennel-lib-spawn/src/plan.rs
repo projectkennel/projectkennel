@@ -186,8 +186,15 @@ impl BpfAcls {
         deny_rules.extend(net.bpf_connect_deny.iter().cloned());
         deny_rules.extend(net.deny_author.iter().cloned());
         let (deny_v4, deny_v6) = encode(&deny_rules)?;
-        let (bind_allow_v4, bind_allow_v6) = encode(&net.bpf_bind_allow)?;
+        let (mut bind_allow_v4, mut bind_allow_v6) = encode(&net.bpf_bind_allow)?;
         let (bind_deny_v4, bind_deny_v6) = encode(&net.bpf_bind_deny)?;
+        // The own-net-ns loopback, open by default in both directions (#218).
+        let (lo_v4, lo_v6) = own_netns_loopback(net.mode);
+        let (mut allow_v4, mut allow_v6) = (allow_v4, allow_v6);
+        allow_v4.extend(lo_v4.iter().copied());
+        allow_v6.extend(lo_v6.iter().copied());
+        bind_allow_v4.extend(lo_v4);
+        bind_allow_v6.extend(lo_v6);
         Ok(Self {
             allow_v4,
             allow_v6,
@@ -226,6 +233,36 @@ fn single_port_tcp_grants(rules: &[NetRule], access: AccessNet) -> Vec<(u16, Acc
         .filter(|r| matches!(r.protocol, Protocol::Tcp | Protocol::Any) && r.port_min == r.port_max)
         .map(|r| (r.port_min, access))
         .collect()
+}
+
+/// The loopback the kennel's OWN network namespace carries (`127.0.0.0/8`, `::1/128`), as
+/// any-port BPF allow entries for both the connect and the bind ACL (#218).
+///
+/// In `constrained`/`unconstrained` the kennel has a private net-ns, so its `lo` is not the
+/// host's: only the kennel's own processes listen there, and a client/server pair inside the
+/// kennel (an agent TUI and its local server on an ephemeral port) must be able to meet on it.
+/// Empty for `host` (there `127.0.0.1` IS the host's loopback — T1.6) and `none` (its `lo` is
+/// deliberately left down: total isolation). Author `[net.bpf]` denies still win: both ACLs
+/// are deny-first.
+pub(crate) fn own_netns_loopback(mode: NetMode) -> (Vec<LpmV4Entry>, Vec<LpmV6Entry>) {
+    let _ = mode;
+    (Vec::new(), Vec::new())
+}
+
+/// The TCP rights the workload's Landlock ruleset handles (#218).
+///
+/// Landlock gates TCP by port alone; the cgroup BPF ACL gates address + port and is the
+/// authoritative egress control in every mode. Where a Landlock port rule cannot express what
+/// the BPF ACL permits, Landlock must not handle that direction, or it denies a permitted
+/// connect/bind:
+///
+/// - `constrained`/`unconstrained`: neither direction — the open own-net-ns loopback is any
+///   port, and the proxy endpoint is already pinned by address+port in BPF;
+/// - `host`: a direction stops being handled when any of its BPF allow rules is a port range;
+/// - `none`: both stay handled (nothing is reachable anyway).
+pub(crate) fn landlock_net_handled(net: &NetPolicy) -> AccessNet {
+    let _ = net;
+    AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and
@@ -699,6 +736,9 @@ pub struct Plan {
     /// Landlock TCP-port rules `(port, access)`. Best-effort port hardening that
     /// complements the authoritative BPF (CIDR+port) egress control.
     pub landlock_net: Vec<(u16, AccessNet)>,
+    /// The TCP rights the Landlock ruleset handles at all (the mode-derived `landlock_net_handled`); a port
+    /// rule for an unhandled right is a no-op.
+    pub landlock_net_handled: AccessNet,
     /// Syscall numbers the seccomp filter denies (resolved from the policy's deny
     /// names via `kennel_lib_syscall::seccomp::syscall_number`). Empty ⇒ no filter.
     pub seccomp_deny: Vec<i64>,
@@ -846,6 +886,8 @@ pub struct Supervision {
     pub landlock_fs: Vec<(PathBuf, AccessFs)>,
     /// The workload's Landlock network-port rules.
     pub landlock_net: Vec<(u16, AccessNet)>,
+    /// The TCP rights the workload's ruleset handles (see [`Plan::landlock_net_handled`]).
+    pub landlock_net_handled: AccessNet,
     /// The workload's seccomp denylist (syscall numbers); empty ⇒ no filter.
     pub seccomp_deny: Vec<i64>,
     /// The action a denied syscall triggers.
@@ -1442,6 +1484,7 @@ impl Plan {
             new_root: None,
             landlock_fs,
             landlock_net,
+            landlock_net_handled: landlock_net_handled(&ep.net),
             seccomp_deny,
             seccomp_deny_action,
             bpf_allow_v4: acls.allow_v4,

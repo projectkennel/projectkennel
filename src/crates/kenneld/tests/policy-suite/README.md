@@ -35,6 +35,7 @@ missing prerequisite aborts with the precise cause.
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `proc-curated`    | none | children/grandchildren read their own `/proc/self`; `/proc/{cpuinfo,stat,meminfo,version}` are synthesized and agree with `nproc`; ungranted host-global entries (`kallsyms`, `loadavg`, `sys`) are masked empty (#218) |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
+| `net-loopback`    | constrained | the kennel's own `lo` is open by default: a server on an ephemeral `127.0.0.1`/`::1` port is reached by a separate child process, with no `[net.bpf]` grant; direct public egress is still refused (#218) |
 | `net-constrained` | constrained | own netns loopback is up + bindable; the in-ns SOCKS endpoint listens at `<addr>:1080` |
 | `net-isolated`    | constrained | the kennel is in its OWN netns: it reaches its own in-ns loopback but CANNOT reach a host `127.0.0.1` listener (proves two distinct namespaces, not a filtered one). Setup binds a host-side listener. |
 | `ssh-egress`      | constrained | the full SSH re-origination cascade: workload `ssh` → facade-ssh → binder → netproxy → bastion → akc-vended forced command → `ssh` to a destination sshd, marker round-trips. No agent. |

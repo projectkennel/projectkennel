@@ -325,7 +325,12 @@ fn spawn_all(
         }
         // Built post-pivot with skip_missing: a grant for a path absent from the view is
         // vacuous (the name does not resolve), not an error.
-        let ruleset = kennel_lib_spawn::build_ruleset(&sup.landlock_fs, &sup.landlock_net, true)?;
+        let ruleset = kennel_lib_spawn::build_ruleset(
+            &sup.landlock_fs,
+            &sup.landlock_net,
+            sup.landlock_net_handled,
+            true,
+        )?;
         ruleset.restrict_current_process()?;
         // Resource limits last, so lowering RLIMIT_NOFILE cannot starve the rule opens.
         for (resource, soft, hard) in &sup.ulimits {
@@ -718,6 +723,7 @@ mod tests {
             groups: Some(vec![1000]),
             landlock_fs: Vec::new(),
             landlock_net: Vec::new(),
+            landlock_net_handled: kennel_lib_syscall::landlock::AccessNet::empty(),
             seccomp_deny: Vec::new(),
             seccomp_deny_action: kennel_lib_syscall::seccomp::Action::KillProcess,
             ulimits: Vec::new(),

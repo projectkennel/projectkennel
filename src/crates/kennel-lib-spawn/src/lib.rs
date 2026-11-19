@@ -279,9 +279,12 @@ pub fn prepare(
 pub fn build_ruleset(
     fs: &[(PathBuf, AccessFs)],
     net: &[(u16, AccessNet)],
+    net_handled: AccessNet,
     skip_missing: bool,
 ) -> io::Result<Ruleset> {
     let mut ruleset = Ruleset::new()?;
+    // TCP rights the BPF ACL alone gates (#218): Landlock must not handle them.
+    ruleset.handle_net_only(net_handled);
     for (path, access) in fs {
         match ruleset.allow_path(path, *access) {
             Ok(()) => {}
@@ -1958,6 +1961,158 @@ mod tests {
                 "{g}: expected InvalidPolicy naming the grant, got {r:?}"
             );
         }
+    }
+
+    fn plan_in_mode(mode: NetMode, edit: impl FnOnce(&mut kennel_lib_policy::NetPolicy)) -> Plan {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.net.mode = mode;
+        p.effective_policy.net.bpf_connect_allow.clear();
+        p.effective_policy.net.bpf_bind_allow.clear();
+        edit(&mut p.effective_policy.net);
+        Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan")
+    }
+
+    fn tcp_rule(cidr: &str, prefix_len: u8, port_min: u16, port_max: u16) -> NetRule {
+        NetRule {
+            cidr: cidr.to_owned(),
+            prefix_len,
+            port_min,
+            port_max,
+            protocol: Protocol::Tcp,
+        }
+    }
+
+    /// #218: inside the kennel's OWN network namespace, loopback is the kennel's private `lo`, so
+    /// an in-kennel client/server pair (an agent TUI and its server on an ephemeral port) must
+    /// meet there by default: 127.0.0.0/8 and ::1 are any-port in BOTH BPF ACLs, and Landlock
+    /// handles no TCP right (it cannot express "any port"; BPF is the address+port gate).
+    #[test]
+    fn own_netns_modes_open_loopback_and_leave_tcp_to_bpf() {
+        let (lo_v4, lo_v6) = crate::plan::own_netns_loopback(NetMode::Constrained);
+        assert_eq!(
+            (lo_v4.len(), lo_v6.len()),
+            (1, 1),
+            "127.0.0.0/8 and ::1/128"
+        );
+        for mode in [NetMode::Constrained, NetMode::Unconstrained] {
+            let plan = plan_in_mode(mode, |_| {});
+            for e in &lo_v4 {
+                assert!(
+                    plan.bpf_allow_v4.contains(e),
+                    "{mode:?}: connect allow 127/8"
+                );
+                assert!(
+                    plan.bpf_bind_allow_v4.contains(e),
+                    "{mode:?}: bind allow 127/8"
+                );
+            }
+            for e in &lo_v6 {
+                assert!(plan.bpf_allow_v6.contains(e), "{mode:?}: connect allow ::1");
+                assert!(
+                    plan.bpf_bind_allow_v6.contains(e),
+                    "{mode:?}: bind allow ::1"
+                );
+            }
+            assert_eq!(plan.landlock_net_handled, AccessNet::empty(), "{mode:?}");
+        }
+    }
+
+    /// The loopback entries encode exactly 127.0.0.0/8 and ::1/128, any port, any protocol,
+    /// not the proxy flag.
+    #[test]
+    fn the_loopback_entries_are_slash_8_and_slash_128_any_port() {
+        let (v4, v6) = crate::plan::own_netns_loopback(NetMode::Unconstrained);
+        let mut key4 = 8u32.to_ne_bytes().to_vec();
+        key4.extend([127, 0, 0, 0]);
+        let mut key6 = 128u32.to_ne_bytes().to_vec();
+        key6.extend(std::net::Ipv6Addr::LOCALHOST.octets());
+        let mut any = 0u16.to_ne_bytes().to_vec();
+        any.extend(u16::MAX.to_ne_bytes());
+        any.extend([0, 0, 0, 0]);
+        assert_eq!(
+            v4.iter()
+                .map(|(k, e)| (k.to_vec(), e.to_vec()))
+                .collect::<Vec<_>>(),
+            vec![(key4, any.clone())]
+        );
+        assert_eq!(
+            v6.iter()
+                .map(|(k, e)| (k.to_vec(), e.to_vec()))
+                .collect::<Vec<_>>(),
+            vec![(key6, any)]
+        );
+    }
+
+    /// `host` shares the HOST's loopback (T1.6): no default opening, and Landlock keeps
+    /// gating TCP. `none` leaves `lo` down by design: no opening either.
+    #[test]
+    fn host_and_none_open_no_loopback_and_keep_landlock_tcp() {
+        for mode in [NetMode::Host, NetMode::None] {
+            assert_eq!(
+                crate::plan::own_netns_loopback(mode),
+                (Vec::new(), Vec::new()),
+                "{mode:?}"
+            );
+            let plan = plan_in_mode(mode, |_| {});
+            assert_eq!(
+                plan.landlock_net_handled,
+                AccessNet::BIND_TCP | AccessNet::CONNECT_TCP,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// In `host` mode a port-RANGE allow cannot be a Landlock rule, so that direction stops
+    /// being handled (BPF alone gates it) — Landlock must never deny what BPF permits. A
+    /// single-port rule keeps the direction handled.
+    #[test]
+    fn a_host_mode_port_range_unhandles_only_its_direction() {
+        let bind_range = plan_in_mode(NetMode::Host, |n| {
+            n.bpf_bind_allow.push(tcp_rule("127.0.0.1", 32, 3000, 3999));
+        });
+        assert_eq!(bind_range.landlock_net_handled, AccessNet::CONNECT_TCP);
+        let connect_range = plan_in_mode(NetMode::Host, |n| {
+            n.bpf_connect_allow
+                .push(tcp_rule("10.0.0.0", 8, 0, u16::MAX));
+        });
+        assert_eq!(connect_range.landlock_net_handled, AccessNet::BIND_TCP);
+        let single = plan_in_mode(NetMode::Host, |n| {
+            n.bpf_bind_allow.push(tcp_rule("127.0.0.1", 32, 3000, 3000));
+            n.bpf_connect_allow.push(tcp_rule("10.0.0.0", 8, 443, 443));
+        });
+        assert_eq!(
+            single.landlock_net_handled,
+            AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
+        );
+    }
+
+    /// The restriction tooling still works over the open default: an author `[net.bpf]` deny on
+    /// loopback lands in the deny tries, which both BPF decisions consult FIRST.
+    #[test]
+    fn an_author_loopback_deny_still_lands_in_the_deny_tries() {
+        let plan = plan_in_mode(NetMode::Constrained, |n| {
+            n.bpf_connect_deny
+                .push(tcp_rule("127.0.0.0", 8, 0, u16::MAX));
+            n.bpf_bind_deny.push(tcp_rule("127.0.0.1", 32, 0, u16::MAX));
+        });
+        let mut connect_key = 8u32.to_ne_bytes().to_vec();
+        connect_key.extend([127, 0, 0, 0]);
+        let mut bind_key = 32u32.to_ne_bytes().to_vec();
+        bind_key.extend([127, 0, 0, 1]);
+        assert!(plan
+            .bpf_deny_v4
+            .iter()
+            .any(|(k, _)| k.to_vec() == connect_key));
+        assert!(plan
+            .bpf_bind_deny_v4
+            .iter()
+            .any(|(k, _)| k.to_vec() == bind_key));
     }
 
     #[test]
