@@ -88,6 +88,24 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 /// with 0.7.0 — place the artefact in a repo), a source policy (compile it), a template name
 /// (derive a leaf from it), or nothing at all (list/compile).
 fn resolve_settled_for_run(arg: &str) -> Result<PathBuf, String> {
+    let _ = resolve_settled_in;
+    resolve_settled_for_run_legacy(arg)
+}
+
+/// [`resolve_settled_for_run`] against explicit policy and template dirs, with `base` the
+/// current directory. A bare word is always a policy name, whatever files sit in `base`;
+/// `base` is consulted only to explain a miss (a same-named file there is not runnable).
+fn resolve_settled_in(
+    arg: &str,
+    policy_dirs: &[PathBuf],
+    template_dirs: &[PathBuf],
+    base: &Path,
+) -> Result<PathBuf, String> {
+    let _ = (arg, policy_dirs, template_dirs, base);
+    todo!("a bare word is a name for `run`, even when a same-named file is here")
+}
+
+fn resolve_settled_for_run_legacy(arg: &str) -> Result<PathBuf, String> {
     let user = kennel_lib_config::User::load().unwrap_or_default();
     if arg.contains('/') || Path::new(arg).exists() {
         return Err(
@@ -718,6 +736,86 @@ fn send_resize(name: &str) {
         },
         &[],
     );
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// A scratch policy repo, template dir and "current directory", removed on drop.
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("kennel-run-resolve-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for sub in ["policies", "templates", "cwd"] {
+                std::fs::create_dir_all(dir.join(sub)).expect("create scratch dir");
+            }
+            Self(dir)
+        }
+        fn put(&self, rel: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, b"x").expect("write");
+            path
+        }
+        fn resolve(&self, arg: &str) -> Result<PathBuf, String> {
+            resolve_settled_in(
+                arg,
+                &[self.0.join("policies")],
+                &[self.0.join("templates")],
+                &self.0.join("cwd"),
+            )
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn run_resolves_a_name_even_when_a_same_named_file_is_here() {
+        // `kennel run opencode` from ~, where the opencode binary is `~/opencode`, used to be
+        // refused as "a path".
+        let t = Tree::new("name");
+        let settled = t.put("policies/opencode/opencode.settled.toml");
+        t.put("cwd/opencode");
+        assert_eq!(t.resolve("opencode").expect("resolves"), settled);
+    }
+
+    #[test]
+    fn run_refuses_an_argument_with_a_slash() {
+        let t = Tree::new("slash");
+        t.put("policies/opencode/opencode.settled.toml");
+        let err = t.resolve("./opencode").expect_err("a path is refused");
+        assert!(err.contains("takes a policy NAME"), "got {err}");
+    }
+
+    #[test]
+    fn run_explains_a_miss_when_only_a_file_of_that_name_is_here() {
+        let t = Tree::new("miss");
+        t.put("cwd/agent.settled.toml");
+        let err = t
+            .resolve("agent.settled.toml")
+            .expect_err("not a policy name");
+        assert!(err.contains("no policy named"), "got {err}");
+        assert!(
+            err.contains("is a file in this directory"),
+            "the file is named as the likely confusion: {err}"
+        );
+    }
+
+    #[test]
+    fn run_still_points_a_source_only_policy_at_compile() {
+        let t = Tree::new("source");
+        t.put("policies/agent/policy.toml");
+        let err = t.resolve("agent").expect_err("no settled artefact");
+        assert!(err.contains("compile it first"), "got {err}");
+    }
 }
 
 #[cfg(test)]
