@@ -172,13 +172,83 @@ pub fn resolve_policy_in(
     policy_dirs: &[PathBuf],
     base: &Path,
 ) -> Result<Resolved, String> {
-    let _ = (arg, prefer_settled, policy_dirs, base);
-    todo!("a bare word resolves as a name before a same-named file")
+    let literal = base.join(arg);
+    if arg.contains('/') {
+        if literal.exists() {
+            let name = policy_name_from_path(&literal);
+            return Ok(Resolved {
+                path: literal,
+                name,
+                note: None,
+            });
+        }
+        return Err(format!("`{arg}`: no such file"));
+    }
+    if is_valid_policy_name(arg) {
+        for dir in policy_dirs {
+            let named = dir.join(arg);
+            let settled = named.join(format!("{arg}.settled.toml"));
+            let source = named.join("policy.toml");
+            let ordered = if prefer_settled {
+                [settled, source]
+            } else {
+                [source, settled]
+            };
+            for candidate in ordered {
+                if candidate.is_file() {
+                    let note = literal
+                        .exists()
+                        .then(|| shadowed_file_note(arg, &candidate));
+                    return Ok(Resolved {
+                        path: candidate,
+                        name: arg.to_owned(),
+                        note,
+                    });
+                }
+            }
+        }
+    }
+    if literal.exists() {
+        let name = policy_name_from_path(&literal);
+        return Ok(Resolved {
+            path: literal,
+            name,
+            note: None,
+        });
+    }
+    if !is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    Err(format!(
+        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel); pass a path, or compile one with `kennel policy compile`"
+    ))
 }
 
-/// Resolve a `<template>` argument against explicit `template_dirs`, with relative paths
-/// taken from `base`: the template counterpart of [`resolve_policy_in`], with the same rule
-/// (a `/` makes it a path; a bare word is a name first, then a file in `base`).
+/// The note for a bare word that named both a policy (or template) and a file in the current
+/// directory: the name won, and `./<word>` picks the file.
+fn shadowed_file_note(arg: &str, chosen: &Path) -> String {
+    format!(
+        "`{arg}` resolved to {}; a file `{arg}` in this directory was not used \
+         (pass `./{arg}` to use it)",
+        chosen.display()
+    )
+}
+
+/// Print a resolution note, if any, to stderr.
+fn print_note(resolved: &Resolved) {
+    if let Some(note) = &resolved.note {
+        eprintln!("kennel: note: {note}");
+    }
+}
+
+/// Resolve a `<template>` argument against explicit `template_dirs`.
+///
+/// The template counterpart of [`resolve_policy_in`], with relative paths taken from `base`
+/// and the same rule: a `/` makes it a path; a bare word is a name first, then a file in
+/// `base`.
 ///
 /// # Errors
 ///
@@ -189,48 +259,74 @@ pub fn resolve_template_in(
     template_dirs: &[PathBuf],
     base: &Path,
 ) -> Result<Resolved, String> {
-    let _ = (arg, template_dirs, base);
-    todo!("a bare word resolves as a template name before a same-named file")
+    let literal = base.join(arg);
+    if arg.contains('/') {
+        if literal.exists() {
+            let name = policy_name_from_path(&literal);
+            return Ok(Resolved {
+                path: literal,
+                name,
+                note: None,
+            });
+        }
+        return Err(format!("`{arg}`: no such file"));
+    }
+    if is_valid_policy_name(arg) {
+        for dir in template_dirs {
+            // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
+            for candidate in [
+                dir.join(format!("{arg}.toml")),
+                dir.join(arg).join("policy.toml"),
+            ] {
+                if candidate.is_file() {
+                    let note = literal
+                        .exists()
+                        .then(|| shadowed_file_note(arg, &candidate));
+                    return Ok(Resolved {
+                        path: candidate,
+                        name: arg.to_owned(),
+                        note,
+                    });
+                }
+            }
+        }
+    }
+    if literal.exists() {
+        let name = policy_name_from_path(&literal);
+        return Ok(Resolved {
+            path: literal,
+            name,
+            note: None,
+        });
+    }
+    if !is_valid_policy_name(arg) {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid template name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    Err(format!(
+        "no template named `{arg}` (searched `templates/` under ~/.config/kennel, /etc/kennel, \
+         /usr/lib/kennel); pass a path to a template file"
+    ))
 }
 
 /// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
 ///
+/// The [`resolve_policy_in`] rule, against the user's policy dirs and the current directory:
+/// a `/` makes it a path; a bare word is a policy name first (noting on stderr a same-named
+/// file it did not use), then a file in the current directory.
+///
 /// # Errors
 ///
-/// Returns a message if `arg` is neither an existing file nor a valid policy
-/// name, or if no matching policy file is found under any policy directory.
+/// Returns a message if a path argument does not exist, or a bare word is neither a policy
+/// name nor an existing file.
 pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
-    let literal = Path::new(arg);
-    if literal.exists() {
-        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
-    }
-    if !is_valid_policy_name(arg) {
-        return Err(format!(
-            "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
-        ));
-    }
-    for dir in kennel_lib_config::User::load()
+    let dirs = kennel_lib_config::User::load()
         .unwrap_or_default()
-        .policy_dirs()
-    {
-        let base = dir.join(arg);
-        let settled = base.join(format!("{arg}.settled.toml"));
-        let source = base.join("policy.toml");
-        let ordered = if prefer_settled {
-            [settled, source]
-        } else {
-            [source, settled]
-        };
-        for candidate in ordered {
-            if candidate.is_file() {
-                return Ok((candidate, arg.to_owned()));
-            }
-        }
-    }
-    Err(format!(
-        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel); pass a path, or compile one with `kennel policy compile`"
-    ))
+        .policy_dirs();
+    let resolved = resolve_policy_in(arg, prefer_settled, &dirs, Path::new(""))?;
+    print_note(&resolved);
+    Ok((resolved.path, resolved.name))
 }
 
 /// The trust tier a cascade path belongs to, by its root.
@@ -317,8 +413,10 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
     ))
 }
 
-/// Resolve a template/fragment argument: a **name** in the template cascade (user
-/// `~/.config/kennel/templates/<name>` first), else a filesystem path.
+/// Resolve a template/fragment argument: a **name** in the template cascade, else a path.
+///
+/// The user `~/.config/kennel/templates/<name>` is searched first. A `/` makes the argument a
+/// path only; a bare word that names a template wins over a same-named file here.
 ///
 /// The template counterpart of [`resolve_policy`], so `sign-template base-mine` finds
 /// `~/.config/kennel/templates/base-mine/policy.toml` (or `base-mine.toml`) without the caller
@@ -330,32 +428,11 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
 /// Returns a message if the argument is neither an existing file nor a valid name resolving in the
 /// template dirs.
 pub fn resolve_template(arg: &str) -> Result<(PathBuf, String), String> {
-    let literal = Path::new(arg);
-    if literal.exists() {
-        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
-    }
-    if !is_valid_policy_name(arg) {
-        return Err(format!(
-            "`{arg}` is not an existing file, and not a valid template name (no `/`, `..`, or whitespace)"
-        ));
-    }
     let mut dirs = Vec::new();
     add_default_template_dirs(&mut dirs);
-    for dir in dirs {
-        // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
-        for candidate in [
-            dir.join(format!("{arg}.toml")),
-            dir.join(arg).join("policy.toml"),
-        ] {
-            if candidate.is_file() {
-                return Ok((candidate, arg.to_owned()));
-            }
-        }
-    }
-    Err(format!(
-        "no template named `{arg}` (searched `templates/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel); pass a path to a template file"
-    ))
+    let resolved = resolve_template_in(arg, &dirs, Path::new(""))?;
+    print_note(&resolved);
+    Ok((resolved.path, resolved.name))
 }
 
 /// Derive a kennel name from a policy file path.

@@ -501,7 +501,10 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    // A name in the policy repos, or a path (the same rule as `compile`).
+    let (policy_file, _) = resolve_policy(policy_path, false)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -568,7 +571,10 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    // A name in the policy repos, or a path (the same rule as `compile`).
+    let (policy_file, _) = resolve_policy(policy_path, false)?;
+    let bytes = std::fs::read(&policy_file)
+        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };

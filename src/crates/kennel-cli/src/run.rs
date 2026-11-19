@@ -88,8 +88,13 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 /// with 0.7.0 — place the artefact in a repo), a source policy (compile it), a template name
 /// (derive a leaf from it), or nothing at all (list/compile).
 fn resolve_settled_for_run(arg: &str) -> Result<PathBuf, String> {
-    let _ = resolve_settled_in;
-    resolve_settled_for_run_legacy(arg)
+    let user = kennel_lib_config::User::load().unwrap_or_default();
+    resolve_settled_in(
+        arg,
+        &user.policy_dirs(),
+        &user.template_dirs(),
+        Path::new(""),
+    )
 }
 
 /// [`resolve_settled_for_run`] against explicit policy and template dirs, with `base` the
@@ -101,13 +106,7 @@ fn resolve_settled_in(
     template_dirs: &[PathBuf],
     base: &Path,
 ) -> Result<PathBuf, String> {
-    let _ = (arg, policy_dirs, template_dirs, base);
-    todo!("a bare word is a name for `run`, even when a same-named file is here")
-}
-
-fn resolve_settled_for_run_legacy(arg: &str) -> Result<PathBuf, String> {
-    let user = kennel_lib_config::User::load().unwrap_or_default();
-    if arg.contains('/') || Path::new(arg).exists() {
+    if arg.contains('/') {
         return Err(
             "`kennel run` takes a policy NAME resolved from the policy repos \
              (~/.config/kennel/policies, /etc/kennel/policies, /usr/lib/kennel/policies), not a \
@@ -122,13 +121,13 @@ fn resolve_settled_for_run_legacy(arg: &str) -> Result<PathBuf, String> {
         ));
     }
     let mut source_hit: Option<PathBuf> = None;
-    for dir in user.policy_dirs() {
-        let base = dir.join(arg);
-        let settled = base.join(format!("{arg}.settled.toml"));
+    for dir in policy_dirs {
+        let named = dir.join(arg);
+        let settled = named.join(format!("{arg}.settled.toml"));
         if settled.is_file() {
             return Ok(settled);
         }
-        let source = base.join("policy.toml");
+        let source = named.join("policy.toml");
         if source_hit.is_none() && source.is_file() {
             source_hit = Some(source);
         }
@@ -141,7 +140,7 @@ fn resolve_settled_for_run_legacy(arg: &str) -> Result<PathBuf, String> {
             source.display()
         ));
     }
-    for tdir in user.template_dirs() {
+    for tdir in template_dirs {
         if tdir.join(arg).join("policy.toml").is_file() {
             return Err(format!(
                 "`{arg}` is a template — a shared base, not a runnable policy. Derive a leaf \
@@ -150,9 +149,17 @@ fn resolve_settled_for_run_legacy(arg: &str) -> Result<PathBuf, String> {
             ));
         }
     }
+    let here = if base.join(arg).exists() {
+        format!(
+            "; `{arg}` is a file in this directory, but `kennel run` takes policy names, not \
+             paths"
+        )
+    } else {
+        String::new()
+    };
     Err(format!(
         "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel — `kennel policy list` shows what is there); author one with \
+         /usr/lib/kennel — `kennel policy list` shows what is there){here}; author one with \
          `kennel policy generate`, then `kennel policy compile {arg} --key <key>`"
     ))
 }

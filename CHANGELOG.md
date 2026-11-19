@@ -6,6 +6,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### CLI changes
+
+- **A bare `<policy>` word is a policy name before it is a file in the current directory.**
+  `kennel policy compile` (and every verb that takes a `<policy>` or `<template>`) checked for a
+  file of that name first, so `kennel policy compile opencode` run from a directory holding the
+  `opencode` binary tried to parse the binary. Now an argument containing `/` is a path and only
+  a path; a bare word resolves as a name first, with a note when a same-named file was passed
+  over (`./<word>` picks the file); and only a word that names no policy falls back to a file,
+  so `kennel policy compile policy.toml` still works. `kennel run` no longer refuses a policy
+  name because a same-named file is in the current directory. `kennel policy validate` and
+  `kennel policy risks` now accept a policy name, not only a path.
+
 ### Docs & tooling
 
 - **`publish-repo.sh` no longer risks deleting the live repo's signed metadata.** It published
