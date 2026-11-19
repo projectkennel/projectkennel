@@ -91,7 +91,12 @@ pub use spawn::spawn_eligible;
 /// compile), so the bump is the authorable-surface lever only: an old CLI meeting a source
 /// using the new forms fails its parse legibly, and an old daemon refuses a v5-stamped
 /// artefact as too-new rather than guessing.
-pub const SETTLED_SCHEMA_VERSION: u32 = 5;
+/// v6 (0.8.0, #218/#229): two additive-optional settled fields — `[fs.tmp] mmap_exec` and the
+/// per-grant `fs.write_mmap_exec` list — re-pinned onto v5 in-cycle and promoted here. A policy
+/// that uses neither is byte-identical to a v5 artefact (and the MIN floor stays 3), but one that
+/// does carries fields a v5 reader rejects as unknown, so an older daemon refuses a v6-stamped
+/// artefact as too-new rather than failing obscurely.
+pub const SETTLED_SCHEMA_VERSION: u32 = 6;
 
 /// The oldest `settled_schema_version` this build still verifies. A pre-v3 settled policy carries the
 /// old `TmpPolicy` shape (`private`/`mode`) this build no longer reads and must be recompiled.

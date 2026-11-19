@@ -4,7 +4,49 @@ All notable changes to Project Kennel are recorded here. The format follows [Kee
 
 Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
-## [Unreleased]
+## [0.8.0] — 2026-11-19
+
+**Multi-process and native-code workloads work inside a kennel, and writable space is never
+executable unless you say so.** Driven by #218 (opencode / Bun aborting under 0.7.1), this release
+fixes four kennel-side problems behind it: every process now reads its own `/proc/self` (Landlock had
+pinned it to the first process), a kennel's private loopback is open by default, Landlock no longer
+denies TCP that the BPF ACL permits, and a new `ai-coding-native` template allows the exec-mappable
+`/tmp` that runtimes unpacking native code need. In the other direction, writable binds are now
+`noexec,nosuid,nodev` — the one **breaking** change. Landlock denials are now audit-logged, a
+workload no longer races its D-Bus and AF_UNIX facades at startup, and the
+supply chain is two third-party crates lighter on the TCB path (`basic-toml` is first-party, and
+`hmac-sha512` is gone).
+
+### Upgrade notes
+
+- **Native code in a writable project tree needs an opt-out.** Node `.node` addons in
+  `node_modules`, an in-project venv's extension modules and Rust proc-macros under `target/` now
+  fail with `failed to map segment from shared object` until that grant sets `mmap_exec = true`
+  (HOWTO §7). See *Runtime & enforcement*.
+- **Settled schema v5 → v6** (`MIN` stays 3). A 0.8.0 daemon reads every existing artefact; an
+  artefact that uses `[fs.tmp] mmap_exec` or a per-grant `mmap_exec` is v6 and is refused as
+  too-new by a 0.7.x daemon. Upgrade the daemon before (or with) the CLI.
+- **Re-pin leaf policies.** `base-confined`, `base-bwrap`, `base-flatpak`, `containerised-service`
+  and `interactive` were re-signed, so a leaf compiled against them hits a lockfile mismatch on its
+  next compile: run `kennel policy upgrade <name>`.
+- **opencode and other Bun single-file agents:** derive the leaf from `ai-coding-native`.
+
+### Security fixes
+
+- **Every process in a kennel can read its own `/proc/self`; `/proc` is curated, not raw.**
+  Landlock anchors a rule on the inode opened when the ruleset is built, so the shipped
+  `/proc/self/**` grant covered only the workload's *first* process (`/proc/<its pid>`): every
+  child it forked was denied its own `/proc/self`. Multi-process workloads broke — Bun/JSC
+  (`opencode`) `abort()`s at startup when a child cannot read `/proc/self` (#218). Every `fs.read`
+  grant under `/proc` now compiles to ONE Landlock read rule on `/proc`, and the view's fresh
+  procfs is curated in the construction child: per-process entries stay real; `cpuinfo`,
+  `meminfo`, `stat` and `version` are **synthesized from templates** filled only with values the
+  workload's own syscalls already expose (usable CPU count, `sysinfo(2)`, `uname(2)`) — snapshots,
+  with zeroed `/proc/stat` counters; every other top-level entry (`/proc/sys`, `kallsyms`,
+  `modules`, `loadavg`, …) is **masked empty** unless the policy names it, in which case the real
+  entry passes through. The top level is enumerated at spawn, so an entry a future kernel adds
+  is masked without a code change. Previously these host-global entries were present but
+  Landlock-denied; now they read as empty.
 
 ### Fixed
 
@@ -54,47 +96,26 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   addresses. In `host` mode a direction (bind or connect) stops being Landlock-handled only when
   one of its allow rules is a range; single-port rules keep the Landlock layer.
 
-### IPC protocol changes
-
-- The kenneld → `kennel-bin-init` plan and supervision blobs carry the handled Landlock TCP
-  rights (`landlock_net_handled`). Both ends ship together.
-
-### Security fixes
-
-- **Every process in a kennel can read its own `/proc/self`; `/proc` is curated, not raw.**
-  Landlock anchors a rule on the inode opened when the ruleset is built, so the shipped
-  `/proc/self/**` grant covered only the workload's *first* process (`/proc/<its pid>`): every
-  child it forked was denied its own `/proc/self`. Multi-process workloads broke — Bun/JSC
-  (`opencode`) `abort()`s at startup when a child cannot read `/proc/self` (#218). Every `fs.read`
-  grant under `/proc` now compiles to ONE Landlock read rule on `/proc`, and the view's fresh
-  procfs is curated in the construction child: per-process entries stay real; `cpuinfo`,
-  `meminfo`, `stat` and `version` are **synthesized from templates** filled only with values the
-  workload's own syscalls already expose (usable CPU count, `sysinfo(2)`, `uname(2)`) — snapshots,
-  with zeroed `/proc/stat` counters; every other top-level entry (`/proc/sys`, `kallsyms`,
-  `modules`, `loadavg`, …) is **masked empty** unless the policy names it, in which case the real
-  entry passes through. The top level is enumerated at spawn, so an entry a future kernel adds
-  is masked without a code change. Previously these host-global entries were present but
-  Landlock-denied; now they read as empty.
-
 ### Policy schema changes
 
 - **`mmap_exec` on `[[fs.write.add]]` entries** (#229): opt that writable grant out of `noexec`.
   Legal only on `fs.write` adds; it folds with its entry (a later `remove`, a re-add with
   `false`, or a set-form `fs.write` drops it). Settled as `fs.write_mmap_exec`, omitted when empty.
-  Warned per grant at compile. Same in-cycle v5 re-pin as `[fs.tmp] mmap_exec`; owes the v6 bump.
+  Warned per grant at compile. Part of settled schema v6 (below).
 - **`[fs.tmp] mmap_exec`** (default `false`): mount the kennel's private `/tmp` without `noexec`, so
   a runtime can `dlopen` native code it unpacks there (Bun single-file executables such as
   `opencode` extract their TUI library into `$TMPDIR`, #218). `execve` from `/tmp` stays refused
   (Landlock grants writable paths no execute right). The compiler warns when it is set: native code
   written to `/tmp` can then run, including whole programs via the dynamic loader. The settled
-  field is omitted when false, so existing artefacts are byte-identical; the schema shape is
-  re-pinned at v5 in-cycle and owes a v6 bump at the next release (an artefact that sets it is
-  refused by a 0.7.1 daemon).
+  field is omitted when false, so existing artefacts are byte-identical; an artefact that sets it
+  is settled schema v6 (below) and is refused by a 0.7.x daemon.
 - **`/proc` grants are classified at compile.** `fs.read = ["/proc"]` / `["/proc/**"]` still
   serves the real, uncurated procfs, and now **warns**. A path *inside* a host-global entry
   (`/proc/sys/kernel/osrelease`) is **refused**: the one `/proc` rule cannot narrow below a
   top-level entry — grant `/proc/sys/**` explicitly. Non-canonical `/proc` paths are refused.
   No settled-schema change (the plan is derived from the existing `fs.read` set).
+- **Settled schema v6.** The two `mmap_exec` fields above were re-pinned onto v5 in-cycle and are
+  promoted to v6 here; `schema/schema-version.lock` freezes the v5 line at its 0.7.1 shape.
 
 ### Template changes
 
@@ -109,6 +130,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### IPC protocol changes
 
+- The kenneld → `kennel-bin-init` plan and supervision blobs carry the handled Landlock TCP
+  rights (`landlock_net_handled`). Both ends ship together.
 - The kenneld → `kennel-bin-init` plan blob carries the view's `ProcView`: a tag, the
   synthesized set, and the passthrough names (each validated as a single top-level name on
   decode). Both ends ship together.
@@ -146,7 +169,6 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the interim RUSTSEC-2026-0374 ignore are removed. Third-party crate count drops by one; no new
   dependencies. The workspace lint pass over the parser is the follow-up (#221).
 - `kennel-lib-syscall` enables `nix`'s `feature` feature (for `uname(2)`); no new crates.
-
 - **`mini-sansio-dbus` 5.0.1 → 6.0.1; the one local vendor patch is dropped and byte-identical
   vendoring is restored.** Upstream merged our header-field-decoder fix (the wire-reachable
   `unreachable!()` on a bogus field-code byte, found by the kennel-fuzz harness and carried since
@@ -157,6 +179,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `messages/` tree kennel never links; the marshalling core `kennel-lib-dbus` uses is unchanged
   apart from added derives and `wants()` taking `&self`. No new dependencies; still
   `#![forbid(unsafe_code)]`.
+
+### Docs & tooling
+
+- README and website rewritten to lead with what kennel is; the CLI and status blocks brought
+  current; install snippets full-width (#211–#213). The templates README replaces a stale status
+  table with a usage guide (#217), and the reference-monitor narrative is clarified (#216).
+- `.env` and the `dist/repo` build tree are git-ignored (#214).
 
 ## [0.7.1] — 2026-07-15
 
