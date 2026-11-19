@@ -21,29 +21,36 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns the OS error if the parent cannot be created, or the bind/listen/rename fails.
 pub fn bind_ready(path: &Path) -> io::Result<UnixListener> {
-    let _ = path;
-    todo!("facade readiness (D-Bus race)")
+    let _ = std::fs::remove_file(path); // a stale node from a prior run
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let staging = staging_name(path);
+    let _ = std::fs::remove_file(&staging);
+    // `UnixListener::bind` is bind(2) + listen(2): the staging node is already listening when it
+    // returns, so after the rename the real path is never visible un-listened.
+    let listener = UnixListener::bind(&staging)?;
+    std::fs::rename(&staging, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&staging);
+    })?;
+    Ok(listener)
 }
 
-/// Report readiness to `kennel-bin-init`: if this facade is gated (`KENNEL_READY_FD` set by init),
-/// write one byte to that fd. Call once, after every listener is bound. Ungated ⇒ a no-op.
+/// Report readiness to `kennel-bin-init`.
+///
+/// If this facade is gated (`KENNEL_READY_FD` set by init), write one byte to the inherited
+/// readiness fd. Call once, after every listener is bound. Ungated ⇒ a no-op.
+/// (`kennel_lib_syscall::boot::signal_facade_ready` does the raw-fd write.)
 ///
 /// # Errors
 ///
-/// The OS error if the readiness fd cannot be written.
+/// The OS error if the readiness fd is not the expected one, not open, or cannot be written.
 pub fn signal_ready() -> io::Result<()> {
-    signal_ready_to(
+    kennel_lib_syscall::boot::signal_facade_ready(
         std::env::var(kennel_lib_syscall::ready::READY_ENV)
             .ok()
             .as_deref(),
     )
-}
-
-/// [`signal_ready`] with the environment value injected (testable). `fd` is the decimal fd
-/// number; it is written through `/proc/self/fd/<n>` so this crate stays `unsafe`-free.
-fn signal_ready_to(fd: Option<&str>) -> io::Result<()> {
-    let _ = fd;
-    todo!("facade readiness (D-Bus race)")
 }
 
 /// The temporary name [`bind_ready`] listens on before the rename: a sibling of `path`, so the
@@ -91,28 +98,6 @@ mod tests {
         let _listener = bind_ready(&path).expect("replaces the stale node");
         assert!(UnixStream::connect(&path).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn signal_ready_writes_one_byte_to_the_named_fd() {
-        use std::io::Read as _;
-        use std::os::fd::AsRawFd as _;
-        let (r, w) = kennel_lib_syscall::ready::pipe().expect("pipe");
-        signal_ready_to(Some(&w.as_raw_fd().to_string())).expect("signal");
-        drop(w);
-        let mut got = Vec::new();
-        std::fs::File::from(r).read_to_end(&mut got).expect("read");
-        assert_eq!(got, vec![1u8]);
-    }
-
-    #[test]
-    fn signal_ready_is_a_no_op_when_ungated() {
-        signal_ready_to(None).expect("no env ⇒ nothing to do");
-    }
-
-    #[test]
-    fn signal_ready_refuses_a_malformed_fd() {
-        assert!(signal_ready_to(Some("not-a-number")).is_err());
     }
 
     #[test]

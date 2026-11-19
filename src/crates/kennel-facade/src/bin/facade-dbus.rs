@@ -60,14 +60,27 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Bind every listener BEFORE serving any (`bind_ready`: each is listening before its path is
+    // visible), then signal readiness — kennel-bin-init holds the workload until it does, so a
+    // workload that talks to the bus immediately cannot race the bind.
     let mut handles = Vec::new();
     for (path, bus) in listeners {
+        let listener = match kennel_facade::listen::bind_ready(Path::new(&path)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("facade-dbus: {path}: {e}");
+                continue;
+            }
+        };
         let device = device.clone();
         handles.push(thread::spawn(move || {
-            if let Err(e) = serve(&device, &path, bus) {
+            if let Err(e) = serve(&device, &listener, bus) {
                 eprintln!("facade-dbus: {path}: {e}");
             }
         }));
+    }
+    if let Err(e) = kennel_facade::listen::signal_ready() {
+        eprintln!("facade-dbus: readiness signal: {e}");
     }
     for handle in handles {
         let _ = handle.join();
@@ -89,13 +102,8 @@ fn split_pair(arg: &str) -> Option<(String, Bus)> {
     Some((path.to_owned(), bus))
 }
 
-/// Bind a D-Bus server endpoint at `path` and mediate each accepted connection against `bus`.
-fn serve(device: &str, path: &str, bus: Bus) -> io::Result<()> {
-    let _ = std::fs::remove_file(path);
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(path)?;
+/// Mediate each connection accepted on the bus endpoint `listener` against `bus`.
+fn serve(device: &str, listener: &UnixListener, bus: Bus) -> io::Result<()> {
     for incoming in listener.incoming() {
         let workload = incoming?;
         let device = device.to_owned();

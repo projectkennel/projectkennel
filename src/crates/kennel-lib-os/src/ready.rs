@@ -4,7 +4,7 @@
 //! # Purpose
 //!
 //! `kennel-bin-init` forks the facades and then the workload. A workload that connects to a facade
-//! socket at once (a D-Bus client, a brokered AF_UNIX socket) must not beat the facade's bind. Init
+//! socket at once (a D-Bus client, a brokered `AF_UNIX` socket) must not beat the facade's bind. Init
 //! cannot simply check that the socket path exists: it is the kennel's uid 0, mapped to host root
 //! only, so the operator-owned `0700` `/tmp` is not even searchable to it (`CAP_DAC_OVERRIDE` in a
 //! user namespace covers only inodes whose owner is mapped there). So the facade reports readiness
@@ -14,11 +14,11 @@
 //!
 //! # Why nix here
 //!
-//! `pipe2`/`dup2`/`poll`/`read` via nix's safe wrappers: this module is `unsafe`-free.
+//! `pipe2`/`poll`/`read` via nix's safe wrappers: this module is `unsafe`-free.
 
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd, RawFd};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The fixed fd a gated facade inherits the readiness pipe's write end at. 3–9 are taken by the
 /// other boot fds (`PTY_RETURN_FD` … `TUN_FD`).
@@ -27,26 +27,16 @@ pub const READY_FD: RawFd = 10;
 /// The environment variable that tells a facade it is gated and which fd to signal on.
 pub const READY_ENV: &str = "KENNEL_READY_FD";
 
-/// Create the readiness pipe, close-on-exec, as `(read end, write end)`. Close-on-exec so the
-/// workload never inherits either end; a gated facade gets its own copy at [`READY_FD`] via
-/// [`place_write_end`].
+/// Create the readiness pipe, close-on-exec, as `(read end, write end)`.
+///
+/// Close-on-exec so the workload never inherits either end; `kennel-bin-init` places a gated facade's copy at
+/// [`READY_FD`] (`kennel_lib_syscall::fd::dup_onto`, not close-on-exec) in its forked child.
 ///
 /// # Errors
 ///
 /// The OS error if `pipe2(2)` fails.
 pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    todo!("facade readiness (D-Bus race)")
-}
-
-/// In the forked facade child, before `execve`: duplicate `write` onto [`READY_FD`] *without*
-/// close-on-exec, so the facade program inherits it. Async-signal-safe (`dup2` only).
-///
-/// # Errors
-///
-/// The OS error if `dup2(2)` fails.
-pub fn place_write_end(write: BorrowedFd<'_>) -> io::Result<()> {
-    let _ = write;
-    todo!("facade readiness (D-Bus race)")
+    Ok(nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)?)
 }
 
 /// Read readiness bytes from `read` until `expected` have arrived, every writer has closed (EOF:
@@ -56,15 +46,36 @@ pub fn place_write_end(write: BorrowedFd<'_>) -> io::Result<()> {
 ///
 /// The OS error if `poll(2)` or `read(2)` fails for a reason other than an interrupt.
 pub fn wait(read: BorrowedFd<'_>, expected: usize, timeout: Duration) -> io::Result<usize> {
-    let _ = (read, expected, timeout);
-    todo!("facade readiness (D-Bus race)")
+    use nix::poll::{PollFd, PollFlags, PollTimeout};
+    let start = Instant::now();
+    let mut got = 0usize;
+    let mut buf = [0u8; 64];
+    while got < expected {
+        let left = timeout.saturating_sub(start.elapsed());
+        if left.is_zero() {
+            break;
+        }
+        let ms = u16::try_from(left.as_millis()).unwrap_or(u16::MAX);
+        let mut fds = [PollFd::new(read, PollFlags::POLLIN)];
+        match nix::poll::poll(&mut fds, PollTimeout::from(ms)) {
+            Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+            Ok(_) => {}
+            Err(e) => return Err(e.into()),
+        }
+        match nix::unistd::read(read, &mut buf) {
+            Ok(0) => break, // EOF: every writer (the gated facades) closed
+            Ok(n) => got = got.saturating_add(n),
+            Err(nix::errno::Errno::EINTR | nix::errno::Errno::EAGAIN) => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(got.min(expected))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::fd::AsFd;
-    use std::time::Instant;
 
     fn signal(write: &OwnedFd) {
         nix::unistd::write(write, &[1]).expect("write a readiness byte");

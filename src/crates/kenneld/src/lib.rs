@@ -1673,7 +1673,9 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: shim_bin,
         args,
-        signals_ready: false,
+        // It serves the shims the workload connects to: kennel-bin-init holds the workload until
+        // it signals that every listener is bound.
+        signals_ready: true,
     });
 }
 
@@ -1944,7 +1946,8 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: facade_bin,
         args,
-        signals_ready: false,
+        // It serves the bus sockets: kennel-bin-init holds the workload until it signals ready.
+        signals_ready: true,
     });
 }
 
