@@ -1,0 +1,31 @@
+# ============================================================================
+# Suite case: construction-as-operator — building a view never acts on a host path as root.
+#
+# The construction child is the kennel's uid 0, which the `0 0 1` map makes HOST root, and it
+# builds the view before `pivot_root`, with the host filesystem still mounted. Every path it
+# handles comes from its caller, and a writable grant is a host directory a previous workload
+# could have filled with symlinks. So it builds with the OPERATOR's filesystem identity: the
+# kernel then refuses anything the operator could not do, and nothing it creates on the host
+# is root's.
+#
+# The observable: a writable grant is a real host directory, and construction creates the
+# trust-manifest mask placeholders inside it. `run.sh` checks, host-side, that nothing in that
+# directory is owned by uid 0 after a run. The workload only proves the grant was live.
+# ============================================================================
+
+template_name = "construction-as-operator"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+write = ["~/kennel-e2e/construction-as-operator"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/touch", "/bin/touch"]
+
+[workload]
+argv = ["/bin/sh", "-c", "touch \"$HOME/kennel-e2e/construction-as-operator/from-workload\""]
