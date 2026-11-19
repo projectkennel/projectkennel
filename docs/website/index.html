@@ -1137,6 +1137,42 @@ threats.exposed = [<span class="p">"T1.9"</span>]   <span class="c"># each grant
 
 <span class="c"># filesystem, identity, audit, ssh … inherited from base-confined@v1, then narrowed</span></pre>
 
+                <div class="prose rv" style="margin-top:30px">
+                    <p>Some agents load native code they unpack at run time. Bun single-file executables such as
+                        opencode extract shared libraries into <code>/tmp</code> and <code>dlopen</code> them. For
+                        those, derive from <code>ai-coding-native</code>: it is <code>ai-coding-strict</code> with one
+                        change, a private <code>/tmp</code> that allows executable mappings. Running a program
+                        from <code>/tmp</code> is still refused, and the <code>/tmp</code> is discarded when the
+                        kennel exits. A complete policy for opencode:</p>
+                </div>
+<pre class="snippet rv"><span class="c"># ~/.config/kennel/policies/opencode/policy.toml</span>
+name = <span class="p">"opencode"</span>
+template_base = <span class="p">"ai-coding-native"</span>   <span class="c"># ai-coding-strict + [fs.tmp] mmap_exec = true</span>
+
+<span class="c"># the agent binary: readable and allowed to run</span>
+[[fs.read.add]]
+path = <span class="p">"~/.opencode/bin/opencode"</span>
+reason = <span class="p">"the agent: a Bun single-file executable"</span>
+
+[[exec.allow.add]]
+path = <span class="p">"~/.opencode/bin/opencode"</span>
+reason = <span class="p">"run the agent"</span>
+
+<span class="c"># egress: .add extends the inherited registries instead of replacing them</span>
+[[net.proxy.allow.add]]
+name = <span class="p">"api.anthropic.com"</span>
+ports = [443]
+reason = <span class="p">"the model API"</span>
+threats.exposed = [<span class="p">"T1.8"</span>]
+
+[[net.proxy.allow.add]]
+name = <span class="p">"models.dev"</span>
+ports = [443]
+reason = <span class="p">"opencode's model catalogue"</span>
+threats.exposed = [<span class="p">"T1.8"</span>]</pre>
+<pre class="snippet rv"><span class="k">kennel</span> policy compile opencode   <span class="c"># resolve against the signed template, sign with your key</span>
+<span class="k">kennel</span> run opencode</pre>
+
                 <div class="rv"
                     style="margin-top:30px;border:1px solid var(--rule-2);border-radius:12px;background:var(--paper-2);padding:28px 28px">
                     <p class="fig" style="margin:0 0 4px">The CLI · two houses</p>
