@@ -683,6 +683,7 @@ mod tests {
                 "/dev/binderfs/binder".to_owned(),
                 "/run/x.sock=wl".to_owned(),
             ],
+            signals_ready: false,
         };
         let argv = facade_argv(&facade).expect("argv");
         assert_eq!(

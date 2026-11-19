@@ -881,6 +881,10 @@ pub struct AuxProcess {
     pub path: PathBuf,
     /// Arguments after `argv[0]`.
     pub args: Vec<String>,
+    /// This facade serves sockets the workload may connect to at once, and reports when it is
+    /// listening: `kennel-bin-init` hands it the readiness pipe (`kennel_lib_os::ready`) and starts
+    /// the workload only once every such facade has signalled (bounded wait).
+    pub signals_ready: bool,
 }
 
 /// The **supervision-half** of a kennel's enforcement (`07-2-kennel-bin-init.md` §7.2.3).
