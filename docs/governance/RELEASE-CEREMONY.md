@@ -124,10 +124,21 @@ settled-schema is a **release gate**, not a "verify only" axis — read its row 
     - `GNUPGHOME=<release-keyring> src/tools/build-repo.sh --key <release-key-fpr>` — builds the signed
       APT repo (reprepro-signed `InRelease`) and DNF repo (`rpm --addsign` per package + a detach-signed
       `repomd.xml`) under `dist/repo/`, plus the public key, its fingerprint, and `index.html`.
-    - `AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… R2_ENDPOINT=… R2_BUCKET=kennel-packages
-      src/tools/publish-repo.sh` — syncs the tree into R2 over the S3 API (`--delete` prunes retired
-      objects). The R2 token *signs nothing*: a leak serves stale or denied content, never a forged
-      package (that needs the offline GPG key). R2 has no per-file size cap.
+    - `src/tools/publish-repo.sh --env-file <r2.env> --dry-run`, then without `--dry-run`. The env
+      file (mode 0600, never committed) sets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+      `R2_ENDPOINT` and `R2_BUCKET=projectkennel-packages`. The publish runs in three steps over the
+      S3 API: the packages and repodata first, then the signed metadata that names them, then it
+      deletes, one by one, only the objects absent from the new tree (the previous release's
+      packages and repodata). Read the dry run's delete list: it must name only those. It never uses
+      `aws s3 sync --delete`, which over a live tree planned to delete `Release`, `Packages` and
+      `repomd.xml` right after uploading them (0.8.0). The R2 token *signs nothing*: a leak serves
+      stale or denied content, never a forged package (that needs the offline GPG key). R2 has no
+      per-file size cap.
+    - **Unlocking the release key on a remote build host:** the passphrase prompt needs your
+      terminal, so sign once with `gpg --pinentry-mode loopback -u <fpr> --sign -o /dev/null
+      /etc/hostname` from an `ssh` session, and **keep that session open** until `build-repo.sh` has
+      run. Without lingering, systemd stops the user manager — and gpg-agent's passphrase cache
+      with it — when your last session closes.
     - **Cloudflare config on the custom domain (one-time):** (a) a **Cache Rule** matching `/deb/pool/*`
       and `/rpm/*/*.rpm` → Edge TTL 1y + immutable (packages are content-addressed; publish-repo uploads
       a safe `must-revalidate` baseline so metadata freshness is never wrong even without the rule);
