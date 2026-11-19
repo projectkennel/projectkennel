@@ -8,6 +8,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **Granting the D-Bus driver no longer opens the bus.** Every D-Bus client needs
+  `org.freedesktop.DBus` in `talk`, and with it the broker forwarded every driver method: a
+  kennel could own any free name, start any activatable service, and call
+  `UpdateActivationEnvironment`, which changes the environment of services the bus starts later,
+  outside any kennel. The `own` list was never enforced. Driver calls are now decided by method:
+  queries and `AddMatch` pass, `RequestName` needs the name in `own`, `StartServiceByName` needs
+  a destination the kennel may call, and the rest are refused. **Behaviour change:** an
+  application that requests its own bus name needs that name in `own`.
 - **A workload can no longer pin kenneld's binder buffer.** kenneld replied to each transaction
   and freed its buffer in one write, and the binder driver skips the rest of a write after a
   command fails. A workload that sent one-way transactions made every reply fail, so no buffer

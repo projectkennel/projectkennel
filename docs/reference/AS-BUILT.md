@@ -26,6 +26,40 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — the D-Bus driver is mediated by method; `own` is enforced
+
+- **Bears-on:** Kennel book Vol 2, the D-Bus mediation chapter (§7.7.4 name ownership, §7.7.6
+  the match table, §7.7.10). The archived design said `RequestName` outside `own` returns
+  not-allowed and `StartServiceByName` is permitted only for allowed destinations; the code did
+  neither.
+- **Change:** `Filter::decide` judged a call by its destination name only, and the bus driver
+  (`org.freedesktop.DBus`) was a destination like any other. A client cannot work without it
+  (`AddMatch`), so every `[dbus]` policy grants it — and with that grant every driver method was
+  forwarded. `BusRules.own` was carried from the policy to the broker and read by nothing. On the
+  test VM, a kennel with `talk = ["org.freedesktop.DBus"]` and an empty `own` called
+  `RequestName` for an arbitrary name and the bus granted it. As-built now, a call to the driver
+  that the policy admits is further decided by method (`filter::driver_decision`), default-deny:
+  - admitted: the read-only queries (`GetId`, `GetNameOwner`, `NameHasOwner`, `ListNames`,
+    `ListActivatableNames`, `ListQueuedOwners`, `GetConnection*`), `RemoveMatch`, `Hello`, and
+    `Peer.Ping`/`GetMachineId`, `Introspectable.Introspect`, `Properties.Get`/`GetAll`;
+  - `AddMatch`, unless the rule mentions `eavesdrop`;
+  - `RequestName` / `ReleaseName`, only for a name `own` admits;
+  - `StartServiceByName`, only for a destination the kennel may call anyway (not refused to
+    brokering, not denied, admitted by `talk` or a `call` entry);
+  - everything else is refused — notably `UpdateActivationEnvironment`, which sets the
+    environment of services the bus later activates outside any kennel, and `BecomeMonitor`.
+  A method call that omits its interface is judged as the driver's own interface, since the
+  driver resolves it by member alone. The string argument is read from a little-endian body
+  whose signature starts with `s`; if it cannot be read the call is refused.
+- **Behaviour change:** an application that requests its own bus name (most GUI toolkits do)
+  now needs that name in `[dbus.<bus>.allow] own`.
+- **Why:** the driver's methods act on the bus, not on a peer, so a name-based allowlist does not
+  describe what granting it permits.
+- **Not changed:** signals are still admitted by the sender-chosen interface string against
+  `broadcast ∪ talk`, not by sending service; replies are still matched on `reply_serial` alone;
+  the compiler still accepts a `talk` grant of the driver without comment (it is now safe to).
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — node 0 frees the inbound buffer before it replies
 
 - **Bears-on:** Kennel book Vol 2, the binder chapter (§7.1, the transaction/buffer discipline);
