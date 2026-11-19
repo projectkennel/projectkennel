@@ -1,8 +1,8 @@
 {
   "crate_count": 31,
-  "total_sloc": 42453,
+  "total_sloc": 42468,
   "tcb_crate_count": 17,
-  "tcb_sloc": 25585,
+  "tcb_sloc": 25600,
   "crates": [
     {
       "name": "kenneld",
@@ -236,7 +236,7 @@
     },
     {
       "name": "kennel-lib-landlock",
-      "sloc": 249,
+      "sloc": 264,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],

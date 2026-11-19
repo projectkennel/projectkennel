@@ -249,6 +249,16 @@ attempted target, so the audit log is the first place to look when a workload
 (§5). Check `kennel audit <name> --resource network` for the denied destination,
 then add a `[[net.proxy.allow]]` (or a `[net.bpf]` CIDR rule in `host` mode).
 
+**A workload gets "Permission denied" on a file.** The path is not granted, so
+Landlock refuses it. On kernel 6.15+ (Landlock ABI 7) each denial is written to
+the kernel audit log as a `LANDLOCK_ACCESS` record naming the path and the
+missing right (`blockers=fs.read_file`, …), *if* audit is enabled on the host:
+with `auditd` running, `sudo ausearch -m LANDLOCK_ACCESS -ts recent`; with
+journald's audit socket enabled, `sudo journalctl _TRANSPORT=audit`. Without
+either, records fall back to the rate-limited kernel log (`sudo dmesg`) and
+bursts are dropped. Add the path to `fs.read`/`fs.write` if the workload
+legitimately needs it.
+
 **A policy won't parse / compile.** `kennel policy validate <policy>` prints the
 exact field and reason. A common cause is a field name the parser does not
 accept — the authoritative list is `man policy.toml` and
