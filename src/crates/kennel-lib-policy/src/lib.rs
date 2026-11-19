@@ -488,6 +488,32 @@ mod tests {
         );
     }
 
+    /// `[fs.tmp] mmap_exec` (#218) is omitted from the canonical form when false — so every
+    /// existing artefact serialises, and verifies, exactly as before — and, when true, is inside
+    /// the signed bytes (flipping it breaks the signature).
+    #[test]
+    fn tmp_mmap_exec_is_omitted_when_false_and_signature_bound_when_true() {
+        let key = signing_key();
+        let mut policy = sample_policy();
+        let canon = |p: &SettledPolicy| {
+            String::from_utf8(canonical::canonical_bytes(p).expect("canon")).expect("utf8")
+        };
+        assert!(!policy.effective_policy.fs.tmp.mmap_exec);
+        assert!(!canon(&policy).contains("mmap_exec"), "absent when false");
+
+        policy.effective_policy.fs.tmp.mmap_exec = true;
+        assert!(canon(&policy).contains("mmap_exec = true"));
+        let doc = sign_settled(&policy, &key).expect("sign");
+        let bytes = to_bytes(&doc).expect("serialise");
+        let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
+        assert!(verified.effective_policy.fs.tmp.mmap_exec);
+
+        let text = String::from_utf8(bytes).expect("utf8");
+        let tampered = text.replacen("mmap_exec = true", "mmap_exec = false", 1);
+        assert_ne!(tampered, text);
+        assert!(verify_settled(tampered.as_bytes(), &keyset_for(&key)).is_err());
+    }
+
     #[test]
     fn fs_tmp_dev_and_proc_hidepid_round_trip_and_are_signature_bound() {
         let key = signing_key();
@@ -495,6 +521,7 @@ mod tests {
         policy.effective_policy.fs.tmp = TmpPolicy {
             writable: true,
             size_mib: 256,
+            mmap_exec: false,
         };
         policy.effective_policy.fs.dev = DevPolicy {
             allow: vec![

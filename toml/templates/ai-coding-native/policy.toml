@@ -1,0 +1,37 @@
+# ============================================================================
+# Template: ai-coding-native
+# Inherits: ai-coding-strict
+# Threat catalogue: THREATS.md v0.4
+#
+# ai-coding-strict for agents whose runtime loads native code it unpacks at run
+# time. Bun single-file executables (opencode, …) extract embedded `.so` files
+# (e.g. a TUI render library) into $TMPDIR and dlopen them; on the strict
+# template's `noexec` /tmp that fails with "failed to map segment from shared
+# object" (#218).
+#
+# The ONE difference: /tmp allows executable file mappings (`mmap(PROT_EXEC)`,
+# i.e. dlopen / the dynamic loader). Everything else is inherited unchanged.
+#
+# What this does and does not open:
+#   - execve of a file in /tmp is STILL refused: Landlock grants EXECUTE only to
+#     the exec allowlist, and writable paths never get it (exec.deny_writable).
+#   - Native code written to /tmp can be loaded, including a whole program run
+#     through the dynamic loader (`ld-linux… /tmp/prog`) — so the exec allowlist
+#     no longer bounds WHICH native code runs. The containment boundary does not
+#     move: Landlock's filesystem rules, the BPF network ACLs, seccomp and the
+#     namespaces apply to the whole process, whatever code it runs.
+#   - /tmp is a fresh per-kennel tmpfs: nothing planted there survives the
+#     session. Persistent writable paths (the project tree) are unaffected.
+# ============================================================================
+
+template_base = "ai-coding-strict"
+template_name = "ai-coding-native"
+
+# --- Private /tmp: executable mappings allowed --------------------------------
+[fs.tmp]
+mmap_exec = true
+
+[signature]
+algorithm = "sshsig"
+key_id = "kennel-maint-2026"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQKNBmy0PMguqT8qcbq78I8mpUyf8V2vVoI\nqsGg7zOXBctJLozz+wOi4GMydQyUX+xoEE7Gd0MBQeO+6QguFEng0=\n-----END SSH SIGNATURE-----\n"

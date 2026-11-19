@@ -543,6 +543,9 @@ pub struct ShimView {
     pub dev_allow: Vec<PathBuf>,
     /// The workload's `/tmp` tmpfs size cap, in mebibytes.
     pub tmp_size_mib: u32,
+    /// Mount `/tmp` without `MS_NOEXEC` (`[fs.tmp] mmap_exec`, #218): executable file mappings
+    /// allowed; `execve` is still Landlock-refused.
+    pub tmp_mmap_exec: bool,
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
     /// What the fresh `/proc` exposes (#218).
@@ -1429,6 +1432,7 @@ impl Plan {
             binds,
             dev_allow,
             tmp_size_mib: ep.fs.tmp.size_mib,
+            tmp_mmap_exec: false, // placeholder (#218): carried in the feat commit
             proc_hidepid: ep.proc.hidepid,
             proc,
             binder: true,

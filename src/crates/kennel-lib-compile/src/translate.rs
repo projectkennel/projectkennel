@@ -1349,10 +1349,12 @@ fn translate_fs(
                 Some(s) => parse_size_mib(s)?,
                 None => DEFAULT_TMP_MIB,
             },
+            mmap_exec: false, // placeholder (#218): carried in the feat commit
         },
         None => TmpPolicy {
             writable: false,
             size_mib: DEFAULT_TMP_MIB,
+            mmap_exec: false,
         },
     };
 

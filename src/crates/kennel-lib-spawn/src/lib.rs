@@ -696,7 +696,14 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     // Mode 0700: the tmpfs is owned by the workload user inside its own mount namespace, so
     // owner-only is private-and-usable (no other uid exists in the kennel to grant). Fixed, not
     // policy-derived — a per-policy DAC mode gated no real adversary here.
-    mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some("0700"), false, true)?;
+    // `noexec` unless the policy opted into executable mappings (`[fs.tmp] mmap_exec`, #218).
+    mount::mount_tmpfs(
+        &tmp,
+        Some(view.tmp_size_mib),
+        Some("0700"),
+        false,
+        !view.tmp_mmap_exec,
+    )?;
     // 5a. Curate the fresh /proc (#218): the workload's single /proc read rule exposes only
     //     per-process entries, the synthesized templates, and the policy's named passthroughs —
     //     every other top-level entry is masked empty. The over-mount sources are staged in the
@@ -1173,6 +1180,7 @@ mod tests {
                     tmp: TmpPolicy {
                         writable: true,
                         size_mib: 512,
+                        mmap_exec: false,
                     },
                     dev: DevPolicy {
                         allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],
@@ -2117,6 +2125,23 @@ mod tests {
             .bpf_bind_deny_v4
             .iter()
             .any(|(k, _)| k.to_vec() == bind_key));
+    }
+
+    /// `[fs.tmp] mmap_exec` reaches the view (#218), and `/tmp` stays `noexec` by default.
+    #[test]
+    fn tmp_mmap_exec_reaches_the_view() {
+        for on in [false, true] {
+            let mut p = policy_with_placeholders();
+            p.effective_policy.fs.tmp.mmap_exec = on;
+            let plan = Plan::from_policy(
+                &substitute(&p, &subst()).expect("subst"),
+                7,
+                "kennel-dev",
+                Path::new("/home/dev"),
+            )
+            .expect("plan");
+            assert_eq!(plan.view.as_ref().expect("view").tmp_mmap_exec, on);
+        }
     }
 
     #[test]

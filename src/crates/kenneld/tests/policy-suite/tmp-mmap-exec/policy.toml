@@ -1,0 +1,59 @@
+# ============================================================================
+# Suite case: tmp-mmap-exec — `[fs.tmp] mmap_exec` (#218, the ai-coding-native template).
+#
+# With mmap_exec the kennel's private /tmp is mounted without MS_NOEXEC, so a runtime can dlopen
+# native code it unpacks there (Bun single-file executables). execve from /tmp must STILL be
+# refused: Landlock grants writable paths no EXECUTE. This case proves, from the inside:
+#
+#   1. /tmp is mounted without noexec;
+#   2. a shared library copied into /tmp loads (ctypes/dlopen);
+#   3. execve of an executable copied into /tmp is refused (EACCES), while the same binary at
+#      its allowlisted path runs.
+#
+# The kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "tmp-mmap-exec"
+template_base = "base-confined"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/proc/self/**"]
+
+[fs.tmp]
+writable = true
+mmap_exec = true
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*", "/usr/bin/true"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import ctypes, ctypes.util, errno, glob, os, shutil, subprocess
+
+opts = [l.split()[3] for l in open('/proc/self/mounts') if l.split()[1] == '/tmp']
+if not opts or 'noexec' in opts[0].split(','):
+    raise SystemExit('/tmp is still noexec: %s' % opts)
+
+libz = [p for p in glob.glob('/usr/lib/*/libz.so.1') + glob.glob('/lib/*/libz.so.1')]
+if not libz:
+    raise SystemExit('no libz.so.1 to copy')
+shutil.copy(os.path.realpath(libz[0]), '/tmp/libzcopy.so')
+try:
+    ctypes.CDLL('/tmp/libzcopy.so')
+except OSError as e:
+    raise SystemExit('dlopen from /tmp failed: %s' % e)
+
+subprocess.run(['/usr/bin/true'], check=True)  # the allowlisted original runs
+shutil.copy('/usr/bin/true', '/tmp/true-copy'); os.chmod('/tmp/true-copy', 0o755)
+try:
+    subprocess.run(['/tmp/true-copy'], check=True)
+    raise SystemExit('execve from /tmp unexpectedly succeeded')
+except PermissionError:
+    pass
+"
+    """,
+]

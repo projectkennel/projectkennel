@@ -965,6 +965,12 @@ pub struct FsTmp {
     /// Size cap in human form (`"512M"`, `"1G"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<String>,
+    /// Allow executable file mappings (`mmap(PROT_EXEC)`, `dlopen`) of files in `/tmp` — for
+    /// runtimes that unpack and load native code at run time (Bun single-file executables).
+    /// `execve` from `/tmp` stays refused. Default `false` (`/tmp` is `noexec`). Warned at compile:
+    /// native code written to `/tmp` can then run, including whole programs via the dynamic loader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmap_exec: Option<bool>,
 }
 
 /// `[fs.proc]`: procfs hidepid. Visibility is always self-only (structural).

@@ -487,6 +487,7 @@ fn put_view(w: &mut Writer, v: &ShimView) {
         w.path(d);
     }
     w.u32(v.tmp_size_mib);
+    w.bool(v.tmp_mmap_exec);
     w.bool(v.proc_hidepid);
     put_proc_view(w, &v.proc);
     w.bool(v.binder);
@@ -679,6 +680,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         dev_allow.push(r.path()?);
     }
     let tmp_size_mib = r.u32()?;
+    let tmp_mmap_exec = r.bool()?;
     let proc_hidepid = r.bool()?;
     let proc = get_proc_view(r)?;
     let binder = r.bool()?;
@@ -731,6 +733,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         binds,
         dev_allow,
         tmp_size_mib,
+        tmp_mmap_exec,
         proc_hidepid,
         proc,
         binder,
@@ -1176,6 +1179,7 @@ mod tests {
             ],
             dev_allow: vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/net/tun")],
             tmp_size_mib: 512,
+            tmp_mmap_exec: true,
             proc_hidepid: true,
             proc: ProcView::Full,
             binder: true,
