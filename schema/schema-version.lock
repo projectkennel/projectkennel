@@ -39,8 +39,12 @@
 #     retired dead keys (cap.bounding_set, proxy_listen_v6_address). An old CLI meeting a source
 #     that uses the new forms fails its parse legibly; an old daemon refuses a v5-stamped artefact
 #     as too-new.
-#     Re-pinned in-cycle after 0.7.1 for the additive-optional `[fs.tmp] mmap_exec` (#218) and
-#     the per-entry `[[fs.write.add]] mmap_exec` (#229): a policy that uses neither is
-#     byte-identical to a 0.7.1 artefact, but one that does carries a field a 0.7.1 daemon rejects
-#     — so this owes a v6 BUMP at the next release (the rule above).
-5 a5b0c614f3d456d9c113aa994f46f47c2a9735d4dedae02cbc7623967ce56ffc
+5 4a764871e14cb5088fda28215e74b2fa5b37dcdb40a1ae06cd3f833224974168
+# v6: the 0.8.0 ABI. Two additive-optional settled fields, re-pinned onto v5 during the cycle and
+#     promoted here at release (the rule above): `[fs.tmp] mmap_exec` (an exec-mappable private
+#     /tmp, #218/#227) and the per-grant `[[fs.write.add]] mmap_exec` → settled
+#     `fs.write_mmap_exec` (writable binds are noexec unless opted out, #229/#230). A policy using
+#     neither is byte-identical to a v5 artefact, so the MIN floor stays 3; one that uses either
+#     carries a field a 0.7.x daemon rejects, which is the break this bump makes legible. The v5
+#     line above is frozen at its 0.7.1 shape.
+6 a5b0c614f3d456d9c113aa994f46f47c2a9735d4dedae02cbc7623967ce56ffc
