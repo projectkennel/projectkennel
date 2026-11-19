@@ -72,20 +72,58 @@ export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-auto}"
 export AWS_REQUEST_CHECKSUM_CALCULATION="${AWS_REQUEST_CHECKSUM_CALCULATION:-when_required}"
 export AWS_RESPONSE_CHECKSUM_VALIDATION="${AWS_RESPONSE_CHECKSUM_VALIDATION:-when_required}"
 
-# One sync, --delete to prune retired objects, with a SAFE uniform cache header: metadata
-# and the key MUST revalidate so a fresh publish is seen; packages may be cached far longer,
-# but that is an OPTIMISATION applied by a Cloudflare Cache Rule on the custom domain
-# (match /deb/pool/* and /rpm/*/*.rpm → Edge TTL 1y, immutable), never a shorter-is-wrong
-# default here. Correctness (metadata freshness) lives in the object header; performance
-# (package longevity) lives in the Cache Rule. R2 has no per-file size cap, so large
-# packages are fine.
-echo "publish-repo.sh: syncing $repo → s3://$R2_BUCKET (R2) ${dry:+[dry-run]}"
-aws s3 sync "$repo" "s3://$R2_BUCKET" \
-	--endpoint-url "$R2_ENDPOINT" \
-	--delete \
-	--no-progress \
-	--cache-control "public, max-age=300, must-revalidate" \
-	$dry
+# Every object gets a SAFE uniform cache header: metadata and the key MUST revalidate so a
+# fresh publish is seen; packages may be cached far longer, but that is an OPTIMISATION
+# applied by a Cloudflare Cache Rule on the custom domain (match /deb/pool/* and
+# /rpm/*/*.rpm → Edge TTL 1y, immutable), never a shorter-is-wrong default here. Correctness
+# (metadata freshness) lives in the object header; performance (package longevity) lives in
+# the Cache Rule. R2 has no per-file size cap, so large packages are fine.
+#
+# Three steps, never `aws s3 sync --delete`. Over a live tree, aws-cli's sync compares the
+# local and remote listings in different orders and planned to upload AND THEN delete the
+# same key for `Release`, `Packages` and `repomd.xml` (they sort next to `Release.gpg` and
+# `Packages.gz`). That would leave the repo without its signed metadata: every `apt update`
+# and `dnf` refresh fails. So:
+#   1. upload the packages and the content-addressed repodata, which nothing names yet;
+#   2. upload everything else: the signed metadata that names them, the key, the index;
+#   3. delete, one by one, only the remote keys absent from the new tree.
+# A client therefore never sees metadata that points at a missing file, and a key the new
+# tree contains is never deleted.
+cache="public, max-age=300, must-revalidate"
+s3_sync() {
+	aws s3 sync "$repo" "s3://$R2_BUCKET" \
+		--endpoint-url "$R2_ENDPOINT" \
+		--no-progress \
+		--cache-control "$cache" \
+		$dry "$@"
+}
+
+echo "publish-repo.sh: [1/3] packages + repodata → s3://$R2_BUCKET (R2) ${dry:+[dry-run]}"
+s3_sync --exclude '*' --include '*.deb' --include '*.rpm' --include '*/repodata/*.xml.zst'
+
+echo "publish-repo.sh: [2/3] signed metadata, key, index → s3://$R2_BUCKET ${dry:+[dry-run]}"
+s3_sync
+
+# Byte-order (C) collation on both sides, so the set difference is exact.
+local_keys="$(cd "$repo" && find . -type f | sed 's#^\./##' | LC_ALL=C sort)"
+remote_keys="$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --endpoint-url "$R2_ENDPOINT" \
+	--query 'Contents[].[Key]' --output text | grep -vx 'None' | LC_ALL=C sort || true)"
+retired="$(LC_ALL=C comm -23 <(printf '%s\n' "$remote_keys" | sed '/^$/d') \
+	<(printf '%s\n' "$local_keys"))"
+
+echo "publish-repo.sh: [3/3] retiring $(printf '%s' "$retired" | grep -c . || true) object(s) absent from $repo ${dry:+[dry-run]}"
+while IFS= read -r key; do
+	[[ -n "$key" ]] || continue
+	if [[ -e "$repo/$key" ]]; then
+		echo "publish-repo.sh: refusing to delete '$key': it is in the new tree" >&2
+		exit 1
+	fi
+	if [[ -n "$dry" ]]; then
+		echo "(dryrun) delete: s3://$R2_BUCKET/$key"
+	else
+		aws s3 rm "s3://$R2_BUCKET/$key" --endpoint-url "$R2_ENDPOINT"
+	fi
+done <<<"$retired"
 
 echo "publish-repo.sh: done. Verify the live repo before announcing:"
 echo "  apt:  add the repo on a clean box and 'apt update' (fails closed if the signature is wrong)"

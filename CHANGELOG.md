@@ -4,6 +4,18 @@ All notable changes to Project Kennel are recorded here. The format follows [Kee
 
 Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that touch a stable surface are recorded under a section named for that surface: `### CLI changes`, `### Policy schema changes`, `### Audit schema changes`, `### IPC protocol changes`, `### BPF ABI changes`. Dependency changes (§5), MSRV changes (§2), and threat-catalogue changes are also recorded here.
 
+## [Unreleased]
+
+### Docs & tooling
+
+- **`publish-repo.sh` no longer risks deleting the live repo's signed metadata.** It published
+  with one `aws s3 sync --delete`. Over a live tree, the first time a release replaced an earlier
+  one (0.8.0), the dry run planned to upload `Release`, `Packages` and `repomd.xml` and then delete
+  them, which would have failed every `apt update` and `dnf` refresh. It now uploads the packages
+  and repodata, then the signed metadata, then deletes one by one only the objects absent from the
+  new tree, and never a key the tree contains. `RELEASE-CEREMONY.md` now names the real bucket
+  (`projectkennel-packages`) and describes unlocking the release key on a remote build host.
+
 ## [0.8.0] — 2026-11-19
 
 **Multi-process and native-code workloads work inside a kennel, and writable space is never
