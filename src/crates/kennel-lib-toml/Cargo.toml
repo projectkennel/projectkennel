@@ -20,9 +20,5 @@ serde = { version = "=1.0.228", default-features = false, features = ["std", "de
 serde_derive = "=1.0.228"
 serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
 
-# The workspace lint set (clippy pedantic + no indexing/arithmetic/panic) is not yet applied:
-# this commit keeps upstream's code as-is so the import stays reviewable as a copy. Bringing
-# it up to the workspace standard is the #221 follow-up. `unsafe` is forbidden now (upstream
-# has none).
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

@@ -30,25 +30,6 @@
 //! [basic-toml]: https://github.com/dtolnay/basic-toml
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![allow(
-    clippy::bool_to_int_with_if,
-    clippy::elidable_lifetime_names,
-    clippy::let_underscore_untyped,
-    clippy::manual_let_else,
-    clippy::manual_range_contains,
-    clippy::match_like_matches_macro,
-    clippy::missing_errors_doc,
-    clippy::must_use_candidate,
-    clippy::needless_doctest_main,
-    clippy::needless_lifetimes,
-    clippy::needless_pass_by_value,
-    clippy::similar_names,
-    clippy::type_complexity,
-    clippy::uninlined_format_args,
-    clippy::unnecessary_box_returns,
-    clippy::unwrap_or_default
-)]
 
 mod de;
 mod error;

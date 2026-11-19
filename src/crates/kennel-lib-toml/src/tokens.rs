@@ -41,7 +41,7 @@ pub enum Token<'a> {
     },
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy)]
 pub enum Error {
     InvalidCharInString(usize, char),
     InvalidEscape(usize, char),
@@ -76,8 +76,12 @@ enum MaybeString {
     Owned(String),
 }
 
+/// The per-character callback `read_string` drives: `(tokenizer, value, multiline, index, char)`.
+type NewCharFn<'f> =
+    dyn FnMut(&mut Tokenizer<'_>, &mut MaybeString, bool, usize, char) -> Result<(), Error> + 'f;
+
 impl<'a> Tokenizer<'a> {
-    pub fn new(input: &'a str) -> Tokenizer<'a> {
+    pub fn new(input: &'a str) -> Self {
         let mut t = Tokenizer {
             input,
             chars: CrlfFold {
@@ -123,18 +127,18 @@ impl<'a> Tokenizer<'a> {
         Ok(Some((span, token)))
     }
 
-    pub fn peek(&mut self) -> Result<Option<(Span, Token<'a>)>, Error> {
+    pub fn peek(&self) -> Result<Option<(Span, Token<'a>)>, Error> {
         self.clone().next()
     }
 
-    pub fn eat(&mut self, expected: Token<'a>) -> Result<bool, Error> {
+    pub fn eat(&mut self, expected: &Token<'a>) -> Result<bool, Error> {
         self.eat_spanned(expected).map(|s| s.is_some())
     }
 
     /// Eat a value, returning it's span if it was consumed.
-    pub fn eat_spanned(&mut self, expected: Token<'a>) -> Result<Option<Span>, Error> {
+    pub fn eat_spanned(&mut self, expected: &Token<'a>) -> Result<Option<Span>, Error> {
         let span = match self.peek()? {
-            Some((span, ref found)) if expected == *found => span,
+            Some((span, ref found)) if *expected == *found => span,
             Some(_) | None => return Ok(None),
         };
 
@@ -142,18 +146,18 @@ impl<'a> Tokenizer<'a> {
         Ok(Some(span))
     }
 
-    pub fn expect(&mut self, expected: Token<'a>) -> Result<(), Error> {
+    pub fn expect(&mut self, expected: &Token<'a>) -> Result<(), Error> {
         // ignore span
         let _ = self.expect_spanned(expected)?;
         Ok(())
     }
 
     /// Expect the given token returning its span.
-    pub fn expect_spanned(&mut self, expected: Token<'a>) -> Result<Span, Error> {
+    pub fn expect_spanned(&mut self, expected: &Token<'a>) -> Result<Span, Error> {
         let current = self.current();
         match self.next()? {
             Some((span, found)) => {
-                if expected == found {
+                if *expected == found {
                     Ok(span)
                 } else {
                     Err(Error::Wanted {
@@ -187,10 +191,9 @@ impl<'a> Tokenizer<'a> {
                 if multiline {
                     return Err(Error::MultilineStringKey(offset));
                 }
-                match src.find('\n') {
-                    None => Ok((span, val)),
-                    Some(i) => Err(Error::NewlineInTableKey(offset + i)),
-                }
+                src.find('\n').map_or(Ok((span, val)), |i| {
+                    Err(Error::NewlineInTableKey(offset.saturating_add(i)))
+                })
             }
             Some((_, other)) => Err(Error::Wanted {
                 at: current,
@@ -250,11 +253,8 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn current(&mut self) -> usize {
-        match self.chars.clone().next() {
-            Some(i) => i.0,
-            None => self.input.len(),
-        }
+    pub fn current(&self) -> usize {
+        self.chars.clone().next().map_or(self.input.len(), |i| i.0)
     }
 
     fn whitespace_token(&mut self, start: usize) -> Token<'a> {
@@ -266,7 +266,7 @@ impl<'a> Tokenizer<'a> {
 
     fn comment_token(&mut self, start: usize) -> Token<'a> {
         while let Some((_, ch)) = self.chars.clone().next() {
-            if ch != '\t' && (ch < '\u{20}' || ch > '\u{10ffff}') {
+            if ch != '\t' && !('\u{20}'..='\u{10ffff}').contains(&ch) {
                 break;
             }
             self.one();
@@ -278,13 +278,7 @@ impl<'a> Tokenizer<'a> {
         &mut self,
         delim: char,
         start: usize,
-        new_ch: &mut dyn FnMut(
-            &mut Tokenizer,
-            &mut MaybeString,
-            bool,
-            usize,
-            char,
-        ) -> Result<(), Error>,
+        new_ch: &mut NewCharFn<'_>,
     ) -> Result<Token<'a>, Error> {
         let mut multiline = false;
         if self.eatc(delim) {
@@ -292,20 +286,22 @@ impl<'a> Tokenizer<'a> {
                 multiline = true;
             } else {
                 return Ok(Token::String {
-                    src: &self.input[start..start + 2],
+                    src: &self.input[start..start.saturating_add(2)],
                     val: Cow::Borrowed(""),
                     multiline: false,
                 });
             }
         }
         let mut val = MaybeString::NotEscaped(self.current());
-        let mut n = 0;
+        let mut n: usize = 0;
         loop {
-            n += 1;
+            n = n.saturating_add(1);
             match self.one() {
                 Some((i, '\n')) => {
                     if multiline {
-                        if self.input.as_bytes()[i] == b'\r' {
+                        // (Upstream quirk kept as-is: `i` is the `\n`'s own index, so this never
+                        // matches; behaviour-preserving in a lint-only pass.)
+                        if self.input.as_bytes().get(i) == Some(&b'\r') {
                             val.make_owned(&self.input[..i]);
                         }
                         if n == 1 {
@@ -330,11 +326,11 @@ impl<'a> Tokenizer<'a> {
                         }
                         if self.eatc(delim) {
                             val.push(delim);
-                            i += 1;
+                            i = i.saturating_add(1);
                         }
                         if self.eatc(delim) {
                             val.push(delim);
-                            i += 1;
+                            i = i.saturating_add(1);
                         }
                     }
                     return Ok(Token::String {
@@ -351,7 +347,7 @@ impl<'a> Tokenizer<'a> {
 
     fn literal_string(&mut self, start: usize) -> Result<Token<'a>, Error> {
         self.read_string('\'', start, &mut |_me, val, _multi, i, ch| {
-            if ch == '\u{09}' || ('\u{20}' <= ch && ch <= '\u{10ffff}' && ch != '\u{7f}') {
+            if ch == '\u{09}' || (('\u{20}'..='\u{10ffff}').contains(&ch) && ch != '\u{7f}') {
                 val.push(ch);
                 Ok(())
             } else {
@@ -405,7 +401,7 @@ impl<'a> Tokenizer<'a> {
                 }
                 Ok(())
             }
-            ch if ch == '\u{09}' || ('\u{20}' <= ch && ch <= '\u{10ffff}' && ch != '\u{7f}') => {
+            ch if ch == '\u{09}' || (('\u{20}'..='\u{10ffff}').contains(&ch) && ch != '\u{7f}') => {
                 val.push(ch);
                 Ok(())
             }
@@ -414,19 +410,20 @@ impl<'a> Tokenizer<'a> {
     }
 
     fn hex(&mut self, start: usize, i: usize, len: usize) -> Result<char, Error> {
-        let mut buf = String::with_capacity(len);
+        // Accumulate the (at most 8) hex digits directly; `checked_*` keeps the fold total, though
+        // 8 digits cannot exceed `u32::MAX`.
+        let mut val: u32 = 0;
         for _ in 0..len {
-            match self.one() {
-                Some((_, ch)) if ch as u32 <= 0x7F && ch.is_ascii_hexdigit() => buf.push(ch),
+            let digit = match self.one() {
+                Some((_, ch)) if ch.is_ascii_hexdigit() => ch.to_digit(16),
                 Some((i, ch)) => return Err(Error::InvalidHexEscape(i, ch)),
                 None => return Err(Error::UnterminatedString(start)),
-            }
+            };
+            val = digit
+                .and_then(|d| val.checked_mul(16)?.checked_add(d))
+                .ok_or(Error::InvalidEscapeValue(i, val))?;
         }
-        let val = u32::from_str_radix(&buf, 16).unwrap();
-        match char::from_u32(val) {
-            Some(ch) => Ok(ch),
-            None => Err(Error::InvalidEscapeValue(i, val)),
-        }
+        char::from_u32(val).ok_or(Error::InvalidEscapeValue(i, val))
     }
 
     fn keylike(&mut self, start: usize) -> Token<'a> {
@@ -440,24 +437,23 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn substr_offset(&self, s: &'a str) -> usize {
-        assert!(s.len() <= self.input.len());
+        // `s` is always a sub-slice of `input` here; the checks stay as debug assertions, and a
+        // broken invariant degrades to a wrong error column rather than a panic (#228).
+        debug_assert!(s.len() <= self.input.len());
         let a = self.input.as_ptr() as usize;
         let b = s.as_ptr() as usize;
-        assert!(a <= b);
-        b - a
+        debug_assert!(a <= b);
+        b.saturating_sub(a)
     }
 
     /// Calculate the span of a single character.
-    fn step_span(&mut self, start: usize) -> Span {
-        let end = match self.peek_one() {
-            Some(t) => t.0,
-            None => self.input.len(),
-        };
+    fn step_span(&self, start: usize) -> Span {
+        let end = self.peek_one().map_or(self.input.len(), |t| t.0);
         Span { start, end }
     }
 
     /// Peek one char without consuming it.
-    fn peek_one(&mut self) -> Option<(usize, char)> {
+    fn peek_one(&self) -> Option<(usize, char)> {
         self.chars.clone().next()
     }
 
@@ -467,7 +463,7 @@ impl<'a> Tokenizer<'a> {
     }
 }
 
-impl<'a> Iterator for CrlfFold<'a> {
+impl Iterator for CrlfFold<'_> {
     type Item = (usize, char);
 
     fn next(&mut self) -> Option<(usize, char)> {
@@ -487,38 +483,34 @@ impl<'a> Iterator for CrlfFold<'a> {
 impl MaybeString {
     fn push(&mut self, ch: char) {
         match *self {
-            MaybeString::NotEscaped(..) => {}
-            MaybeString::Owned(ref mut s) => s.push(ch),
+            Self::NotEscaped(..) => {}
+            Self::Owned(ref mut s) => s.push(ch),
         }
     }
 
     fn make_owned(&mut self, input: &str) {
         match *self {
-            MaybeString::NotEscaped(start) => {
-                *self = MaybeString::Owned(input[start..].to_owned());
+            Self::NotEscaped(start) => {
+                *self = Self::Owned(input[start..].to_owned());
             }
-            MaybeString::Owned(..) => {}
+            Self::Owned(..) => {}
         }
     }
 
     fn into_cow(self, input: &str) -> Cow<'_, str> {
         match self {
-            MaybeString::NotEscaped(start) => Cow::Borrowed(&input[start..]),
-            MaybeString::Owned(s) => Cow::Owned(s),
+            Self::NotEscaped(start) => Cow::Borrowed(&input[start..]),
+            Self::Owned(s) => Cow::Owned(s),
         }
     }
 }
 
-fn is_keylike(ch: char) -> bool {
-    ('A' <= ch && ch <= 'Z')
-        || ('a' <= ch && ch <= 'z')
-        || ('0' <= ch && ch <= '9')
-        || ch == '-'
-        || ch == '_'
+const fn is_keylike(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'
 }
 
-impl<'a> Token<'a> {
-    pub fn describe(&self) -> &'static str {
+impl Token<'_> {
+    pub const fn describe(&self) -> &'static str {
         match *self {
             Token::Keylike(_) => "an identifier",
             Token::Equals => "an equals",

@@ -1,3 +1,11 @@
+// Upstream basic-toml 0.1.10 test, kept unchanged as the behavioural reference for the in-tree
+// parser (#228); the workspace's test-code lints are relaxed for these upstream files alone.
+#![allow(
+    missing_docs,
+    elided_lifetimes_in_paths,
+    clippy::unwrap_used,
+    clippy::indexing_slicing
+)]
 #![allow(
     clippy::match_like_matches_macro,
     clippy::needless_pass_by_value,
