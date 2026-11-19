@@ -501,7 +501,7 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let (_, bytes) = read_policy_arg(policy_path)?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -568,7 +568,7 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
-    let bytes = std::fs::read(policy_path).map_err(|e| format!("reading {policy_path}: {e}"))?;
+    let (_, bytes) = read_policy_arg(policy_path)?;
     let source = FsTemplateSource {
         dirs: template_dirs,
     };
@@ -675,11 +675,18 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Read a `<policy>` argument's file and source bytes: a name in the policy repos, or a path
+/// (the [`resolve_policy`] rule every verb shares).
+fn read_policy_arg(arg: &str) -> Result<(PathBuf, Vec<u8>), String> {
+    let (path, _) = resolve_policy(arg, false)?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok((path, bytes))
+}
+
 /// The policy's *declared* `(name, template_base)` from its raw source, before the
 /// fold drops them. Works for both the template/source and the delta-leaf forms.
 fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), String> {
-    let (path, _) = resolve_policy(arg, false)?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let (_, bytes) = read_policy_arg(arg)?;
     if let Ok(src) = kennel_lib_compile::parse_source(&bytes) {
         return Ok((src.name.or(src.template_name), src.template_base));
     }
@@ -694,8 +701,7 @@ fn resolve_effective(
     template_dirs: &[PathBuf],
     tc: &TrustContext,
 ) -> Result<kennel_lib_compile::SourcePolicy, String> {
-    let (path, _) = resolve_policy(arg, false)?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let (path, bytes) = read_policy_arg(arg)?;
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
