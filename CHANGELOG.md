@@ -55,6 +55,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Policy schema changes
 
+- **`[fs.tmp] mmap_exec`** (default `false`): mount the kennel's private `/tmp` without `noexec`, so
+  a runtime can `dlopen` native code it unpacks there (Bun single-file executables such as
+  `opencode` extract their TUI library into `$TMPDIR`, #218). `execve` from `/tmp` stays refused
+  (Landlock grants writable paths no execute right). The compiler warns when it is set: native code
+  written to `/tmp` can then run, including whole programs via the dynamic loader. The settled
+  field is omitted when false, so existing artefacts are byte-identical; the schema shape is
+  re-pinned at v5 in-cycle and owes a v6 bump at the next release (an artefact that sets it is
+  refused by a 0.7.1 daemon).
 - **`/proc` grants are classified at compile.** `fs.read = ["/proc"]` / `["/proc/**"]` still
   serves the real, uncurated procfs, and now **warns**. A path *inside* a host-global entry
   (`/proc/sys/kernel/osrelease`) is **refused**: the one `/proc` rule cannot narrow below a
@@ -63,6 +71,9 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Template changes
 
+- **New `ai-coding-native` template**: `ai-coding-strict` plus `[fs.tmp] mmap_exec = true`, the
+  only difference. For agents whose runtime loads native code it unpacks at run time. `/tmp` is a
+  fresh per-kennel tmpfs, so nothing planted there survives the session.
 - **`base-confined`, `base-bwrap`, `base-flatpak`, `containerised-service` grant `/proc/stat`**
   (synthesized; libuv's `os.cpus()` reads it). **`interactive` drops `/proc/**`** for the
   curated set plus `/proc/uptime` and `/proc/loadavg`: `ps`/`top`/`free` see every process of

@@ -33,6 +33,7 @@ missing prerequisite aborts with the precise cause.
 | `fs-view`         | none | granted `~` subdir readable; non-granted sibling ENOENT; home tmpfs writable; `/etc/shadow` absent |
 | `fs-redirect`     | none | a `source`-redirected grant (W15) serves the view path from a different host inode, over-mounting the symmetric parent; the never-granted store is ENOENT. Setup stages the host tree. |
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
+| `tmp-mmap-exec`   | constrained | `[fs.tmp] mmap_exec`: `/tmp` is mounted without `noexec`, a `.so` copied there loads, and `execve` from `/tmp` is still refused (#218) |
 | `proc-curated`    | none | children/grandchildren read their own `/proc/self`; `/proc/{cpuinfo,stat,meminfo,version}` are synthesized and agree with `nproc`; ungranted host-global entries (`kallsyms`, `loadavg`, `sys`) are masked empty (#218) |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-loopback`    | constrained | the kennel's own `lo` is open by default: a server on an ephemeral `127.0.0.1`/`::1` port is reached by a separate child process, with no `[net.bpf]` grant; direct public egress is still refused (#218) |

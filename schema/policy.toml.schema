@@ -701,6 +701,10 @@
       "additionalProperties": false,
       "description": "`[fs.tmp]`: the workload's own `/tmp` tmpfs.",
       "properties": {
+        "mmap_exec": {
+          "description": "Allow executable file mappings (`mmap(PROT_EXEC)`, `dlopen`) of files in `/tmp` — for",
+          "type": "boolean"
+        },
         "size": {
           "description": "Size cap in human form (`\"512M\"`, `\"1G\"`).",
           "type": "string"

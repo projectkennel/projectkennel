@@ -723,6 +723,7 @@ fn fold_fs_tmp(p: &FsTmp, c: &FsTmp) -> FsTmp {
     FsTmp {
         writable: or(&c.writable, &p.writable),
         size: or(&c.size, &p.size),
+        mmap_exec: or(&c.mmap_exec, &p.mmap_exec),
     }
 }
 

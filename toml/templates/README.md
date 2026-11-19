@@ -9,6 +9,7 @@ Use `kennel template list` to see installed templates and `kennel template show 
 | Template | Start here when you need to… |
 | --- | --- |
 | [`ai-coding-strict`](ai-coding-strict/) | Run an AI coding agent against one project. The leaf supplies the project path and model API destination. |
+| [`ai-coding-native`](ai-coding-native/) | `ai-coding-strict` plus an exec-mappable private `/tmp`, for agents that `dlopen` native code they unpack at run time (Bun single-file binaries such as `opencode`). |
 | [`interactive`](interactive/) | Run an interactive shell with a selected toolset. |
 | [`inspect-only`](inspect-only/) | Read a directory without building or changing it. |
 | [`package-install`](package-install/) | Install packages from selected registries for a bounded task. |

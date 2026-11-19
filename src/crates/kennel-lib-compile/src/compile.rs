@@ -128,6 +128,7 @@ pub fn compile(
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
+    warnings.extend(tmp_mmap_exec_warnings(&translated.effective_policy));
     assemble(
         name,
         &translated,
@@ -229,6 +230,25 @@ fn unenforced_section_warnings(effective: &SourcePolicy) -> Vec<String> {
 }
 
 /// Warn loudly about each `freeform` variant in a spawn-target template's `[[mutable]]` manifest.
+/// Warn when `/tmp` allows executable mappings (`[fs.tmp] mmap_exec`, #218): native code the
+/// workload writes there can run, including a whole program through the dynamic loader, so the
+/// exec allowlist no longer bounds which native code runs. A legitimate choice for runtimes that
+/// unpack and `dlopen` native code (footgun-warn-dont-forbid), never a silent one.
+fn tmp_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec<String> {
+    if !effective.fs.tmp.mmap_exec {
+        return Vec::new();
+    }
+    vec![
+        "[fs.tmp] mmap_exec = true: /tmp allows executable mappings, so native code the \
+          workload writes there can be loaded — including a whole program run through the \
+          dynamic loader — and the exec allowlist no longer bounds which native code runs. \
+          execve from /tmp stays refused, /tmp does not outlive the kennel, and Landlock, the \
+          BPF network ACLs and seccomp still confine the process. Meant for runtimes that \
+          unpack and dlopen native code (Bun single-file executables, #218)."
+            .to_owned(),
+    ]
+}
+
 /// Freeform is the open footgun (any value the agent supplies is accepted), so it is
 /// warned at compile (warn, never forbid: `footgun-warn-dont-forbid`); the mandatory `reason` is
 /// surfaced so the operator sees what they signed off.
@@ -415,6 +435,8 @@ mod tests {
         include_str!("../../../../toml/templates/base-confined/policy.toml");
     const AI_CODING_STRICT: &str =
         include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
+    const AI_CODING_NATIVE: &str =
+        include_str!("../../../../toml/templates/ai-coding-native/policy.toml");
 
     struct MapSource(Vec<(String, String, Vec<u8>)>);
     impl TemplateSource for MapSource {
@@ -456,6 +478,57 @@ mod tests {
         ));
         let entry = parse(leaf.as_bytes()).expect("parse");
         compile(&entry, &s, &Trust::dev(), "test-0.0.0").expect("compile")
+    }
+
+    fn compile_native_leaf(leaf: &str) -> Compiled {
+        let mut s = src();
+        for (name, body) in [
+            ("ai-coding-strict", AI_CODING_STRICT),
+            ("ai-coding-native", AI_CODING_NATIVE),
+        ] {
+            s.0.push((name.to_owned(), "v1".to_owned(), body.as_bytes().to_vec()));
+        }
+        let entry = parse(leaf.as_bytes()).expect("parse");
+        compile(&entry, &s, &Trust::dev(), "test-0.0.0").expect("compile")
+    }
+
+    fn tmp_warnings(c: &Compiled) -> Vec<&String> {
+        c.warnings
+            .iter()
+            .filter(|w| w.contains("mmap_exec"))
+            .collect()
+    }
+
+    /// #218: `ai-coding-native` is `ai-coding-strict` with an exec-mappable `/tmp` — the one
+    /// difference — and the compiler says so, once.
+    #[test]
+    fn the_native_template_allows_tmp_mmap_exec_and_warns() {
+        let native = compile_native_leaf("name = \"leaf\"\ntemplate_base = \"ai-coding-native\"\n");
+        let strict = compile_leaf("name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n");
+        assert!(native.policy.effective_policy.fs.tmp.mmap_exec);
+        assert!(
+            !strict.policy.effective_policy.fs.tmp.mmap_exec,
+            "strict keeps /tmp noexec"
+        );
+        assert_eq!(tmp_warnings(&native).len(), 1, "{:?}", native.warnings);
+        assert!(tmp_warnings(&strict).is_empty(), "{:?}", strict.warnings);
+        // Otherwise identical to strict.
+        let mut a = native.policy.effective_policy;
+        a.fs.tmp.mmap_exec = false;
+        assert_eq!(
+            a, strict.policy.effective_policy,
+            "the only difference is fs.tmp.mmap_exec"
+        );
+    }
+
+    /// A leaf can turn it back off over the native template (fold: child wins).
+    #[test]
+    fn a_leaf_can_turn_tmp_mmap_exec_back_off() {
+        let c = compile_native_leaf(
+            "name = \"leaf\"\ntemplate_base = \"ai-coding-native\"\n[fs.tmp]\nmmap_exec = false\n",
+        );
+        assert!(!c.policy.effective_policy.fs.tmp.mmap_exec);
+        assert!(tmp_warnings(&c).is_empty());
     }
 
     fn proc_warnings(c: &Compiled) -> Vec<&String> {

@@ -136,6 +136,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 tmp: TmpPolicy {
                     writable: true,
                     size_mib: 512,
+                    mmap_exec: false,
                 },
                 dev: DevPolicy { allow: dev_allow() },
             },

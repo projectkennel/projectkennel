@@ -1349,10 +1349,12 @@ fn translate_fs(
                 Some(s) => parse_size_mib(s)?,
                 None => DEFAULT_TMP_MIB,
             },
+            mmap_exec: t.mmap_exec.unwrap_or(false),
         },
         None => TmpPolicy {
             writable: false,
             size_mib: DEFAULT_TMP_MIB,
+            mmap_exec: false,
         },
     };
 

@@ -370,6 +370,12 @@ pub struct TmpPolicy {
     pub writable: bool,
     /// Size cap of the tmpfs, in mebibytes.
     pub size_mib: u32,
+    /// Allow executable file mappings from `/tmp` (#218): the tmpfs is mounted WITHOUT
+    /// `MS_NOEXEC`, so `mmap(PROT_EXEC)`/`dlopen` of a file written there works. `execve` stays
+    /// refused (Landlock grants writable paths no EXECUTE). Omitted when `false`, so an artefact
+    /// that does not use it serialises — and signs — exactly as before.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mmap_exec: bool,
 }
 
 /// Device-file policy (§7.4.8): which `/dev` nodes the kennel's constructed
@@ -1753,6 +1759,7 @@ pub fn sample_settled() -> SettledPolicy {
                 tmp: TmpPolicy {
                     writable: true,
                     size_mib: 512,
+                    mmap_exec: false,
                 },
                 dev: DevPolicy {
                     allow: vec!["/dev/null".to_owned(), "/dev/urandom".to_owned()],

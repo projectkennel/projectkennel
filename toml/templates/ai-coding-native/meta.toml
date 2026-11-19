@@ -1,0 +1,6 @@
+name = "ai-coding-native"
+template_base = "ai-coding-strict"
+maintainer_key = "kennel-maint-2026"
+threat_catalogue_version = "0.4"
+last_reviewed = "2026-11-19"
+description = "ai-coding-strict plus an exec-mappable /tmp, for agents (Bun single-file binaries such as opencode) that dlopen native code they unpack at run time."
