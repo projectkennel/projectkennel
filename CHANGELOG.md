@@ -17,6 +17,45 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   kernel audit log only when audit is enabled on the host (`auditd`, or journald's audit socket);
   see HOWTO §7. (#218)
 
+### Security fixes
+
+- **Every process in a kennel can read its own `/proc/self`; `/proc` is curated, not raw.**
+  Landlock anchors a rule on the inode opened when the ruleset is built, so the shipped
+  `/proc/self/**` grant covered only the workload's *first* process (`/proc/<its pid>`): every
+  child it forked was denied its own `/proc/self`. Multi-process workloads broke — Bun/JSC
+  (`opencode`) `abort()`s at startup when a child cannot read `/proc/self` (#218). Every `fs.read`
+  grant under `/proc` now compiles to ONE Landlock read rule on `/proc`, and the view's fresh
+  procfs is curated in the construction child: per-process entries stay real; `cpuinfo`,
+  `meminfo`, `stat` and `version` are **synthesized from templates** filled only with values the
+  workload's own syscalls already expose (usable CPU count, `sysinfo(2)`, `uname(2)`) — snapshots,
+  with zeroed `/proc/stat` counters; every other top-level entry (`/proc/sys`, `kallsyms`,
+  `modules`, `loadavg`, …) is **masked empty** unless the policy names it, in which case the real
+  entry passes through. The top level is enumerated at spawn, so an entry a future kernel adds
+  is masked without a code change. Previously these host-global entries were present but
+  Landlock-denied; now they read as empty.
+
+### Policy schema changes
+
+- **`/proc` grants are classified at compile.** `fs.read = ["/proc"]` / `["/proc/**"]` still
+  serves the real, uncurated procfs, and now **warns**. A path *inside* a host-global entry
+  (`/proc/sys/kernel/osrelease`) is **refused**: the one `/proc` rule cannot narrow below a
+  top-level entry — grant `/proc/sys/**` explicitly. Non-canonical `/proc` paths are refused.
+  No settled-schema change (the plan is derived from the existing `fs.read` set).
+
+### Template changes
+
+- **`base-confined`, `base-bwrap`, `base-flatpak`, `containerised-service` grant `/proc/stat`**
+  (synthesized; libuv's `os.cpus()` reads it). **`interactive` drops `/proc/**`** for the
+  curated set plus `/proc/uptime` and `/proc/loadavg`: `ps`/`top`/`free` see every process of
+  the kennel without exposing the rest of the host's procfs. All five re-signed
+  (`kennel-maint-2026`).
+
+### IPC protocol changes
+
+- The kenneld → `kennel-bin-init` plan blob carries the view's `ProcView`: a tag, the
+  synthesized set, and the passthrough names (each validated as a single top-level name on
+  decode). Both ends ship together.
+
 ### Internal / supply chain
 
 - **`basic-toml` is now the first-party `kennel-lib-toml`.** RUSTSEC-2026-0374 marked
@@ -27,6 +66,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   Apache-2.0) and copyright are kept (NOTICE). The vendored `.crate`, its CHECKSUMS/vet records and
   the interim RUSTSEC-2026-0374 ignore are removed. Third-party crate count drops by one; no new
   dependencies. The workspace lint pass over the parser is the follow-up (#221).
+- `kennel-lib-syscall` enables `nix`'s `feature` feature (for `uname(2)`); no new crates.
+
 - **`mini-sansio-dbus` 5.0.1 → 6.0.1; the one local vendor patch is dropped and byte-identical
   vendoring is restored.** Upstream merged our header-field-decoder fix (the wire-reachable
   `unreachable!()` on a bogus field-code byte, found by the kennel-fuzz harness and carried since

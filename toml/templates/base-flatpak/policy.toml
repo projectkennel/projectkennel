@@ -58,7 +58,7 @@ read = [
     "/etc/ssl/**", "/etc/pki/**",
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
     "/etc/alternatives/**",
-    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/version",
     "/sys/devices/system/cpu/**",
 ]
 write = []
@@ -126,4 +126,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCXG2wcPlhQFnLHquOcc+apwdf4RxA82mu\nmbAl0PRvVkfksBLJemgStECf2LujHWfyLo4oxe1suCpLbkMJDB0Aw=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQJ8kgNDme0RSxFFxljaWM3njkAkQKAen1P\nI3BxTxCkwk19KvoHdffJK10Ngwnis9rEhH0hrdiuMxGBvr+ayorQQ=\n-----END SSH SIGNATURE-----\n"

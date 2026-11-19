@@ -79,7 +79,12 @@ read = [
     # The libc/NSS files are SYNTHESISED per-kennel (scrubbed of host specifics),
     # not bound from the host: /etc/{hosts,resolv.conf,nsswitch.conf,services,
     # protocols,passwd,group,host.conf}. See kenneld::etc and §7.2.5.
-    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/version",
+    # /proc is a fresh procfs, CURATED (#218): every process in the kennel reads its
+    # own /proc/self (and its children theirs); cpuinfo/meminfo/stat/version are
+    # SYNTHESISED from templates (CPU count, memory, uname — nothing a syscall would not
+    # already reveal); every other host-global entry (/proc/sys, kallsyms, …) is masked
+    # empty. Name a top-level entry here to pass the real one through.
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/version",
     "/sys/devices/system/cpu/**",        # processor-count detection
 ]
 
@@ -257,4 +262,4 @@ deny = [
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQNYZzKLn+Wq3rALr7au/zQUMxvDy1AkD3W\nlLzBfiqcA/KfeznXifZJRsoGQWOFD1X9HNL+Au8ZV70CQn9CUhEgA=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQIQbuaQqWIyRvr9Nmu5bRIIHnuldjUsbXz\nHqiR4Olf5HSMGxSA7UigFi/L4AaSFc63CzMhtgednFmjz5OVASzg8=\n-----END SSH SIGNATURE-----\n"

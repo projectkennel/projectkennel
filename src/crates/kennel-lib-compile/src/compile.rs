@@ -122,6 +122,9 @@ pub fn compile(
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
     let translated = translate(&effective)?;
+    warnings.extend(crate::procfs::validate(
+        &translated.effective_policy.fs.read,
+    )?);
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
@@ -442,6 +445,68 @@ mod tests {
         compile(&entry, &src(), &Trust::dev(), "test-0.0.0")
             .expect("compile")
             .policy
+    }
+
+    fn compile_leaf(leaf: &str) -> Compiled {
+        let mut s = src();
+        s.0.push((
+            "ai-coding-strict".to_owned(),
+            "v1".to_owned(),
+            AI_CODING_STRICT.as_bytes().to_vec(),
+        ));
+        let entry = parse(leaf.as_bytes()).expect("parse");
+        compile(&entry, &s, &Trust::dev(), "test-0.0.0").expect("compile")
+    }
+
+    fn proc_warnings(c: &Compiled) -> Vec<&String> {
+        c.warnings.iter().filter(|w| w.contains("/proc")).collect()
+    }
+
+    /// The shipped templates grant `/proc` the curated way (#218): no `/proc` warning.
+    #[test]
+    fn the_shipped_ai_template_raises_no_proc_warning() {
+        let c = compile_leaf("name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n");
+        assert!(proc_warnings(&c).is_empty(), "{:?}", c.warnings);
+        assert!(
+            c.policy
+                .effective_policy
+                .fs
+                .read
+                .contains(&"/proc/stat".to_owned()),
+            "base-confined grants the synthesized /proc/stat: {:?}",
+            c.policy.effective_policy.fs.read
+        );
+    }
+
+    /// Granting the real, uncurated `/proc` compiles but warns (#218).
+    #[test]
+    fn a_whole_proc_grant_warns() {
+        let c = compile_leaf(
+            "name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n\
+             [[fs.read.add]]\npath = \"/proc/**\"\nreason = \"debugging\"\n",
+        );
+        assert_eq!(proc_warnings(&c).len(), 1, "{:?}", c.warnings);
+    }
+
+    /// A grant inside a host-global `/proc` entry is refused (#218).
+    #[test]
+    fn a_nested_global_proc_grant_is_refused() {
+        let mut s = src();
+        s.0.push((
+            "ai-coding-strict".to_owned(),
+            "v1".to_owned(),
+            AI_CODING_STRICT.as_bytes().to_vec(),
+        ));
+        let entry = parse(
+            b"name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n\
+              [[fs.read.add]]\npath = \"/proc/sys/kernel/osrelease\"\nreason = \"r\"\n",
+        )
+        .expect("parse");
+        let err = compile(&entry, &s, &Trust::dev(), "test-0.0.0").expect_err("refused");
+        assert!(
+            err.to_string().contains("/proc/sys/kernel/osrelease"),
+            "{err}"
+        );
     }
 
     #[test]

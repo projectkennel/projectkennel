@@ -1,0 +1,63 @@
+# ============================================================================
+# Suite case: proc-curated — every process's own /proc/self, and a curated /proc (#218).
+#
+# Landlock cannot follow /proc/self across processes: a rule on /proc/self anchors on the
+# sealing process's /proc/<pid>, so before #218 only the workload's FIRST process could read
+# /proc/self and every child it forked was denied (Bun/JSC aborts on that). The view now grants
+# /proc read as a whole and curates the procfs instead. This case inherits base-confined's
+# grants unchanged and proves, from the inside:
+#
+#   1. a child and a grandchild of the workload read their own /proc/self/status, and the
+#      status they read is their own (Pid matches);
+#   2. the synthesized files are served and coherent: /proc/cpuinfo and /proc/stat list one
+#      CPU per `nproc`, /proc/meminfo has MemTotal, /proc/version is `<sysname> version …`;
+#   3. an ungranted host-global entry is masked, not real: /proc/kallsyms and /proc/loadavg
+#      are empty files, /proc/sys is an empty directory;
+#   4. the mask sources left nothing behind in the private /tmp.
+#
+# The kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "proc-curated"
+template_base = "base-confined"
+
+[exec]
+shell = "/bin/sh"
+allow = [
+    "/bin/sh", "/bin/dash", "/usr/bin/cat", "/usr/bin/head", "/usr/bin/grep", "/usr/bin/ls",
+    "/usr/bin/wc", "/usr/bin/nproc", "/usr/bin/awk", "/usr/bin/mawk", "/usr/bin/gawk",
+]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    fail() { echo "proc-curated: $*" >&2; exit 1; }
+
+    # 1. Children and grandchildren read their OWN /proc/self.
+    # The child prints its $$ then execs awk, so the awk reading /proc/self IS that child.
+    c="$(sh -c 'echo $$; exec awk "/^Pid:/ {print \\$2}" /proc/self/status')" \
+        || fail "child cannot read /proc/self/status"
+    set -- $c
+    [ "$#" = 2 ] && [ "$1" = "$2" ] || fail "child read '$c' — not its own pid"
+    g="$(sh -c 'sh -c "head -1 /proc/self/status"')" || fail "grandchild cannot read /proc/self/status"
+    case "$g" in Name:*) ;; *) fail "grandchild read '$g'" ;; esac
+    cat /proc/self/maps >/dev/null || fail "child cannot read /proc/self/maps"
+
+    # 2. Synthesized files are served and coherent.
+    n="$(nproc)"
+    [ "$(grep -c '^processor' /proc/cpuinfo)" = "$n" ] || fail "cpuinfo processors != nproc ($n)"
+    [ "$(grep -c '^cpu[0-9]' /proc/stat)" = "$n" ] || fail "stat cpuN lines != nproc ($n)"
+    grep -q '^MemTotal: *[1-9][0-9]* kB$' /proc/meminfo || fail "meminfo lacks MemTotal"
+    grep -q '^Linux version ' /proc/version || fail "version is '$(cat /proc/version)'"
+
+    # 3. Ungranted host-global entries are masked.
+    [ -e /proc/kallsyms ] && [ ! -s /proc/kallsyms ] || fail "/proc/kallsyms is not masked empty"
+    [ -e /proc/loadavg ] && [ ! -s /proc/loadavg ] || fail "/proc/loadavg is not masked empty"
+    [ -d /proc/sys ] && [ -z "$(ls -A /proc/sys)" ] || fail "/proc/sys is not masked empty"
+
+    # 4. The curation's scratch sources are unlinked (only the pre-existing trust masks remain).
+    [ -z "$(ls -A /tmp | grep -v '^\\.kennel-mask')" ] || fail "/tmp holds: $(ls -A /tmp)"
+    exit 0
+    """,
+]

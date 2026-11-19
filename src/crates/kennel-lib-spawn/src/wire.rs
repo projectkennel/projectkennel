@@ -17,13 +17,15 @@
 
 use std::path::PathBuf;
 
+use kennel_lib_policy::procfs::Synth;
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet};
 use kennel_lib_syscall::namespace::Namespaces;
 use kennel_lib_syscall::process::{resource_by_name, resource_name};
 use kennel_lib_syscall::seccomp::Action;
 
 use crate::plan::{
-    AuxProcess, BindMount, ConstructionHalf, ImageRoot, Persistence, Plan, ShimView, Supervision,
+    AuxProcess, BindMount, ConstructionHalf, ImageRoot, Persistence, Plan, ProcView, ShimView,
+    Supervision,
 };
 
 /// Maximum element count for any length-prefixed vector (a `DoS`/corruption bound).
@@ -396,6 +398,66 @@ const fn ttl_action_from_byte(b: u8) -> kennel_lib_policy::TtlAction {
     }
 }
 
+/// Encode the view's [`ProcView`] (#218).
+fn put_proc_view(w: &mut Writer, v: &ProcView) {
+    match v {
+        ProcView::Full => w.u8(0),
+        ProcView::Curated {
+            synthesize,
+            passthrough,
+        } => {
+            w.u8(1);
+            w.count(synthesize.len());
+            for s in synthesize {
+                w.u8(match s {
+                    Synth::Cpuinfo => 0,
+                    Synth::Meminfo => 1,
+                    Synth::Stat => 2,
+                    Synth::Version => 3,
+                });
+            }
+            w.count(passthrough.len());
+            for name in passthrough {
+                w.bytes(name.as_bytes());
+            }
+        }
+    }
+}
+
+/// Decode a [`ProcView`] (#218).
+fn get_proc_view(r: &mut Reader<'_>) -> Result<ProcView, PlanWireError> {
+    match r.u8()? {
+        0 => Ok(ProcView::Full),
+        1 => {
+            let mut synthesize = Vec::new();
+            for _ in 0..r.count()? {
+                synthesize.push(match r.u8()? {
+                    0 => Synth::Cpuinfo,
+                    1 => Synth::Meminfo,
+                    2 => Synth::Stat,
+                    3 => Synth::Version,
+                    _ => return Err(PlanWireError::BadTag),
+                });
+            }
+            let mut passthrough = Vec::new();
+            for _ in 0..r.count()? {
+                let name = String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)?;
+                // A passthrough is one top-level /proc name; a separator would let a
+                // tampered blob name a path the curation never vetted.
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    return Err(PlanWireError::BadString);
+                }
+                passthrough.push(name);
+            }
+            Ok(ProcView::Curated {
+                synthesize,
+                passthrough,
+            })
+        }
+        _ => Err(PlanWireError::BadTag),
+    }
+}
+
 fn put_view(w: &mut Writer, v: &ShimView) {
     w.path(&v.shim_root);
     w.count(v.binds.len());
@@ -412,6 +474,7 @@ fn put_view(w: &mut Writer, v: &ShimView) {
     }
     w.u32(v.tmp_size_mib);
     w.bool(v.proc_hidepid);
+    put_proc_view(w, &v.proc);
     w.bool(v.binder);
     w.count(v.mask_paths.len());
     for p in &v.mask_paths {
@@ -607,6 +670,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     }
     let tmp_size_mib = r.u32()?;
     let proc_hidepid = r.bool()?;
+    let proc = get_proc_view(r)?;
     let binder = r.bool()?;
     let mut mask_paths = Vec::new();
     for _ in 0..r.count()? {
@@ -658,6 +722,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
         dev_allow,
         tmp_size_mib,
         proc_hidepid,
+        proc,
         binder,
         mask_paths,
         mask_dir_paths,
@@ -1105,6 +1170,7 @@ mod tests {
             dev_allow: vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/net/tun")],
             tmp_size_mib: 512,
             proc_hidepid: true,
+            proc: ProcView::Full,
             binder: true,
             mask_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.json")],
             mask_dir_paths: vec![PathBuf::from("/home/kennel/work/.trust-manifest.d")],
@@ -1208,6 +1274,29 @@ mod tests {
         let (back, interactive) = decode_plan(&encode_plan(&p)).expect("decode");
         assert_eq!(back, p, "the decoded plan must equal the original");
         assert!(!interactive, "no interactive fd was set");
+    }
+
+    /// A curated `/proc` (#218) survives the wire: the synthesized set and the passthrough
+    /// names reach `kennel-bin-init`'s construction intact.
+    #[test]
+    fn round_trips_a_curated_proc_view() {
+        use kennel_lib_policy::procfs::Synth;
+        for proc in [
+            ProcView::Full,
+            ProcView::Curated {
+                synthesize: Vec::new(),
+                passthrough: Vec::new(),
+            },
+            ProcView::Curated {
+                synthesize: vec![Synth::Cpuinfo, Synth::Meminfo, Synth::Stat, Synth::Version],
+                passthrough: vec!["loadavg".to_owned(), "sys".to_owned()],
+            },
+        ] {
+            let mut p = rich_plan();
+            p.view.as_mut().expect("rich plan has a view").proc = proc.clone();
+            let (back, _) = decode_plan(&encode_plan(&p)).expect("decode");
+            assert_eq!(back.view.expect("view").proc, proc);
+        }
     }
 
     #[test]

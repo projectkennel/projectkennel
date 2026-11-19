@@ -41,6 +41,7 @@ pub mod libresolve;
 pub mod netaddr;
 pub mod openssh;
 pub mod patch;
+pub mod procfs;
 pub mod settled;
 pub mod signature;
 pub mod spawn;

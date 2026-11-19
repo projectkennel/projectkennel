@@ -27,6 +27,7 @@
 
 pub mod mesh_rendezvous;
 pub mod plan;
+pub mod procfs;
 pub mod wire;
 
 use std::io;
@@ -37,7 +38,7 @@ use kennel_lib_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 
 pub use plan::{
-    AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan,
+    AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan, ProcView,
     ProxyEndpoint, ShimView, Supervision,
 };
 
@@ -693,6 +694,24 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     // owner-only is private-and-usable (no other uid exists in the kennel to grant). Fixed, not
     // policy-derived — a per-policy DAC mode gated no real adversary here.
     mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some("0700"), false, true)?;
+    // 5a. Curate the fresh /proc (#218): the workload's single /proc read rule exposes only
+    //     per-process entries, the synthesized templates, and the policy's named passthroughs —
+    //     every other top-level entry is masked empty. The over-mount sources are staged in the
+    //     private /tmp and unlinked once mounted.
+    if let ProcView::Curated {
+        synthesize,
+        passthrough,
+    } = &view.proc
+    {
+        let facts = procfs::ProcFacts::gather()?;
+        procfs::curate(
+            &proc,
+            &under(Path::new("/tmp/.kennel-proc")),
+            synthesize,
+            passthrough,
+            &facts,
+        )?;
+    }
     // Private POSIX shared memory at /dev/shm — a fresh per-kennel tmpfs like /tmp, so `shm_open(3)`
     // works (Wayland compositors, Chromium, …). The constructed minimal /dev exists above; this adds
     // the conventional shm tmpfs inside it (mode 1777 like the host's).
@@ -1825,6 +1844,120 @@ mod tests {
             vec![PathBuf::from("/dev/null"), PathBuf::from("/dev/urandom")]
         );
         assert!(view.proc_hidepid);
+    }
+
+    fn plan_with_reads(reads: &[&str]) -> Result<Plan, SpawnError> {
+        let mut p = policy_with_placeholders();
+        p.effective_policy
+            .fs
+            .read
+            .retain(|r| !r.starts_with("/proc"));
+        p.effective_policy
+            .fs
+            .read
+            .extend(reads.iter().map(|s| (*s).to_owned()));
+        Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+    }
+
+    fn proc_rules(plan: &Plan) -> Vec<(PathBuf, AccessFs)> {
+        plan.landlock_fs
+            .iter()
+            .filter(|(p, _)| p.starts_with("/proc"))
+            .cloned()
+            .collect()
+    }
+
+    /// #218: Landlock cannot follow `/proc/self` across processes, so every `/proc` read grant
+    /// collapses to ONE read rule on `/proc` itself — the rule that covers every forked child's
+    /// own `/proc/self` — and the curated view controls what it exposes.
+    #[test]
+    fn proc_read_grants_collapse_to_one_rule_on_proc() {
+        use kennel_lib_policy::procfs::Synth;
+        let plan = plan_with_reads(&[
+            "/proc/self/**",
+            "/proc/cpuinfo",
+            "/proc/meminfo",
+            "/proc/stat",
+            "/proc/version",
+        ])
+        .expect("plan");
+        assert_eq!(
+            proc_rules(&plan),
+            vec![(
+                PathBuf::from("/proc"),
+                AccessFs::READ_FILE | AccessFs::READ_DIR
+            )],
+            "exactly one read rule, on /proc"
+        );
+        let view = plan.view.as_ref().expect("view");
+        assert_eq!(
+            view.proc,
+            ProcView::Curated {
+                synthesize: vec![Synth::Cpuinfo, Synth::Meminfo, Synth::Stat, Synth::Version],
+                passthrough: Vec::new(),
+            }
+        );
+        assert!(
+            !view.binds.iter().any(|b| b.target.starts_with("/proc")),
+            "/proc is a fresh mount, never a host bind"
+        );
+    }
+
+    #[test]
+    fn a_named_global_proc_entry_passes_through() {
+        let plan =
+            plan_with_reads(&["/proc/self/**", "/proc/loadavg", "/proc/sys/**"]).expect("plan");
+        assert_eq!(
+            plan.view.as_ref().expect("view").proc,
+            ProcView::Curated {
+                synthesize: Vec::new(),
+                passthrough: vec!["loadavg".to_owned(), "sys".to_owned()],
+            }
+        );
+        assert_eq!(proc_rules(&plan).len(), 1);
+    }
+
+    #[test]
+    fn a_whole_proc_grant_serves_the_real_procfs() {
+        for g in ["/proc", "/proc/**"] {
+            let plan = plan_with_reads(&[g, "/proc/cpuinfo"]).expect("plan");
+            assert_eq!(
+                plan.view.as_ref().expect("view").proc,
+                ProcView::Full,
+                "{g}"
+            );
+            assert_eq!(proc_rules(&plan).len(), 1, "{g}");
+        }
+    }
+
+    #[test]
+    fn no_proc_grant_still_curates_and_grants_no_proc_rule() {
+        let plan = plan_with_reads(&[]).expect("plan");
+        assert_eq!(
+            plan.view.as_ref().expect("view").proc,
+            ProcView::Curated {
+                synthesize: Vec::new(),
+                passthrough: Vec::new(),
+            }
+        );
+        assert!(proc_rules(&plan).is_empty());
+    }
+
+    /// The compiler refuses these; the runtime re-check fails closed on a hand-built policy.
+    #[test]
+    fn a_nested_or_non_canonical_proc_grant_fails_closed() {
+        for g in ["/proc/sys/kernel/osrelease", "/proc/../etc"] {
+            let r = plan_with_reads(&[g]);
+            assert!(
+                matches!(&r, Err(SpawnError::InvalidPolicy(m)) if m.contains(g)),
+                "{g}: expected InvalidPolicy naming the grant, got {r:?}"
+            );
+        }
     }
 
     #[test]

@@ -33,6 +33,7 @@ missing prerequisite aborts with the precise cause.
 | `fs-view`         | none | granted `~` subdir readable; non-granted sibling ENOENT; home tmpfs writable; `/etc/shadow` absent |
 | `fs-redirect`     | none | a `source`-redirected grant (W15) serves the view path from a different host inode, over-mounting the symmetric parent; the never-granted store is ENOENT. Setup stages the host tree. |
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
+| `proc-curated`    | none | children/grandchildren read their own `/proc/self`; `/proc/{cpuinfo,stat,meminfo,version}` are synthesized and agree with `nproc`; ungranted host-global entries (`kallsyms`, `loadavg`, `sys`) are masked empty (#218) |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-constrained` | constrained | own netns loopback is up + bindable; the in-ns SOCKS endpoint listens at `<addr>:1080` |
 | `net-isolated`    | constrained | the kennel is in its OWN netns: it reaches its own in-ns loopback but CANNOT reach a host `127.0.0.1` listener (proves two distinct namespaces, not a filtered one). Setup binds a host-side listener. |
