@@ -1,0 +1,108 @@
+# ============================================================================
+# Suite case: registration-denied — a kennel cannot register itself as someone else's provider.
+#
+# Three node-0 verbs hand their sender a cross-kennel role, and every kennel can send them:
+#
+#   * REGISTER_TUN_SINK on the kennel's own bus — the sink is daemon-global, so whoever holds it
+#     receives every `[net.udp]` kennel's UDP egress;
+#   * ADD_SERVICE on a mesh bus — the device is mounted into every participant, consumers too,
+#     so this would replace the provider (here: the D-Bus broker) for all of them;
+#   * GET_SESSION_POLICY on a mesh bus — the broker's pull of another kennel's filter.
+#
+# kenneld honours each only from the SUPERVISED PROVIDER of that capability, decided from its
+# own registry (how the kennel was started + its signed `[[provides]]`), never from the verb
+# having arrived. This kennel is an ordinary D-Bus consumer; its workload sends all three and
+# exits 0 iff each is answered DENIED.
+# ============================================================================
+
+name = "registration-denied"
+template_base = "base-confined"
+
+[dbus.session]
+enabled = true
+
+[dbus.session.allow]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/bin/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[[consumes]]
+name = "org.projectkennel.dbus"
+shape = "dbus-name"
+required = true
+reason = "be a participant of the D-Bus broker's mesh bus"
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import ctypes, fcntl, mmap, os, struct, sys
+
+BINDER_WRITE_READ = 0xc0306201
+BC_TRANSACTION = 0x40406300
+BR_REPLY, BR_FAILED, BR_DEAD, BR_ERROR = 0x80407203, 0x7211, 0x7205, 0x80047200
+SIXTEEN = (0x80107207, 0x80107208, 0x80107209, 0x8010720a)   # incref/acquire/release/decref
+BINDER_TYPE_BINDER = 0x73622a85
+ADD_SERVICE, GET_SESSION_POLICY, REGISTER_TUN_SINK = 1, 17, 18
+DENIED = 1
+
+def transact(path, code, name=b'', with_node=True):
+    '''One synchronous transaction to node 0; returns the reply's first byte, or a string.'''
+    fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+    keep = mmap.mmap(fd, 128 * 1024, mmap.MAP_PRIVATE, mmap.PROT_READ)
+    body = name + b'\\0' * (-len(name) % 8)
+    offsets = b''
+    if with_node:
+        offsets = struct.pack('<Q', len(body))
+        body += struct.pack('<IIQQ', BINDER_TYPE_BINDER, 0x17f, 0x1000, 0x1000)
+    data = ctypes.create_string_buffer(body, max(len(body), 1))
+    offs = ctypes.create_string_buffer(offsets, max(len(offsets), 1))
+    td = struct.pack('<QQIIiIQQQQ', 0, 0, code, 0, 0, 0, len(body), len(offsets),
+                     ctypes.addressof(data), ctypes.addressof(offs))
+    out = ctypes.create_string_buffer(struct.pack('<I', BC_TRANSACTION) + td)
+    pending = len(out) - 1
+    while True:
+        rd = ctypes.create_string_buffer(512)
+        bwr = ctypes.create_string_buffer(struct.pack(
+            '<QQQQQQ', pending, 0, ctypes.addressof(out), 512, 0, ctypes.addressof(rd)))
+        fcntl.ioctl(fd, BINDER_WRITE_READ, bwr)
+        pending = 0
+        got = struct.unpack('<QQQQQQ', bwr.raw[:48])[4]
+        i = 0
+        while i + 4 <= got:
+            cmd = struct.unpack_from('<I', rd.raw, i)[0]; i += 4
+            if cmd == BR_REPLY:
+                size, _, ptr = struct.unpack_from('<QQQ', rd.raw, i + 32)
+                return ctypes.string_at(ptr, size)[0] if size else 'empty reply'
+            if cmd in (BR_FAILED, BR_DEAD):
+                return 'no reply (%#x)' % cmd
+            if cmd == BR_ERROR:
+                i += 4
+            elif cmd in SIXTEEN:
+                i += 16
+
+checks = [
+    ('REGISTER_TUN_SINK on our own bus',
+     lambda: transact('/dev/binderfs/binder', REGISTER_TUN_SINK)),
+    ('ADD_SERVICE org.projectkennel.dbus-broker on the mesh bus',
+     lambda: transact('/dev/binderfs-mesh/binder', ADD_SERVICE, b'org.projectkennel.dbus-broker')),
+    ('GET_SESSION_POLICY on the mesh bus',
+     lambda: transact('/dev/binderfs-mesh/binder', GET_SESSION_POLICY, b'\\0\\1', with_node=False)),
+]
+bad = 0
+for what, send in checks:
+    try:
+        status = send()
+    except OSError as e:
+        status = 'error: %s' % e
+    ok = status == DENIED
+    bad += not ok
+    print('%-58s -> %s' % (what, 'DENIED' if ok else 'NOT denied (status %r)' % (status,)))
+sys.exit(1 if bad else 0)
+""",
+]
