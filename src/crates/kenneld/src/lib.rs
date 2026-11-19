@@ -1673,6 +1673,9 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: shim_bin,
         args,
+        // It serves the shims the workload connects to: kennel-bin-init holds the workload until
+        // it signals that every listener is bound.
+        signals_ready: true,
     });
 }
 
@@ -1725,6 +1728,7 @@ fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, piv
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: bin.to_path_buf(),
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), tun_addr.to_string()],
+        signals_ready: false,
     });
 }
 
@@ -1796,6 +1800,7 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: socks5_bin.to_path_buf(),
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), listen.to_string()],
+        signals_ready: false,
     });
     // The workload's egress goes through facade-socks5, which serves BOTH SOCKS5 and HTTP-proxy on
     // the one listener. Point the HTTP(S)_PROXY vars at the `http://` form: many runtimes (Go
@@ -1859,6 +1864,7 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: client_bin.to_path_buf(),
         args,
+        signals_ready: false,
     });
 }
 
@@ -1940,6 +1946,8 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: facade_bin,
         args,
+        // It serves the bus sockets: kennel-bin-init holds the workload until it signals ready.
+        signals_ready: true,
     });
 }
 

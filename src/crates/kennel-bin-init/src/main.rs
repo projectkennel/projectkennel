@@ -38,6 +38,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io;
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -241,10 +242,19 @@ fn spawn_all(
 
     // 1. Facades: dropped to the operator, NOT confined (they must reach the bus). The pids
     //    are returned in `sup.aux` order so the supervisor can map a death back to its spec.
+    //    The socket-serving facades (`signals_ready`) share one readiness pipe; each writes a byte
+    //    once every listener is bound (`kennel_lib_os::ready`).
+    let gated = sup.aux.iter().filter(|a| a.signals_ready).count();
+    let ready_pipe = if gated > 0 {
+        Some(kennel_lib_syscall::ready::pipe()?)
+    } else {
+        None
+    };
     let mut facade_pids = Vec::with_capacity(sup.aux.len());
     for facade in &sup.aux {
         tr.detail(&format!("forking facade {}", facade.path.display()));
-        facade_pids.push(fork_facade(facade, sup, &envp_ref)?);
+        let ready = ready_pipe.as_ref().map(|(_, w)| w.as_fd());
+        facade_pids.push(fork_facade(facade, sup, &envp_ref, ready)?);
     }
     // Best-effort lifecycle report: kenneld audits it (the bus, not a reply, is the
     // source of truth, and the verb may be unserved on an older daemon).
@@ -253,6 +263,15 @@ fn spawn_all(
         lifecycle::NOTIFY_BOOT_SYNC,
         &pids_payload(&facade_pids),
     );
+
+    // 1b. Readiness: a workload that connects to a facade socket at once must not beat the
+    //     facade's bind. Close our write end (so EOF means every gated facade exited) and wait,
+    //     bounded, for one byte per gated facade. On expiry or error start the workload anyway
+    //     (the pre-readiness behaviour) and trace it, so a broken facade cannot wedge the kennel.
+    if let Some((read, write)) = ready_pipe {
+        drop(write);
+        await_facades(read.as_fd(), gated, tr);
+    }
 
     // 2. The workload: dropped to the operator AND confined.
     tr.step(&format!(
@@ -409,19 +428,68 @@ fn may_restart(starts: &mut Vec<Instant>, now: Instant) -> bool {
     starts.len() < START_LIMIT_BURST
 }
 
+/// How long the workload waits for the gated facades' readiness signals. A facade binds within
+/// milliseconds; the bound is a backstop so a broken one cannot wedge the kennel.
+const FACADE_READY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Wait, bounded, for one readiness byte per gated facade on `read`; trace a shortfall or error
+/// and return either way (the workload then starts, as it did before readiness gating).
+fn await_facades(read: BorrowedFd<'_>, gated: usize, tr: kennel_lib_config::Tracer) {
+    match kennel_lib_syscall::ready::wait(read, gated, FACADE_READY_TIMEOUT) {
+        Ok(n) if n >= gated => {}
+        Ok(n) => tr.detail(&format!(
+            "{n}/{gated} facades signalled ready within {}s; starting the workload anyway",
+            FACADE_READY_TIMEOUT.as_secs()
+        )),
+        Err(e) => tr.detail(&format!(
+            "facade readiness wait failed ({e}); starting the workload anyway"
+        )),
+    }
+}
+
 /// Fork one facade: build its argv, drop it to the operator, exec it **unconfined** (it must
 /// reach the bus). Shared by the initial [`spawn_all`] and the supervisor's restart path.
-fn fork_facade(facade: &AuxProcess, sup: &Supervision, envp_ref: &[&CStr]) -> io::Result<i32> {
+///
+/// `ready` is the readiness pipe's write end (`kennel_lib_os::ready`), passed only on the first
+/// launch: a gated facade (`signals_ready`) gets it at `READY_FD`, named in its environment, and
+/// signals once listening. A restart passes `None` — the workload is already running.
+fn fork_facade(
+    facade: &AuxProcess,
+    sup: &Supervision,
+    envp_ref: &[&CStr],
+    ready: Option<BorrowedFd<'_>>,
+) -> io::Result<i32> {
+    use kennel_lib_syscall::ready::{READY_ENV, READY_FD};
     let argv = facade_argv(facade)?;
     let argv_ref = borrow(&argv);
     let path = cstr_path(&facade.path)?;
-    fork_drop_exec(
+    let Some(ready) = ready.filter(|_| facade.signals_ready) else {
+        return fork_drop_exec(
+            &path,
+            &argv_ref,
+            envp_ref,
+            sup.drop_gid,
+            sup.groups.as_deref(),
+            sup.drop_uid,
+        );
+    };
+    let ready_env = cstring(
+        format!("{READY_ENV}={READY_FD}").as_bytes(),
+        "readiness env",
+    )?;
+    let mut envp_gated: Vec<&CStr> = envp_ref.to_vec();
+    envp_gated.push(&ready_env);
+    fork_drop_exec_confined(
         &path,
+        None,
         &argv_ref,
-        envp_ref,
+        &envp_gated,
         sup.drop_gid,
         sup.groups.as_deref(),
         sup.drop_uid,
+        // In the child, after the drop and before execve: place the write end at READY_FD, not
+        // close-on-exec, so the facade inherits it (the only "seal" a facade gets).
+        || kennel_lib_syscall::fd::dup_onto(ready, READY_FD),
     )
 }
 
@@ -523,7 +591,7 @@ fn supervise(
                     continue;
                 }
                 std::thread::sleep(RESTART_DELAY);
-                match fork_facade(facade, sup, &envp_ref) {
+                match fork_facade(facade, sup, &envp_ref, None) {
                     Ok(new_pid) => {
                         state.starts.push(Instant::now());
                         facades.insert(new_pid, state);
@@ -683,6 +751,7 @@ mod tests {
                 "/dev/binderfs/binder".to_owned(),
                 "/run/x.sock=wl".to_owned(),
             ],
+            signals_ready: false,
         };
         let argv = facade_argv(&facade).expect("argv");
         assert_eq!(

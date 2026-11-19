@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 43148,
+  "total_sloc": 43297,
   "tcb_crate_count": 17,
-  "tcb_sloc": 26104,
+  "tcb_sloc": 26214,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7869,
+      "sloc": 7874,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 2566,
+      "sloc": 2568,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -86,13 +86,23 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1568,
+      "sloc": 1607,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["compositor-broker", "facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh", "facade-tun", "kennel-spawn"],
       "consumers": [],
       "first_party_deps": ["kennel-lib-binder", "kennel-lib-cli", "kennel-lib-dbus", "kennel-lib-scm", "kennel-lib-syscall"],
       "external_deps": []
+    },
+    {
+      "name": "kennel-lib-syscall",
+      "sloc": 1292,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "binder", "bpf", "cli", "control", "facade", "kenneld", "privhelper", "spawn", "tun-broker"],
+      "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
+      "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
     },
     {
       "name": "kennel-lib-audit",
@@ -103,16 +113,6 @@
       "consumers": ["cli", "kenneld"],
       "first_party_deps": ["kennel-lib-text"],
       "external_deps": []
-    },
-    {
-      "name": "kennel-lib-syscall",
-      "sloc": 1273,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["bin-init", "binder", "bpf", "cli", "control", "facade", "kenneld", "privhelper", "spawn", "tun-broker"],
-      "first_party_deps": ["kennel-lib-landlock", "kennel-lib-os", "kennel-lib-scm"],
-      "external_deps": ["bitflags", "libc", "nix", "seccompiler"]
     },
     {
       "name": "kennel-tun-broker",
@@ -196,7 +196,7 @@
     },
     {
       "name": "kennel-bin-init",
-      "sloc": 394,
+      "sloc": 443,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-bin-init"],
@@ -206,7 +206,7 @@
     },
     {
       "name": "kennel-lib-os",
-      "sloc": 361,
+      "sloc": 396,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],

@@ -12,10 +12,12 @@
 //!
 //! # Non-goals
 //!
-//! No I/O, no policy, no sockets: this is the parse surface only. The connect/splice
-//! loops stay in each binary.
+//! No policy, and no I/O beyond [`listen::bind_ready`] — the one readiness-atomic socket bind the
+//! path-serving facades share (it decides when the workload may start, so it lives in one place).
+//! Otherwise this is the parse surface only; the connect/splice loops stay in each binary.
 
 #![forbid(unsafe_code)]
 
+pub mod listen;
 pub mod socks5;
 pub mod tun;

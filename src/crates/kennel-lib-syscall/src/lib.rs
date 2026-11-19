@@ -82,7 +82,7 @@ pub mod wake;
 // The safe (no-`unsafe`) primitives live in `kennel-lib-os` so this crate carries only genuinely
 // unsafe code (CODING-STANDARDS §4). Re-exported so existing `kennel_lib_syscall::{path, unistd,
 // netlink, handshake}` paths keep resolving unchanged.
-pub use kennel_lib_os::{handshake, net, netlink, path, unistd};
+pub use kennel_lib_os::{handshake, net, netlink, path, ready, unistd};
 
 // SCM_RIGHTS fd-passing is its own small unsafe-bearing crate (parallel to kennel-lib-landlock), so
 // dumb delegates can use it without the whole unsafe crate; re-exported so `kennel_lib_syscall::scm::…`

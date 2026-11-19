@@ -54,14 +54,27 @@ fn main() -> ExitCode {
     // One listener thread per granted socket; the process lives for the kennel's
     // lifetime (kenneld reaps it). A thread that fails to set up logs and exits; the
     // others keep serving.
+    //
+    // Bind every listener BEFORE serving any (`bind_ready`), then signal readiness —
+    // kennel-bin-init holds the workload until it does.
     let mut handles = Vec::new();
     for (shim, service) in sockets {
+        let listener = match kennel_facade::listen::bind_ready(Path::new(&shim)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("facade-afunix: {shim} ({service}): {e}");
+                continue;
+            }
+        };
         let device = device.clone();
         handles.push(thread::spawn(move || {
-            if let Err(e) = serve_socket(&device, &shim, &service) {
+            if let Err(e) = serve_socket(&device, &listener, &service) {
                 eprintln!("facade-afunix: {shim} ({service}): {e}");
             }
         }));
+    }
+    if let Err(e) = kennel_facade::listen::signal_ready() {
+        eprintln!("facade-afunix: readiness signal: {e}");
     }
     for handle in handles {
         let _ = handle.join();
@@ -78,15 +91,9 @@ fn split_pair(arg: &str) -> Option<(String, String)> {
     Some((shim.to_owned(), service.to_owned()))
 }
 
-/// Bind a listener at `shim` and broker each accepted connection to the facade
-/// service `service`, splicing the in-kennel client to the returned host fd.
-fn serve_socket(device: &str, shim: &str, service: &str) -> io::Result<()> {
-    let _ = std::fs::remove_file(shim); // a stale socket from a prior run
-    if let Some(parent) = Path::new(shim).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(shim)?;
-
+/// Broker each connection accepted on the shim `listener` to the facade service `service`,
+/// splicing the in-kennel client to the returned host fd.
+fn serve_socket(device: &str, listener: &UnixListener, service: &str) -> io::Result<()> {
     for incoming in listener.incoming() {
         let client = incoming?;
         // Broker *inside* the per-connection worker, never on the accept thread. An `ondemand`

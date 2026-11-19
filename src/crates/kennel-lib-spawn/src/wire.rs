@@ -361,11 +361,7 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
     // aux: Vec<AuxProcess>
     w.count(p.aux.len());
     for a in &p.aux {
-        w.path(&a.path);
-        w.count(a.args.len());
-        for arg in &a.args {
-            w.bytes(arg.as_bytes());
-        }
+        put_aux(&mut w, a);
     }
 
     match p.ttl_seconds {
@@ -457,6 +453,35 @@ fn get_proc_view(r: &mut Reader<'_>) -> Result<ProcView, PlanWireError> {
         }
         _ => Err(PlanWireError::BadTag),
     }
+}
+
+/// Encode one seal-launched facade (`AuxProcess`): path, args, then whether it signals readiness.
+fn put_aux(w: &mut Writer, a: &AuxProcess) {
+    w.path(&a.path);
+    w.count(a.args.len());
+    for arg in &a.args {
+        w.bytes(arg.as_bytes());
+    }
+    w.bool(a.signals_ready);
+}
+
+/// Decode the facade list (`Vec<AuxProcess>`), shared by both plan halves.
+fn get_aux(r: &mut Reader<'_>) -> Result<Vec<AuxProcess>, PlanWireError> {
+    let mut aux = Vec::new();
+    for _ in 0..r.count()? {
+        let path = r.path()?;
+        let mut args = Vec::new();
+        for _ in 0..r.count()? {
+            args.push(get_string(r)?);
+        }
+        let signals_ready = r.bool()?;
+        aux.push(AuxProcess {
+            path,
+            args,
+            signals_ready,
+        });
+    }
+    Ok(aux)
 }
 
 /// Decode the Landlock TCP port rules and the handled TCP rights (#218).
@@ -606,15 +631,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
     // stdio presence: the three fds ride out of band, so the decoded plan carries `None`.
     let _stdio_present = r.bool()?;
 
-    let mut aux = Vec::new();
-    for _ in 0..r.count()? {
-        let path = r.path()?;
-        let mut args = Vec::new();
-        for _ in 0..r.count()? {
-            args.push(String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)?);
-        }
-        aux.push(crate::plan::AuxProcess { path, args });
-    }
+    let aux = get_aux(&mut r)?;
 
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
     let ttl_action = ttl_action_from_byte(r.u8()?);
@@ -891,11 +908,7 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
 
     w.count(s.aux.len());
     for a in &s.aux {
-        w.path(&a.path);
-        w.count(a.args.len());
-        for arg in &a.args {
-            w.bytes(arg.as_bytes());
-        }
+        put_aux(&mut w, a);
     }
 
     w.bool(s.interactive);
@@ -974,15 +987,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         ulimits.push((resource, soft, hard));
     }
 
-    let mut aux = Vec::new();
-    for _ in 0..r.count()? {
-        let path = r.path()?;
-        let mut args = Vec::new();
-        for _ in 0..r.count()? {
-            args.push(get_string(&mut r)?);
-        }
-        aux.push(AuxProcess { path, args });
-    }
+    let aux = get_aux(&mut r)?;
 
     let interactive = r.bool()?;
     let workload_fd_pinned = r.bool()?;
@@ -1279,6 +1284,7 @@ mod tests {
                     "/dev/binderfs/binder".to_owned(),
                     "/home/kennel/wl.sock=echo".to_owned(),
                 ],
+                signals_ready: true,
             }],
             ttl_seconds: Some(3600),
             ttl_action: kennel_lib_policy::TtlAction::Warn,
@@ -1399,6 +1405,7 @@ mod tests {
                     "/dev/binderfs/binder".to_owned(),
                     "/run/wl.sock=wayland".to_owned(),
                 ],
+                signals_ready: true,
             }],
             interactive: true,
             workload_fd_pinned: false,

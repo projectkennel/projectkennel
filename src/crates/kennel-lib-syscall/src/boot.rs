@@ -30,6 +30,43 @@ const fn borrow(fd: RawFd) -> BorrowedFd<'static> {
     unsafe { BorrowedFd::borrow_raw(fd) }
 }
 
+/// Signal facade readiness on the inherited readiness pipe (`kennel_lib_os::ready`).
+///
+/// `fd_value` is the facade's `$KENNEL_READY_FD` (`None` when the facade is not gated: a no-op).
+/// It must name exactly [`READY_FD`](kennel_lib_os::ready::READY_FD), so a stray value cannot make
+/// a facade write to an arbitrary descriptor. Writes one byte to the **inherited** fd directly and
+/// closes it — never by re-opening `/proc/self/fd/N`, which re-checks the pipe inode's permissions
+/// and is refused: `kennel-bin-init` created the pipe as the kennel's uid 0, the facade runs as the
+/// operator.
+///
+/// # Errors
+///
+/// `InvalidInput` for a value other than `READY_FD`; `EBADF` if that fd is not open; the OS error
+/// if the write fails.
+pub fn signal_facade_ready(fd_value: Option<&str>) -> io::Result<()> {
+    use kennel_lib_os::ready::READY_FD;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    let Some(value) = fd_value else {
+        return Ok(());
+    };
+    if value.parse::<RawFd>().ok() != Some(READY_FD) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("readiness fd {value:?} is not the fixed READY_FD {READY_FD}"),
+        ));
+    }
+    // SAFETY: F_GETFD on a plain integer descriptor reads no memory; -1/EBADF if it is not open.
+    if unsafe { libc::fcntl(READY_FD, libc::F_GETFD) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: READY_FD is open (checked just above) and was placed in this process by
+    // kennel-bin-init for exactly this one write; nothing else in the facade owns it, so taking
+    // ownership to write and then close it cannot double-close or alias.
+    let fd = unsafe { OwnedFd::from_raw_fd(READY_FD) };
+    nix::unistd::write(&fd, &[1]).map_err(io::Error::from)?;
+    Ok(())
+}
+
 /// The fixed descriptor for the boot-sync socket.
 ///
 /// The factory places `kennel-bin-init`'s end of the boot-sync socket (a `SOCK_SEQPACKET` pair)
@@ -167,4 +204,47 @@ pub fn place_injected_stdio() -> io::Result<()> {
         drop(unsafe { OwnedFd::from_raw_fd(slot) });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The facade's readiness write goes to the inherited fd itself (no re-open), at `READY_FD`.
+    /// Run in a forked child so fd 10 is placed in that process, not in the test harness.
+    #[test]
+    fn signal_facade_ready_writes_the_inherited_fd() {
+        use kennel_lib_os::ready::{pipe, wait, READY_FD};
+        use std::os::fd::AsFd;
+        let (r, w) = pipe().expect("pipe");
+        // SAFETY: fork in a test; the child only dup2s, writes one byte and _exits.
+        match unsafe { nix::unistd::fork() }.expect("fork") {
+            nix::unistd::ForkResult::Child => {
+                let ok = crate::fd::dup_onto(w.as_fd(), READY_FD).is_ok()
+                    && signal_facade_ready(Some("10")).is_ok();
+                // SAFETY: _exit after fork, no Drop/atexit.
+                unsafe { libc::_exit(i32::from(!ok)) };
+            }
+            nix::unistd::ForkResult::Parent { child } => {
+                drop(w);
+                let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                assert!(
+                    matches!(status, nix::sys::wait::WaitStatus::Exited(_, 0)),
+                    "{status:?}"
+                );
+                assert_eq!(
+                    wait(r.as_fd(), 1, std::time::Duration::from_secs(5)).expect("wait"),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signal_facade_ready_is_a_no_op_when_ungated_and_refuses_other_fds() {
+        assert!(signal_facade_ready(None).is_ok());
+        for bad in ["11", "0", "abc", ""] {
+            assert!(signal_facade_ready(Some(bad)).is_err(), "{bad:?}");
+        }
+    }
 }

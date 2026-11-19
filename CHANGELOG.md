@@ -6,6 +6,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Fixed
+
+- **A workload no longer races its facades' sockets at startup.** `kennel-bin-init` forked the
+  facades and started the workload with no readiness barrier, so a workload that talked to D-Bus or
+  a brokered AF_UNIX socket at once could connect before the facade had bound it — the intermittent
+  `dbus-session-allowed` / `dbus-brokered` suite failures, and an agent's first bus call failing at
+  startup. The socket-serving facades (`facade-dbus`, `facade-afunix`) now bind every listener
+  before serving any, each listening before its path is visible, and then **signal readiness** over
+  a pipe `kennel-bin-init` hands them (`KENNEL_READY_FD`); init starts the workload once every one
+  has signalled, bounded at 5 s (then it starts anyway and traces it). The signal comes from the
+  facade rather than from init checking the path, because init — the kennel's uid 0, mapped to host
+  root only — cannot even search the operator's `0700` `/tmp`.
+
 ### Runtime & enforcement
 
 - **BREAKING for native code in writable trees: writable binds are now `noexec,nosuid,nodev`.**
