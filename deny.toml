@@ -61,13 +61,7 @@ yanked = "deny"
 # Any unignored advisory fails the check (v2 default). Each entry added here must
 # carry a written reason and a tracking reference — an ignore is a documented,
 # time-boxed risk acceptance, reviewed when RELEASE-WATCH.toml is walked (§5.6).
-ignore = [
-    # basic-toml 0.1.10 is unmaintained (archived upstream 2025-03-02) — not a vulnerability.
-    # It parses the settled policy on the TCB path, so we neither keep an unowned crate nor
-    # migrate to `toml` (a chain of new external crates into the TCB): we bring it in-tree as a
-    # first-party crate. Time-boxed: removed when projectkennel#221 lands.
-    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained; being brought in-tree as first-party (projectkennel#221)" },
-]
+ignore = []
 
 [sources]
 # §5.5 in mechanical form: the only origin we accept is the crates.io index
