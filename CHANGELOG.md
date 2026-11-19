@@ -144,6 +144,9 @@ supply chain is two third-party crates lighter on the TCB path (`basic-toml` is 
 - The kenneld → `kennel-bin-init` plan blob carries the view's `ProcView`: a tag, the
   synthesized set, and the passthrough names (each validated as a single top-level name on
   decode). Both ends ship together.
+- The kenneld → `kennel-bin-init` plan and supervision blobs carry a `signals_ready` flag on
+  each auxiliary process, marking the facades `kennel-bin-init` waits for before starting the
+  workload (`KENNEL_READY_FD`). Both ends ship together.
 
 ### Internal / supply chain
 
