@@ -511,7 +511,7 @@ mod tests {
         // Sign base-confined and serve the signed bytes.
         let signed =
             sign_source(&parse(BASE_CONFINED.as_bytes()).expect("parse"), &key).expect("sign");
-        let signed_bytes = basic_toml::to_string(&signed)
+        let signed_bytes = kennel_lib_toml::to_string(&signed)
             .expect("serialise")
             .into_bytes();
         let source = MapSource(vec![(
@@ -706,7 +706,7 @@ mod tests {
 
         // Sign the chain (base-confined, ai-coding-strict) and the fragment.
         let to_bytes = |p: &crate::source::SourcePolicy| {
-            basic_toml::to_string(&sign_source(p, &key).expect("sign"))
+            kennel_lib_toml::to_string(&sign_source(p, &key).expect("sign"))
                 .expect("ser")
                 .into_bytes()
         };
@@ -714,7 +714,7 @@ mod tests {
             b"name = \"corp-egress\"\n[[net.proxy.allow.add]]\nname = \"proxy.corp\"\nports = [443]\nreason = \"r\"\n",
         )
         .expect("parse fragment");
-        let signed_frag = basic_toml::to_string(&sign_source(&frag, &key).expect("sign"))
+        let signed_frag = kennel_lib_toml::to_string(&sign_source(&frag, &key).expect("sign"))
             .expect("ser")
             .into_bytes();
         let source = MapSource(vec![
@@ -789,7 +789,7 @@ mod tests {
         let host_ids: BTreeSet<String> = BTreeSet::new();
 
         // A vendor-signed base-confined (the chain must verify under require).
-        let base = basic_toml::to_string(
+        let base = kennel_lib_toml::to_string(
             &sign_source(&parse(BASE_CONFINED.as_bytes()).expect("p"), &vendor).expect("sign"),
         )
         .expect("ser")

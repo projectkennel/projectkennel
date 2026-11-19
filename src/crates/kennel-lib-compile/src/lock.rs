@@ -96,7 +96,7 @@ impl Lockfile {
     ///
     /// Returns [`PolicyError::Parse`] if the bytes are not a valid lockfile.
     pub fn parse(bytes: &[u8]) -> Result<Self, PolicyError> {
-        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))
+        kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))
     }
 
     /// Serialise to lockfile TOML bytes.
@@ -105,7 +105,7 @@ impl Lockfile {
     ///
     /// Returns [`PolicyError::Canonical`] if serialisation fails.
     pub fn to_bytes(&self) -> Result<Vec<u8>, PolicyError> {
-        basic_toml::to_string(self)
+        kennel_lib_toml::to_string(self)
             .map(String::into_bytes)
             .map_err(|e| PolicyError::Canonical(e.to_string()))
     }

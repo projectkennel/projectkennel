@@ -15,15 +15,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "basic-toml"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -120,10 +111,10 @@ dependencies = [
 name = "kennel-compose"
 version = "0.7.1"
 dependencies = [
- "basic-toml",
  "kennel-lib-compile",
  "kennel-lib-config",
  "kennel-lib-policy",
+ "kennel-lib-toml",
  "termion",
 ]
 
@@ -188,11 +179,11 @@ version = "0.7.1"
 name = "kennel-lib-compile"
 version = "0.7.1"
 dependencies = [
- "basic-toml",
  "gen-schema",
  "kennel-lib-config",
  "kennel-lib-control",
  "kennel-lib-policy",
+ "kennel-lib-toml",
  "kennel-schema",
  "kennel-schema-derive",
  "serde",
@@ -202,7 +193,7 @@ dependencies = [
 name = "kennel-lib-config"
 version = "0.7.1"
 dependencies = [
- "basic-toml",
+ "kennel-lib-toml",
  "serde",
 ]
 
@@ -250,9 +241,9 @@ dependencies = [
 name = "kennel-lib-policy"
 version = "0.7.1"
 dependencies = [
- "basic-toml",
  "ed25519-compact",
  "hmac-sha512",
+ "kennel-lib-toml",
  "kennel-schema",
  "kennel-schema-derive",
  "object",
@@ -301,6 +292,15 @@ name = "kennel-lib-text"
 version = "0.7.1"
 
 [[package]]
+name = "kennel-lib-toml"
+version = "0.7.1"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "serde_json",
+]
+
+[[package]]
 name = "kennel-privhelper"
 version = "0.7.1"
 dependencies = [
@@ -343,7 +343,6 @@ dependencies = [
 name = "kenneld"
 version = "0.7.1"
 dependencies = [
- "basic-toml",
  "kennel-host-delegate",
  "kennel-lib-audit",
  "kennel-lib-binder",
@@ -353,6 +352,7 @@ dependencies = [
  "kennel-lib-policy",
  "kennel-lib-spawn",
  "kennel-lib-syscall",
+ "kennel-lib-toml",
  "kennel-privhelper",
  "libc",
  "serde",

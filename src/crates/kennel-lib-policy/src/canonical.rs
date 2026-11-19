@@ -3,10 +3,10 @@
 //! The signature on a settled policy is computed over the canonical form of its
 //! body (the [`SettledPolicy`], excluding the `[signature]` envelope, which is a
 //! sibling table in the document). Because the signer and verifier both derive
-//! the bytes the same way — a deterministic `basic-toml` serialisation of the
+//! the bytes the same way — a deterministic `kennel-lib-toml` serialisation of the
 //! body struct in declaration order — they agree byte-for-byte.
 //!
-//! This pins the canonical form: a deterministic `basic-toml` serialisation of
+//! This pins the canonical form: a deterministic `kennel-lib-toml` serialisation of
 //! the body in struct-field order. JSON's canonicalisation (sorted keys,
 //! normalised numbers) buys nothing here — we control both ends, and the schema
 //! has no floats (`02-2-config-schema.md` §Format).
@@ -21,7 +21,7 @@ use crate::settled::SettledPolicy;
 /// Returns [`PolicyError::Canonical`] if the body cannot be serialised (which
 /// would indicate a struct shape the TOML serialiser rejects, caught in tests).
 pub fn canonical_bytes(policy: &SettledPolicy) -> Result<Vec<u8>, PolicyError> {
-    basic_toml::to_string(policy)
+    kennel_lib_toml::to_string(policy)
         .map(String::into_bytes)
         .map_err(|e| PolicyError::Canonical(e.to_string()))
 }

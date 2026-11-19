@@ -14,7 +14,7 @@ enum Enum {
 
 #[test]
 fn unknown_variant() {
-    let error = basic_toml::from_str::<Struct>("value = \"NonExistent\"").unwrap_err();
+    let error = kennel_lib_toml::from_str::<Struct>("value = \"NonExistent\"").unwrap_err();
 
     assert_eq!(
         error.to_string(),
@@ -24,7 +24,7 @@ fn unknown_variant() {
 
 #[test]
 fn from_str() {
-    let s = basic_toml::from_str::<Struct>("value = \"Variant\"").unwrap();
+    let s = kennel_lib_toml::from_str::<Struct>("value = \"Variant\"").unwrap();
 
     assert_eq!(Enum::Variant, s.value);
 }

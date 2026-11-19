@@ -32,7 +32,7 @@ pub type Manifest = Vec<Variant>;
 
 /// One variant — a leaf field that may diverge from the template, plus the constraint bounding it.
 ///
-/// Flat by construction: a data-carrying enum would not round-trip through the `basic_toml` canonical
+/// Flat by construction: a data-carrying enum would not round-trip through the `kennel-lib-toml` canonical
 /// form the signature covers, so the constraint *kind* is identified by which fields are populated.
 /// [`resolve`](Self::resolve) lifts it to the logic-form [`Constraint`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
@@ -435,7 +435,7 @@ mod tests {
     use super::*;
 
     fn variant_toml(toml: &str) -> Variant {
-        basic_toml::from_str(toml).expect("variant parses")
+        kennel_lib_toml::from_str(toml).expect("variant parses")
     }
 
     #[test]
@@ -449,9 +449,9 @@ mod tests {
         ] {
             let v = variant_toml(toml);
             v.resolve().expect("resolves");
-            // The signed bytes must survive a basic_toml round-trip unchanged.
-            let reser = basic_toml::to_string(&v).expect("serialises");
-            let back: Variant = basic_toml::from_str(&reser).expect("re-parses");
+            // The signed bytes must survive a kennel-lib-toml round-trip unchanged.
+            let reser = kennel_lib_toml::to_string(&v).expect("serialises");
+            let back: Variant = kennel_lib_toml::from_str(&reser).expect("re-parses");
             assert_eq!(v, back);
         }
     }

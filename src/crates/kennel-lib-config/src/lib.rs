@@ -140,7 +140,7 @@ fn read_layer<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, 
         path: path.to_path_buf(),
         source,
     })?;
-    basic_toml::from_str(&text)
+    kennel_lib_toml::from_str(&text)
         .map(Some)
         .map_err(|e| ConfigError::Parse {
             path: path.to_path_buf(),
@@ -1287,11 +1287,11 @@ mod tests {
         struct Holder {
             log_level: LogLevel,
         }
-        let h: Holder = basic_toml::from_str("log_level = \"trace\"").expect("parse trace");
+        let h: Holder = kennel_lib_toml::from_str("log_level = \"trace\"").expect("parse trace");
         assert_eq!(h.log_level, LogLevel::Trace);
-        let h: Holder = basic_toml::from_str("log_level = \"debug\"").expect("parse debug");
+        let h: Holder = kennel_lib_toml::from_str("log_level = \"debug\"").expect("parse debug");
         assert_eq!(h.log_level, LogLevel::Debug);
-        let h: Holder = basic_toml::from_str("log_level = \"info\"").expect("parse info");
+        let h: Holder = kennel_lib_toml::from_str("log_level = \"info\"").expect("parse info");
         assert_eq!(h.log_level, LogLevel::Info);
     }
 }

@@ -708,7 +708,7 @@ pub struct CapSection {
 ///
 /// `Serialize` is hand-written (not derived) so the `allow` field can serialise as a value (its
 /// `Set` form, a bare array) or a sub-table (its `Delta` form) while still emitting all values
-/// before all tables: the `basic-toml` canonical-form requirement.
+/// before all tables: the `kennel-lib-toml` canonical-form requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
@@ -783,7 +783,7 @@ impl Serialize for ExecSection {
 ///
 /// `Serialize` is hand-written (not derived) so the `read`/`write`/`deny` fields can each serialise
 /// as a value (their `Set` form) or a sub-table (their `Delta` form) while still emitting all values
-/// before all tables: the `basic-toml` canonical-form requirement.
+/// before all tables: the `kennel-lib-toml` canonical-form requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(kennel_schema_derive::SchemaType))]
@@ -1220,7 +1220,7 @@ pub struct NetAllow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     // `tls` and `threats` are TOML tables: declared after the scalar fields so they
-    // serialise last (`basic-toml` emits values before tables).
+    // serialise last (`kennel-lib-toml` emits values before tables).
     /// `tls.required` and friends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<NetTls>,
@@ -1622,7 +1622,7 @@ pub struct EnvSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<String>>,
     /// Variables forced to a specific value. Declared last: as a TOML table it must
-    /// serialise after the array-valued fields (`basic-toml` emits values first).
+    /// serialise after the array-valued fields (`kennel-lib-toml` emits values first).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub set: Option<BTreeMap<String, String>>,
 }
@@ -1835,7 +1835,7 @@ fn dbus_destination(entry: &str) -> &str {
 ///
 /// Returns [`PolicyError::Parse`] if the bytes are not valid TOML matching the schema.
 pub fn parse(bytes: &[u8]) -> Result<SourcePolicy, PolicyError> {
-    basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))
+    kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))
 }
 
 impl SourcePolicy {

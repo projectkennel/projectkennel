@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 macro_rules! bad {
     ($toml:expr, $msg:expr) => {
-        match basic_toml::from_str::<Value>($toml) {
+        match kennel_lib_toml::from_str::<Value>($toml) {
             Ok(s) => panic!("parsed to: {:#?}", s),
             Err(e) => assert_eq!(e.to_string(), $msg),
         }
@@ -31,7 +31,7 @@ fn crlf() {
      contents are never required to be entirely resident in memory all at once.\r\n\
      \"\"\"\
      ";
-    basic_toml::from_str::<Value>(toml).unwrap();
+    kennel_lib_toml::from_str::<Value>(toml).unwrap();
 }
 
 #[test]
@@ -70,7 +70,7 @@ All other whitespace
 is preserved.
 '''
 "#;
-    let table: Value = basic_toml::from_str(toml).unwrap();
+    let table: Value = kennel_lib_toml::from_str(toml).unwrap();
     assert_eq!(table["bar"], json!("\0"));
     assert_eq!(table["key1"], json!("One\nTwo"));
     assert_eq!(table["key2"], json!("One\nTwo"));
@@ -110,7 +110,7 @@ fn tables_in_arrays() {
 [foo.bar]
 #...
 ";
-    let table: Value = basic_toml::from_str(toml).unwrap();
+    let table: Value = kennel_lib_toml::from_str(toml).unwrap();
     table["foo"][0]["bar"].as_object().unwrap();
     table["foo"][1]["bar"].as_object().unwrap();
 }
@@ -119,7 +119,7 @@ fn tables_in_arrays() {
 fn empty_table() {
     let toml = "
 [foo]";
-    let table: Value = basic_toml::from_str(toml).unwrap();
+    let table: Value = kennel_lib_toml::from_str(toml).unwrap();
     table["foo"].as_object().unwrap();
 }
 
@@ -145,7 +145,7 @@ name = "banana"
 [[fruit.variety]]
 name = "plantain"
 "#;
-    let table: Value = basic_toml::from_str(toml).unwrap();
+    let table: Value = kennel_lib_toml::from_str(toml).unwrap();
     assert_eq!(table["fruit"][0]["name"], json!("apple"));
     assert_eq!(table["fruit"][0]["physical"]["color"], json!("red"));
     assert_eq!(table["fruit"][0]["physical"]["shape"], json!("round"));
@@ -192,13 +192,13 @@ fn stray_cr() {
 
 #[test]
 fn blank_literal_string() {
-    let table: Value = basic_toml::from_str("foo = ''").unwrap();
+    let table: Value = kennel_lib_toml::from_str("foo = ''").unwrap();
     assert_eq!(table["foo"], json!(""));
 }
 
 #[test]
 fn many_blank() {
-    let table: Value = basic_toml::from_str("foo = \"\"\"\n\n\n\"\"\"").unwrap();
+    let table: Value = kennel_lib_toml::from_str("foo = \"\"\"\n\n\n\"\"\"").unwrap();
     assert_eq!(table["foo"], json!("\n\n"));
 }
 
@@ -208,7 +208,7 @@ fn literal_eats_crlf() {
         foo = \"\"\"\\\r\n\"\"\"
         bar = \"\"\"\\\r\n   \r\n   \r\n   a\"\"\"
     ";
-    let table: Value = basic_toml::from_str(toml).unwrap();
+    let table: Value = kennel_lib_toml::from_str(toml).unwrap();
     assert_eq!(table["foo"], json!(""));
     assert_eq!(table["bar"], json!("a"));
 }
@@ -254,7 +254,7 @@ fn floats() {
         ($actual:expr, $expected:expr) => {{
             let f = format!("foo = {}", $actual);
             println!("{}", f);
-            let a: Value = basic_toml::from_str(&f).unwrap();
+            let a: Value = kennel_lib_toml::from_str(&f).unwrap();
             assert_eq!(a["foo"], json!($expected));
         }};
     }
@@ -289,7 +289,7 @@ fn bare_key_names() {
         \"character encoding\" = \"value\"
         'ʎǝʞ' = \"value\"
     ";
-    let a: Value = basic_toml::from_str(toml).unwrap();
+    let a: Value = kennel_lib_toml::from_str(toml).unwrap();
     let _ = &a["foo"];
     let _ = &a["-"];
     let _ = &a["_"];
@@ -396,7 +396,7 @@ fn table_names() {
         ['a.a']
         ['\"\"']
     ";
-    let a: Value = basic_toml::from_str(toml).unwrap();
+    let a: Value = kennel_lib_toml::from_str(toml).unwrap();
     println!("{:?}", a);
     let _ = &a["a"]["b"];
     let _ = &a["f f"];
@@ -412,11 +412,11 @@ fn invalid_bare_numeral() {
 
 #[test]
 fn inline_tables() {
-    basic_toml::from_str::<Value>("a = {}").unwrap();
-    basic_toml::from_str::<Value>("a = {b=1}").unwrap();
-    basic_toml::from_str::<Value>("a = {   b   =   1    }").unwrap();
-    basic_toml::from_str::<Value>("a = {a=1,b=2}").unwrap();
-    basic_toml::from_str::<Value>("a = {a=1,b=2,c={}}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {b=1}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {   b   =   1    }").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {a=1,b=2}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {a=1,b=2,c={}}").unwrap();
 
     bad!(
         "a = {a=1,}",
@@ -439,9 +439,9 @@ fn inline_tables() {
         "expected a table key, found eof at line 1 column 6"
     );
 
-    basic_toml::from_str::<Value>("a = {a=[\n]}").unwrap();
-    basic_toml::from_str::<Value>("a = {\"a\"=[\n]}").unwrap();
-    basic_toml::from_str::<Value>("a = [\n{},\n{},\n]").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {a=[\n]}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = {\"a\"=[\n]}").unwrap();
+    kennel_lib_toml::from_str::<Value>("a = [\n{},\n{},\n]").unwrap();
 }
 
 #[test]
@@ -449,7 +449,7 @@ fn number_underscores() {
     macro_rules! t {
         ($actual:expr, $expected:expr) => {{
             let f = format!("foo = {}", $actual);
-            let table: Value = basic_toml::from_str(&f).unwrap();
+            let table: Value = kennel_lib_toml::from_str(&f).unwrap();
             assert_eq!(table["foo"], json!($expected));
         }};
     }
@@ -496,16 +496,16 @@ fn bad_strings() {
 
 #[test]
 fn empty_string() {
-    let table: Value = basic_toml::from_str::<Value>("foo = \"\"").unwrap();
+    let table: Value = kennel_lib_toml::from_str::<Value>("foo = \"\"").unwrap();
     assert_eq!(table["foo"], json!(""));
 }
 
 #[test]
 fn booleans() {
-    let table: Value = basic_toml::from_str("foo = true").unwrap();
+    let table: Value = kennel_lib_toml::from_str("foo = true").unwrap();
     assert_eq!(table["foo"], json!(true));
 
-    let table: Value = basic_toml::from_str("foo = false").unwrap();
+    let table: Value = kennel_lib_toml::from_str("foo = false").unwrap();
     assert_eq!(table["foo"], json!(false));
 
     bad!(

@@ -23,7 +23,7 @@ kennel-lib-control = { path = "../kennel-lib-control" }
 kennel-lib-config = { path = "../kennel-lib-config" }
 # Source and settled policies are TOML (no JSON); serde derives the schema types.
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
-basic-toml = "=0.1.10"
+kennel-lib-toml = { path = "../kennel-lib-toml" }
 # Schema single-source (behind the `schema` feature, off by default → never in the
 # runtime/TCB build): the source structs derive their JSON-Schema node, so `gen-schema`
 # emits `schema/policy.toml.schema` directly from these parser structs — no hand mirror.

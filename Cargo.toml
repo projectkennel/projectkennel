@@ -53,6 +53,8 @@ members = [
     "src/crates/kennel-schema",
     "src/crates/kennel-schema-derive",
     "src/crates/kennel-lib-text",
+    # In-tree TOML for Serde (basic-toml 0.1.10, brought in-tree as first-party: #221).
+    "src/crates/kennel-lib-toml",
     # Binaries that are not a binder-connector end.
     "src/crates/kennel-bin-init",
     # The OCI launcher: workload-side argv[0] for an image-root kennel (not in the daemon TCB).

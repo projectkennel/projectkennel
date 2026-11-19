@@ -53,7 +53,7 @@ fn to_json(toml: Value) -> Value {
 
 fn run(toml_raw: &str, json_raw: &str) {
     println!("parsing:\n{}", toml_raw);
-    let toml: Value = basic_toml::from_str(toml_raw).unwrap();
+    let toml: Value = kennel_lib_toml::from_str(toml_raw).unwrap();
     let json: Value = serde_json::from_str(json_raw).unwrap();
 
     // Assert toml == json
@@ -67,7 +67,8 @@ fn run(toml_raw: &str, json_raw: &str) {
 
     // Assert round trip
     println!("round trip parse: {}", toml);
-    let toml2: Value = basic_toml::from_str(&basic_toml::to_string(&toml).unwrap()).unwrap();
+    let toml2: Value =
+        kennel_lib_toml::from_str(&kennel_lib_toml::to_string(&toml).unwrap()).unwrap();
     assert_eq!(toml, toml2);
 }
 

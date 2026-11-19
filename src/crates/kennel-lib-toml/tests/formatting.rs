@@ -1,4 +1,4 @@
-use basic_toml::to_string;
+use kennel_lib_toml::to_string;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]

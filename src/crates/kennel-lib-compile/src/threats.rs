@@ -70,7 +70,7 @@ impl Catalogue {
     /// two entries share an id.
     pub fn parse(bytes: &[u8]) -> Result<Self, PolicyError> {
         let raw: RawCatalogue =
-            basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+            kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
         let mut entries = BTreeMap::new();
         for entry in raw.threats {
             if entries.insert(entry.id.clone(), entry.clone()).is_some() {

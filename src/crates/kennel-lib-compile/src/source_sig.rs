@@ -275,7 +275,7 @@ fn require_err(name: &str, why: &str) -> PolicyError {
 pub fn canonical_source(policy: &SourcePolicy) -> Result<Vec<u8>, PolicyError> {
     let mut bare = policy.clone();
     bare.signature = None;
-    basic_toml::to_string(&bare)
+    kennel_lib_toml::to_string(&bare)
         .map(String::into_bytes)
         .map_err(|e| PolicyError::Canonical(e.to_string()))
 }

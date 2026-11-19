@@ -115,7 +115,7 @@ pub const MIN_SETTLED_SCHEMA_VERSION: u32 = 3;
 /// signature does not verify, or any framework invariant is violated.
 pub fn verify_settled(bytes: &[u8], keys: &KeySet) -> Result<SettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
-        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     verify_doc(doc, keys)
 }
 
@@ -135,7 +135,7 @@ pub fn verify_settled_signed(
     keys: &KeySet,
 ) -> Result<(SettledPolicy, String), PolicyError> {
     let doc: SignedSettledPolicy =
-        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     let key_id = doc.signature.key_id.clone();
     let policy = verify_doc(doc, keys)?;
     Ok((policy, key_id))
@@ -163,7 +163,7 @@ pub fn verify_pinned(
     expected_signature: &str,
 ) -> Result<SettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
-        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     if doc.signature.key_id != expected_key_id || doc.signature.signature != expected_signature {
         return Err(PolicyError::Spawn(
             "template content-pin mismatch — the trust store resolved a different signed artefact \
@@ -210,7 +210,7 @@ pub fn parse_settled_unverified(bytes: &[u8]) -> Result<SettledPolicy, PolicyErr
 /// [`PolicyError::UnsupportedSchemaVersion`] if its schema is too new.
 pub fn parse_signed_settled_unverified(bytes: &[u8]) -> Result<SignedSettledPolicy, PolicyError> {
     let doc: SignedSettledPolicy =
-        basic_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        kennel_lib_toml::from_slice(bytes).map_err(|e| PolicyError::Parse(e.to_string()))?;
     check_schema_version(doc.policy.settled_schema_version)?;
     Ok(doc)
 }
@@ -283,7 +283,7 @@ pub fn sign_settled(
 ///
 /// Returns [`PolicyError::Canonical`] if serialisation fails.
 pub fn to_bytes(doc: &SignedSettledPolicy) -> Result<Vec<u8>, PolicyError> {
-    basic_toml::to_string(doc)
+    kennel_lib_toml::to_string(doc)
         .map(String::into_bytes)
         .map_err(|e| PolicyError::Canonical(e.to_string()))
 }

@@ -501,7 +501,7 @@ impl MaybeString {
         }
     }
 
-    fn into_cow(self, input: &str) -> Cow<str> {
+    fn into_cow(self, input: &str) -> Cow<'_, str> {
         match self {
             MaybeString::NotEscaped(start) => Cow::Borrowed(&input[start..]),
             MaybeString::Owned(s) => Cow::Owned(s),
