@@ -25,7 +25,7 @@ the code whose compromise would break confinement.
 | `kennel-lib-compile` | 5449 | — | — | cli, compose | serde |
 | `kennel-cli` | 5327 | — | — | *(binary)* | lexopt, serde, serde_json |
 | `kennel-lib-toml` | 2673 | — | **yes** | compile, compose, config, kenneld, policy | serde |
-| `kennel-lib-policy` | 2613 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, hmac-sha512, object, serde |
+| `kennel-lib-policy` | 2613 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, object, serde |
 | `kennel-lib-spawn` | 2540 | — | **yes** | bin-init, kenneld, privhelper | — |
 | `kennel-lib-binder` | 2225 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn, tun-broker | libc |
 | `kennel-privhelper` | 1798 | — | **yes** | kenneld | — |
@@ -116,9 +116,8 @@ process) and **adversarial vs trusted input** (what an attacker can actually rea
 |---|--:|---|---|
 | `object` | 35,805 | first-party ELF only — the SSH dialer + facade binaries (`libresolve`) and the first-party BPF object; the **workload's** ELF is resolved CLI-side at compile (`resolve_settled_loaders`), never re-resolved at runtime | **trusted** |
 | `serde` + `serde_core` | 18,866 | our own typed binder/wire structs | trusted-ish |
-| `ed25519-compact` | 3,715 | signature verification over the signed policy artefact — operates on attacker-supplyable bytes, but verification *is* the defence | guard |
+| `ed25519-compact` | 5,639 (1,352 of it the precomputed base-point table, constants) | signature verification over the signed policy artefact — operates on attacker-supplyable bytes, but verification *is* the defence | guard |
 | `seccompiler` | 2,806 | compiles our own seccomp filter program | trusted |
-| `basic-toml` | 2,678 | the **signed** policy artefact | trusted |
 
 **Bindings / glue — declarations resolving to the platform `libc.so`/kernel, ≈0 per-line
 logic risk (~150k vendored):** `libc` (112,666 — almost all `extern` decls + constants),
