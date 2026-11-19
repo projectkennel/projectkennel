@@ -1,0 +1,28 @@
+# ============================================================================
+# Suite case: ns-not-enterable — a kennel-built namespace cannot be entered from outside.
+#
+# The kennel's user namespace maps host uid 0 (`0 0 1`). If the operator owned that namespace,
+# any process at the operator's uid could `setns` into it and `setuid(0)` — host root, with the
+# host filesystem still mounted (a bare `setns` goes through no pivot). The factory therefore
+# creates the namespace owned by ROOT, so nothing at the operator's uid holds a capability over
+# it (THREATS T5.4: "no user-owned namespace ever contains host uid 0").
+#
+# This policy only holds a kennel open; `run.sh` does the checking from the HOST side, as the
+# ordinary operator — the vantage point the property is about.
+# ============================================================================
+
+template_name = "ns-not-enterable"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/sleep", "/bin/sleep"]
+
+[workload]
+argv = ["/bin/sh", "-c", "sleep 30"]
