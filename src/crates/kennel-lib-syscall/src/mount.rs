@@ -245,6 +245,16 @@ pub fn is_bpffs(path: &Path) -> io::Result<bool> {
     Ok(st.filesystem_type() == BPF_FS_MAGIC)
 }
 
+/// Whether `path` sits on a tmpfs — `statfs` reports `TMPFS_MAGIC`.
+///
+/// # Errors
+///
+/// Returns the OS error if `path` cannot be `statfs`'d.
+pub fn is_tmpfs(path: &Path) -> io::Result<bool> {
+    let st = nix::sys::statfs::statfs(path).map_err(map_err)?;
+    Ok(st.filesystem_type() == nix::sys::statfs::TMPFS_MAGIC)
+}
+
 /// Mount a fresh `proc` at `target` (`nosuid,nodev`), with `hidepid=2` when
 /// `hidepid` so `/proc/<pid>` is owner-only even within the PID namespace
 /// (§7.4.7, belt-and-braces atop the namespace).

@@ -157,6 +157,16 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let half = decode_construction(ch_bytes)
         .map_err(|e| io::Error::other(format!("construction-half decode: {e:?}")))?;
 
+    // The supplementary gids to map into the kennel must be groups the CALLER is already in.
+    // The factory holds CAP_SETGID, so writing a gid into `gid_map` is a grant; the caller's
+    // own membership check is on the wrong side of this boundary (anyone can run the helper).
+    // Our real gid and supplementary groups are the caller's, stamped by the kernel.
+    check_granted_gids(
+        &half.granted_gids,
+        real_gid(),
+        &kennel_lib_syscall::unistd::supplementary_groups(),
+    )?;
+
     // Pull the SCM fds in the FIXED send order (pty then workload), guided by the half's
     // presence flags — so an absent pty does not misalign the workload fd. A flag set but no
     // fd present is a malformed datagram (fail closed). `remove(0)` keeps the order.
@@ -697,13 +707,26 @@ fn attach_egress_via_helper(cgroup: &std::path::Path, egress_bytes: &[u8]) -> io
 /// all their kennels; the per-kennel pin dir and the pins are created operator-side by the
 /// sub-helper. Best-effort: a mount failure degrades to "no audit drain", never fatal.
 fn ensure_bpf_pin_bpffs() {
-    let base = crate::bpf_pin_root(real_uid());
-    if std::fs::create_dir_all(&base).is_err() {
+    // The pin root is under the caller's own runtime directory, so the caller controls every
+    // name in it — and this mount is made with CAP_SYS_ADMIN in the HOST mount namespace. Reach
+    // the directory without following a symlink in any component, mount on that descriptor, and
+    // only on a directory the caller owns: the mount can then land nowhere but the caller's own
+    // plain directory.
+    let uid = real_uid();
+    let Ok(dir) = kennel_lib_syscall::fd::dir_no_symlinks(&crate::bpf_pin_root(uid)) else {
+        return;
+    };
+    let at = kennel_lib_syscall::fd::proc_path(&dir);
+    if kennel_lib_syscall::mount::is_bpffs(&at).unwrap_or(false) {
+        return; // already mounted (the walk stepped onto it)
+    }
+    if kennel_lib_syscall::fd::owner_and_kind(&dir).ok() != Some((uid, true)) {
+        eprintln!(
+            "kennel-privhelper: bpf pin root is not the caller's own directory; not mounting"
+        );
         return;
     }
-    if !kennel_lib_syscall::mount::is_bpffs(&base).unwrap_or(false) {
-        let _ = kennel_lib_syscall::mount::mount_bpffs(&base);
-    }
+    let _ = kennel_lib_syscall::mount::mount_bpffs(&at);
 }
 
 /// Over-mount the exclusive-bind sentinel on `src` by exec'ing the `{sys_admin}`
@@ -889,6 +912,24 @@ fn write_identity_maps(pid: i32, uid: u32, gid: u32, granted: &[u32]) -> io::Res
     Ok(())
 }
 
+/// Refuse a granted gid the caller is not a member of (pure; the caller passes its own ids).
+///
+/// A granted gid becomes a `gid_map` line, and `kennel-bin-init` will give the workload any
+/// mapped non-zero gid its peer asks for. The only gids that may be mapped are therefore the
+/// caller's own: its real gid or one of its supplementary groups. Gid 0 is never a grant (it is
+/// mapped for the kennel's root, and `kennel-bin-init` never drops a workload to it).
+fn check_granted_gids(granted: &[u32], own_gid: u32, own_groups: &[u32]) -> io::Result<()> {
+    for &gid in granted {
+        if gid == 0 || (gid != own_gid && !own_groups.contains(&gid)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("granted gid {gid} is not one of the caller's own groups"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Build the `uid_map`/`gid_map` strings (pure; the write is in [`write_identity_maps`]).
 ///
 /// **Precise multi-extent map** — exactly host uid/gid 0 (the kennel's real root) plus the
@@ -919,6 +960,36 @@ fn build_identity_maps(uid: u32, gid: u32, granted: &[u32]) -> (String, String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_granted_gid_must_be_one_of_the_callers_own() {
+        // The caller is gid 1000, in groups 27 and 44.
+        assert!(
+            check_granted_gids(&[], 1000, &[27, 44]).is_ok(),
+            "nothing granted"
+        );
+        assert!(
+            check_granted_gids(&[27, 44], 1000, &[27, 44]).is_ok(),
+            "own groups"
+        );
+        assert!(
+            check_granted_gids(&[1000], 1000, &[27]).is_ok(),
+            "own primary gid"
+        );
+        assert!(
+            check_granted_gids(&[6], 1000, &[27, 44]).is_err(),
+            "not a member of 6"
+        );
+        assert!(
+            check_granted_gids(&[27, 6], 1000, &[27]).is_err(),
+            "one bad gid refuses all"
+        );
+        // Gid 0 is never a grant, even for a caller who is in group 0.
+        assert!(
+            check_granted_gids(&[0], 1000, &[0]).is_err(),
+            "gid 0 is never granted"
+        );
+    }
 
     #[test]
     fn maps_are_precise_root_plus_operator_plus_granted() {

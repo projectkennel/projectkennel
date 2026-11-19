@@ -232,6 +232,15 @@ fn spawn_all(
     envp: &[CString],
     tr: kennel_lib_config::Tracer,
 ) -> io::Result<(i32, Vec<i32>)> {
+    // The workload and facades never run with gid 0. We are told the persona by our bus peer,
+    // and gid 0 is always mapped (it is ours), so refuse it here: the factory vouches only for
+    // the non-zero gids it mapped, which are the caller's own groups.
+    if sup.drop_gid == 0 || sup.groups.as_deref().is_some_and(|g| g.contains(&0)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing a persona with gid 0: the workload never holds the kennel root's group",
+        ));
+    }
     let groups = sup.groups.as_deref();
     let envp_ref = borrow(envp);
 

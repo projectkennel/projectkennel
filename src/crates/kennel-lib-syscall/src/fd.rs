@@ -170,6 +170,69 @@ pub fn scaffold_dir(path: &Path, anchors: &[&Path]) -> io::Result<OwnedFd> {
     Ok(current)
 }
 
+/// Make sure the directory at the absolute path `path` exists, creating missing components, with
+/// **no symlink followed in any component**, and return an `O_PATH` handle to it.
+///
+/// For a privileged helper that must act on a directory under a caller-owned tree (the per-user
+/// runtime directory): the handle pins the inode the walk reached, so a later mount lands on that
+/// directory and nowhere a link could point.
+///
+/// # Errors
+///
+/// `InvalidInput` if `path` is not absolute plain names; `ELOOP`/`ENOTDIR` if a component is a
+/// symlink or not a directory; any other `openat2`/`mkdirat` error.
+pub fn dir_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
+    use nix::errno::Errno;
+    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::{mkdirat, Mode};
+
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not an absolute path", path.display()),
+        ));
+    }
+    let mut current = open(
+        Path::new("/"),
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    for name in &plain_names(path)? {
+        let how = || {
+            OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+                .resolve(
+                    ResolveFlag::RESOLVE_BENEATH
+                        | ResolveFlag::RESOLVE_NO_SYMLINKS
+                        | ResolveFlag::RESOLVE_NO_MAGICLINKS,
+                )
+        };
+        current = match openat2(&current, name.as_os_str(), how()) {
+            Ok(fd) => fd,
+            Err(Errno::ENOENT) => {
+                mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
+                    .map_err(io::Error::from)?;
+                openat2(&current, name.as_os_str(), how()).map_err(io::Error::from)?
+            }
+            Err(e) => return Err(io::Error::from(e)),
+        };
+    }
+    Ok(current)
+}
+
+/// The owner uid and file-type of an open descriptor's inode: `(uid, is_directory)`.
+///
+/// # Errors
+///
+/// The OS error if `fstat` fails.
+pub fn owner_and_kind(fd: &OwnedFd) -> io::Result<(u32, bool)> {
+    use nix::sys::stat::{fstat, SFlag};
+    let st = fstat(fd).map_err(io::Error::from)?;
+    let is_dir = SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFDIR;
+    Ok((st.st_uid, is_dir))
+}
+
 /// What a path inside a [`RootDir`] is required to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {

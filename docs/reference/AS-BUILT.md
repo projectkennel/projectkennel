@@ -26,6 +26,33 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — the helpers check what they are given: granted gids, the bpffs pin root, the exclusive over-mount
+
+- **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory and its
+  capability-split sub-helpers; `[identity].groups` (§7.4); the host-mode egress pins (§7.5);
+  exclusive binds (§2.7 / T2.8). Archived `04-trust-boundaries.md` ("the helper refuses any gid
+  the caller is not a member of" — it did not).
+- **Change:** the helpers are world-executable and identify their caller only by real uid, so
+  every check that lived in `kenneld` was on the wrong side of the boundary. Three are now made
+  by the helper itself:
+  - **Granted gids.** The factory wrote wire-supplied `granted_gids` into `gid_map` with
+    `CAP_SETGID`. It now refuses any gid that is not the caller's real gid or one of its
+    supplementary groups (its own, kernel-stamped), and never gid 0. `kennel-bin-init` refuses a
+    persona whose gid or supplementary groups include 0.
+  - **The bpffs pin root.** `ensure_bpf_pin_bpffs` did `create_dir_all` and `mount` by name on
+    `/run/user/<uid>/kennel/bpf`, a path under the caller's control, with `CAP_SYS_ADMIN` in the
+    host mount namespace. It now reaches the directory with no symlink followed in any component
+    (`fd::dir_no_symlinks`), mounts on that descriptor, and only on a directory the caller owns.
+  - **`kennel-privhelper-mounts`.** `mount` checked ownership of a name and then mounted on the
+    name; `unmount` was gated only on a sentinel file the caller could create anywhere. Both now
+    pin the directory first (`open_no_symlinks`) and act on that inode. `mount` verifies
+    afterwards that the path leads to a fresh, empty, caller-owned tmpfs on a new device.
+    `unmount` requires a tmpfs **mount root** owned by the caller that carries the sentinel.
+- **Why:** a privileged helper cannot rely on its caller having checked.
+- **Not changed:** the unbounded host-`lo` address adds through `kennel-privhelper-net`, and the
+  exclusive over-mount still failing open when the sub-helper refuses.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — view destinations are resolved by descriptor inside the new root; a symlink at a mount point is refused
 
 - **Bears-on:** Kennel book Vol 2, the filesystem chapter's view construction (§7.4) and the

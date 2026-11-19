@@ -8,6 +8,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **The privileged helpers no longer trust their caller for three things.** Supplementary gids
+  to map into a kennel must be groups the caller is in, and a workload is never given gid 0. The
+  per-user bpffs for host-mode egress is mounted on a directory reached without following a
+  symlink and owned by the caller; before, a symlink at `/run/user/<uid>/kennel/bpf` put the mount
+  wherever it pointed. `kennel-privhelper-mounts` pins the directory before checking and mounting
+  it, and releases only a tmpfs mount of the caller's that carries the lock sentinel; before, a
+  sentinel file alone let any user detach a mount whose root they could write.
 - **A symlink can no longer steer where a kennel's view is built.** Bind mount points, the
   trust-manifest masks and the staged `/etc` and home files were resolved by name before
   `pivot_root`. A symlink left in a writable grant by an earlier workload — or shipped in an OCI
