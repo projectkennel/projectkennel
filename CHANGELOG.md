@@ -87,6 +87,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   regenerated independently from the RFC 8032 base point (all 256 entries match). Still zero
   transitive deps under `default-features = false, features = ["std"]`. Two fewer third-party
   crates on the TCB path since 0.7.1, counting `basic-toml`.
+- **Dev/test builds carry less debug info.** `[profile.dev]` keeps `line-tables-only` (backtraces
+  still show file:line for our code) and vendored dependencies get none, since every test and
+  binary target statically links the vendored graph. Measured on a clean aarch64 build plus
+  test run: `target/` 3.01 → 1.91 GiB, executables 1.63 → 0.93 GiB, clean build 16 → 13 s, same
+  1209 tests passing. Release profiles are unchanged.
 - **`basic-toml` is now the first-party `kennel-lib-toml`.** RUSTSEC-2026-0374 marked
   `basic-toml` 0.1.10 unmaintained (upstream archived 2025-03-02). It parses the settled policy on
   the TCB path, so rather than migrate to `toml` (a chain of new external crates into the TCB) its

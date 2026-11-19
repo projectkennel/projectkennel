@@ -126,6 +126,17 @@ arithmetic_side_effects = "deny"
 # the privhelper must terminate, not unwind through cleanup). The test profile
 # is dev-based and unwinds by default, so #[should_panic] and catch_unwind work
 # without an explicit override (cargo ignores `panic` on the test profile).
+# Dev/test builds: keep file:line in backtraces for our own code, and no debug info at all for
+# the vendored graph. Every one of the ~130 test and binary targets statically links that graph
+# (libc, object, nix, serde, … ≈250k lines), and full DWARF for it made each test binary tens of
+# MB that no one steps through. For a debugger session, override locally
+# (`CARGO_PROFILE_DEV_DEBUG=full`) or use `release-with-debuginfo`. `test` inherits `dev`.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
