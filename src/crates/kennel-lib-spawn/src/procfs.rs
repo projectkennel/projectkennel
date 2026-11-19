@@ -49,20 +49,74 @@ impl ProcFacts {
     ///
     /// Returns the OS error if `sysinfo(2)` or `uname(2)` fails.
     pub fn gather() -> io::Result<Self> {
-        todo!("procfs curation (#218)")
+        use kennel_lib_syscall::sysinfo;
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        Ok(Self {
+            cpus: sysinfo::usable_cpus(),
+            memory: sysinfo::memory()?,
+            kernel: sysinfo::kernel()?,
+            now_secs,
+        })
     }
 }
 
 /// Render the synthesized `/proc` file `synth` from its template.
 #[must_use]
 pub fn render(synth: Synth, facts: &ProcFacts) -> String {
-    let _ = (synth, facts);
-    todo!("procfs curation (#218)")
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    match synth {
+        Synth::Cpuinfo => {
+            for i in 0..facts.cpus {
+                let _ = write!(
+                    out,
+                    "processor\t: {i}\nmodel name\t: kennel virtual CPU\n\n"
+                );
+            }
+        }
+        Synth::Meminfo => {
+            let free_kib = facts.memory.free / 1024;
+            for (key, kib) in [
+                ("MemTotal", facts.memory.total / 1024),
+                ("MemFree", free_kib),
+                ("MemAvailable", free_kib),
+                ("Buffers", 0),
+                ("Cached", 0),
+                ("SwapTotal", 0),
+                ("SwapFree", 0),
+            ] {
+                let _ = writeln!(out, "{:<16}{kib:>12} kB", format!("{key}:"));
+            }
+        }
+        Synth::Stat => {
+            // Ten zeroed counters (user nice system idle iowait irq softirq steal guest
+            // guest_nice): a snapshot carries no load, and delta-readers see none.
+            let zeros = "0 0 0 0 0 0 0 0 0 0";
+            let _ = writeln!(out, "cpu  {zeros}");
+            for i in 0..facts.cpus {
+                let _ = writeln!(out, "cpu{i} {zeros}");
+            }
+            let btime = facts.now_secs.saturating_sub(facts.memory.uptime_secs);
+            let _ = write!(
+                out,
+                "intr 0\nctxt 0\nbtime {btime}\nprocesses 0\nprocs_running 1\nprocs_blocked 0\n"
+            );
+        }
+        Synth::Version => {
+            let k = &facts.kernel;
+            let _ = writeln!(out, "{} version {} {}", k.sysname, k.release, k.version);
+        }
+    }
+    out
 }
 
-/// Curate the freshly mounted procfs at `proc_dir`: over-mount every top-level entry that is
-/// not per-process, synthesized, or passed through with an empty read-only one, and every
-/// `synthesize` entry with its rendered template. `scratch` is a directory on a writable
+/// Curate the freshly mounted procfs at `proc_dir`.
+///
+/// Every top-level entry that is not per-process, synthesized, or passed through is
+/// over-mounted with an empty read-only one, and every `synthesize` entry with its rendered
+/// template. `scratch` is a directory on a writable
 /// tmpfs for the over-mount sources; they are unlinked once mounted.
 ///
 /// # Errors
@@ -75,8 +129,60 @@ pub fn curate(
     passthrough: &[String],
     facts: &ProcFacts,
 ) -> io::Result<()> {
-    let _ = (proc_dir, scratch, synthesize, passthrough, facts);
-    todo!("procfs curation (#218)")
+    use kennel_lib_policy::procfs::PER_PROCESS_LINKS;
+    use kennel_lib_syscall::mount;
+
+    std::fs::create_dir_all(scratch)?;
+    let empty_file = scratch.join("empty");
+    std::fs::File::create(&empty_file)?;
+    let empty_dir = scratch.join("empty.d");
+    std::fs::create_dir_all(&empty_dir)?;
+
+    // Collect first: over-mounting while iterating the same directory is not something to
+    // rely on.
+    let mut entries: Vec<(String, std::fs::FileType)> = Vec::new();
+    for entry in std::fs::read_dir(proc_dir)? {
+        let entry = entry?;
+        let Ok(name) = entry.file_name().into_string() else {
+            continue; // procfs top-level names are ASCII; nothing to curate otherwise
+        };
+        entries.push((name, entry.file_type()?));
+    }
+
+    for (name, kind) in entries {
+        // Per-process entries and the policy's named passthroughs stay real. A symlink is
+        // never mounted over (that would follow it into a per-process directory); the
+        // top-level links all resolve into `self`, which is per-process anyway.
+        if name.bytes().all(|b| b.is_ascii_digit())
+            || PER_PROCESS_LINKS.contains(&name.as_str())
+            || passthrough.contains(&name)
+            || kind.is_symlink()
+        {
+            continue;
+        }
+        let dest = proc_dir.join(&name);
+        let source = match Synth::from_name(&name).filter(|s| synthesize.contains(s)) {
+            Some(synth) => {
+                let src = scratch.join(synth.name());
+                std::fs::write(&src, render(synth, facts))?;
+                src
+            }
+            None if kind.is_dir() => empty_dir.clone(),
+            None => empty_file.clone(),
+        };
+        let context = |what: &str, e: io::Error| {
+            io::Error::new(
+                e.kind(),
+                format!("/proc curation {what} {}: {e}", dest.display()),
+            )
+        };
+        mount::bind(&source, &dest, false).map_err(|e| context("bind", e))?;
+        mount::remount_readonly(&dest).map_err(|e| context("remount_ro", e))?;
+    }
+
+    // The over-mounts hold their source inodes; the names are scaffolding the workload must
+    // not see in its /tmp.
+    std::fs::remove_dir_all(scratch)
 }
 
 #[cfg(test)]
@@ -150,8 +256,11 @@ mod tests {
         let text = render(Synth::Stat, &facts(3));
         let cpu_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("cpu")).collect();
         assert_eq!(cpu_lines.len(), 1 + 3, "{text}");
-        assert!(cpu_lines[0].starts_with("cpu "), "aggregate first: {text}");
-        for (i, l) in cpu_lines[1..].iter().enumerate() {
+        assert!(
+            cpu_lines.first().is_some_and(|l| l.starts_with("cpu ")),
+            "aggregate first: {text}"
+        );
+        for (i, l) in cpu_lines.iter().skip(1).enumerate() {
             assert!(l.starts_with(&format!("cpu{i} ")), "{l}");
         }
         // Ten zeroed counters per cpu line (user..guest_nice), so delta-readers see no load.

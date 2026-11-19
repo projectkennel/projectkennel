@@ -33,16 +33,19 @@ include = ["core-shell", "core-coreutils", "core-file-mutation", "core-archive",
 mode = "host"
 reason = "an interactive human shell needs direct, unmediated egress (git/ssh/curl) on the host network stack"
 
-# Re-list base-confined's read baseline (a template's fs.read replaces, not adds) and
-# widen /proc to the whole namespaced procfs so `ps`/`top`/`free` see this kennel's
-# own processes (the PID namespace already hides everything else).
+# Re-list base-confined's read baseline (a template's fs.read replaces, not adds).
+# `ps`/`top`/`free` need no wide /proc grant: the curated /proc (#218) already shows
+# every process of THIS kennel (the PID namespace hides everything else) and
+# synthesizes cpuinfo/meminfo/stat/version. uptime + loadavg are passed through real
+# (host-global, low-sensitivity) for top's header and ps's elapsed times.
 [fs]
 read = [
     "/usr/**", "/lib/**", "/lib64/**",
     "/etc/ssl/**", "/etc/pki/**",
     "/etc/ld.so.conf", "/etc/ld.so.conf.d/**", "/etc/ld.so.cache",
     "/etc/alternatives/**",   # awk→gawk, vi, editor, pager … symlink farm (else dangles)
-    "/proc/**",
+    "/proc/self/**", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/version",
+    "/proc/uptime", "/proc/loadavg",
     "/sys/devices/system/cpu/**",
 ]
 
@@ -95,4 +98,4 @@ ttl_action = "warn"
 [signature]
 algorithm = "sshsig"
 key_id = "kennel-maint-2026"
-signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQLarsSizXqG1HhJ3AmgrUXdjLPJNGH+VP4\nkTfQPdWphnmr7f9yFgXSwg4oMCacp5MI0D/c6T6234TIJXH2lDFQY=\n-----END SSH SIGNATURE-----\n"
+signature = "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgKWVn2EUqe+ju7quWQv7aY/ihwM\npBFaipL7vU2UVH85IAAAAbcG9saWN5LnYxQHByb2plY3RrZW5uZWwub3JnAAAAAAAAAAZz\naGE1MTIAAABTAAAAC3NzaC1lZDI1NTE5AAAAQCHp+OLRqkSCbkIuNV4USGpcIGuFDIOlxD\nDADkeSJT6jaaxPiCzmVgbbk1keM15u1SERqEHN3vlRTXVHICTREwo=\n-----END SSH SIGNATURE-----\n"

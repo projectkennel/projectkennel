@@ -423,8 +423,35 @@ pub enum ProcView {
 /// host-global entry, or a non-canonical path) — the compiler refuses these; this re-check
 /// fails closed on a hand-crafted settled policy.
 pub fn proc_view(read: &[String]) -> Result<ProcView, SpawnError> {
-    let _ = read;
-    todo!("procfs curation (#218)")
+    use kennel_lib_policy::procfs::{classify_read, ProcRead};
+    let mut synthesize = Vec::new();
+    let mut passthrough = Vec::new();
+    let mut whole = false;
+    for entry in read {
+        match classify_read(entry) {
+            None | Some(ProcRead::PerProcess) => {}
+            Some(ProcRead::Whole) => whole = true,
+            Some(ProcRead::Synthesized(s)) => synthesize.push(s),
+            Some(ProcRead::Passthrough(name)) => passthrough.push(name),
+            Some(ProcRead::Nested { .. } | ProcRead::NonCanonical) => {
+                return Err(SpawnError::InvalidPolicy(format!(
+                    "fs.read `{entry}` cannot be served by the curated /proc (a path inside a \
+                     host-global entry, or non-canonical)"
+                )));
+            }
+        }
+    }
+    if whole {
+        return Ok(ProcView::Full);
+    }
+    synthesize.sort_unstable();
+    synthesize.dedup();
+    passthrough.sort_unstable();
+    passthrough.dedup();
+    Ok(ProcView::Curated {
+        synthesize,
+        passthrough,
+    })
 }
 
 /// The constructed-`$HOME` view (§7.4.5).
@@ -1113,7 +1140,16 @@ impl Plan {
         // Shortest source path first (parent before child). Stable: equal-length paths keep their
         // first-seen order, so the result is deterministic.
         fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
+        // #218: every READ grant under /proc is served by ONE rule on /proc itself — the only
+        // rule that covers each forked child's own /proc/self (a rule on /proc/self anchors on
+        // the sealing process's /proc/<pid>). What it exposes is the curated view's job
+        // (`ProcView`). A write grant under /proc keeps its own rule.
+        let mut proc_read = false;
         for (granted, writable) in fs_grants {
+            if !writable && granted.starts_with("/proc") {
+                proc_read = true;
+                continue;
+            }
             let target = remap_target(&granted, home, &shim_root);
             landlock_fs.push((
                 target.clone(),
@@ -1140,6 +1176,11 @@ impl Plan {
                 });
             }
         }
+
+        if proc_read {
+            landlock_fs.push((PathBuf::from("/proc"), read_access(permissive_exec)));
+        }
+        let proc = proc_view(&ep.fs.read)?;
 
         // The execution gate (§7.3): grant FS_EXECUTE on the allowlisted binaries and on
         // each one's dynamic loader (`PT_INTERP`/`ld.so`, resolved at compile time into
@@ -1318,7 +1359,7 @@ impl Plan {
             dev_allow,
             tmp_size_mib: ep.fs.tmp.size_mib,
             proc_hidepid: ep.proc.hidepid,
-            proc: ProcView::Full,
+            proc,
             binder: true,
             mask_paths,
             mask_dir_paths,

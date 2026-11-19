@@ -17,6 +17,7 @@
 
 use std::path::PathBuf;
 
+use kennel_lib_policy::procfs::Synth;
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet};
 use kennel_lib_syscall::namespace::Namespaces;
 use kennel_lib_syscall::process::{resource_by_name, resource_name};
@@ -399,13 +400,62 @@ const fn ttl_action_from_byte(b: u8) -> kennel_lib_policy::TtlAction {
 
 /// Encode the view's [`ProcView`] (#218).
 fn put_proc_view(w: &mut Writer, v: &ProcView) {
-    let _ = (w, v);
+    match v {
+        ProcView::Full => w.u8(0),
+        ProcView::Curated {
+            synthesize,
+            passthrough,
+        } => {
+            w.u8(1);
+            w.count(synthesize.len());
+            for s in synthesize {
+                w.u8(match s {
+                    Synth::Cpuinfo => 0,
+                    Synth::Meminfo => 1,
+                    Synth::Stat => 2,
+                    Synth::Version => 3,
+                });
+            }
+            w.count(passthrough.len());
+            for name in passthrough {
+                w.bytes(name.as_bytes());
+            }
+        }
+    }
 }
 
 /// Decode a [`ProcView`] (#218).
 fn get_proc_view(r: &mut Reader<'_>) -> Result<ProcView, PlanWireError> {
-    let _ = r;
-    Ok(ProcView::Full)
+    match r.u8()? {
+        0 => Ok(ProcView::Full),
+        1 => {
+            let mut synthesize = Vec::new();
+            for _ in 0..r.count()? {
+                synthesize.push(match r.u8()? {
+                    0 => Synth::Cpuinfo,
+                    1 => Synth::Meminfo,
+                    2 => Synth::Stat,
+                    3 => Synth::Version,
+                    _ => return Err(PlanWireError::BadTag),
+                });
+            }
+            let mut passthrough = Vec::new();
+            for _ in 0..r.count()? {
+                let name = String::from_utf8(r.bytes()?).map_err(|_| PlanWireError::BadString)?;
+                // A passthrough is one top-level /proc name; a separator would let a
+                // tampered blob name a path the curation never vetted.
+                if name.is_empty() || name.contains('/') || name == "." || name == ".." {
+                    return Err(PlanWireError::BadString);
+                }
+                passthrough.push(name);
+            }
+            Ok(ProcView::Curated {
+                synthesize,
+                passthrough,
+            })
+        }
+        _ => Err(PlanWireError::BadTag),
+    }
 }
 
 fn put_view(w: &mut Writer, v: &ShimView) {

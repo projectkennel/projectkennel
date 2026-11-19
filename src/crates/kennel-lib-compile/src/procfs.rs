@@ -29,8 +29,35 @@ use kennel_lib_policy::PolicyError;
 ///
 /// Returns [`PolicyError::SourceValidation`] with one message per refused entry.
 pub fn validate(read: &[String]) -> Result<Vec<String>, PolicyError> {
-    let _ = (read, classify_read, std::marker::PhantomData::<ProcRead>);
-    todo!("procfs curation (#218)")
+    let mut warnings: Vec<String> = Vec::new();
+    let mut errs: Vec<String> = Vec::new();
+    for entry in read {
+        match classify_read(entry) {
+            Some(ProcRead::Whole) if warnings.is_empty() => warnings.push(format!(
+                "fs.read `{entry}` serves the host's real, uncurated /proc: every host-global \
+                 entry (/proc/sys, /proc/kallsyms, /proc/modules, /proc/cmdline, …) becomes \
+                 readable. Every process already reads its own /proc/self under the curated \
+                 view; grant `/proc/self/**` plus the specific top-level files the workload \
+                 needs (/proc/cpuinfo, /proc/meminfo, /proc/stat, /proc/version are \
+                 synthesized) unless the real host view is the point."
+            )),
+            Some(ProcRead::Nested { top }) => errs.push(format!(
+                "fs.read `{entry}` sits inside the host-global /proc/{top}, which cannot be \
+                 granted below its top level (the one /proc rule would expose all of it); grant \
+                 `/proc/{top}/**` explicitly if the workload needs it"
+            )),
+            Some(ProcRead::NonCanonical) => errs.push(format!(
+                "fs.read `{entry}` is not a canonical /proc path (empty, `.`, `..` or glob \
+                 component)"
+            )),
+            _ => {}
+        }
+    }
+    if errs.is_empty() {
+        Ok(warnings)
+    } else {
+        Err(PolicyError::SourceValidation(errs))
+    }
 }
 
 #[cfg(test)]
@@ -44,7 +71,10 @@ mod tests {
     fn errors(r: Result<Vec<String>, PolicyError>) -> Vec<String> {
         match r {
             Err(PolicyError::SourceValidation(ms)) => ms,
-            other => panic!("expected SourceValidation, got {other:?}"),
+            other => {
+                assert!(other.is_err(), "expected SourceValidation, got {other:?}");
+                Vec::new()
+            }
         }
     }
 
@@ -73,9 +103,12 @@ mod tests {
         for p in ["/proc", "/proc/**"] {
             let w = validate(&reads(&[p, "/proc/self/**"])).expect("valid");
             assert_eq!(w.len(), 1, "{p}: {w:?}");
-            assert!(w[0].contains(p), "{p}: names the grant: {w:?}");
             assert!(
-                w[0].contains("/proc/sys"),
+                w.first().map_or("", String::as_str).contains(p),
+                "{p}: names the grant: {w:?}"
+            );
+            assert!(
+                w.first().map_or("", String::as_str).contains("/proc/sys"),
                 "{p}: names what it exposes: {w:?}"
             );
         }
@@ -99,9 +132,16 @@ mod tests {
     fn a_path_inside_a_global_entry_is_refused_with_the_fix() {
         let e = errors(validate(&reads(&["/proc/sys/kernel/osrelease"])));
         assert_eq!(e.len(), 1, "{e:?}");
-        assert!(e[0].contains("/proc/sys/kernel/osrelease"), "{e:?}");
         assert!(
-            e[0].contains("/proc/sys/**"),
+            e.first()
+                .map_or("", String::as_str)
+                .contains("/proc/sys/kernel/osrelease"),
+            "{e:?}"
+        );
+        assert!(
+            e.first()
+                .map_or("", String::as_str)
+                .contains("/proc/sys/**"),
             "suggests the top-level grant: {e:?}"
         );
     }

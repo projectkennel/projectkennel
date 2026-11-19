@@ -40,7 +40,12 @@ pub struct Kernel {
 ///
 /// Returns the OS error if `sysinfo(2)` fails.
 pub fn memory() -> io::Result<Memory> {
-    todo!("procfs curation (#218)")
+    let info = nix::sys::sysinfo::sysinfo().map_err(io::Error::from)?;
+    Ok(Memory {
+        total: info.ram_total(),
+        free: info.ram_unused(),
+        uptime_secs: info.uptime().as_secs(),
+    })
 }
 
 /// Read the kernel identity via `uname(2)`.
@@ -49,14 +54,28 @@ pub fn memory() -> io::Result<Memory> {
 ///
 /// Returns the OS error if `uname(2)` fails, or `InvalidData` if a field is not UTF-8.
 pub fn kernel() -> io::Result<Kernel> {
-    todo!("procfs curation (#218)")
+    let uts = nix::sys::utsname::uname().map_err(io::Error::from)?;
+    let text = |field: &std::ffi::OsStr, name: &str| {
+        field.to_str().map(str::to_owned).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("uname {name} is not UTF-8"),
+            )
+        })
+    };
+    Ok(Kernel {
+        sysname: text(uts.sysname(), "sysname")?,
+        release: text(uts.release(), "release")?,
+        version: text(uts.version(), "version")?,
+        machine: text(uts.machine(), "machine")?,
+    })
 }
 
 /// The number of CPUs this process may run on: its affinity mask, further capped by a cgroup
 /// v2 `cpu.max` quota (`std::thread::available_parallelism`). At least 1.
 #[must_use]
 pub fn usable_cpus() -> usize {
-    todo!("procfs curation (#218)")
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 #[cfg(test)]

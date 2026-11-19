@@ -35,9 +35,11 @@ argv = [
     fail() { echo "proc-curated: $*" >&2; exit 1; }
 
     # 1. Children and grandchildren read their OWN /proc/self.
-    c="$(sh -c 'awk "/^Pid:/ {print \\$2}" /proc/self/status; echo $$ >&2' 2>/tmp/c.pid)" \
+    # The child prints its $$ then execs awk, so the awk reading /proc/self IS that child.
+    c="$(sh -c 'echo $$; exec awk "/^Pid:/ {print \\$2}" /proc/self/status')" \
         || fail "child cannot read /proc/self/status"
-    [ "$c" = "$(cat /tmp/c.pid)" ] || fail "child read pid $c, expected its own $(cat /tmp/c.pid)"
+    set -- $c
+    [ "$#" = 2 ] && [ "$1" = "$2" ] || fail "child read '$c' — not its own pid"
     g="$(sh -c 'sh -c "head -1 /proc/self/status"')" || fail "grandchild cannot read /proc/self/status"
     case "$g" in Name:*) ;; *) fail "grandchild read '$g'" ;; esac
     cat /proc/self/maps >/dev/null || fail "child cannot read /proc/self/maps"
@@ -54,8 +56,7 @@ argv = [
     [ -e /proc/loadavg ] && [ ! -s /proc/loadavg ] || fail "/proc/loadavg is not masked empty"
     [ -d /proc/sys ] && [ -z "$(ls -A /proc/sys)" ] || fail "/proc/sys is not masked empty"
 
-    # 4. No mask scaffolding left in /tmp (beyond this script's own file).
-    rm -f /tmp/c.pid
+    # 4. The curation's scratch sources are unlinked (only the pre-existing trust masks remain).
     [ -z "$(ls -A /tmp | grep -v '^\\.kennel-mask')" ] || fail "/tmp holds: $(ls -A /tmp)"
     exit 0
     """,

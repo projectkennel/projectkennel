@@ -694,6 +694,24 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     // owner-only is private-and-usable (no other uid exists in the kennel to grant). Fixed, not
     // policy-derived — a per-policy DAC mode gated no real adversary here.
     mount::mount_tmpfs(&tmp, Some(view.tmp_size_mib), Some("0700"), false, true)?;
+    // 5a. Curate the fresh /proc (#218): the workload's single /proc read rule exposes only
+    //     per-process entries, the synthesized templates, and the policy's named passthroughs —
+    //     every other top-level entry is masked empty. The over-mount sources are staged in the
+    //     private /tmp and unlinked once mounted.
+    if let ProcView::Curated {
+        synthesize,
+        passthrough,
+    } = &view.proc
+    {
+        let facts = procfs::ProcFacts::gather()?;
+        procfs::curate(
+            &proc,
+            &under(Path::new("/tmp/.kennel-proc")),
+            synthesize,
+            passthrough,
+            &facts,
+        )?;
+    }
     // Private POSIX shared memory at /dev/shm — a fresh per-kennel tmpfs like /tmp, so `shm_open(3)`
     // works (Wayland compositors, Chromium, …). The constructed minimal /dev exists above; this adds
     // the conventional shm tmpfs inside it (mode 1777 like the host's).
@@ -1934,10 +1952,11 @@ mod tests {
     #[test]
     fn a_nested_or_non_canonical_proc_grant_fails_closed() {
         for g in ["/proc/sys/kernel/osrelease", "/proc/../etc"] {
-            match plan_with_reads(&[g]) {
-                Err(SpawnError::InvalidPolicy(m)) => assert!(m.contains(g), "{m}"),
-                other => panic!("{g}: expected InvalidPolicy, got {other:?}"),
-            }
+            let r = plan_with_reads(&[g]);
+            assert!(
+                matches!(&r, Err(SpawnError::InvalidPolicy(m)) if m.contains(g)),
+                "{g}: expected InvalidPolicy naming the grant, got {r:?}"
+            );
         }
     }
 

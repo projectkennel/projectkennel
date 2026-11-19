@@ -16,8 +16,9 @@
 //!
 //! The crate stays pure: this is lexical classification of a grant string, no I/O.
 
-/// A top-level `/proc` file the view synthesizes from a template rather than exposing the
-/// host's real one. Templates are filled only with values a syscall already exposes to the
+/// A top-level `/proc` file the view synthesizes from a template.
+///
+/// The host's real one is never exposed. Templates are filled only with values a syscall already exposes to the
 /// workload (`sched_getaffinity`/cgroup quota, `sysinfo(2)`, `uname(2)`), so a synthesized
 /// file reveals nothing the workload could not learn anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -50,13 +51,13 @@ impl Synth {
     /// The entry named `name` (a top-level `/proc` file name), if it is synthesizable.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        let _ = name;
-        todo!("procfs curation (#218)")
+        Self::ALL.into_iter().find(|s| s.name() == name)
     }
 }
 
-/// Top-level `/proc` names that are per-process, so served by the real procfs under the
-/// whole-`/proc` Landlock rule: the `self`/`thread-self` links and the two compatibility
+/// Top-level `/proc` names that are per-process.
+///
+/// They are served by the real procfs under the whole-`/proc` Landlock rule: the `self`/`thread-self` links and the two compatibility
 /// links that resolve into them (`net` → `self/net`, `mounts` → `self/mounts`). Numeric
 /// (`/proc/<pid>`) entries are per-process too and are recognised separately.
 pub const PER_PROCESS_LINKS: [&str; 4] = ["self", "thread-self", "net", "mounts"];
@@ -86,13 +87,50 @@ pub enum ProcRead {
     NonCanonical,
 }
 
-/// Classify one `fs.read` entry. `None` when the entry is not under `/proc` (matched on a
+/// Classify one `fs.read` entry.
+///
+/// `None` when the entry is not under `/proc` (matched on a
 /// component boundary: `/procfoo` is not under `/proc`). A trailing `/**` or `/*` glob is
 /// stripped first, as for every other grant.
 #[must_use]
 pub fn classify_read(entry: &str) -> Option<ProcRead> {
-    let _ = entry;
-    todo!("procfs curation (#218)")
+    let stripped = entry
+        .strip_suffix("/**")
+        .or_else(|| entry.strip_suffix("/*"))
+        .unwrap_or(entry);
+    let rest = stripped.strip_prefix("/proc")?;
+    // Component boundary: `/procfoo` is not under `/proc`.
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    // A doubled separator (`/proc//x`) is an empty component: non-canonical.
+    if rest.starts_with("//") {
+        return Some(ProcRead::NonCanonical);
+    }
+    let rest = rest.trim_start_matches('/');
+    if rest.is_empty() {
+        return Some(ProcRead::Whole);
+    }
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == ".." || p.contains('*'))
+    {
+        return Some(ProcRead::NonCanonical);
+    }
+    let top = parts.first().copied().unwrap_or_default();
+    if top.bytes().all(|b| b.is_ascii_digit()) || PER_PROCESS_LINKS.contains(&top) {
+        return Some(ProcRead::PerProcess);
+    }
+    if parts.len() > 1 {
+        return Some(ProcRead::Nested {
+            top: top.to_owned(),
+        });
+    }
+    Some(Synth::from_name(top).map_or_else(
+        || ProcRead::Passthrough(top.to_owned()),
+        ProcRead::Synthesized,
+    ))
 }
 
 #[cfg(test)]

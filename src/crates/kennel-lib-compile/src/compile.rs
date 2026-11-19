@@ -122,6 +122,9 @@ pub fn compile(
     crate::identity::validate(&effective)?;
     let spawn_grant = crate::spawn::resolve_grant(&effective, source, trust)?;
     let translated = translate(&effective)?;
+    warnings.extend(crate::procfs::validate(
+        &translated.effective_policy.fs.read,
+    )?);
     warnings.extend(translated.effective_policy.exec.deny_warnings());
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
