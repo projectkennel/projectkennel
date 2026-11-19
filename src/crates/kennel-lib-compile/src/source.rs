@@ -2115,8 +2115,54 @@ impl SourcePolicy {
     /// on a read grant there is nothing writable to relax, on a `remove` it names nothing, and
     /// `fs.deny`/`exec.allow` entries are not binds. Each is refused here, per-artefact.
     fn check_mmap_exec_entries(&self, errs: &mut Vec<String>) {
-        let _ = errs;
-        // placeholder (#229): the checks land in the fix commit
+        let flagged = |e: &&PathEntry| e.mmap_exec.is_some();
+        let mut refuse = |where_: &str, e: &PathEntry, why: &str| {
+            errs.push(format!(
+                "[[{where_}]] \"{}\" carries `mmap_exec`; {why}",
+                e.path.join(", ")
+            ));
+        };
+        if let Some(fs) = &self.fs {
+            if let Some(PathField::Delta(d)) = &fs.read {
+                for e in d.add.iter().filter(flagged) {
+                    refuse(
+                        "fs.read.add",
+                        e,
+                        "it relaxes a writable bind, and fs.read grants none",
+                    );
+                }
+                for e in d.remove.iter().filter(flagged) {
+                    refuse("fs.read.remove", e, "a remove grants nothing");
+                }
+            }
+            if let Some(PathField::Delta(d)) = &fs.write {
+                for e in d.remove.iter().filter(flagged) {
+                    refuse("fs.write.remove", e, "a remove grants nothing to relax");
+                }
+            }
+            for e in fs
+                .deny
+                .iter()
+                .flat_map(PathField::delta_entries)
+                .filter(flagged)
+            {
+                refuse("fs.deny.*", e, "a deny is not a bind");
+            }
+        }
+        if let Some(exec) = &self.exec {
+            for e in exec
+                .allow
+                .iter()
+                .flat_map(PathField::delta_entries)
+                .filter(flagged)
+            {
+                refuse(
+                    "exec.allow.*",
+                    e,
+                    "it applies to `fs.write` grants only (exec.allow names binaries to run)",
+                );
+            }
+        }
     }
 
     /// A runnable **leaf** (a `name` + `template_base`) may not declare

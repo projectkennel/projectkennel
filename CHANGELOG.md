@@ -8,6 +8,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Runtime & enforcement
 
+- **BREAKING for native code in writable trees: writable binds are now `noexec,nosuid,nodev`.**
+  A writable bind (an `fs.write` grant such as a project tree) used to carry the host mount's
+  flags, so native code written there could be `dlopen`ed or run through the dynamic loader — and,
+  unlike `/tmp`, it persists across sessions (#229). Every writable bind is now hardened
+  recursively (`mount_setattr(AT_RECURSIVE)`, submounts included); read-only binds are unchanged.
+  `execve` from writable paths was already refused. **Workloads that load native code from their
+  own writable tree break until the grant opts out:** Node `.node` addons in `node_modules`,
+  extension modules in an in-project venv, Rust proc-macros under `target/`. The symptom is
+  `failed to map segment from shared object`; the fix is `mmap_exec = true` on that
+  `[[fs.write.add]]` entry, which the compiler warns about (HOWTO §7).
 - **Landlock denials inside a kennel are now audit-logged.** The seal now passes
   `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` to `landlock_restrict_self` on Landlock ABI 7+
   (kernel 6.15+). kennel seals in the spawn child and then `execve`s the workload, and the
@@ -55,6 +65,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Policy schema changes
 
+- **`mmap_exec` on `[[fs.write.add]]` entries** (#229): opt that writable grant out of `noexec`.
+  Legal only on `fs.write` adds; it folds with its entry (a later `remove`, a re-add with
+  `false`, or a set-form `fs.write` drops it). Settled as `fs.write_mmap_exec`, omitted when empty.
+  Warned per grant at compile. Same in-cycle v5 re-pin as `[fs.tmp] mmap_exec`; owes the v6 bump.
 - **`[fs.tmp] mmap_exec`** (default `false`): mount the kennel's private `/tmp` without `noexec`, so
   a runtime can `dlopen` native code it unpacks there (Bun single-file executables such as
   `opencode` extract their TUI library into `$TMPDIR`, #218). `execve` from `/tmp` stays refused

@@ -254,8 +254,21 @@ fn tmp_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec
 /// Louder than the `/tmp` case: a bind persists, so native code the workload plants there is
 /// loaded again next session — by the agent, or by the operator's own tools outside the kennel.
 fn write_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec<String> {
-    let _ = effective;
-    Vec::new() // placeholder (#229): the warning lands in the fix commit
+    effective
+        .fs
+        .write_mmap_exec
+        .iter()
+        .map(|p| {
+            format!(
+                "fs.write `{p}` has mmap_exec = true: native code the workload writes there can be \
+                 loaded (including whole programs via the dynamic loader), and unlike /tmp it \
+                 PERSISTS — a planted library is loaded again next session, by the agent or by \
+                 your own tools outside the kennel. execve stays refused. Keep it to trees that \
+                 legitimately load their own native code (node_modules addons, an in-project \
+                 venv, Rust target/)."
+            )
+        })
+        .collect()
 }
 
 /// Freeform is the open footgun (any value the agent supplies is accepted), so it is

@@ -827,6 +827,11 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
             })?;
             // `fd` is dropped here — after mount::bind has consumed the
             // /proc/self/fd/N path and the bind is in place.
+            // #229: a writable bind no longer carries the host mount's exec/suid/dev flags.
+            // Harden the whole subtree (submounts too) noexec,nosuid,nodev; a grant that opted
+            // into executable mappings keeps exec (nosuid,nodev still apply).
+            kennel_lib_syscall::namespace::harden_mount_tree(&dest, b.mmap_exec)
+                .map_err(|e| io::Error::new(e.kind(), format!("harden {}: {e}", dest.display())))?;
         } else {
             // A *redirected* read-only source (W15) resolves with RESOLVE_NO_MAGICLINKS:
             // the source path is an operator assertion of origin, and a procfs/sysfs magic

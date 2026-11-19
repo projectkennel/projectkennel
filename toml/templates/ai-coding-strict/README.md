@@ -34,6 +34,14 @@ Switching agents is a one-line change (the API host). Everything else — the
 credential denylist, the constructed `$HOME`, proxy-only egress, the seccomp
 filter, the ssh-agent — is inherited.
 
+## Native code in the project tree
+
+Writable grants are mounted `noexec`, so native code cannot be loaded from the project tree by
+default: Node `.node` addons in `node_modules`, extension modules in an in-project venv, Rust
+proc-macros under `target/`. If the project needs them, add `mmap_exec = true` to its
+`[[fs.write.add]]` entry; the compiler warns, because code planted there persists. For runtimes
+that unpack native code into `/tmp`, use [`ai-coding-native`](../ai-coding-native/).
+
 ## Defends / residuals
 
 - **Defends:** T1.1 (credential recon), T1.2 (post-install scripts), T1.3 (compromised

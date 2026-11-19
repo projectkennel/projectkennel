@@ -440,6 +440,9 @@ pub struct ProxyEndpoint {
 /// so the work survives the kennel's teardown even though the new root that
 /// frames it is an ephemeral tmpfs (§7.4.5: the constructed view is scaffolding;
 /// the bound content is not).
+// allow(struct_excessive_bools): a wire/data DTO, not a state machine — each bool is an
+// independent per-bind property (writable, exclusive, redirected, mmap_exec), not a mode.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindMount {
     /// The host path bound in.
@@ -1207,6 +1210,9 @@ impl Plan {
         // source path the writable bind carries.
         let exclusive_sources: std::collections::BTreeSet<PathBuf> =
             ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
+        // The writable grants that keep executable mappings (#229), keyed like the grants.
+        let mmap_exec_roots: std::collections::BTreeSet<PathBuf> =
+            ep.fs.write_mmap_exec.iter().map(|p| glob_root(p)).collect();
         // The redirects (W15), keyed like the grants (glob-rooted) so a redirected grant's
         // lookup matches its `fs_grants` entry. Translate guarantees each `path` is granted
         // and maps to exactly one `source`.
@@ -1240,6 +1246,8 @@ impl Plan {
             ));
             if !is_special_mount(&granted) {
                 let exclusive = writable && exclusive_sources.contains(&granted);
+                // #229: a writable bind is hardened noexec unless its grant opted out.
+                let mmap_exec = writable && mmap_exec_roots.contains(&granted);
                 // A redirect decouples the bind's host origin from the granted (view) path;
                 // everything view-side — the target, the Landlock rule, the exclusive match —
                 // keys on the granted path as before.
@@ -1252,7 +1260,7 @@ impl Plan {
                     writable,
                     exclusive,
                     redirected,
-                    mmap_exec: false, // placeholder (#229): carried in the fix commit
+                    mmap_exec,
                 });
             }
         }

@@ -681,8 +681,28 @@ fn fold_fs(p: &FsSection, c: &FsSection, warn: &mut Vec<String>) -> FsSection {
 /// flag); a `Delta` inherits them, drops any whose path it removes, and adds (or, with
 /// `mmap_exec = false`, drops) one per flagged add's paths; an absent field inherits unchanged.
 fn fold_write_mmap_exec(p: &FsSection, c: &FsSection) -> Vec<String> {
-    let _ = c;
-    p.mmap_exec.clone() // placeholder (#229): the fold lands in the fix commit
+    match &c.write {
+        None => p.mmap_exec.clone(),
+        Some(PathField::Set(_)) => Vec::new(),
+        Some(PathField::Delta(d)) => {
+            let mut out = p.mmap_exec.clone();
+            out.retain(|path| !d.remove.iter().any(|e| e.path.contains(path)));
+            for e in &d.add {
+                match e.mmap_exec {
+                    Some(true) => {
+                        for path in &e.path {
+                            if !out.contains(path) {
+                                out.push(path.clone());
+                            }
+                        }
+                    }
+                    Some(false) => out.retain(|path| !e.path.contains(path)),
+                    None => {}
+                }
+            }
+            out
+        }
+    }
 }
 
 /// Fold the `source` redirects (W15) one chain step, mirroring [`fold_pathfield`] per axis.
