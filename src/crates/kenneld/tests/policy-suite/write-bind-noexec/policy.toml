@@ -1,0 +1,74 @@
+# ============================================================================
+# Suite case: write-bind-noexec — writable binds are noexec unless opted out (#229).
+#
+# A writable bind used to carry the host mount's flags, so native code written into a project tree
+# could be dlopen'ed (and, unlike /tmp, it persists across sessions). Writable binds are now
+# hardened noexec,nosuid,nodev — recursively — unless the grant sets `mmap_exec = true`. This case
+# proves, from the inside, with two writable grants (setup.sh creates them on the host):
+#
+#   1. the default grant is mounted noexec and a .so copied into it does NOT load;
+#   2. the `mmap_exec = true` grant is mounted without noexec and the same .so loads;
+#   3. both are nosuid,nodev, and execve of an executable copied into either is refused.
+#
+# The kennel's exit code IS the verdict.
+# ============================================================================
+
+template_name = "write-bind-noexec"
+template_base = "base-confined"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/proc/self/**"]
+
+[[fs.write.add]]
+path = "~/kennel-e2e-229/plain/**"
+reason = "e2e: a default writable grant (noexec)"
+
+[[fs.write.add]]
+path = "~/kennel-e2e-229/mapped/**"
+reason = "e2e: a writable grant that opts into executable mappings"
+mmap_exec = true
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*", "/usr/bin/true"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    python3 -c "
+import ctypes, glob, os, shutil, subprocess
+
+home = os.path.expanduser('~')
+libz = (glob.glob('/usr/lib/*/libz.so.1') + glob.glob('/lib/*/libz.so.1'))[0]
+def opts(d):
+    m = [l.split()[3].split(',') for l in open('/proc/self/mounts') if l.split()[1] == d]
+    if not m:
+        raise SystemExit('%s is not a mount in the view' % d)
+    return m[-1]
+
+for name, want_load in [('plain', False), ('mapped', True)]:
+    d = '%s/kennel-e2e-229/%s' % (home, name)
+    o = opts(d)
+    if 'nosuid' not in o or 'nodev' not in o:
+        raise SystemExit('%s lacks nosuid/nodev: %s' % (d, o))
+    if ('noexec' in o) == want_load:
+        raise SystemExit('%s has the wrong noexec state: %s' % (d, o))
+    so = d + '/libzcopy.so'
+    shutil.copy(os.path.realpath(libz), so)
+    try:
+        ctypes.CDLL(so); loaded = True
+    except OSError:
+        loaded = False
+    if loaded != want_load:
+        raise SystemExit('%s: dlopen loaded=%s, wanted %s' % (d, loaded, want_load))
+    exe = d + '/true-copy'
+    shutil.copy('/usr/bin/true', exe); os.chmod(exe, 0o755)
+    try:
+        subprocess.run([exe], check=True)
+        raise SystemExit('execve from %s unexpectedly succeeded' % d)
+    except PermissionError:
+        pass
+"
+    """,
+]

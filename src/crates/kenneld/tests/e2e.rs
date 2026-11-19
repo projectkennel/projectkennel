@@ -132,6 +132,7 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 redirect: Vec::new(),
+                write_mmap_exec: Vec::new(),
                 cwd: kennel_lib_policy::settled::CwdPolicy::default(),
                 tmp: TmpPolicy {
                     writable: true,

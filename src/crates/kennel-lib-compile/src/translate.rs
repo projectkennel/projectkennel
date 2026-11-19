@@ -1453,6 +1453,7 @@ fn translate_fs(
         home_persist,
         home_readonly: home.readonly.unwrap_or(false),
         redirect,
+        write_mmap_exec: Vec::new(), // placeholder (#229): carried in the fix commit
         cwd,
         tmp,
         dev,

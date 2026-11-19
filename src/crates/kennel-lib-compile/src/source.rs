@@ -346,6 +346,14 @@ pub struct PathEntry {
     /// Threat tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub threats: Option<Threats>,
+    /// Allow executable file mappings (`mmap(PROT_EXEC)`, `dlopen`) from this writable grant
+    /// (#229). Writable binds are mounted `noexec` by default; `true` opts this grant out, for a
+    /// tree that legitimately loads its own native code (Node `.node` addons, an in-project
+    /// venv's extension modules, Rust proc-macros under `target/`). `execve` stays refused.
+    /// Legal only on a `[[fs.write.add]]` entry; warned at compile — a bind persists, so native
+    /// code planted there survives the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mmap_exec: Option<bool>,
 }
 
 /// The `{ add, remove }` increment over a path list (`[[fs.read.add]]` / `[[fs.read.remove]]`).
@@ -829,6 +837,12 @@ pub struct FsSection {
     #[serde(default, skip_deserializing)]
     #[cfg_attr(feature = "schema", schema(skip))]
     pub redirect: Vec<RedirectEntry>,
+    /// The folded `fs.write` paths whose binds allow executable mappings (#229), collected by the
+    /// chain fold from `mmap_exec = true` `[[fs.write.add]]` entries. Never authored at this key
+    /// (skipped on deserialize); the authoring surface is `mmap_exec` on the entry.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schema(skip))]
+    pub mmap_exec: Vec<String>,
 }
 
 /// One folded `source → path` fs redirect (W15): the view path and the host path serving it.
@@ -1865,6 +1879,7 @@ impl SourcePolicy {
         self.check_references(&mut errs);
         self.check_reasons(&mut errs);
         self.check_redirect_sources(&mut errs);
+        self.check_mmap_exec_entries(&mut errs);
         self.check_leaf_invariants(&mut errs);
         self.check_dbus(&mut errs);
         if errs.is_empty() {
@@ -2094,6 +2109,14 @@ impl SourcePolicy {
                 }
             }
         }
+    }
+
+    /// `mmap_exec` (#229) is legal only on an `fs.write` **add**: it relaxes a writable bind, so
+    /// on a read grant there is nothing writable to relax, on a `remove` it names nothing, and
+    /// `fs.deny`/`exec.allow` entries are not binds. Each is refused here, per-artefact.
+    fn check_mmap_exec_entries(&self, errs: &mut Vec<String>) {
+        let _ = errs;
+        // placeholder (#229): the checks land in the fix commit
     }
 
     /// A runnable **leaf** (a `name` + `template_base`) may not declare
@@ -2732,6 +2755,42 @@ image = \"docker.io/library/postgres:17\"
             errors_of(exec).iter().any(|m| m.contains("exec.allow")),
             "source on exec.allow is refused"
         );
+    }
+
+    /// `mmap_exec` (#229) is legal only on an `fs.write` add.
+    #[test]
+    fn mmap_exec_is_confined_to_fs_write_adds() {
+        fn errors_of(src: &str) -> Vec<String> {
+            match parse(src.as_bytes()).expect("parse").validate() {
+                Ok(()) => Vec::new(),
+                Err(PolicyError::SourceValidation(ms)) => ms,
+                Err(e) => vec![format!("unexpected error class: {e}")],
+            }
+        }
+        let head = "name = \"n\"\ntemplate_base = \"base-confined\"\n";
+        let ok = format!(
+            "{head}[[fs.write.add]]\npath = \"~/p/**\"\nreason = \"r\"\nmmap_exec = true\n"
+        );
+        assert!(
+            !errors_of(&ok).iter().any(|m| m.contains("mmap_exec")),
+            "{:?}",
+            errors_of(&ok)
+        );
+        for (table, needle) in [
+            ("fs.read.add", "fs.read"),
+            ("fs.write.remove", "remove"),
+            ("fs.deny.add", "fs.deny"),
+            ("exec.allow.add", "exec.allow"),
+        ] {
+            let bad =
+                format!("{head}[[{table}]]\npath = \"/a\"\nreason = \"r\"\nmmap_exec = true\n");
+            let errs = errors_of(&bad);
+            assert!(
+                errs.iter()
+                    .any(|m| m.contains("mmap_exec") && m.contains(needle)),
+                "{table}: {errs:?}"
+            );
+        }
     }
 
     /// `[fs] redirect` is fold-derived, never authored: the key is refused at parse.

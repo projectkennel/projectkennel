@@ -268,6 +268,21 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
+/// Harden the mount at `target` **and every mount beneath it** (`AT_RECURSIVE`): set `nosuid` and
+/// `nodev`, and `noexec` too unless `allow_exec_mappings` (#229). Used on writable binds, whose
+/// host flags would otherwise carry through; a plain `MS_REMOUNT` reaches only the top mount, so a
+/// submount inside a granted tree would escape it. Only *adds* restrictions, which is permitted on
+/// the kennel's own mounts in its user namespace.
+///
+/// # Errors
+///
+/// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
+pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) -> io::Result<()> {
+    let _ = (target, allow_exec_mappings);
+    todo!("writable binds noexec (#229)")
+}
+
 /// `move_mount(detached_fd → target)` — attach a detached mount (from [`open_tree_clone`]).
 ///
 /// The other half of the mesh handoff: a process holding `CAP_SYS_ADMIN` in its own user namespace

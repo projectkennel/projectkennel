@@ -1824,6 +1824,7 @@ pub fn run_kennel<P, L>(
                     writable: true,
                     exclusive: false,
                     redirected: false,
+                    mmap_exec: false,
                 });
             }
             // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability

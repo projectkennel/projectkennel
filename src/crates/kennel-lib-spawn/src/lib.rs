@@ -1176,6 +1176,7 @@ mod tests {
                     home_persist: Vec::new(),
                     home_readonly: false,
                     redirect: Vec::new(),
+                    write_mmap_exec: Vec::new(),
                     cwd: kennel_lib_policy::settled::CwdPolicy::default(),
                     tmp: TmpPolicy {
                         writable: true,
@@ -2142,6 +2143,36 @@ mod tests {
             .expect("plan");
             assert_eq!(plan.view.as_ref().expect("view").tmp_mmap_exec, on);
         }
+    }
+
+    /// #229: only the writable grants listed in `write_mmap_exec` keep executable mappings;
+    /// every other writable bind (and every read-only one) carries `mmap_exec = false`.
+    #[test]
+    fn write_mmap_exec_marks_only_its_writable_binds() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.write = vec!["/srv/proj/**".to_owned(), "/srv/other".to_owned()];
+        p.effective_policy.fs.write_mmap_exec = vec!["/srv/proj/**".to_owned()];
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let flag = |t: &str| {
+            view.binds
+                .iter()
+                .find(|b| b.target == Path::new(t))
+                .map(|b| (b.writable, b.mmap_exec))
+        };
+        assert_eq!(flag("/srv/proj"), Some((true, true)));
+        assert_eq!(flag("/srv/other"), Some((true, false)));
+        assert!(view
+            .binds
+            .iter()
+            .filter(|b| !b.writable)
+            .all(|b| !b.mmap_exec));
     }
 
     #[test]

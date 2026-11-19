@@ -129,6 +129,7 @@ pub fn compile(
     warnings.extend(unenforced_section_warnings(&effective));
     warnings.extend(spawn_manifest_warnings(&effective));
     warnings.extend(tmp_mmap_exec_warnings(&translated.effective_policy));
+    warnings.extend(write_mmap_exec_warnings(&translated.effective_policy));
     assemble(
         name,
         &translated,
@@ -247,6 +248,14 @@ fn tmp_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec
           unpack and dlopen native code (Bun single-file executables, #218)."
             .to_owned(),
     ]
+}
+
+/// Warn for each writable grant that opted out of `noexec` (`[[fs.write.add]] mmap_exec`, #229).
+/// Louder than the `/tmp` case: a bind persists, so native code the workload plants there is
+/// loaded again next session — by the agent, or by the operator's own tools outside the kennel.
+fn write_mmap_exec_warnings(effective: &kennel_lib_policy::EffectivePolicy) -> Vec<String> {
+    let _ = effective;
+    Vec::new() // placeholder (#229): the warning lands in the fix commit
 }
 
 /// Freeform is the open footgun (any value the agent supplies is accepted), so it is
@@ -529,6 +538,42 @@ mod tests {
         );
         assert!(!c.policy.effective_policy.fs.tmp.mmap_exec);
         assert!(tmp_warnings(&c).is_empty());
+    }
+
+    fn bind_warnings(c: &Compiled) -> Vec<&String> {
+        c.warnings
+            .iter()
+            .filter(|w| w.contains("fs.write") && w.contains("mmap_exec"))
+            .collect()
+    }
+
+    /// #229: a writable grant may opt out of `noexec`; only that grant is listed, and the compiler
+    /// warns once per opted-out grant, naming it.
+    #[test]
+    fn a_writable_grant_can_opt_into_mmap_exec_and_warns() {
+        let c = compile_leaf(
+            "name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n\
+             [[fs.write.add]]\npath = \"~/proj/**\"\nreason = \"project\"\nmmap_exec = true\n\
+             [[fs.write.add]]\npath = \"~/other/**\"\nreason = \"other\"\n",
+        );
+        assert_eq!(
+            c.policy.effective_policy.fs.write_mmap_exec,
+            vec!["~/proj/**".to_owned()]
+        );
+        let w = bind_warnings(&c);
+        assert_eq!(w.len(), 1, "{:?}", c.warnings);
+        assert!(w.first().is_some_and(|w| w.contains("~/proj/**")), "{w:?}");
+    }
+
+    /// No opt-out ⇒ nothing listed, no warning: every writable bind is `noexec`.
+    #[test]
+    fn writable_grants_are_noexec_by_default() {
+        let c = compile_leaf(
+            "name = \"leaf\"\ntemplate_base = \"ai-coding-strict\"\n\
+             [[fs.write.add]]\npath = \"~/proj/**\"\nreason = \"project\"\n",
+        );
+        assert!(c.policy.effective_policy.fs.write_mmap_exec.is_empty());
+        assert!(bind_warnings(&c).is_empty(), "{:?}", c.warnings);
     }
 
     fn proc_warnings(c: &Compiled) -> Vec<&String> {

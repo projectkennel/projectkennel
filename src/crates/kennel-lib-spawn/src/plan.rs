@@ -459,6 +459,10 @@ pub struct BindMount {
     /// bind needs no guard because its source *is* the granted path); a writable one already
     /// passes the stricter `RESOLVE_NO_SYMLINKS` guard every writable bind gets.
     pub redirected: bool,
+    /// A writable bind that allows executable file mappings (`fs.write_mmap_exec`, #229). Every
+    /// other writable bind is hardened `noexec,nosuid,nodev` (recursively) after it is mounted;
+    /// this one gets `nosuid,nodev` only. Meaningless (always `false`) on a read-only bind.
+    pub mmap_exec: bool,
 }
 
 /// How the view's fresh `/proc` is served (#218, [`kennel_lib_policy::procfs`]).
@@ -1103,6 +1107,7 @@ impl Plan {
                 writable,
                 exclusive: false,
                 redirected: false,
+                mmap_exec: false,
             });
         }
     }
@@ -1247,6 +1252,7 @@ impl Plan {
                     writable,
                     exclusive,
                     redirected,
+                    mmap_exec: false, // placeholder (#229): carried in the fix commit
                 });
             }
         }
