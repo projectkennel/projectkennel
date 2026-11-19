@@ -37,6 +37,12 @@ criteria = "safe-to-deploy"
 version = "2.3.0"
 notes = "§5.5 (DEPENDENCIES.md, 2026-05-31): 15 source files byte-identical to github.com/jedisct1/rust-ed25519-compact at tag 2.3.0. Source read for backdoors — no FFI/asm/process/net/fs/env; the one unsafe is the volatile secret-wipe; verification rejects non-canonical S (malleability) and weak/identity keys. Built default-features=false, features=[std]; x25519.rs/pem.rs not compiled."
 
+[[audits.ed25519-compact]]
+who = "Remco van Mook <remco.vanmook@gmail.com>"
+criteria = "safe-to-deploy"
+delta = "2.3.0 -> 2.6.1"
+notes = "§5.5 delta (2026-11-19): 12 source files byte-identical to github.com/jedisct1/rust-ed25519-compact @ 06b22ad (signed tag 2.6.1). Delta read: sha512 made public at our request (upstream #39; IV now as u64 words, same FIPS 180-4 constants) + a `reexports` module whose ct_codecs re-export is gated on `pem`, not `std` (our report #41 — 2.4.0 did not build with std-without-pem); verify now decodes A and R negated and rejects small-order and non-canonical encodings of both (stricter than 2.3.0's identity/zero check), with the same cofactor-tolerant equation; new precomputed BASE_TABLE for base-point multiplication, regenerated independently from the RFC 8032 base point — all 256 entries match; KeyPair::try_from_seed + zero-seed rejection; pem module cfg tidied (pem not enabled here); RFC 8032 and rejection test vectors added. Still one unsafe (volatile wipe), no FFI/asm/process/net/fs/env, no build.rs, no new non-optional deps."
+
 [[audits.itoa]]
 who = "Remco van Mook <remco.vanmook@gmail.com>"
 criteria = "safe-to-deploy"

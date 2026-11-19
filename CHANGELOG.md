@@ -77,6 +77,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **`ed25519-compact` 2.3.0 → 2.6.1; `hmac-sha512` removed.** 2.4.0 made the crate's internal
+  SHA-512 public at our request (upstream #39), and our report #41 fixed its `std`-without-`pem`
+  build, so the SSHSIG preimage hash now comes from `ed25519_compact::sha512` and the separate
+  `hmac-sha512` crate (and the only ISC licence in the graph) is gone. 2.6.1's verifier is
+  stricter: it rejects small-order and non-canonical encodings of both the public key and `R`,
+  with the same cofactor-tolerant equation. §5.5: the `.crate` is byte-identical to the signed
+  `2.6.1` tag, the delta was read, and the new 1,352-line precomputed base-point table was
+  regenerated independently from the RFC 8032 base point (all 256 entries match). Still zero
+  transitive deps under `default-features = false, features = ["std"]`. Two fewer third-party
+  crates on the TCB path since 0.7.1, counting `basic-toml`.
 - **`basic-toml` is now the first-party `kennel-lib-toml`.** RUSTSEC-2026-0374 marked
   `basic-toml` 0.1.10 unmaintained (upstream archived 2025-03-02). It parses the settled policy on
   the TCB path, so rather than migrate to `toml` (a chain of new external crates into the TCB) its
