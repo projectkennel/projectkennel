@@ -324,6 +324,9 @@ pub struct BinderPrep {
     /// here (its manager), and each `[net.udp]` consumer's manager delivers a session through it. One
     /// [`crate::tun_sink::TunSink`] for the whole daemon, cloned into every manager.
     pub tun_sink: crate::tun_sink::TunSink,
+    /// Whether this kennel's signed policy provides the tun-egress capability — only such a
+    /// kennel's manager may register (or, by dying, clear) the daemon-global sink.
+    pub tun_provider: bool,
 }
 
 /// Everything needed to bring one kennel up.
@@ -1569,6 +1572,7 @@ fn acquire_binder_node0(
         prep.catalogue.clone(),
         prep.activator.clone(),
         prep.tun_sink.clone(),
+        prep.tun_provider,
         tun_session,
     )
 }

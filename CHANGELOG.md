@@ -8,6 +8,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A kennel can no longer register itself as another kennel's provider.** Three binder verbs
+  handed their sender a cross-kennel role without checking who sent them. Any kennel could send
+  `REGISTER_TUN_SINK` and receive every `[net.udp]` kennel's UDP egress, DNS included. Any kennel
+  with a `[dbus]` section could send `ADD_SERVICE` on the shared mesh bus and replace the D-Bus
+  broker for all the others, or read their filters with `GET_SESSION_POLICY`. kenneld now honours
+  each only from the kennel its own registry says is that capability's provider, and audits a
+  refusal.
 - **The privileged helpers no longer trust their caller for three things.** Supplementary gids
   to map into a kennel must be groups the caller is in, and a workload is never given gid 0. The
   per-user bpffs for host-mode egress is mounted on a directory reached without following a

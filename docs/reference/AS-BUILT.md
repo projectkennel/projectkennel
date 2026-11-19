@@ -26,6 +26,34 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — node-0 registration verbs authorise their sender
+
+- **Bears-on:** Kennel book Vol 2, the service-catalogue and mesh chapters (§7.13.4a/c), the tun
+  egress chapter (§8 / W2). THREATS T5.1 ("only kenneld may register them" — untrue as built).
+- **Change:** three node-0 verbs gave their sender a cross-kennel role and none checked who sent
+  them. Confirmed on the test VM from an ordinary `[dbus]` consumer kennel: `REGISTER_TUN_SINK`
+  and `ADD_SERVICE org.projectkennel.dbus-broker` were both answered `OK`.
+  - `ADD_SERVICE` (mesh bus): the handle map was overwritten for any sender. The mesh device is
+    mounted into every participant, so a consumer could replace the provider — for the D-Bus bus,
+    become the broker for every other kennel. Now honoured only if the sender's kennel (kernel-
+    stamped pid → cgroup → ctx) is, in the daemon's registry, a **supervised provider at the bus's
+    tier** whose signed policy `[[provides]]` that name (`server::provides_at`). `KennelMeta`
+    gains `provider_tier`, set by the daemon when the supervisor starts a provider.
+  - `GET_SESSION_POLICY` (mesh bus): answered any participant for any ctx. Now only that bus's
+    broker (the same predicate, for the bus's broker service).
+  - `REGISTER_TUN_SINK` (every kennel's own bus): the handler's comment said "reaching the handler
+    is the authorization", but every kennel can send it, and the sink is daemon-global. Now only
+    a kennel whose **signed policy provides** `org.projectkennel.tun-udp` may register, and only
+    such a kennel's manager clears the sink on a death notification. Not restricted to supervised
+    start: the suite (and an operator) may run the broker by hand.
+  - Refusals reply `DENIED` and are audited (`mesh.add-service` / `mesh.session-policy` /
+    `binder.tun`, outcome `deny`).
+- **Why:** arrival on a channel every kennel can reach proves nothing about the sender.
+- **Not changed:** an overwritten mesh handle is still not released, the handle map is unbounded
+  for an authorised provider, and handlers still take a handle from payload bytes without proof
+  the driver translated it.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — the helpers check what they are given: granted gids, the bpffs pin root, the exclusive over-mount
 
 - **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory and its

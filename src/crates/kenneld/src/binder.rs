@@ -92,6 +92,8 @@ pub struct Lifecycle {
 /// `Some` iff it is a `[net.udp]` tun consumer (its presence is the grant).
 struct TunCtx<'a> {
     sink: &'a crate::tun_sink::TunSink,
+    /// Whether this kennel's signed policy provides the tun capability — required to register.
+    provider: bool,
     session: Option<&'a [u8]>,
     cm: &'a Arc<ContextManager>,
 }
@@ -146,6 +148,7 @@ pub fn spawn(
     catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
     tun_sink: crate::tun_sink::TunSink,
+    tun_provider: bool,
     tun_session: Option<Vec<u8>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
@@ -172,6 +175,7 @@ pub fn spawn(
     let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
         let tun = TunCtx {
             sink: &tun_sink,
+            provider: tun_provider,
             session: tun_session.as_deref(),
             cm: &cm_for_handler,
         };
@@ -195,7 +199,9 @@ pub fn spawn(
     // A watched node died: the tun-broker's sink (clear it) or an inbound mirror handle (drop it,
     // §7.5.7 guard 1). The sink is keyed by a sentinel cookie distinct from every mirror cookie.
     let death: DeathHandler = Arc::new(move |cookie: u64, conn: &Connection| {
-        if cookie == crate::tun_sink::SINK_DEATH_COOKIE {
+        // Only the tun-broker's own manager ever watches the sink node, and only it may clear the
+        // daemon-global record.
+        if cookie == crate::tun_sink::SINK_DEATH_COOKIE && tun_provider {
             tun_sink_for_death.clear();
             let _ = conn.dead_binder_done(cookie);
             return;
@@ -945,8 +951,9 @@ fn register_mirror(
 /// is daemon-global — not per-kennel — because the broker and its consumers run in different kennels
 /// (different binder instances), so a consumer's deliver reaches the broker over *its* connection.
 ///
-/// Only the tun-broker's own per-kennel bus ever carries this verb (a consumer never holds the sink
-/// node), so reaching the handler is the authorization. The reply is a status byte.
+/// Any kennel can send this verb to its own node 0, so the handler authorises it: only a kennel
+/// whose signed policy provides the tun capability ([`TunCtx::provider`], read by the daemon from
+/// the settled policy it verified) may register. The reply is a status byte.
 fn register_tun_sink(
     tun: &TunCtx<'_>,
     incoming: &Incoming,
@@ -955,6 +962,19 @@ fn register_tun_sink(
     writer: &Writer,
 ) -> Reply {
     use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+
+    // The sink is daemon-global: whoever registers it receives every `[net.udp]` kennel's egress
+    // session. Every kennel can send this verb to its own node 0, so the verb arriving proves
+    // nothing — only a kennel whose signed policy provides the tun capability may register.
+    if !tun.provider {
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Deny,
+        ));
+        return Reply::Data(one(status::DENIED));
+    }
 
     // The node object the broker sent is the trailing flat_binder_object (the driver translated it to
     // a handle for us); REGISTER_TUN_SINK carries no data before it.

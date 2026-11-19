@@ -266,6 +266,10 @@ struct KennelMeta {
     /// selects the named section; it holds no per-service filter table of its own. `None` until the
     /// policy loads (set by [`Shared::set_settled`] after `reserve`, mirroring [`Shared::set_broker`]).
     settled: Option<std::sync::Arc<kennel_lib_policy::SettledPolicy>>,
+    /// The enablement tier this kennel was started at **as a supervised mesh provider**, or `None`
+    /// for an ordinary run. A kennel may register a mesh service only as a provider: this is set
+    /// by the daemon when the supervisor activates it, never by anything the kennel says.
+    provider_tier: Option<crate::catalogue::Tier>,
 }
 
 /// One entry in `KennelMeta::consumed`: the name, expected shape, and whether the
@@ -318,6 +322,22 @@ fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
         &rules.own,
         &rules.deny_talk,
     ))
+}
+
+/// Whether the running kennel at `ctx` is the provider of the mesh service `name` at `tier`.
+///
+/// The authority for a mesh registration: the kennel was started by the supervisor as an enabled
+/// provider at exactly this bus's tier, and its **signed** policy declares the name in
+/// `[[provides]]` (the reserved-namespace gate was applied to that policy at compile and is sealed
+/// in its signature). Both facts are the daemon's own records; nothing here comes from the caller.
+fn provides_at(reg: &Registry, ctx: u16, tier: crate::catalogue::Tier, name: &str) -> bool {
+    reg.kennels.values().any(|m| {
+        m.ctx == ctx
+            && m.provider_tier == Some(tier)
+            && m.settled
+                .as_ref()
+                .is_some_and(|s| s.mesh.provides.iter().any(|p| p.name == name))
+    })
 }
 
 /// The daemon's shared state, cloned (via `Arc`) into each connection thread.
@@ -708,15 +728,25 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
                 // owned by kenneld's own uid); the socket lets kenneld request movable clones.
                 let mount_dir = crate::mesh::host_rp_dir(tier, name, key);
-                let (holder_pid, holder_sock) = crate::mesh_holder::spawn(&mount_dir)?;
+                let holder = crate::mesh_holder::spawn(&mount_dir)?;
+                // Who may register a service on this bus: the supervised provider of that name at
+                // this bus's tier, decided from the daemon's registry (see `provides_at`).
+                let registry = std::sync::Arc::clone(&self.registry);
+                let may_register: crate::mesh_bus::RegisterFn =
+                    std::sync::Arc::new(move |ctx: u16, service: &str| {
+                        let reg = registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        provides_at(&reg, ctx, tier, service)
+                    });
                 let mb = crate::mesh_bus::MeshBus::create(
                     tier,
                     name,
                     key,
                     &w,
                     mediation,
-                    holder_pid,
-                    holder_sock,
+                    may_register,
+                    holder,
                 )?;
                 e.insert(mb)
             }
@@ -780,6 +810,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 broker: None,
                 consumed: Vec::new(),
                 settled: None,
+                provider_tier: None,
             },
         );
         drop(reg);
@@ -809,6 +840,17 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(meta) = reg.kennels.get_mut(name) {
             meta.settled = Some(settled);
+        }
+    }
+
+    /// Record that the named kennel runs as a supervised mesh provider enabled at `tier`.
+    fn set_provider_tier(&self, name: &str, tier: crate::catalogue::Tier) {
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = reg.kennels.get_mut(name) {
+            meta.provider_tier = Some(tier);
         }
     }
 
@@ -1970,6 +2012,11 @@ pub fn run_kennel<P, L>(
     // (dbus, tun) can pull the section it needs to police the session — kenneld selects it by the
     // consume's shape, holding no filter table. The `Arc` clone is cheap and leaves `loaded` intact.
     shared.set_settled(&req.kennel, std::sync::Arc::clone(&loaded.settled));
+    // …and, for a supervised provider, the tier it was enabled at: what lets it (and nothing else)
+    // register the services its signed policy provides.
+    if let Some(tier) = provider_tier {
+        shared.set_provider_tier(&req.kennel, tier);
+    }
 
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
@@ -2088,6 +2135,17 @@ pub fn run_kennel<P, L>(
             // The one daemon-global tun-egress sink (§8 / W2): the tun-broker's manager registers into
             // it, and each `[net.udp]` consumer's manager delivers a session through it.
             tun_sink: shared.tun_sink.clone(),
+            // Only a kennel whose SIGNED policy provides the tun capability may register that
+            // sink. The name is in the reserved namespace, so the compiler admitted the provide
+            // only through a template signed at the tier the name requires, and that verdict is
+            // sealed in the settled signature the daemon just verified. (Not "supervised only":
+            // an operator may run the broker by hand.)
+            tun_provider: loaded
+                .settled
+                .mesh
+                .provides
+                .iter()
+                .any(|p| p.name == kennel_lib_binder::service::tun_broker::CAPABILITY),
         });
     }
 

@@ -65,6 +65,13 @@ pub struct Mediation {
     pub policy: SessionPolicyFn,
 }
 
+/// Who may register a service on a mesh bus: `(sender's kennel ctx, service name)` → allowed.
+///
+/// Backed by the daemon's registry (see `server::provides_at`): the sender must be the supervised
+/// provider of that name at the bus's tier. The mesh device is mounted into every participant —
+/// consumers included — so a registration is authorised by who sent it, never by its arrival.
+pub type RegisterFn = Arc<dyn Fn(u16, &str) -> bool + Send + Sync>;
+
 /// The [`Mediation::policy`] backing: `(consumer ctx, capability name)` → session-policy artifact.
 pub type SessionPolicyFn = Arc<dyn Fn(u16, &str) -> Option<Vec<u8>> + Send + Sync>;
 
@@ -114,7 +121,7 @@ impl MeshBus {
     ///
     /// Returns the OS error if the binderfs mount, device allocation, device open,
     /// or context-manager claim fails.
-    /// `holder_pid`/`holder_sock` are the unprivileged fork-holder the caller obtained from
+    /// `holder` is the unprivileged fork-holder's pid and control socket, as the caller obtained from
     /// [`crate::mesh_holder::spawn`]; the binderfs lives in its mount namespace, reached via
     /// `/proc/<holder_pid>/root` for kenneld's own node-0 open (its nodes owned by kenneld's uid),
     /// and cloned on request over `holder_sock` for placement in kennel views.
@@ -124,9 +131,10 @@ impl MeshBus {
         key: Option<&str>,
         writer: &Arc<Writer>,
         mediation: Option<Mediation>,
-        holder_pid: i32,
-        holder_sock: std::os::fd::OwnedFd,
+        may_register: RegisterFn,
+        holder: (i32, std::os::fd::OwnedFd),
     ) -> io::Result<Self> {
+        let (holder_pid, holder_sock) = holder;
         let mount_dir = super::mesh::host_rp_dir(tier, name, key);
         // The binderfs lives in the holder's mount namespace; reach it via `/proc/<pid>/root` (the
         // holder's userns is kenneld-owned, so this resolves for kenneld) to serve node 0 here.
@@ -148,6 +156,7 @@ impl MeshBus {
             mesh_handle(
                 &handles_for_handler,
                 mediation.as_ref(),
+                &may_register,
                 incoming,
                 conn,
                 &writer_for_handler,
@@ -274,14 +283,17 @@ impl Drop for MeshBus {
 fn mesh_handle(
     handles: &Mutex<HashMap<String, u32>>,
     mediation: Option<&Mediation>,
+    may_register: &RegisterFn,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
 ) -> Reply {
     match incoming.code {
-        verb::ADD_SERVICE => mesh_add_service(handles, incoming, conn, writer),
+        verb::ADD_SERVICE => mesh_add_service(handles, may_register, incoming, conn, writer),
         verb::SVC_CONNECT => mesh_svc_connect(handles, mediation, incoming, conn, writer),
-        verb::GET_SESSION_POLICY => mesh_get_session_policy(mediation, incoming, writer),
+        verb::GET_SESSION_POLICY => {
+            mesh_get_session_policy(mediation, may_register, incoming, writer)
+        }
         _ => {
             writer.emit(
                 &Event::new(
@@ -302,6 +314,7 @@ fn mesh_handle(
 /// and store it. The `REGISTER_MIRROR` pattern (§7.5.7) — same acquire/death dance.
 fn mesh_add_service(
     handles: &Mutex<HashMap<String, u32>>,
+    may_register: &RegisterFn,
     incoming: &Incoming,
     conn: &Connection,
     writer: &Writer,
@@ -319,6 +332,29 @@ fn mesh_add_service(
         );
         return Reply::Data(vec![status::BAD_REQUEST]);
     };
+
+    // Authorise the SENDER before anything is stored. Every participant of this bus — consumers
+    // too — can reach node 0, so the registration is honoured only from the supervised provider of
+    // this name. The sender is identified by its kernel-stamped pid → kennel cgroup; a one-way
+    // send carries no pid and is refused with the rest.
+    let sender = crate::cgroup::pid_to_ctx(incoming.sender_pid);
+    if !sender.is_some_and(|ctx| may_register(ctx, name)) {
+        writer.emit(
+            &Event::new(
+                "mesh.add-service",
+                Resource::Binder,
+                Outcome::Deny,
+                Source::Kenneld,
+            )
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("service", Value::untrusted(name))
+            .field(
+                "reason",
+                Value::untrusted("sender is not the provider of this service"),
+            ),
+        );
+        return Reply::Data(vec![status::DENIED]);
+    }
 
     // Acquire the handle before the reply frees the transaction buffer.
     if conn.acquire_handle(handle).is_err() {
@@ -509,6 +545,7 @@ fn mesh_new_session(
 /// bus rejects it.
 fn mesh_get_session_policy(
     mediation: Option<&Mediation>,
+    may_register: &RegisterFn,
     incoming: &Incoming,
     writer: &Writer,
 ) -> Reply {
@@ -531,6 +568,13 @@ fn mesh_get_session_policy(
         emit(Outcome::Error, "GET_SESSION_POLICY on a non-mediation bus");
         return Reply::Data(vec![status::BAD_REQUEST]);
     };
+    // Only the broker pulls session policy: the sender must be the supervised provider of this
+    // bus's broker service. Any other participant would be reading another kennel's filter.
+    let sender = crate::cgroup::pid_to_ctx(incoming.sender_pid);
+    if !sender.is_some_and(|ctx| may_register(ctx, &med.broker_service)) {
+        emit(Outcome::Deny, "sender is not this bus's broker");
+        return Reply::Data(vec![status::DENIED]);
+    }
     let Some((ctx, name)) = session::decode_ref(&incoming.data) else {
         emit(Outcome::Error, "malformed request");
         return Reply::Data(vec![status::BAD_REQUEST]);
