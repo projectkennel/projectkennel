@@ -245,8 +245,19 @@ fn single_port_tcp_grants(rules: &[NetRule], access: AccessNet) -> Vec<(u16, Acc
 /// deliberately left down: total isolation). Author `[net.bpf]` denies still win: both ACLs
 /// are deny-first.
 pub(crate) fn own_netns_loopback(mode: NetMode) -> (Vec<LpmV4Entry>, Vec<LpmV6Entry>) {
-    let _ = mode;
-    (Vec::new(), Vec::new())
+    match mode {
+        NetMode::Constrained | NetMode::Unconstrained => {
+            let any = allow_entry(0, u16::MAX, Protocol::Any, 0);
+            (
+                vec![(lpm_v4_key(Ipv4Addr::new(127, 0, 0, 0).octets(), 8), any)],
+                vec![(
+                    lpm_v6_key(Ipv6Addr::LOCALHOST.octets(), HOST_PREFIX_V6),
+                    any,
+                )],
+            )
+        }
+        NetMode::Host | NetMode::None => (Vec::new(), Vec::new()),
+    }
 }
 
 /// The TCP rights the workload's Landlock ruleset handles (#218).
@@ -261,8 +272,26 @@ pub(crate) fn own_netns_loopback(mode: NetMode) -> (Vec<LpmV4Entry>, Vec<LpmV6En
 /// - `host`: a direction stops being handled when any of its BPF allow rules is a port range;
 /// - `none`: both stay handled (nothing is reachable anyway).
 pub(crate) fn landlock_net_handled(net: &NetPolicy) -> AccessNet {
-    let _ = net;
-    AccessNet::BIND_TCP | AccessNet::CONNECT_TCP
+    let both = AccessNet::BIND_TCP | AccessNet::CONNECT_TCP;
+    match net.mode {
+        NetMode::Constrained | NetMode::Unconstrained => AccessNet::empty(),
+        NetMode::None => both,
+        NetMode::Host => {
+            let has_range = |rules: &[NetRule]| {
+                rules.iter().any(|r| {
+                    matches!(r.protocol, Protocol::Tcp | Protocol::Any) && r.port_min != r.port_max
+                })
+            };
+            let mut handled = both;
+            if has_range(&net.bpf_bind_allow) {
+                handled.remove(AccessNet::BIND_TCP);
+            }
+            if has_range(&net.bpf_connect_allow) {
+                handled.remove(AccessNet::CONNECT_TCP);
+            }
+            handled
+        }
+    }
 }
 
 /// The Landlock access a read-granted path subtree receives: read files and

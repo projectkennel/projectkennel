@@ -16,6 +16,25 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   of what was blocked. Below ABI 7 the flag does not exist and is withheld. Records reach the
   kernel audit log only when audit is enabled on the host (`auditd`, or journald's audit socket);
   see HOWTO §7. (#218)
+- **A kennel's own loopback is open by default in `constrained`/`unconstrained`.** Those modes
+  give the kennel a private network namespace, so its `lo` is not the host's — only the kennel's
+  own processes listen there. `127.0.0.0/8` and `::1` are now any-port in both the BPF connect and
+  bind ACLs, so an in-kennel client/server pair on an ephemeral port works without naming ports
+  (an agent TUI and the local server it forks — `opencode --standalone`, #218). Author
+  `[net.bpf].{connect,bind}.deny` rules still restrict it (both ACLs are deny-first). `host` mode
+  is unchanged — its `127.0.0.1` is the host's loopback (T1.6) — and `none` keeps `lo` down.
+- **Landlock no longer denies TCP that the BPF ACL permits.** Landlock gates TCP by port only and
+  cannot express "any port" or a port range, so a `[net.bpf]` range rule (or `ports = []`) was
+  accepted by the compiler, permitted by BPF, and then refused by Landlock. In `constrained` /
+  `unconstrained` the workload's ruleset no longer handles TCP at all — the cgroup BPF ACL, which
+  pins address *and* port (the proxy endpoint, the loopback), is the gate, as it already was for
+  addresses. In `host` mode a direction (bind or connect) stops being Landlock-handled only when
+  one of its allow rules is a range; single-port rules keep the Landlock layer.
+
+### IPC protocol changes
+
+- The kenneld → `kennel-bin-init` plan and supervision blobs carry the handled Landlock TCP
+  rights (`landlock_net_handled`). Both ends ship together.
 
 ### Security fixes
 

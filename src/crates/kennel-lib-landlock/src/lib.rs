@@ -461,8 +461,10 @@ impl Ruleset {
     /// port rule cannot express the grant (any-port loopback inside the kennel's own network
     /// namespace; a port *range*), so Landlock never denies what the BPF ACL permits (#218).
     pub fn handle_net_only(&mut self, keep: AccessNet) {
-        let _ = keep;
-        todo!("loopback in own netns (#218)")
+        self.handled_net &= keep;
+        for (_, access) in &mut self.net_rules {
+            *access &= self.handled_net;
+        }
     }
 
     /// The TCP rights this ruleset handles (gates).
@@ -972,7 +974,7 @@ mod tests {
                 }
                 nix::unistd::ForkResult::Parent { child } => {
                     let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
-                    let want = if want_ok { 0 } else { 1 };
+                    let want = i32::from(!want_ok);
                     assert!(
                         matches!(status, nix::sys::wait::WaitStatus::Exited(_, c) if c == want),
                         "handled={handled:?}: child verdict {status:?}, wanted exit {want} \
@@ -993,7 +995,7 @@ mod tests {
             return 3;
         }
         let addr = libc::sockaddr_in {
-            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_family: libc::sa_family_t::try_from(libc::AF_INET).unwrap_or_default(),
             sin_port: port.to_be(),
             sin_addr: libc::in_addr {
                 s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
@@ -1005,7 +1007,8 @@ mod tests {
             libc::connect(
                 fd,
                 std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
-                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_in>())
+                    .unwrap_or_default(),
             )
         };
         let err = std::io::Error::last_os_error().raw_os_error();

@@ -1680,9 +1680,13 @@ mod tests {
         // `[net.bpf].connect` rules directly (a BPF allow is a union; the author cannot widen
         // past the proxy lock — D2). The host-mode path (where the connect ACL IS the gate) is
         // covered by `host_mode_connect_acl_encodes_to_bpf`.
-        assert!(
-            plan.bpf_allow_v4.is_empty(),
-            "constrained mode has no BPF connect-allow base (proxy endpoint stamped later)"
+        // The one exception is the kennel's own-net-ns loopback (#218): 127.0.0.0/8 any port,
+        // private to this kennel — not a path past the proxy.
+        assert_eq!(
+            plan.bpf_allow_v4,
+            crate::plan::own_netns_loopback(NetMode::Constrained).0,
+            "constrained mode's connect-allow base is only the own-net-ns loopback (proxy \
+             endpoint stamped later)"
         );
         // deny_invariant 169.254.169.254/32 any-proto is enforced in EVERY mode (deny-first).
         assert_eq!(plan.bpf_deny_v4.len(), 1);
@@ -1990,7 +1994,7 @@ mod tests {
 
     /// #218: inside the kennel's OWN network namespace, loopback is the kennel's private `lo`, so
     /// an in-kennel client/server pair (an agent TUI and its server on an ephemeral port) must
-    /// meet there by default: 127.0.0.0/8 and ::1 are any-port in BOTH BPF ACLs, and Landlock
+    /// meet there by default: `127.0.0.0/8` and `::1` are any-port in BOTH BPF ACLs, and Landlock
     /// handles no TCP right (it cannot express "any port"; BPF is the address+port gate).
     #[test]
     fn own_netns_modes_open_loopback_and_leave_tcp_to_bpf() {
@@ -2023,7 +2027,7 @@ mod tests {
         }
     }
 
-    /// The loopback entries encode exactly 127.0.0.0/8 and ::1/128, any port, any protocol,
+    /// The loopback entries encode exactly `127.0.0.0/8` and `::1/128`, any port, any protocol,
     /// not the proxy flag.
     #[test]
     fn the_loopback_entries_are_slash_8_and_slash_128_any_port() {
@@ -2298,13 +2302,16 @@ mod tests {
         )
         .expect("plan");
 
-        // (1) the author allow encodes to a single bind-allow v4 entry (no seed yet — no stamp).
+        // (1) the author allow encodes to a single bind-allow v4 entry, beside the own-net-ns
+        // loopback seed (#218; the /28 own-subnet seed comes later, with the stamp).
+        let lo = crate::plan::own_netns_loopback(NetMode::Constrained).0;
         assert_eq!(
             plan.bpf_bind_allow_v4.len(),
-            1,
+            1 + lo.len(),
             "author bind.allow 0.0.0.0/0:8080 encodes to one bind-allow entry, got {}",
             plan.bpf_bind_allow_v4.len()
         );
+        assert!(lo.iter().all(|e| plan.bpf_bind_allow_v4.contains(e)));
         // (1b) the single-port author allow maps to a Landlock BIND_TCP grant on 8080.
         assert!(
             plan.landlock_net

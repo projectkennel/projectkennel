@@ -459,6 +459,19 @@ fn get_proc_view(r: &mut Reader<'_>) -> Result<ProcView, PlanWireError> {
     }
 }
 
+/// Decode the Landlock TCP port rules and the handled TCP rights (#218).
+fn get_landlock_net(
+    r: &mut Reader<'_>,
+) -> Result<(Vec<(u16, AccessNet)>, AccessNet), PlanWireError> {
+    let mut landlock_net = Vec::new();
+    for _ in 0..r.count()? {
+        let port = r.u16()?;
+        let access = AccessNet::from_bits_truncate(r.u64()?);
+        landlock_net.push((port, access));
+    }
+    Ok((landlock_net, AccessNet::from_bits_truncate(r.u64()?)))
+}
+
 fn put_view(w: &mut Writer, v: &ShimView) {
     w.path(&v.shim_root);
     w.count(v.binds.len());
@@ -551,13 +564,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         landlock_fs.push((path, access));
     }
 
-    let mut landlock_net = Vec::new();
-    for _ in 0..r.count()? {
-        let port = r.u16()?;
-        let access = AccessNet::from_bits_truncate(r.u64()?);
-        landlock_net.push((port, access));
-    }
-    let landlock_net_handled = AccessNet::from_bits_truncate(r.u64()?);
+    let (landlock_net, landlock_net_handled) = get_landlock_net(&mut r)?;
 
     let mut seccomp_deny = Vec::new();
     for _ in 0..r.count()? {
@@ -944,13 +951,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         let access = AccessFs::from_bits_truncate(r.u64()?);
         landlock_fs.push((path, access));
     }
-    let mut landlock_net = Vec::new();
-    for _ in 0..r.count()? {
-        let port = r.u16()?;
-        let access = AccessNet::from_bits_truncate(r.u64()?);
-        landlock_net.push((port, access));
-    }
-    let landlock_net_handled = AccessNet::from_bits_truncate(r.u64()?);
+    let (landlock_net, landlock_net_handled) = get_landlock_net(&mut r)?;
 
     let mut seccomp_deny = Vec::new();
     for _ in 0..r.count()? {
