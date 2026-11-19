@@ -170,6 +170,24 @@ pub fn set_fsuid(uid: u32) -> io::Result<()> {
     }
 }
 
+/// Set the calling thread's *filesystem* gid (`setfsgid(2)`), the group counterpart of
+/// [`set_fsuid`].
+///
+/// Like `setfsuid`, it reports no error; a second call returns the value now in force.
+///
+/// # Errors
+///
+/// `EPERM` if the filesystem gid did not take the requested value.
+pub fn set_fsgid(gid: u32) -> io::Result<()> {
+    let want = Gid::from_raw(gid);
+    let _previous = nix::unistd::setfsgid(want);
+    if nix::unistd::setfsgid(want) == want {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(libc::EPERM))
+    }
+}
+
 /// Change the owner of `path` to `uid`:`gid` (`chown(2)`).
 ///
 /// The privhelper factory uses this to hand the freshly-allocated per-kennel binderfs

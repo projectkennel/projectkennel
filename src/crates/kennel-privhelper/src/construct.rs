@@ -322,8 +322,10 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
             return;
         }
         tracer.step("construct: child is kennel uid 0; building view/binderfs");
-        // All privileged construction runs here, as the kennel's uid 0, BEFORE the hand-off
-        // — so the surfaces are root-owned and no operator code runs as userns-0. A failure
+        // All privileged construction runs here, in the kennel's uid-0 process, BEFORE the hand-off
+        // — so no operator code runs as userns-0. Until the pivot it acts on the filesystem with
+        // the operator's identity, never root's (see `FsIdentity`); the scaffolding is handed to
+        // uid 0 afterwards, so the surfaces still end up root-owned. A failure
         // returns, tripping the _exit(127) backstop (no half-built kennel runs the workload).
         let tun_fd = match build_kennel(&half, op_uid, op_gid) {
             Ok(fd) => fd,
@@ -729,7 +731,8 @@ fn over_mount_exclusive_via_helper(src: &std::path::Path) {
     }
 }
 
-/// The privileged construction the factory child runs as the kennel's uid 0, after its
+/// The privileged construction the factory child runs (as the kennel's uid 0, but with the
+/// operator's filesystem identity until the pivot — see `kennel_lib_spawn::FsIdentity`), after its
 /// maps are written and before the `fexecve` (`07-2` §7.2.1): join the cgroup, build
 /// and `pivot_root` into the view, and hand the per-kennel binderfs device to the
 /// operator (the fix for the binderfs `EACCES`).
@@ -801,22 +804,19 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         .map_err(|e| io::Error::new(e.kind(), format!("make_root_private: {e}")))?;
     if let (Some(view), Some(new_root)) = (&half.view, &half.new_root) {
         // Build + pivot into the constructed view.
-        build_view_and_pivot(view, new_root, &half.file_binds)
+        // Build + pivot with the OPERATOR's filesystem identity: we are host root here and the
+        // host filesystem is still mounted, so no caller-supplied path is touched as root. The
+        // view comes back with its scaffolding root-owned and the workload's $HOME the operator's.
+        let operator = (op_uid != 0).then_some(kennel_lib_spawn::FsIdentity {
+            uid: op_uid,
+            gid: op_gid,
+        });
+        build_view_and_pivot(view, new_root, &half.file_binds, operator)
             .map_err(|e| io::Error::new(e.kind(), format!("build_view_and_pivot: {e}")))?;
-        // The constructed $HOME is the WORKLOAD's private space (the home dir on the view-root
-        // tmpfs plus the copied dotfiles / synthetic ~/.ssh). The construction child built it
-        // as the kennel's uid 0, so it is root-owned — but the workload, the af-unix proxy,
-        // and any in-kennel tool run as the OPERATOR and must read (0600 ~/.ssh keys) and
-        // write (bind sockets) there. Hand the operator only the inodes we constructed.
-        chown_constructed_home(&view.shim_root, op_uid, op_gid)?;
-        // Hand the constructed /tmp to the operator. It is the workload's private scratch — a
-        // fresh tmpfs the construction child built as the kennel's uid 0 — but the workload runs
-        // as the OPERATOR, so without this the persona cannot write it (mktemp, build scratch, even
-        // `touch` all EACCES despite the Landlock /tmp grant; the grant is necessary, not
-        // sufficient, against DAC). Chown the tmpfs root only — it is empty here — so the mode
-        // (0700) stands and /tmp is the persona's own tmp, owned by the workload user.
-        // (A view always mounts /tmp; with `fs.tmp.writable = false` there is simply no Landlock
-        // grant, so this chown is inert there.)
+        // The constructed /tmp is the workload's private scratch, and the workload runs as the
+        // OPERATOR. The tmpfs was mounted with the operator's filesystem identity, so its root is
+        // already the operator's; this is a no-op kept as a guard on that property (mode 0700
+        // stands). "/tmp" here is the tmpfs the seal mounted last, on top of anything else.
         kennel_lib_syscall::unistd::chown_to(std::path::Path::new("/tmp"), op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of
         // the (now real) userns, but every binder client — kennel-bin-init, the af-unix proxy,
@@ -836,60 +836,6 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         mount::mount_special("tmpfs", std::path::Path::new("/tmp"))?;
     }
     Ok(tun_fd)
-}
-
-/// Hand the operator the constructed `$HOME` — and **only inodes we constructed**.
-///
-/// The home dir and the copied dotfiles / synthetic `~/.ssh` live on the **view-root tmpfs**
-/// (the privhelper built them as the kennel's uid 0, so they are root-owned), but the
-/// workload / af-unix proxy / in-kennel tools run as the operator and must read the 0600 ssh
-/// keys and bind sockets there. So chown them to the operator — but writable **binds**
-/// (persisted home paths: the operator's own real host inodes), `/dev`, `/proc`, `/tmp`, and
-/// binderfs must NEVER be touched.
-///
-/// The discriminator is the **home's own device** plus ownership: the constructed home and its
-/// contents share `$HOME`'s device (the view-root tmpfs for a constructed view, or the dedicated
-/// `/home` tmpfs for an OCI overlay root — the merged overlay's `/` has a *different* device, so
-/// `/` is the wrong reference there); every writable bind / special mount under it has a different
-/// device and is skipped. If `$HOME` *itself* is a writable whole-home bind it already resolves to
-/// the operator's own (operator-owned) inode — not ours to touch — so we skip when the home root is
-/// already operator-owned. Symlinks are skipped entirely (ownership is irrelevant and it avoids any
-/// follow), so no `lchown` dance is needed.
-fn chown_constructed_home(shim_root: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-    let Ok(home) = std::fs::symlink_metadata(shim_root) else {
-        return Ok(()); // no constructed home (e.g. the fallback path)
-    };
-    // A whole-home bind resolves to the operator's own inode (already operator-owned); a symlink
-    // is not ours to chown. The constructed home is built by the kennel's uid 0 (root-owned).
-    if home.file_type().is_symlink() || home.uid() == uid {
-        return Ok(());
-    }
-    // Only inodes on the home's own mount are constructed; sub-mounts (writable binds) differ.
-    let home_dev = home.dev();
-    kennel_lib_syscall::unistd::chown_to(shim_root, uid, gid)?;
-    let mut stack = vec![shim_root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            // Skip symlinks (don't chown, don't follow) and anything on another mount
-            // (a writable bind / special fs) — chown only constructed home-mount inodes.
-            if meta.file_type().is_symlink() || meta.dev() != home_dev {
-                continue;
-            }
-            kennel_lib_syscall::unistd::chown_to(&path, uid, gid)?;
-            if meta.file_type().is_dir() {
-                stack.push(path);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Verify the opened `kennel-bin-init` is a trusted root-owned binary before `fexecve`

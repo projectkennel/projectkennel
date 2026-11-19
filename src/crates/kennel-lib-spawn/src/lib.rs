@@ -331,14 +331,20 @@ pub fn build_view_and_pivot(
     view: &ShimView,
     new_root: &Path,
     file_binds: &[(PathBuf, PathBuf)],
+    operator: Option<FsIdentity>,
 ) -> io::Result<()> {
     use kennel_lib_syscall::mount;
+
+    // From here to the pivot, every path this function touches is resolved with the OPERATOR's
+    // filesystem identity (see [`FsIdentity`]). The caller is the kennel's uid 0 = host root, and
+    // the host filesystem is still mounted.
+    fs_as_operator(operator)?;
 
     // OCI substrate root (§7.11.4a / T3.8): boot the image as a layered overlay
     // (kennel-etc : image : scaffold) instead of a constructed tmpfs. Distinct head
     // (no host-closure mirror, /etc wins by layer precedence), shared seal tail.
     if let Some(img) = &view.image {
-        return build_image_view_and_pivot(view, new_root, img, file_binds);
+        return build_image_view_and_pivot(view, new_root, img, file_binds, operator);
     }
 
     // Map an absolute in-kennel path to its staging location under `new_root`.
@@ -353,7 +359,7 @@ pub fn build_view_and_pivot(
     })?;
 
     // 2. Bind the granted system + home paths in.
-    materialize_binds(&view.binds, &under)?;
+    materialize_binds(&view.binds, &under, None)?;
 
     // 2b. Merged-usr compat symlinks (`/bin -> usr/bin`, `/lib64 -> usr/lib`, …).
     //    On modern systems these top-level dirs are symlinks into `/usr`; the view's
@@ -396,7 +402,7 @@ pub fn build_view_and_pivot(
     materialize_etc_overlays(&view.etc_overlays, &under)?;
 
     // 4–7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home, masks, pivot).
-    seal_view_tail(view, new_root)
+    seal_view_tail(view, new_root, operator, true)
 }
 
 /// Bind each granted host `/etc` file read-only over the synthetic `/etc` floor (the real resolver
@@ -497,6 +503,7 @@ fn build_image_view_and_pivot(
     staging: &Path,
     img: &crate::plan::ImageRoot,
     file_binds: &[(PathBuf, PathBuf)],
+    operator: Option<FsIdentity>,
 ) -> io::Result<()> {
     use crate::plan::Persistence;
     use kennel_lib_syscall::mount;
@@ -563,7 +570,16 @@ fn build_image_view_and_pivot(
     //    ALWAYS an upper (§7.11.4c — whole-tree-immutable is `readonly = ["/"]` via Landlock, not
     //    a no-upper mount); the image is never an upper. discard = ephemeral tmpfs, persist =
     //    managed store upper.
-    let lowers: [&Path; 3] = [&kennel_etc, &img.image, &scaffold];
+    // The two layers built above are the kennel's own scaffolding (the synthetic /etc that wins
+    // by layer precedence, and the mount-point floor). They were written as the operator; hand
+    // them to the kennel's uid 0 now, so the workload cannot alter them through the overlay. Both
+    // sit on the staging tmpfs mounted above, with nothing mounted inside them, and the walk
+    // neither follows a symlink nor crosses a mount — so no host inode is in reach.
+    fs_as_root(operator)?;
+    kennel_lib_syscall::fd::chown_tree_same_mount(&kennel_etc, 0, 0, None)?;
+    kennel_lib_syscall::fd::chown_tree_same_mount(&scaffold, 0, 0, None)?;
+    fs_as_operator(operator)?;
+
     let (upper, work) = match img.persistence {
         Persistence::Discard => {
             let upper = staging.join("upper");
@@ -583,16 +599,14 @@ fn build_image_view_and_pivot(
             })?
         }
     };
-    mount::mount_overlay(&lowers, Some((&upper, &work)), &root).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("mount overlay (image {}): {e}", img.image.display()),
-        )
-    })?;
+    mount_image_overlay(
+        img,
+        [&kennel_etc, &scaffold],
+        (&upper, &work),
+        &root,
+        operator,
+    )?;
 
-    // 5. A writable, ephemeral $HOME independent of the rootfs closure-lock: a tmpfs at `/home`
-    //    (the scaffold supplies the mountpoint), so the persona home works even when the rootfs
-    //    is `readonly = ["/"]`. `[fs.home].persist` paths bind on top via `view.binds`.
     let under = |abs: &Path| root.join(abs.strip_prefix("/").unwrap_or(abs));
     let home = under(Path::new("/home"));
     mount::mount_tmpfs(&home, None, Some("0755"), false, true)?;
@@ -601,7 +615,7 @@ fn build_image_view_and_pivot(
     //    writable-through (§7.11.4c) — the `kennel-etc` lower sets the defaults and a workload may
     //    copy-up-shadow them in its own upper, harming only its own view; enforcement is the
     //    netns/BPF/uid-map/Landlock/seccomp, never file content, so nothing is ro-bound here.
-    materialize_binds(&view.binds, &under)?;
+    materialize_binds(&view.binds, &under, Some((&root, operator)))?;
 
     // 7. Closure-lock (§7.11.4c): lock the executable closure as **read-only mounts** — Landlock
     //    rights are additive (the `/` write grant cannot be subtracted at `/usr`), so the lock is a
@@ -631,8 +645,9 @@ fn build_image_view_and_pivot(
         }
     }
 
-    // 8. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot).
-    seal_view_tail(view, &root)
+    // 8. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot). The
+    //    root here is the overlay — image content, not scaffolding — so it is not re-owned.
+    seal_view_tail(view, &root, operator, false)
 }
 
 /// The seal tail shared by [`build_view_and_pivot`]'s constructed-tmpfs head and
@@ -640,7 +655,12 @@ fn build_image_view_and_pivot(
 /// per-kennel binderfs, a fresh `/proc` + private `/tmp`, the shim `$HOME`, the
 /// trust-manifest masks, and finally `pivot_root` into `root` (detaching the old
 /// root). `root` is the about-to-be-pivoted-into mount; every path is keyed beneath it.
-fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
+fn seal_view_tail(
+    view: &ShimView,
+    root: &Path,
+    operator: Option<FsIdentity>,
+    root_is_scaffold: bool,
+) -> io::Result<()> {
     use kennel_lib_syscall::mount;
 
     // Map an absolute in-kennel path to its staging location under `root`.
@@ -687,8 +707,13 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
             kennel_lib_binder::binderfs::DEFAULT_MAX_DEVICES,
         )
         .map_err(|e| io::Error::new(e.kind(), format!("binderfs mount_instance: {e}")))?;
-        kennel_lib_binder::binderfs::add_binder_device(&binderfs_dir)
-            .map_err(|e| io::Error::new(e.kind(), format!("binderfs add_binder_device: {e}")))?;
+        // Allocating the device opens `binder-control`, which binderfs gives to uid 0 of the
+        // mounting namespace (mode 0600) — the one pre-pivot step that needs root's identity. The
+        // path is the binderfs just mounted above, on the /dev tmpfs mounted above that.
+        fs_as_root(operator)?;
+        let added = kennel_lib_binder::binderfs::add_binder_device(&binderfs_dir);
+        fs_as_operator(operator)?;
+        added.map_err(|e| io::Error::new(e.kind(), format!("binderfs add_binder_device: {e}")))?;
         std::os::unix::fs::symlink("binderfs/binder", under(Path::new("/dev/binder")))
             .map_err(|e| io::Error::new(e.kind(), format!("binderfs symlink: {e}")))?;
     }
@@ -755,8 +780,161 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
     mount::pivot_root(root, &put_old)?;
     std::env::set_current_dir("/")?;
     mount::unmount_detach(Path::new("/.kennel-oldroot"))?;
+
+    // The host root is detached. Take root's filesystem identity back and hand the scaffolding
+    // built above — as the operator — to the kennel's uid 0, so the workload (the operator's uid)
+    // cannot alter it. Each walk stays on one mount we created and never follows a symlink or
+    // crosses a mount point, so no bound host inode is touched. The workload's constructed home is
+    // left the operator's, as is /tmp (its own mount, not walked).
+    fs_as_root(operator)?;
     let _ = std::fs::remove_dir(Path::new("/.kennel-oldroot"));
+    let mut scaffolds: Vec<&Path> = vec![Path::new("/dev"), Path::new("/dev/shm")];
+    if root_is_scaffold {
+        scaffolds.push(Path::new("/"));
+    } else {
+        // An OCI overlay root keeps its image content; only the dedicated /home tmpfs is ours.
+        scaffolds.push(Path::new("/home"));
+    }
+    for base in scaffolds {
+        let skip = view.shim_root.strip_prefix(base).ok();
+        kennel_lib_syscall::fd::chown_tree_same_mount(base, 0, 0, skip).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("re-own scaffolding {}: {e}", base.display()),
+            )
+        })?;
+    }
     Ok(())
+}
+
+/// Mount the OCI overlay root: `kennel-etc : image : scaffold` over the upper/work pair.
+///
+/// `layers` are the two scaffolding lowers on the staging tmpfs (`kennel-etc`, then `scaffold`);
+/// `upper_work` is the ephemeral pair on that tmpfs, or the persistent store pair.
+fn mount_image_overlay(
+    img: &crate::plan::ImageRoot,
+    layers: [&Path; 2],
+    upper_work: (&Path, &Path),
+    root: &Path,
+    operator: Option<FsIdentity>,
+) -> io::Result<()> {
+    use crate::plan::Persistence;
+    let (upper, work) = upper_work;
+    // overlayfs keeps the MOUNTER's credentials and uses them for every later access to the real
+    // lower and upper inodes, and it needs them to carry root's filesystem capabilities (its work
+    // directory is mode 000). So this one mount must be made as root — which would let a caller
+    // who names `/etc` as the upper have root write there on a workload's behalf. Close that by
+    // deciding, AS THE OPERATOR, which directories the mount may use, and then mounting those
+    // exact inodes by descriptor (no path is resolved again as root):
+    //   - the image (a lower, read-only) must be reachable by the operator;
+    //   - a persistent upper and work dir must be reachable AND owned by the operator, so root's
+    //     credentials are only ever exercised inside the operator's own directories.
+    // The other layers are on the staging tmpfs built above.
+    let image = overlay_dir(&img.image, None)?;
+    let image_path = fd_path(&image);
+    let [kennel_etc, scaffold] = layers;
+    let lowers: [&Path; 3] = [kennel_etc, &image_path, scaffold];
+    let owner = operator.map(|op| op.uid);
+    let (upper_dir, work_dir) = match img.persistence {
+        Persistence::Discard => (None, None),
+        Persistence::Persist => (
+            Some(overlay_dir(upper, owner)?),
+            Some(overlay_dir(work, owner)?),
+        ),
+    };
+    let upper_path = upper_dir
+        .as_ref()
+        .map_or_else(|| upper.to_path_buf(), fd_path);
+    let work_path = work_dir
+        .as_ref()
+        .map_or_else(|| work.to_path_buf(), fd_path);
+    fs_as_root(operator)?;
+    let mounted =
+        kennel_lib_syscall::mount::mount_overlay(&lowers, Some((&upper_path, &work_path)), root);
+    fs_as_operator(operator)?;
+    mounted.map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("mount overlay (image {}): {e}", img.image.display()),
+        )
+    })?;
+    drop((image, upper_dir, work_dir)); // the mount holds its own references now
+    Ok(())
+}
+
+/// Open a directory the overlay mount will use, with the CURRENT filesystem identity (the
+/// operator's), as an `O_PATH` handle — and, when `owner` is given, require that uid to own it.
+///
+/// The handle pins the inode the operator's identity resolved, so the mount (made as root, see the
+/// call site) cannot be pointed anywhere else. Magic links are refused in the path.
+fn overlay_dir(path: &Path, owner: Option<u32>) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt as _;
+    let fd = kennel_lib_syscall::fd::open_no_magiclinks(kennel_lib_syscall::fd::AT_FDCWD, path)
+        .map_err(|e| io::Error::new(e.kind(), format!("overlay dir {}: {e}", path.display())))?;
+    let dir = std::fs::File::from(fd);
+    let meta = dir.metadata()?;
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("overlay dir {} is not a directory", path.display()),
+        ));
+    }
+    if let Some(uid) = owner {
+        if meta.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "overlay dir {} is owned by uid {}, not the operator ({uid})",
+                    path.display(),
+                    meta.uid()
+                ),
+            ));
+        }
+    }
+    Ok(dir)
+}
+
+/// The `/proc/self/fd/N` path naming an open descriptor's inode.
+fn fd_path(file: &std::fs::File) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+/// The operator's filesystem identity, assumed while a kennel's view is built.
+///
+/// The construction child is the kennel's uid 0, which the `0 0 1` map makes **host root**, and
+/// it works on the host filesystem until `pivot_root`. Every path it is given comes from the
+/// caller (`kenneld` — or anyone else who runs the helper), and directories a previous workload
+/// could write may hold symlinks. So it does not act on those paths as root. It sets its
+/// *filesystem* uid and gid to the operator's for the whole build: the kernel then checks every
+/// lookup, read, create and overlay access against what the operator may do, and (leaving fsuid 0
+/// clears the filesystem capabilities from the effective set) nothing overrides those checks.
+/// The helper cannot be made to read or write a file its caller could not. `CAP_SYS_ADMIN` is not
+/// a filesystem capability and stays, so the mounts still work.
+///
+/// Root's identity is taken back only for steps that touch what the factory itself just created:
+/// allocating the binder device, and re-owning the scaffolding (after the pivot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsIdentity {
+    /// The operator's uid.
+    pub uid: u32,
+    /// The operator's primary gid.
+    pub gid: u32,
+}
+
+/// Assume the operator's filesystem identity (a no-op when there is none: the operator is root).
+fn fs_as_operator(operator: Option<FsIdentity>) -> io::Result<()> {
+    let Some(op) = operator else { return Ok(()) };
+    kennel_lib_syscall::unistd::set_fsgid(op.gid)?;
+    kennel_lib_syscall::unistd::set_fsuid(op.uid)
+}
+
+/// Take root's filesystem identity back (a no-op when it was never dropped).
+fn fs_as_root(operator: Option<FsIdentity>) -> io::Result<()> {
+    if operator.is_none() {
+        return Ok(());
+    }
+    kennel_lib_syscall::unistd::set_fsuid(0)?;
+    kennel_lib_syscall::unistd::set_fsgid(0)
 }
 
 /// Bind each granted system/home path into the view. Recursive, so submounts come along;
@@ -777,7 +955,11 @@ fn seal_view_tail(view: &ShimView, root: &Path) -> io::Result<()> {
 ///
 /// Returns the OS error if creating a mountpoint, the bind mount, or the read-only remount
 /// fails for a present, non-redundant bind.
-fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> io::Result<()> {
+fn materialize_binds(
+    binds: &[BindMount],
+    under: &impl Fn(&Path) -> PathBuf,
+    overlay_root: Option<(&Path, Option<FsIdentity>)>,
+) -> io::Result<()> {
     use kennel_lib_syscall::mount;
     for b in binds {
         if !b.source.exists() {
@@ -791,7 +973,22 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
         if !b.writable && !b.redirected && dest.symlink_metadata().is_ok() {
             continue;
         }
-        create_bind_target(&b.source, &dest).map_err(|e| {
+        let created = match (create_bind_target(&b.source, &dest), overlay_root) {
+            // An OCI overlay root's directories belong to the kennel's uid 0, so the operator's
+            // identity cannot create a mount point the image does not provide. Create that one
+            // path with root's identity — confined to the overlay mount itself, so it can land
+            // neither outside the root nor on a host directory already bound into it.
+            (Err(e), Some((root, operator))) if e.kind() == io::ErrorKind::PermissionDenied => {
+                let rel = b.target.strip_prefix("/").unwrap_or(&b.target);
+                let directory = b.source.is_dir();
+                fs_as_root(operator)?;
+                let made = kennel_lib_syscall::fd::create_in_root_same_mount(root, rel, directory);
+                fs_as_operator(operator)?;
+                made
+            }
+            (result, _) => result,
+        };
+        created.map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!("create_bind_target {}: {e}", dest.display()),

@@ -26,6 +26,43 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — the view is built with the operator's filesystem identity, not root's
+
+- **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory's construction
+  child; Vol 1 §2.8; the filesystem chapter's view construction; the OCI substrate (§7.11.4a).
+  THREATS T5.4.
+- **Change (corpus defect):** §2.8 and T5.4 state that "from the moment uid 0 could touch anything,
+  the host root is already detached". As built, the construction child became host kuid 0 and then
+  ran `build_view_and_pivot` — `create_dir_all`, `File::create`, `fs::copy`, binds, the overlay
+  mount — on caller-supplied paths **before** `pivot_root`. A caller who runs the helper directly
+  chose those paths (root read and write on the host); and with an honest `kenneld`, a symlink a
+  previous workload left in a writable grant redirected the same operations. As-built now:
+  - `build_view_and_pivot` takes an `FsIdentity` and sets the child's **fsuid/fsgid to the
+    operator** for the whole build. Leaving fsuid 0 clears the filesystem capabilities from the
+    effective set, so the kernel enforces "nothing the caller could not do itself" on every
+    path. `CAP_SYS_ADMIN` is unaffected, so the mounts still work.
+  - Root's identity is taken back for three steps only: `add_binder_device` (opens the root-only
+    `binder-control` on the binderfs just mounted); the **OCI overlay mount** (overlayfs requires
+    the mounter to hold root's file capabilities — its work directory is mode 000 — so the image,
+    upper and work directories are opened as the operator first, a persistent upper/work must be
+    operator-owned, and the mount is made on those descriptors via `/proc/self/fd`); and the
+    post-pivot **re-own** of the scaffolding.
+  - Ownership is inverted: scaffolding used to be built as root and `$HOME` chowned to the
+    operator (`chown_constructed_home`, a device-and-uid heuristic that could be pointed at a bound
+    host directory). Now everything is built as the operator and the scaffolding is handed to uid 0
+    by `fd::chown_tree_same_mount`, which resolves each step with
+    `RESOLVE_NO_XDEV | RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`. `chown_constructed_home` is removed.
+  - Side effect: the trust-manifest mask placeholders construction creates inside a writable
+    grant are now the operator's on the host, not root's.
+- **Why:** a privileged helper acting on its caller's paths must use its caller's authority.
+- **Residual (open):** the view contains binds of host paths the caller chose, and
+  `kennel-bin-init` is kuid 0 inside it. Any path operation init performs at its peer's direction
+  (e.g. creating a mesh mount target) is a root operation that can land on a bound host inode.
+  Destination paths under the new root are also still resolved by name, so a symlink in a
+  writable grant can redirect an operator-identity write or a mount target within the operator's
+  own reach. Both are recorded as open in the 2026-11-19 review tracker (rows R-42, R-43).
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — the kennel user namespace is root-owned; kenneld holds descriptors, not namespace access
 
 - **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory, the boot-sync

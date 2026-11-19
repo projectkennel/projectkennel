@@ -90,6 +90,195 @@ pub fn open_no_magiclinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
     openat2_o_path(dir_fd, path, RESOLVE_NO_MAGICLINKS)
 }
 
+/// Create the mount point `rel` beneath `root` — a directory, or an empty file — together with any
+/// missing parent directories, **without leaving `root`'s mount**.
+///
+/// For the one place the privhelper factory must create a path with root's identity before the
+/// pivot: a bind's mount point inside an OCI overlay root, whose directories belong to the kennel's
+/// uid 0. The tree is image content, so a component may be a symlink pointing anywhere; and binds
+/// of host directories are already mounted inside it. Every step is therefore resolved against
+/// `root` with `RESOLVE_IN_ROOT | RESOLVE_NO_XDEV | RESOLVE_NO_MAGICLINKS`: a symlink is followed
+/// only within `root`, and stepping onto another mount fails `EXDEV`, so nothing is ever created
+/// on a bound host inode or outside the overlay. `rel` must be made of plain names only.
+///
+/// An existing path is left as it is.
+///
+/// # Errors
+///
+/// `InvalidInput` if `rel` has a component that is not a plain name (`..`, a root, a prefix);
+/// `EXDEV` if the path crosses a mount point; any other `openat2`/`mkdirat` error.
+pub fn create_in_root_same_mount(root: &Path, rel: &Path, directory: bool) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::{mkdirat, Mode};
+    use std::path::Component;
+
+    let mut names: Vec<&std::ffi::OsStr> = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(name) => names.push(name),
+            Component::CurDir => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "mount point path must be plain names beneath the root",
+                ))
+            }
+        }
+    }
+    let root_fd = open(
+        root,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let resolve = ResolveFlag::RESOLVE_IN_ROOT
+        | ResolveFlag::RESOLVE_NO_XDEV
+        | ResolveFlag::RESOLVE_NO_MAGICLINKS;
+    let handle = || {
+        OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+            .resolve(resolve)
+    };
+
+    let mut walked = std::path::PathBuf::new();
+    for (index, name) in names.iter().enumerate() {
+        let parent = walked.clone();
+        walked.push(name);
+        match openat2(&root_fd, walked.as_path(), handle()) {
+            Ok(_) => continue, // already there
+            Err(Errno::ENOENT) => {}
+            Err(e) => return Err(io::Error::from(e)),
+        }
+        let parent_fd = if parent.as_os_str().is_empty() {
+            root_fd.try_clone()?
+        } else {
+            openat2(&root_fd, parent.as_path(), handle()).map_err(io::Error::from)?
+        };
+        let last = index.saturating_add(1) == names.len();
+        if last && !directory {
+            // One plain name under a parent we just resolved: create it there, exclusively.
+            let create = OpenHow::new()
+                .flags(
+                    OFlag::O_WRONLY
+                        | OFlag::O_CREAT
+                        | OFlag::O_EXCL
+                        | OFlag::O_NOFOLLOW
+                        | OFlag::O_CLOEXEC,
+                )
+                .mode(Mode::from_bits_truncate(0o644))
+                .resolve(
+                    ResolveFlag::RESOLVE_BENEATH
+                        | ResolveFlag::RESOLVE_NO_XDEV
+                        | ResolveFlag::RESOLVE_NO_SYMLINKS,
+                );
+            openat2(&parent_fd, *name, create).map_err(io::Error::from)?;
+        } else {
+            mkdirat(&parent_fd, *name, Mode::from_bits_truncate(0o755)).map_err(io::Error::from)?;
+        }
+    }
+    Ok(())
+}
+
+/// Give `dir`, and everything beneath it **on the same mount**, to `uid`:`gid`.
+///
+/// The privhelper factory builds a kennel's view with the operator's filesystem identity (so the
+/// kernel refuses anything the caller could not do itself), then uses this to hand the scaffolding
+/// it created back to the kennel's uid 0. It must never touch an inode the factory did not create,
+/// so the walk is descriptor-based and resolves every step with `RESOLVE_NO_XDEV |
+/// RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH`:
+///
+/// - a name that is a **mount point** (every bind of a host path is one) fails `EXDEV` and is
+///   skipped, so no bound host inode is reached;
+/// - a **symlink** is never followed — the link itself is re-owned (`AT_EMPTY_PATH` on an `O_PATH`
+///   handle), never its target.
+///
+/// `skip`, when given, is a path **relative to `dir`** whose subtree is left alone (the workload's
+/// constructed home, which is the operator's by design).
+///
+/// # Errors
+///
+/// Any `open`/`openat2`/`fchownat`/`readdir` error other than the `EXDEV` that marks a mount point.
+pub fn chown_tree_same_mount(
+    dir: &Path,
+    uid: u32,
+    gid: u32,
+    skip: Option<&Path>,
+) -> io::Result<()> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    let root = open(
+        dir,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    chown_tree_at(&root, Path::new(""), uid, gid, skip)
+}
+
+/// The recursive body of [`chown_tree_same_mount`]: `dir` is an open directory, `rel` its path
+/// relative to the walk's root (only compared against `skip`, never resolved).
+fn chown_tree_at(
+    dir: &OwnedFd,
+    rel: &Path,
+    uid: u32,
+    gid: u32,
+    skip: Option<&Path>,
+) -> io::Result<()> {
+    use nix::errno::Errno;
+    use nix::fcntl::{openat2, AtFlags, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::{fstat, SFlag};
+    use nix::unistd::{fchown, fchownat, Gid, Uid};
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let owner = Some(Uid::from_raw(uid));
+    let group = Some(Gid::from_raw(gid));
+    fchown(dir, owner, group).map_err(io::Error::from)?;
+
+    // Collect the names first: the directory stream shares its offset with `dir`'s duplicate, and
+    // re-owning entries while iterating must not disturb it.
+    let mut names: Vec<std::ffi::OsString> = Vec::new();
+    {
+        let mut stream = nix::dir::Dir::from_fd(dir.try_clone()?).map_err(io::Error::from)?;
+        for entry in stream.iter() {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_bytes();
+            if name != b"." && name != b".." {
+                names.push(std::ffi::OsString::from_vec(name.to_vec()));
+            }
+        }
+    }
+
+    let resolve = ResolveFlag::RESOLVE_NO_XDEV
+        | ResolveFlag::RESOLVE_NO_SYMLINKS
+        | ResolveFlag::RESOLVE_BENEATH;
+    for name in names {
+        let child_rel = rel.join(&name);
+        if skip == Some(child_rel.as_path()) {
+            continue;
+        }
+        let handle = OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+            .resolve(resolve);
+        let node = match openat2(dir, name.as_os_str(), handle) {
+            Ok(fd) => fd,
+            // A mount point: not something we created. Leave it and everything under it alone.
+            Err(Errno::EXDEV) => continue,
+            Err(e) => return Err(io::Error::from(e)),
+        };
+        fchownat(&node, "", owner, group, AtFlags::AT_EMPTY_PATH).map_err(io::Error::from)?;
+        let kind = SFlag::from_bits_truncate(fstat(&node).map_err(io::Error::from)?.st_mode);
+        if kind & SFlag::S_IFMT == SFlag::S_IFDIR {
+            let listing = OpenHow::new()
+                .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+                .resolve(resolve);
+            let sub = openat2(dir, name.as_os_str(), listing).map_err(io::Error::from)?;
+            chown_tree_at(&sub, &child_rel, uid, gid, skip)?;
+        }
+    }
+    Ok(())
+}
+
 /// The shared `openat2(2)` body: open `path` as `O_PATH` under `resolve` restrictions.
 fn openat2_o_path(dir_fd: RawFd, path: &Path, resolve: u64) -> io::Result<OwnedFd> {
     use std::ffi::CString;

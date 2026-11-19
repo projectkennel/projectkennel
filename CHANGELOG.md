@@ -8,6 +8,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **The privileged helper builds a kennel's view with the operator's filesystem identity, not
+  root's.** Its construction child is host root until `pivot_root`, and it created directories,
+  copied files and mounted an overlay on paths supplied by its caller. Anyone who ran the helper
+  directly could have root read or write a host file, and a symlink left in a writable grant by
+  an earlier workload could redirect the same operations. The child now sets its filesystem uid
+  and gid to the operator's for the whole build, so the kernel refuses anything the caller could
+  not do. An OCI overlay is mounted on directories opened and checked as the operator, and a
+  persistent upper must be operator-owned. Placeholders the build creates inside a writable grant
+  are now owned by the operator on the host, not by root.
 - **A kennel's user namespace is now owned by root, not by the operator.** The namespace maps host
   uid 0, and the factory made the operator its owner so `kenneld` could open the kennel's binderfs
   through `/proc/<init>/root`. A namespace's owner holds every capability inside it, so any
