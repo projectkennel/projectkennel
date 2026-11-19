@@ -26,6 +26,30 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — node 0 frees the inbound buffer before it replies
+
+- **Bears-on:** Kennel book Vol 2, the binder chapter (§7.1, the transaction/buffer discipline);
+  the TTL custodian (§9.7). THREATS T5.1.
+- **Change:** every reply was one write of `[BC_REPLY][BC_FREE_BUFFER]`, and `write_only` never
+  looked at `write_consumed`. The binder driver stops processing a write at the first command
+  that fails and still returns success, so a reply the **sender** could make fail left the free
+  unprocessed and the inbound buffer allocated for the life of the endpoint. The simplest way to
+  make it fail is to send one-way: there is no transaction stack to reply onto. On the test VM a
+  workload's node 0 accepted eight 8 KiB one-way transactions (the 64 KiB one-way allowance) and
+  refused every one after — with which `kennel-bin-init`'s TTL-expiry notice can no longer be
+  delivered, and on a mesh bus every participant's `SVC_CONNECT` is affected. As-built now:
+  - the write is `[BC_FREE_BUFFER][BC_REPLY]` (`Connection::reply_write`): the free is
+    unconditional. The reply rides the thread's transaction stack, not the buffer, and handlers
+    already take their own reference to anything they keep from it;
+  - `Incoming` carries `one_way`, and a one-way transaction is freed and **not** replied to.
+- **Why:** a resource the peer fills must be released on a path the peer cannot interrupt.
+- **Not changed:** `write_only` still ignores `write_consumed`, so after a reply that fails for
+  another reason (the peer died, or did not accept a returned fd) a command queued behind it in
+  the same write — the handle release after `HandleOnce` — is still skipped. The transact loops
+  still discard a nested inbound transaction without freeing it, still busy-spin on a
+  non-blocking fd, and still have no deadline.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — the trust manifest is validated on load; revert and re-pin act inside the workspace
 
 - **Bears-on:** Kennel book Vol 2, the workspace trust-manifest chapter (§7.4, T2.8) — the

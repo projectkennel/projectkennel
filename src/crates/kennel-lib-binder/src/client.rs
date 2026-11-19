@@ -49,6 +49,9 @@ pub struct Incoming {
     /// The kernel buffer holding the data, to release with `BC_FREE_BUFFER` after
     /// the reply is sent.
     pub buffer: u64,
+    /// Whether the sender asked for no reply (`TF_ONE_WAY`). A one-way transaction has no
+    /// transaction stack to reply onto: its buffer is freed and nothing is sent back.
+    pub one_way: bool,
 }
 
 /// One cycle's inbound work from [`Connection::recv_batch`].
@@ -580,9 +583,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -605,9 +606,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -636,9 +635,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -790,9 +787,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -910,6 +905,7 @@ impl Connection {
                         sender_euid: td.sender_euid,
                         node_cookie: td.cookie,
                         buffer: td.buffer,
+                        one_way: td.flags & proto::TF_ONE_WAY != 0,
                     });
                 }
                 Br::SpawnLooper => spawn_looper = true,
@@ -960,6 +956,28 @@ impl Connection {
         fds
     }
 
+    /// The `BINDER_WRITE_READ` write for answering `incoming` with `td`: **free the inbound
+    /// buffer first, then reply**.
+    ///
+    /// The driver stops processing a write at the first command that fails, and still returns
+    /// success. With the reply first, any reply the peer could make fail — it died, it sent
+    /// one-way, it did not accept the fd being returned — left the `BC_FREE_BUFFER` behind it
+    /// unprocessed, and the inbound buffer stayed allocated for the life of the endpoint: a peer
+    /// could pin node 0's whole buffer. Freeing first makes the free unconditional. It is safe:
+    /// the reply rides the thread's transaction stack, not the buffer, and a handler has already
+    /// taken its own reference to anything it keeps from the buffer.
+    ///
+    /// A one-way transaction gets no `BC_REPLY` at all — there is nothing to reply onto, and the
+    /// attempt would only arm an error on this thread.
+    fn reply_write(incoming: &Incoming, td: &TransactionData) -> Vec<u8> {
+        let mut write = Vec::new();
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        if !incoming.one_way {
+            proto::write_transaction(&mut write, true, td);
+        }
+        write
+    }
+
     /// Reply to the most recently received transaction with `data`, then free its
     /// inbound buffer. Must be called on the same thread that `recv`d it (binder
     /// tracks the transaction stack per thread).
@@ -973,9 +991,7 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         // Write-only: the BR_TRANSACTION_COMPLETE for this reply is drained by the
         // next serve cycle; blocking to read it here would stall the looper.
         self.write_only(&write)

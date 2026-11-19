@@ -8,6 +8,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A workload can no longer pin kenneld's binder buffer.** kenneld replied to each transaction
+  and freed its buffer in one write, and the binder driver skips the rest of a write after a
+  command fails. A workload that sent one-way transactions made every reply fail, so no buffer
+  was ever freed: eight sends filled the allowance, after which the kennel's own TTL-expiry
+  notice could not be delivered, and on a shared mesh bus other kennels' connects failed.
+  kenneld now frees the buffer before it replies, and does not reply to a one-way transaction.
 - **`kennel review` can no longer be steered by the workspace it reviews.** A cloned repository
   could ship its own trust manifest with trigger paths outside the workspace, and `--revert`
   would write the repository's blobs there. A workload could swap a pinned trigger for a symlink
