@@ -1,0 +1,30 @@
+# ============================================================================
+# Suite case: mount-point-symlink — a mount point is the path itself, never a symlink's target.
+#
+# The trust-manifest masks are mounts placed inside every writable grant, over paths in a
+# host directory an earlier workload could write. If construction resolved such a path by
+# name, a symlink planted there would send the mask to the link's target and leave the path
+# itself under the workload's control — the mask silently bypassed. Construction therefore
+# resolves every destination by descriptor inside the new root and REFUSES a symlink at a
+# mount point: the kennel does not start.
+#
+# `run.sh` plants the symlink host-side (standing in for the earlier workload) and asserts
+# the run is refused. This policy's workload must never execute.
+# ============================================================================
+
+template_name = "mount-point-symlink"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+write = ["~/kennel-e2e/mount-point-symlink"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/touch", "/bin/touch"]
+
+[workload]
+argv = ["/bin/sh", "-c", "touch \"$HOME/kennel-e2e/mount-point-symlink/WORKLOAD-RAN\""]
