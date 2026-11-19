@@ -233,6 +233,44 @@ pub fn owner_and_kind(fd: &OwnedFd) -> io::Result<(u32, bool)> {
     Ok((st.st_uid, is_dir))
 }
 
+/// An `O_PATH` handle to the **socket** named `leaf` directly inside the directory `dir`.
+///
+/// For connecting to a socket in a directory someone else can write: `dir` is reached with no
+/// symlink followed, `leaf` must be a single name, it is opened without being followed, and it
+/// must be a socket. Connecting to the handle (through [`proc_path`]) then reaches that socket and
+/// nothing a link in the directory could point at.
+///
+/// # Errors
+///
+/// `InvalidInput` if `leaf` is not one plain name or the entry is not a socket; `ELOOP` if it is
+/// a symlink; any other `openat2`/`fstat` error (`ENOENT` when it is not bound yet).
+pub fn socket_in_dir(dir: &Path, leaf: &std::ffi::OsStr) -> io::Result<OwnedFd> {
+    use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::SFlag;
+    if plain_names(Path::new(leaf))?.len() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "socket name must be one plain name",
+        ));
+    }
+    let dir_fd = open_no_symlinks(AT_FDCWD, dir)?;
+    let how = OpenHow::new()
+        .flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+        .resolve(
+            ResolveFlag::RESOLVE_BENEATH
+                | ResolveFlag::RESOLVE_NO_SYMLINKS
+                | ResolveFlag::RESOLVE_NO_XDEV,
+        );
+    let sock = openat2(&dir_fd, leaf, how).map_err(io::Error::from)?;
+    if file_type(&sock)? != SFlag::S_IFSOCK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the rendezvous entry is not a socket",
+        ));
+    }
+    Ok(sock)
+}
+
 /// What a path inside a [`RootDir`] is required to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {

@@ -35,6 +35,36 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     let ep = &policy.effective_policy;
     let mut v = Vec::new();
 
+    // A mesh `name`/`key` becomes a component of a host path the daemon creates and binds, so it
+    // must be one safe component. The compiler enforces this; re-assert it here because a settled
+    // artefact can be signed without ever passing through the compiler.
+    for (kind, name, key) in policy
+        .mesh
+        .provides
+        .iter()
+        .map(|p| ("provides", &p.name, &p.key))
+        .chain(
+            policy
+                .mesh
+                .consumes
+                .iter()
+                .map(|c| ("consumes", &c.name, &c.key)),
+        )
+    {
+        if !crate::meshname::name_ok(name) {
+            v.push(InvariantViolation::new(
+                "mesh.name",
+                format!("[[{kind}]] name is not a well-formed capability name"),
+            ));
+        }
+        if key.as_deref().is_some_and(|k| !crate::meshname::key_ok(k)) {
+            v.push(InvariantViolation::new(
+                "mesh.key",
+                format!("[[{kind}]] key is not a well-formed token"),
+            ));
+        }
+    }
+
     if !ep.cap.no_new_privs {
         v.push(InvariantViolation::new("cap.no_new_privs", "must be true"));
     }

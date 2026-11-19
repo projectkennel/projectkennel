@@ -26,6 +26,40 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — mesh names are one safe path component; the rendezvous connect is pinned to a socket; signing stages nothing on disk
+
+- **Bears-on:** Kennel book Vol 2, the service catalogue and mesh chapters (§7.13.3, §7.13.4b);
+  the signing chapter. THREATS T3.10.
+- **Change:**
+  - **Capability `name` / `key` grammar.** `kenneld` joins a provider's `name` and `key` into a
+    host path — the rendezvous directory it creates, chmods `0700`, and binds writable into the
+    provider — and its path builder documented them as "filesystem-safe single components by
+    compile validation". The compiler checked only that `name` was non-empty, unreserved and
+    unique, and never looked at `key`: on the test VM a `[[provides]] name = "x/../../../../tmp/…"`
+    compiled. `kennel_lib_policy::meshname` now defines the grammar (letters, digits, `.`, `-`,
+    `_`; no empty label; bounded length). It is enforced for `[[provides]]` and `[[consumes]]` at
+    compile, re-asserted by `invariant::validate` when a settled policy loads (an artefact can be
+    signed without passing through the compiler), and `kenneld::mesh::component` refuses to
+    build a path from anything else.
+  - **The rendezvous connect.** On an af-unix consume, `kenneld` path-connected, from the host,
+    to `<rendezvous dir>/<endpoint leaf>` — a directory the provider can write. A provider that
+    replaced its socket with a symlink sent the consumer's connection to any host socket the
+    operator can reach (reproduced on the VM with a scratch socket; `kenneld`'s own control
+    socket is such a socket, and its peer-credential check would see `kenneld`). The connect now
+    goes through `fd::socket_in_dir`: the directory is reached with no symlink followed, the leaf
+    is opened without being followed and must be a **socket** on that filesystem, and the connect
+    is made to that inode.
+  - **Signing.** `sshsig_sign` wrote the message to `/tmp/kennel-sign-<pid>/canonical` (a
+    directory made with `create_dir_all`, so a pre-existing one of any owner was accepted) and
+    read `canonical.sig` back; root went through this with the host key at install. The message
+    now goes to `ssh-keygen -Y sign` on stdin and the signature is read from stdout.
+- **Why:** a name the daemon turns into a path must be validated where the daemon can rely on
+  it; a connect made by the daemon into a directory a workload writes must not follow what the
+  workload put there; and a privileged signer must not stage its input where others can write.
+- **Not changed:** the other predictable `/tmp` paths in the CLI (the clone staging file, the
+  `TempSettled` fallback when `XDG_RUNTIME_DIR` is unset, the pinned-baseline temp file).
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — an address is judged as the destination the kernel will dial
 
 - **Bears-on:** Kennel book Vol 2, the network chapter (§7.5: the proxied modes' special-use gate,

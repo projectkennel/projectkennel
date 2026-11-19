@@ -14,6 +14,13 @@ use crate::catalogue::Tier;
 /// `key` is appended when present (§7.13.4b). Both inputs are filesystem-safe single components by
 /// compile validation (§7.13.3): `name` is a reverse-DNS identifier, `key` a filesystem-safe token.
 fn component(name: &str, key: Option<&str>) -> String {
+    // The grammar is enforced at compile and re-asserted when the settled policy loads, so this
+    // cannot fire — but the result is joined into a host path we create and bind, and `join`
+    // lets an absolute or `..` component walk anywhere. Never build a path from anything else.
+    use kennel_lib_policy::meshname::{key_ok, name_ok};
+    if !name_ok(name) || key.is_some_and(|k| !key_ok(k)) {
+        return String::from("_invalid");
+    }
     key.map_or_else(|| name.to_owned(), |k| format!("{name}.{k}"))
 }
 
@@ -27,6 +34,21 @@ pub fn host_rp_dir(tier: Tier, name: &str, key: Option<&str>) -> PathBuf {
         .join("mesh")
         .join(tier.as_str())
         .join(component(name, key))
+}
+
+/// The rendezvous directory and the socket's leaf name inside it, for a connect that must not
+/// leave that directory (see `binder::connect` — the provider can write the directory).
+#[must_use]
+pub fn host_rp_parts(
+    tier: Tier,
+    name: &str,
+    key: Option<&str>,
+    endpoint: &str,
+) -> (PathBuf, std::ffi::OsString) {
+    let leaf = Path::new(endpoint)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("sock"));
+    (host_rp_dir(tier, name, key), leaf.to_owned())
 }
 
 /// The host socket the broker connects.

@@ -8,6 +8,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A mesh provider can no longer redirect kenneld's connection, and a capability name can no
+  longer be a path.** For an af-unix capability, kenneld connects from the host to the provider's
+  socket in a directory the provider can write. A provider that put a symlink there sent the
+  consumer to any host socket the operator can reach, kenneld's control socket included; kenneld
+  now connects only to a real socket in that directory. Separately, a `[[provides]]` `name` or
+  `key` such as `x/../../home/…` compiled, and kenneld would then create, chmod and bind the
+  directory it named; names and keys must now be plain identifiers, checked at compile, at load
+  and in the daemon.
+- **Signing no longer stages the message in `/tmp`.** The bytes to sign were written to
+  `/tmp/kennel-sign-<pid>/`, a path any local user could create first, and root signed through it
+  with the host key at install. The message is now piped to `ssh-keygen`.
 - **Respelling an address no longer gets it past the network policy.** An IPv4-mapped IPv6
   address (`::ffff:127.0.0.1`) is the IPv4 address it names, but both the proxy and the
   host-mode BPF ACL judged it as IPv6: in `unconstrained` mode it reached the host's loopback and
