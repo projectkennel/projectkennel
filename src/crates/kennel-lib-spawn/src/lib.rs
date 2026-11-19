@@ -213,6 +213,12 @@ pub fn substitute(
         *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.exclusive", path)?;
     }
+    // The `mmap_exec` opt-outs (#229) name `write` paths: substitute them identically, or a `~/`
+    // opt-out never matches its substituted bind and the bind silently stays noexec.
+    for path in &mut fs.write_mmap_exec {
+        *path = substitute_path(path, subst, &user, &group);
+        reject_leftover("fs.write_mmap_exec", path)?;
+    }
     // Redirects (W15): `path` must keep matching its (substituted) grant in `read`/`write`,
     // and `source` is a bind-backed host path like any grant — both substitute identically.
     for r in &mut fs.redirect {
@@ -2178,6 +2184,43 @@ mod tests {
             .iter()
             .filter(|b| !b.writable)
             .all(|b| !b.mmap_exec));
+    }
+
+    /// Regression (#229 e2e): a `~/` opt-out must survive spawn-time substitution exactly like
+    /// its `fs.write` grant, or the two never match and the bind silently stays noexec.
+    #[test]
+    fn a_home_relative_write_mmap_exec_survives_substitution() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.write = vec!["~/proj/**".to_owned(), "~/other".to_owned()];
+        p.effective_policy.fs.write_mmap_exec = vec!["~/proj/**".to_owned()];
+        let substituted = substitute(&p, &subst()).expect("subst");
+        assert_eq!(
+            substituted.effective_policy.fs.write_mmap_exec,
+            substituted
+                .effective_policy
+                .fs
+                .write
+                .iter()
+                .filter(|w| w.ends_with("/proj/**"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "substituted identically to its fs.write grant"
+        );
+        let plan =
+            Plan::from_policy(&substituted, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let marked: Vec<_> = view
+            .binds
+            .iter()
+            .filter(|b| b.mmap_exec)
+            .map(|b| b.source.clone())
+            .collect();
+        assert_eq!(
+            marked,
+            vec![PathBuf::from("/home/dev/proj")],
+            "{:?}",
+            view.binds
+        );
     }
 
     #[test]
