@@ -1,0 +1,34 @@
+# ============================================================================
+# Suite case: mesh-rendezvous-symlink — the provider half.
+#
+# An af-unix provider binds its socket in a rendezvous directory that kenneld owns and binds
+# into the provider writable. On a consume, KENNELD connects to that socket from the host and
+# hands the connection to the consumer. The provider can write the directory, so it can leave a
+# symlink where its socket should be; a connect by name would follow it to any host socket the
+# operator can reach — kenneld's own control socket included.
+#
+# This provider does exactly that: it replaces its endpoint with a symlink to a host socket
+# `run.sh` created outside every grant. kenneld must refuse to connect through it.
+# ============================================================================
+name = "rendezvous-link-provider"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+write = ["/run/mesh"]
+
+[exec]
+allow = ["/usr/bin/python3", "/usr/bin/python3.*", "/bin/sh"]
+
+[workload]
+argv = ["/usr/bin/python3", "-u", "-c", "import os,time\ntry: os.unlink('/run/mesh/echo.sock')\nexcept OSError: pass\nos.symlink('__VICTIM__', '/run/mesh/echo.sock')\nprint('provider: symlink placed', os.readlink('/run/mesh/echo.sock'))\ntime.sleep(60)\n"]
+pinned = true
+
+[[provides]]
+name = "test.mesh.rendezvous"
+shape = "af-unix"
+endpoint = "/run/mesh/echo.sock"
+reason = "a provider that leaves a symlink where its socket should be"
