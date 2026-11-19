@@ -213,6 +213,7 @@ jobs:
           src/tools/tests/schema-version-pin.sh
           src/tools/tests/spawn-target-binaries.sh
           src/tools/tests/external-deps-manifest.sh
+          src/tools/tests/publish-repo.sh
 
   man:
     name: man (regen check + groff lint)
