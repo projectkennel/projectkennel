@@ -19,9 +19,9 @@
 //! `ConstructionHalf` bytes as data (and, later, a controlling-pty socket as `SCM_RIGHTS`).
 //! The `kennel-bin-init` binary is **not** taken from the wire — the helper resolves it from the
 //! root-owned deployment cascade itself (see below). The helper replies on the same channel
-//! with the construction child's **host pid** (so `kenneld` can take binder node 0 via
-//! `/proc/<pid>/root` and gate the lifecycle verbs), then stays alive as that child's parent
-//! and `_exit`s with its status — the reliable exit path up to `kenneld`.
+//! with the construction child's **host pid** (so `kenneld` can gate the lifecycle verbs), the
+//! boot-sync socket, and an `O_PATH` handle to the kennel's binder device (so `kenneld` can take
+//! binder node 0 without any access to the kennel's namespaces), then exits.
 //!
 //! # The clone / map handshake
 //!
@@ -54,6 +54,9 @@ use kennel_lib_syscall::unistd::{real_gid, real_uid};
 /// as a mirror, on the host `lo` (so an operator's `ss`/`lsof` maps a kennel address back to
 /// the kennel, §7.5.6). Host (`mode = host`) shares the host `lo` directly and adds no in-ns copy.
 const LOOPBACK: &str = "lo";
+
+/// The in-view path of the kennel's binder device (the seal mounts the per-kennel binderfs here).
+const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
 /// Receive buffer for the construction datagram: the length-prefixed construction-half plus
 /// the (variable-length) egress payload tail. Sized for a large allow/deny ruleset.
@@ -104,7 +107,7 @@ pub fn run_construct(chan: BorrowedFd<'_>) -> ! {
 // `op_uid`/`op_gid` are the domain names; the pedantic similar-names heuristic flags the
 // pair, but renaming would only obscure them.
 // allow(too_many_lines): one cohesive privileged construction — recv, clone with the
-// operator-owned userns, write maps, hand off — that cannot be split without breaking the
+// root-owned userns, write maps, hand off — that cannot be split without breaking the
 // linear fd/identity/clone ordering the security argument depends on.
 #[allow(clippy::similar_names, clippy::too_many_lines)]
 fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
@@ -245,28 +248,35 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     let (built_r, built_w) = pipe_cloexec()?;
 
     // The boot-sync socket (07-2 §7.2.1a) that makes startup deterministic. `kennel-bin-init` cannot
-    // take node 0 before it `fexecve`s (kenneld opens the binderfs via `/proc/<init>/root`, which
-    // only resolves post-exec), yet must not pull before node 0 is up — so the factory gates the
+    // take node 0 itself, and must not pull before kenneld has claimed it — so the factory gates the
     // *pull*, not the exec: the child inherits `init_sync` at `BOOT_SYNC_FD` across the `fexecve`,
     // and kenneld holds `daemon_sync` (we hand it over with the init pid below). `kennel-bin-init`
     // signals "ready" on it after exec and blocks; kenneld claims node 0 and signals "go".
     let (init_sync, daemon_sync) = seqpacket_pair()?;
+
+    // The binder hand-back socket. The kennel userns is root-owned (step 3), so kenneld holds no
+    // capability over it and cannot reach the binderfs through `/proc/<init>/root`. Instead the
+    // construction child sends up an `O_PATH` handle to exactly one inode — its binder device —
+    // and the factory relays that to kenneld with the init pid. kenneld re-opens it to claim node 0.
+    let (binder_rx, binder_tx) = seqpacket_pair()?;
 
     // The operator identity (the caller's real ids; setcap/setuid leave the real uid as
     // the invoking user) — never wire-supplied (sec review §6).
     let op_uid = real_uid();
     let op_gid = real_gid();
 
-    // 3. Clone the construction child with the new user namespace **owned by the operator**.
-    //    `CLONE_NEWUSER` records the creating process's *effective* uid as the namespace owner,
-    //    and the owner is what grants `CAP_SYS_PTRACE` in that userns to a process of the same
-    //    uid — so the operator `kenneld` can open the kennel's binderfs (an `FS_USERNS_MOUNT`
-    //    whose `s_user_ns` is this userns) via `/proc/<init>/root`. A root-owned userns denies
-    //    the operator that access (the `/proc/<init>/root` EACCES under Yama `ptrace_scope=1`).
-    //    The factory therefore drops its *effective* uid to the operator across the clone, then
-    //    restores euid 0 to write the maps. The child still gets full capabilities in the new
-    //    userns (a `CLONE_NEWUSER` child always does), so it self-escalates to the kennel's uid 0
-    //    for the root-owned construction (below).
+    // 3. Clone the construction child with the new user namespace **owned by root**.
+    //    `CLONE_NEWUSER` records the creating process's *effective* uid as the namespace owner, and
+    //    a process in the parent namespace whose euid equals the owner holds EVERY capability in the
+    //    child namespace — enough to `setns` into it and `setuid(0)`. This namespace maps host uid 0
+    //    (`0 0 1`), so an operator-owned one would hand any process at the operator's uid host
+    //    root, with the host filesystem still mounted (no pivot is involved in a bare `setns`).
+    //    The invariant is therefore: **no user-owned namespace ever contains host uid 0**. The
+    //    factory raises its effective uid to 0 across the clone so the owner is root; nothing at
+    //    the operator's uid — kenneld included — can then enter the kennel's namespaces or read its
+    //    view through `/proc/<init>/root`. kenneld is handed what it needs as descriptors instead.
+    //    The child still gets full capabilities in the new userns (a `CLONE_NEWUSER` child always
+    //    does), so it becomes the kennel's uid 0 for the root-owned construction (below).
     let granted = half.granted_gids.clone();
     let namespaces = half.namespaces; // captured before `half` moves into the child
                                       // The host sources of the exclusive binds (§2.7), captured before `half` moves into the child;
@@ -279,7 +289,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
                 .map(|b| b.source.clone())
                 .collect()
         });
-    // Captured before the child closure moves `half`: the cgroup to birth the child into.
+    // Captured before the child closure moves `half`: whether this kennel has a binderfs to hand
+    // back (only a constructed view mounts one), and the cgroup to birth the child into.
+    let has_binder = half.new_root.is_some() && half.view.as_ref().is_some_and(|v| v.binder);
     let cgroup_path = half.cgroup_join.then(|| half.cgroup.clone());
     // The child's inherited copy of the maps-ack pipe **write** end (`clone` copies the fd table).
     // The child closes it first thing so its `recv_ack` below sees EOF — not a forever block — if the
@@ -320,6 +332,26 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
                 return;
             }
         };
+        // Hand the factory parent an `O_PATH` handle to this kennel's binder device (see the
+        // hand-back socket above). `O_PATH` on a non-directory: the holder can re-open that one
+        // inode and nothing else — no traversal into the view. No symlink is followed. A kennel
+        // without a constructed view has no binderfs, so nothing is sent and the parent sees EOF.
+        if has_binder {
+            let dev = match kennel_lib_syscall::fd::open_no_symlinks(
+                kennel_lib_syscall::fd::AT_FDCWD,
+                std::path::Path::new(IN_VIEW_BINDER_DEVICE),
+            ) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    eprintln!("kennel-privhelper: construction child: open binder device: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = send_with_raw_fds(binder_tx.as_fd(), &[1u8], &[dev.as_raw_fd()]) {
+                eprintln!("kennel-privhelper: construction child: hand back binder device: {e}");
+                return;
+            }
+        }
         // Signal the parent that the view is built and `pivot_root`ed: the source path is now
         // detached from this view, so the parent may over-mount it operator-side (§2.7). Sent
         // before the `fexecve` (which would CLOEXEC `built_w`); best-effort.
@@ -351,9 +383,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // Hand off to the trusted `kennel-bin-init` (resolved from root-owned config, not the
         // wire) **as the kennel's uid 0** (no drop): PID 1 must NOT share the operator uid, or
         // the operator-uid workload/facades could signal or ptrace it (07-2 §7.2.5).
-        // `kennel-bin-init` itself drops the workload and facades to the operator. kenneld still
-        // reaches `/proc/<init>/root` because the kennel userns is operator-owned, so the
-        // operator kenneld holds CAP_SYS_PTRACE in it. Empty argv/envp (the pull model).
+        // `kennel-bin-init` itself drops the workload and facades to the operator. kenneld cannot
+        // reach `/proc/<init>/root` (the userns is root-owned); it holds the binder handle and the
+        // boot-sync socket instead. Empty argv/envp (the pull model).
         let err = fexecve(init_file.as_fd(), &[], &[]);
         // fexecve returned ⇒ failure; name it, then fall through to the _exit(127) backstop.
         eprintln!("kennel-privhelper: construction child: fexecve kennel-bin-init: {err}");
@@ -369,12 +401,16 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
                 .map_err(|e| io::Error::new(e.kind(), format!("open cgroup {}: {e}", p.display())))
         })
         .transpose()?;
-    // Drop the *effective* uid to the operator so the clone's `CLONE_NEWUSER` records the
-    // operator as the userns owner (see step 3); real/saved stay (operator, 0) so the parent
-    // restores euid 0 below to write the maps. A no-op when the operator already is root.
+    // Raise the *effective* uid to 0 so the clone's `CLONE_NEWUSER` records ROOT as the userns
+    // owner (see step 3) — via `CAP_SETUID` under the setcap factory; already 0 under the
+    // setuid-root fallback. The *filesystem* uid stays the operator's: `CLONE_INTO_CGROUP` checks
+    // write permission on the (operator-owned, delegated) cgroup against fsuid, and the factory
+    // holds no `CAP_DAC_OVERRIDE`. A no-op when the operator already is root.
     if op_uid != 0 {
-        kennel_lib_syscall::unistd::set_euid(op_uid)
-            .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid({op_uid}): {e}")))?;
+        kennel_lib_syscall::unistd::set_euid(0)
+            .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid(0): {e}")))?;
+        kennel_lib_syscall::unistd::set_fsuid(op_uid)
+            .map_err(|e| io::Error::new(e.kind(), format!("factory setfsuid({op_uid}): {e}")))?;
     }
     let init_pid = match &cgroup_dir {
         Some(dir) => clone_pid1_in_cgroup(namespaces, dir.as_fd(), child)?,
@@ -384,17 +420,14 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         "construct: cloned PID 1 (host pid {init_pid}); writing identity maps"
     ));
 
-    // 4. Restore the parent's **effective** uid to 0 (undo the pre-clone operator drop) before the
-    //    map write: the `/proc/<pid>/uid_map` file is owned by global root (the factory holds file
-    //    caps, so its construction child is non-dumpable), so euid 0 is what lets us open it.
-    //    Permitted via `CAP_SETUID` under the setcap factory (and via the saved uid 0 under the
-    //    setuid-root fallback). The userns owner is already fixed (operator) at the clone.
-    if op_uid != 0 {
-        kennel_lib_syscall::unistd::set_euid(0)
-            .map_err(|e| io::Error::new(e.kind(), format!("factory seteuid(0): {e}")))?;
-    }
+    // The parent's copy of the child's end of the binder hand-back socket was captured by the
+    // closure and dropped with it when `clone` returned here, so a child that dies or `fexecve`s
+    // without sending yields EOF on `binder_rx` below rather than a hang.
 
-    // Escalate the parent to uid 0 ONLY to write the child's identity maps. The kernel's `uid_map`
+    // 4. Escalate the parent to uid 0 ONLY to write the child's identity maps: the
+    //    `/proc/<pid>/uid_map` file is owned by global root (the factory holds file caps, so its
+    //    construction child is non-dumpable), and `setuid(0)` also brings the filesystem uid back
+    //    to 0 so we can open it. The userns owner is already fixed (root) at the clone. The kernel's `uid_map`
     //    write gate requires `CAP_SYS_ADMIN` over the new user namespace (checked against the
     //    opener's creds) — satisfied here by the factory's `cap_sys_admin` at euid 0; and the line
     //    mapping host uid 0 (`0 0 1`) additionally requires `CAP_SETFCAP` (Linux 5.12+). This does
@@ -440,11 +473,23 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     drop(built_r);
 
     // Report the init pid AND hand kenneld the boot-sync socket as the sole SCM fd: kenneld waits
-    // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (now reachable via
-    // /proc/<pid>/root), and signals "go". With that off our hands, the factory's job is done.
-    send_with_raw_fds(chan, &init_pid.to_le_bytes(), &[daemon_sync.as_raw_fd()])?;
+    // on it for `kennel-bin-init`'s post-exec "ready", claims node 0 (through the binder handle
+    // sent alongside), and signals "go". With that off our hands, the factory's job is done.
+    // Collect the binder device handle from the child (it sends it once the view is built). EOF —
+    // no binderfs, or a child that died — yields none; kenneld refuses a kennel that needs one.
+    let binder_dev: Option<OwnedFd> = {
+        let mut byte = [0u8; 1];
+        recv_with_fds(binder_rx.as_fd(), &mut byte)
+            .ok()
+            .and_then(|(_, mut fds)| (!fds.is_empty()).then(|| fds.remove(0)))
+    };
+    drop(binder_rx);
+    let mut reply_fds = vec![daemon_sync.as_raw_fd()];
+    reply_fds.extend(binder_dev.as_ref().map(AsRawFd::as_raw_fd));
+    send_with_raw_fds(chan, &init_pid.to_le_bytes(), &reply_fds)?;
     tracer.step(&format!(
-        "construct: reported init pid {init_pid} + boot-sync socket to kenneld; factory done"
+        "construct: reported init pid {init_pid} + boot-sync socket + binder handle ({}) to kenneld; factory done",
+        if binder_dev.is_some() { "present" } else { "none" }
     ));
 
     // 5. Done. The factory's whole job was to build the kennel, write the maps, and report the init
@@ -775,11 +820,11 @@ fn build_kennel(half: &ConstructionHalf, op_uid: u32, op_gid: u32) -> io::Result
         kennel_lib_syscall::unistd::chown_to(std::path::Path::new("/tmp"), op_uid, op_gid)?;
         // Hand the binderfs device to the operator: it is created mode 0600 owned by uid 0 of
         // the (now real) userns, but every binder client — kennel-bin-init, the af-unix proxy,
-        // kenneld via /proc/<init>/root — acts as the operator. The mount-root dir is 0755
+        // kenneld through the handed-back device handle — acts as the operator. The mount-root dir is 0755
         // (operator-traversable already), so only the device itself needs chowning.
         if view.binder {
             kennel_lib_syscall::unistd::chown_to(
-                std::path::Path::new("/dev/binderfs/binder"),
+                std::path::Path::new(IN_VIEW_BINDER_DEVICE),
                 op_uid,
                 op_gid,
             )?;

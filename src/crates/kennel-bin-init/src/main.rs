@@ -89,31 +89,10 @@ fn main() -> ExitCode {
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
     require_kennel_userns()?;
-    // Authorise the operator kenneld to traverse our `/proc/<init>/root` under Yama
-    // `ptrace_scope=1` (07-2 §7.2.1a): it claims binder node 0 that way, but it is neither
-    // our process ancestor nor a holder of CAP_SYS_PTRACE in the initial userns Yama checks.
-    // Done BEFORE READY so the flag is set when kenneld opens the device. `_ANY` because
-    // kenneld lives in an ancestor PID namespace and has no pid we (kennel pid 1) could name;
-    // Yama's uid check still bars the lower-privileged operator-uid workload/facades from the
-    // uid-0 init. Best-effort: a kernel without Yama needs no relaxation, so a failure here
-    // must not abort the boot — surface it and continue to READY.
-    if let Err(e) = kennel_lib_syscall::process::set_ptracer_any() {
-        eprintln!("kennel-bin-init: PR_SET_PTRACER_ANY (Yama relaxation) failed, continuing: {e}");
-    }
-    // Mesh rendezvous (§7.13.4a): bind the datagram socket BEFORE READY, so it exists when kenneld
-    // sends the detached connector-binderfs clones (it does so right after our READY, reaching us via
-    // /proc/<init>/root). We receive + `move_mount` them below, before forking the workload. Bound
-    // unconditionally; a kennel with no mesh participation just receives a count-0 datagram.
-    let rendezvous = kennel_lib_syscall::scm::bind_dgram(Path::new(
-        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
-    ))?;
-    // We are the kennel's userns-0 (host root via `0 0 1`), so the socket is root-owned; make it
-    // writable so the operator-uid kenneld can send to it. Safe: it is removed before the workload
-    // forks, so no kennel process ever races it.
-    std::fs::set_permissions(
-        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
-        std::os::unix::fs::PermissionsExt::from_mode(0o666),
-    )?;
+    // No Yama relaxation and no in-view rendezvous socket: the kennel userns is root-owned, so
+    // nothing outside it — kenneld included — may traverse `/proc/<init>/root`. kenneld claims
+    // node 0 through the device handle the factory handed it, and sends the mesh mounts over the
+    // boot-sync socket (below).
     // Boot-sync (07-2 §7.2.1a): announce we have execed and block until kenneld has claimed binder
     // node 0, so the pull below is a single first-try transaction (no retry). The factory placed
     // our end of the sync socket at `BOOT_SYNC_FD` before our `fexecve`.
@@ -141,7 +120,7 @@ fn run() -> io::Result<u8> {
     // Place the connector mesh mounts kenneld handed us (§7.13.4a): `move_mount` each detached
     // binderfs clone into its in-view target and grant the workload Landlock access to the device,
     // before we fork the workload (which opens it by path). A count-0 datagram is the no-mesh case.
-    place_mesh_mounts(&rendezvous, &mut sup, &tr)?;
+    place_mesh_mounts(&mut sup, &tr)?;
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
@@ -157,22 +136,24 @@ fn run() -> io::Result<u8> {
 
 /// Receive the mesh rendezvous datagram and `move_mount` each detached binderfs clone into the view.
 ///
-/// kenneld sent (after our READY) one datagram naming each clone's in-view target directory, with the
-/// detached mount fds as `SCM_RIGHTS`. For each, we create the target dir, `move_mount` the binderfs
-/// onto it (we hold `CAP_SYS_ADMIN` in the kennel userns, so a sibling-userns clone attaches fine),
-/// and append the device dir + node to the workload's Landlock grants — so the workload, sealed when
-/// it is forked, may open `<target>/binder`. A count-0 datagram (a kennel with no mesh) is a no-op.
-fn place_mesh_mounts(
-    rendezvous: &std::os::fd::OwnedFd,
-    sup: &mut Supervision,
-    tr: &kennel_lib_config::Tracer,
-) -> io::Result<()> {
+/// kenneld sends (right after its GO) one datagram on the boot-sync socket naming each clone's
+/// in-view target directory, with the detached mount fds as `SCM_RIGHTS`. For each, we create the
+/// target dir, `move_mount` the binderfs onto it (we hold `CAP_SYS_ADMIN` in the kennel userns, so a
+/// sibling-userns clone attaches fine), and append the device dir + node to the workload's Landlock
+/// grants — so the workload, sealed when it is forked, may open `<target>/binder`. A count-0
+/// datagram (a kennel with no mesh) is a no-op. It is always sent, so an empty read means kenneld
+/// went away mid-bring-up: fail closed rather than start a workload missing its mesh mounts.
+fn place_mesh_mounts(sup: &mut Supervision, tr: &kennel_lib_config::Tracer) -> io::Result<()> {
     use kennel_lib_syscall::landlock::AccessFs;
     use std::os::fd::AsFd as _;
     let mut buf = [0u8; 4096];
-    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(rendezvous.as_fd(), &mut buf)?;
-    // The socket has served its purpose; clear it so the workload's /dev carries no stray node.
-    let _ = std::fs::remove_file(kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK);
+    let sync = kennel_lib_syscall::boot::boot_sync_socket();
+    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(sync, &mut buf)?;
+    if n == 0 {
+        return Err(io::Error::other(
+            "mesh rendezvous: kenneld closed the boot-sync socket before sending the mesh mounts",
+        ));
+    }
     for (mount, target) in
         kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)
     {

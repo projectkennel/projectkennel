@@ -6,6 +6,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Security
+
+- **A kennel's user namespace is now owned by root, not by the operator.** The namespace maps host
+  uid 0, and the factory made the operator its owner so `kenneld` could open the kennel's binderfs
+  through `/proc/<init>/root`. A namespace's owner holds every capability inside it, so any
+  process at the operator's uid could `setns` into a running kennel's user namespace, become uid 0
+  there, and act as host root on the host filesystem — or enter the kennel itself. The factory now
+  creates the namespace with effective uid 0, so nothing at the operator's uid can enter a
+  kennel-built namespace or read its view from outside. `kenneld` is handed what it needs as
+  descriptors: a handle to the binder device, and the boot-sync socket, which now also carries the
+  mesh mounts. `kennel-bin-init` no longer sets `PR_SET_PTRACER_ANY`, and the mode-0666 rendezvous
+  socket in the view is gone. An operator can no longer `nsenter` into their own kennel.
+
 ### Docs & tooling
 
 - **`publish-repo.sh` no longer risks deleting the live repo's signed metadata.** It published

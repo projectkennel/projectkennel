@@ -154,12 +154,7 @@ pub trait Privileged {
         _pty_fd: Option<std::os::fd::RawFd>,
         _workload_fd: Option<std::os::fd::RawFd>,
         _stdio_fds: Option<[std::os::fd::RawFd; 3]>,
-    ) -> io::Result<(
-        Child,
-        i32,
-        std::os::fd::OwnedFd,
-        kennel_privhelper::client::HelperStderr,
-    )> {
+    ) -> io::Result<kennel_privhelper::client::Constructed> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "factory construction not supported by this Privileged impl",
@@ -217,12 +212,7 @@ impl Privileged for HelperClient {
         pty_fd: Option<std::os::fd::RawFd>,
         workload_fd: Option<std::os::fd::RawFd>,
         stdio_fds: Option<[std::os::fd::RawFd; 3]>,
-    ) -> io::Result<(
-        Child,
-        i32,
-        std::os::fd::OwnedFd,
-        kennel_privhelper::client::HelperStderr,
-    )> {
+    ) -> io::Result<kennel_privhelper::client::Constructed> {
         kennel_privhelper::client::construct_kennel(
             &self.helper,
             construction_half,
@@ -1219,7 +1209,7 @@ fn bring_up<P: Privileged + Sync>(
     // Create the UDP-egress tun when the policy opts in (`[net.udp]`, W2). Valid only on the
     // proxied modes, which own their net-ns — the same window `lo_up` covers.
     let tun = net.udp;
-    let (mut child, init_pid, sync, supervision_bytes, helper_stderr) = construct_via_factory(
+    let (built, supervision_bytes) = construct_via_factory(
         privileged,
         plan,
         command,
@@ -1231,14 +1221,20 @@ fn bring_up<P: Privileged + Sync>(
         tracer.level_u8(),
         state,
     )?;
+    let kennel_privhelper::client::Constructed {
+        mut child,
+        init_pid,
+        sync,
+        binder: binder_handle,
+        stderr: helper_stderr,
+    } = built;
     tracer.step(&format!(
         "bring-up: factory returned, kennel-bin-init pid={init_pid}; awaiting boot-sync (exec)"
     ));
     let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
 
-    // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed — only then is its
-    // binderfs reachable via /proc/<init>/root. This is what lets node 0 be claimed deterministically
-    // (and what the old retry loop was really waiting on). A failure here leaves the kennel up but
+    // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed and is blocked
+    // waiting for the bus. This is what lets node 0 be claimed deterministically, before the pull. A failure here leaves the kennel up but
     // binder-less; the workload (which it gates) will not start, so surface it. The construction child
     // shares the factory's captured stderr (W15): on a boot-sync failure its own cause — e.g.
     // `construction child: build_kennel: <reason>` — is folded in, not just the transport symptom.
@@ -1252,25 +1248,6 @@ fn bring_up<P: Privileged + Sync>(
         return Err(Error::Io(io::Error::new(e.kind(), msg)));
     }
     tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
-
-    // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place. The
-    // init bound its datagram socket before READY, so it is reachable now via /proc/<init>/root; the
-    // init `move_mount`s each fd into its target before forking the workload. Privhelper-free and
-    // boot-sync-free — the datagram buffers, so this need not block on the init's receive. Always
-    // sent (a count-0 datagram for a kennel with no mesh participation), so the init's receive is
-    // unconditional and never hangs.
-    {
-        let sock_path = std::path::PathBuf::from(format!("/proc/{init_pid}/root"))
-            .join(kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK.trim_start_matches('/'));
-        let (data, fds) = kennel_lib_spawn::mesh_rendezvous::encode(mesh_mounts);
-        kennel_lib_syscall::scm::send_to_with_fds(&sock_path, &data, &fds).map_err(Error::Io)?;
-        if !mesh_mounts.is_empty() {
-            tracer.step(&format!(
-                "bring-up: mesh rendezvous — sent {} mount fd(s) to kennel-bin-init",
-                mesh_mounts.len()
-            ));
-        }
-    }
 
     // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
     // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
@@ -1315,10 +1292,8 @@ fn bring_up<P: Privileged + Sync>(
     }
 
     // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
-    // so kennel-bin-init can pull its supervision-half. kennel-bin-init has execed (boot-sync above), so
-    // the device is reachable via /proc/<init>/root — a single open, no retry.
+    // so kennel-bin-init can pull its supervision-half — a single open, no retry.
     if plan.view.as_ref().is_some_and(|v| v.binder) {
-        let init_pid_u32 = u32::try_from(init_pid).unwrap_or(0);
         let lifecycle = crate::binder::Lifecycle {
             init_host_pid: Some(init_pid),
             supervision: supervision_bytes,
@@ -1330,11 +1305,17 @@ fn bring_up<P: Privileged + Sync>(
             // The operator-prompt channel for the TTL `renew` action; `None` ⇒ fall back to warn.
             prompt: prep.prompt.clone(),
         };
-        tracer.step(&format!(
-            "bring-up: acquiring binder node 0 via /proc/{init_pid_u32}/root"
-        ));
+        tracer.step("bring-up: acquiring binder node 0 through the factory's device handle");
+        // The kennel's userns is root-owned, so there is no path to its binderfs from here; the
+        // factory hands the device over as a descriptor. A kennel that needs a bus but came back
+        // without one cannot be served — refuse it rather than run a workload with no mediation.
+        let handle = binder_handle.ok_or_else(|| {
+            Error::Io(io::Error::other(
+                "the factory returned no binder device handle for a kennel that has a binderfs",
+            ))
+        })?;
         match acquire_binder_node0(
-            init_pid_u32,
+            &handle,
             ctx,
             prep,
             lifecycle,
@@ -1358,6 +1339,24 @@ fn bring_up<P: Privileged + Sync>(
         "bring-up: signalling bus-live — kennel-bin-init may pull its plan + start the workload",
     );
     kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
+
+    // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place, as one
+    // datagram on the boot-sync socket right after GO. The init reads it after pulling its plan and
+    // `move_mount`s each fd into its target before forking the workload. Always sent (a count-0
+    // datagram for a kennel with no mesh participation), so the init's receive is unconditional
+    // and never hangs. There is no socket in the kennel's view for this: the userns is root-owned,
+    // so kenneld could not reach one.
+    {
+        use std::os::fd::AsFd as _;
+        let (data, fds) = kennel_lib_spawn::mesh_rendezvous::encode(mesh_mounts);
+        kennel_lib_syscall::scm::send_with_fds(sync.as_fd(), &data, &fds).map_err(Error::Io)?;
+        if !mesh_mounts.is_empty() {
+            tracer.step(&format!(
+                "bring-up: mesh rendezvous — sent {} mount fd(s) to kennel-bin-init",
+                mesh_mounts.len()
+            ));
+        }
+    }
     let _ = child.wait();
     Ok(init_pid)
 }
@@ -1403,16 +1402,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     egress_bytes: &[u8],
     log_level: u8,
     state: &mut Provision,
-) -> Result<
-    (
-        Child,
-        i32,
-        std::os::fd::OwnedFd,
-        Vec<u8>,
-        kennel_privhelper::client::HelperStderr,
-    ),
-    Error,
-> {
+) -> Result<(kennel_privhelper::client::Constructed, Vec<u8>), Error> {
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
 
@@ -1430,7 +1420,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     // boot-sync socket: the caller waits on it for kennel-bin-init's "ready", claims binder node 0,
     // then signals "go" (deterministic startup, `07-2` §7.2.1a). The factory exits the moment it
     // reports the pid, so the caller reaps the `Child` after the sync.
-    let (child, init_pid, sync, helper_stderr) = privileged.construct_kennel(
+    let built = privileged.construct_kennel(
         &half_bytes,
         Some(egress_bytes),
         plan.interactive_return_fd,
@@ -1439,7 +1429,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     )?;
     state.factory = true;
 
-    Ok((child, init_pid, sync, supervision_bytes, helper_stderr))
+    Ok((built, supervision_bytes))
 }
 
 /// Build the construction-half (the privhelper factory's input) from the plan, the kennel's
@@ -1538,18 +1528,13 @@ fn supervision_from(
 }
 
 /// Take node 0 of a kennel's binderfs instance and run its registry + lifecycle serve
-/// thread. The binderfs is mounted inside the kennel (by the spawn seal on the legacy
-/// path, or by the factory's construction child); we reach it from the daemon via the
-/// process's `/proc/<pid>/root`, which (post-`pivot_root`) is the view.
-///
-/// `resolve_pid` yields the pid whose `/proc/<pid>/root` holds the device, retried until
-/// the device appears (construction runs concurrently with our return). On the legacy
-/// path that is the workload (a `/children` walk from the spawn intermediate); on the
-/// factory path it is `kennel-bin-init` directly. `lifecycle` carries the init-pid gate +
-/// supervision-half kenneld serves over node 0 (disabled on the legacy path).
+/// thread. The binderfs is mounted inside the kennel by the factory's construction child. The
+/// kennel's user namespace is root-owned, so kenneld has no path to it; `handle` is the `O_PATH`
+/// reference to the binder device the factory handed back. `lifecycle` carries the init-pid gate
+/// + supervision-half kenneld serves over node 0.
 #[allow(clippy::too_many_arguments)] // the node-0 serve inputs; each is one subsystem's state
 fn acquire_binder_node0(
-    init_pid: u32,
+    handle: &std::os::fd::OwnedFd,
     ctx: u16,
     prep: &BinderPrep,
     lifecycle: crate::binder::Lifecycle,
@@ -1559,16 +1544,17 @@ fn acquire_binder_node0(
 ) -> io::Result<crate::binder::Manager> {
     use std::os::fd::OwnedFd;
 
-    // Deterministic: the factory has mounted the binderfs and is blocking its child before
-    // `fexecve` (it reported the pid only after the device existed), so this is a single open with
-    // no retry. The pid is stable across the upcoming `fexecve` (same process becomes kennel-bin-init).
-    let dev = format!("/proc/{init_pid}/root/dev/binderfs/binder");
-    // std opens files O_CLOEXEC by default on Unix.
+    // `handle` is the factory's `O_PATH` reference to the kennel's binder device. Re-opening it
+    // through `/proc/self/fd` is a fresh `open(2)` by this process, so the binder connection is
+    // kenneld's own (a binder descriptor belongs to the process that opened it) — and it needs no
+    // access to the kennel's namespaces, only ordinary permission on the device node, which the
+    // factory chowned to the operator. std opens files O_CLOEXEC by default on Unix.
+    let dev = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(handle));
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&dev)
-        .map_err(|e| io::Error::new(e.kind(), format!("open kennel binderfs {dev}: {e}")))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("open kennel binder device: {e}")))?;
     crate::binder::spawn(
         OwnedFd::from(file),
         ctx,

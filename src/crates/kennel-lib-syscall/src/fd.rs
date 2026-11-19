@@ -43,6 +43,12 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 /// `__NR_openat2` — syscall 437 on x86-64 / aarch64 / riscv64.
 const SYS_OPENAT2: libc::c_long = 437;
 
+/// `AT_FDCWD`: resolve a relative path against the current directory.
+///
+/// Ignored for an absolute path. Re-exported so a `#![forbid(unsafe_code)]` caller without a
+/// `libc` dependency need not spell the magic number.
+pub const AT_FDCWD: RawFd = libc::AT_FDCWD;
+
 /// Open `path` relative to `dir_fd` with `RESOLVE_NO_SYMLINKS`, returning an
 /// `O_PATH` fd.
 ///

@@ -26,6 +26,39 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — the kennel user namespace is root-owned; kenneld holds descriptors, not namespace access
+
+- **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory, the boot-sync
+  handshake (§7.2.1a) and the mapped-uid-0 analysis (Vol 1 §2.8); the binder chapter's mount
+  sequencing; the mesh rendezvous (§7.13.4a). THREATS T5.4.
+- **Change (corpus defect — the book's analysis is wrong, not only the code):** the factory used to
+  drop its effective uid to the operator across the `clone`, making the **operator the owner** of a
+  user namespace that maps **host uid 0** (`0 0 1`). The stated purpose was `CAP_SYS_PTRACE` for
+  `kenneld`, so it could open the binderfs through `/proc/<init>/root`. But a namespace's owner
+  holds *every* capability in it, so any process at the operator's uid could `setns` into a running
+  kennel's user namespace, `setuid(0)`, and be host kuid 0 with the host filesystem still mounted
+  — or join the mount namespace too and be uid 0 inside the kennel. §2.8 and T5.4 analysed only
+  code that goes through the pivot; a bare `setns` does not. Reproduced on Ubuntu 26.04 / kernel 7.0.
+  As-built now:
+  - The factory **raises** its effective uid to 0 across the clone (filesystem uid pinned to the
+    operator for the `CLONE_INTO_CGROUP` permission check), so the namespace owner is **root**.
+    The new invariant: *no user-owned namespace ever contains host uid 0*.
+  - `kenneld` no longer touches `/proc/<init>/root`. The construction child sends the factory an
+    `O_PATH` handle to the kennel's binder device; the factory relays it in its reply (second
+    `SCM_RIGHTS` fd, after the boot-sync socket); `kenneld` re-opens it (`/proc/self/fd/N`) to claim
+    node 0.
+  - The mesh rendezvous datagram rides the **boot-sync socket**, sent right after GO. The in-view
+    datagram socket (`/dev/.kennel-mesh.sock`, mode 0666) is gone.
+  - `kennel-bin-init` no longer sets `PR_SET_PTRACER_ANY`; the Yama relaxation existed only for the
+    `/proc/<init>/root` open.
+  - Removed: `scm::bind_dgram`, `scm::send_to_with_fds`, `process::set_ptracer_any`,
+    `mesh_rendezvous::RENDEZVOUS_SOCK`.
+- **Why:** entering a kennel-built namespace from outside was never meant to be possible; operator
+  ownership made it possible and, with host uid 0 mapped, made it a local root.
+- **Not changed by this:** the construction child is still host kuid 0 before `pivot_root`, so the
+  factory's handling of caller-supplied paths remains a separate, open defect.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-07-04 — D-Bus mediation has ONE home: the standing dbus-broker (host-dbus retired)
 
 - **Bears-on:** Kennel book Vol 2, the D-Bus mediation chapter (§7.7 in the pre-book numbering)

@@ -72,8 +72,7 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)` child *is* the
 /// namespace init, unlike an `unshare` caller, which is not), so no
 /// second fork is needed. The parent gets the child's **host** pid back — the fact
-/// kenneld needs to gate the binder lifecycle verbs and to open
-/// `/proc/<pid>/root/dev/binderfs/binder`.
+/// kenneld needs to gate the binder lifecycle verbs.
 ///
 /// # The map-write handshake (caller's responsibility)
 ///

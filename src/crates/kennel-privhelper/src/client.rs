@@ -80,6 +80,24 @@ impl HelperStderr {
     }
 }
 
+/// What the factory hands back once a kennel is constructed.
+pub struct Constructed {
+    /// The factory process (exits as soon as it has replied; the caller reaps it).
+    pub child: Child,
+    /// `kennel-bin-init`'s host pid.
+    pub init_pid: i32,
+    /// The kenneld end of the boot-sync socket.
+    pub sync: OwnedFd,
+    /// An `O_PATH` handle to the kennel's binder device, or `None` for a kennel with no binderfs.
+    ///
+    /// The kennel's user namespace is root-owned, so the caller cannot reach the device by path
+    /// (`/proc/<init>/root` is closed to it). This handle names that one inode; re-opening it
+    /// (`/proc/self/fd/N`) yields the caller's own binder connection.
+    pub binder: Option<OwnedFd>,
+    /// The factory's captured stderr.
+    pub stderr: HelperStderr,
+}
+
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-bin-init`.
 ///
 /// Returns the (short-lived) helper [`Child`], `kennel-bin-init`'s **host pid** (`07-2` §7.2.1), and
@@ -88,10 +106,10 @@ impl HelperStderr {
 /// §7.2.1a), and reaps this `Child` afterwards (the factory exits once it has reported the pid).
 ///
 /// The factory builds the kennel — including mounting the per-kennel binderfs — `fexecve`s
-/// `kennel-bin-init`, and reports the init pid here with the kenneld end of the boot-sync socket as
-/// the sole `SCM_RIGHTS` fd. `kennel-bin-init` (post-exec) signals "ready" on its inherited end and
-/// blocks; the caller opens the now-reachable binderfs via `/proc/<init>/root`, claims node 0,
-/// and signals "go" — at which point `kennel-bin-init`'s first `GET_SANDBOX_PLAN` finds the context
+/// `kennel-bin-init`, and reports the init pid here with the kenneld end of the boot-sync socket
+/// and a handle to the kennel's binder device as `SCM_RIGHTS` fds. `kennel-bin-init` (post-exec)
+/// signals "ready" on its inherited end and blocks; the caller re-opens the device handle, claims
+/// node 0, and signals "go" — at which point `kennel-bin-init`'s first `GET_SANDBOX_PLAN` finds the context
 /// manager serving (no retry on either side). kenneld (a `set_child_subreaper`) adopts the
 /// orphaned `kennel-bin-init`.
 ///
@@ -104,6 +122,8 @@ impl HelperStderr {
 ///
 /// Returns the OS error if the socketpair, spawn, send, or receive fails, or
 /// [`io::ErrorKind::InvalidData`] if the reply is not the 4-byte pid plus the boot-sync fd.
+/// A missing binder handle is not an error here ([`Constructed::binder`] is `None`): a kennel
+/// with no constructed view has none, and the caller knows whether it needs one.
 pub fn construct_kennel(
     helper: &Path,
     construction_half: &[u8],
@@ -111,7 +131,7 @@ pub fn construct_kennel(
     pty_fd: Option<RawFd>,
     workload_fd: Option<RawFd>,
     stdio_fds: Option<[RawFd; 3]>,
-) -> io::Result<(Child, i32, OwnedFd, HelperStderr)> {
+) -> io::Result<Constructed> {
     let (ours, theirs) = seqpacket_pair()?;
     // Capture the factory's stderr (W15) rather than inherit it: a background thread forwards each
     // line to the journal (unchanged) and rings the last lines, so a construction failure can carry
@@ -153,8 +173,8 @@ pub fn construct_kennel(
     }
     send_with_raw_fds(ours.as_fd(), &data, &fds)?;
 
-    // The reply is the 4-byte init pid plus the kenneld end of the boot-sync socket as the sole
-    // SCM fd.
+    // The reply is the 4-byte init pid plus, as SCM fds in a FIXED order, the kenneld end of the
+    // boot-sync socket and then (when the kennel has a binderfs) the binder device handle.
     let mut buf = [0u8; 4];
     let (n, mut reply_fds) = recv_with_fds(ours.as_fd(), &mut buf)?;
     if n != 4 {
@@ -175,7 +195,16 @@ pub fn construct_kennel(
         ));
     }
     let sync = reply_fds.remove(0);
-    Ok((child, i32::from_le_bytes(buf), sync, helper_stderr))
+    // The second fd, when present, is the binder device handle (a kennel with no constructed view
+    // has no binderfs, so none is sent).
+    let binder = (!reply_fds.is_empty()).then(|| reply_fds.remove(0));
+    Ok(Constructed {
+        child,
+        init_pid: i32::from_le_bytes(buf),
+        sync,
+        binder,
+        stderr: helper_stderr,
+    })
 }
 
 /// Append the factory's captured stderr (if any) to a transport-level `symptom` (W15).
