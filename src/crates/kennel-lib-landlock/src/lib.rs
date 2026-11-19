@@ -290,6 +290,17 @@ pub fn supported_scope(abi: u32) -> Scope {
     }
 }
 
+/// `landlock_restrict_self` flag `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` (ABI 7,
+/// `uapi/linux/landlock.h`): keep logging denials after the restricted process `execve`s.
+pub const RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
+
+/// The `landlock_restrict_self` flags to seal with on an `abi` kernel.
+#[must_use]
+pub fn restrict_flags(abi: u32) -> u32 {
+    let _ = abi;
+    todo!("landlock audit logging (#218)")
+}
+
 /// Create a ruleset fd governing the handled access rights in `attr`.
 fn create_ruleset(attr: &RulesetAttr) -> io::Result<OwnedFd> {
     let ret = sys_create_ruleset(Some(attr), 0);
@@ -418,6 +429,12 @@ impl Ruleset {
         }
         self.path_rules.push((file, access));
         Ok(())
+    }
+
+    /// The `landlock_restrict_self` flags [`Ruleset::restrict_current_process`] seals with.
+    #[must_use]
+    pub fn restrict_flags(&self) -> u32 {
+        todo!("landlock audit logging (#218)")
     }
 
     /// Allow `access` (masked to the handled set) on TCP `port`.
@@ -557,6 +574,35 @@ mod tests {
             supported_scope(6),
             Scope::ABSTRACT_UNIX_SOCKET | Scope::SIGNAL
         );
+    }
+
+    /// Denials after the workload's `execve` must reach the kernel audit log (#218): kennel seals
+    /// and then execs the workload, and Landlock's default (ABI 7+) logs only same-exec denials, so
+    /// without `LOG_NEW_EXEC_ON` every workload denial is silent. Below ABI 7 the flag does not
+    /// exist and passing it is `EINVAL`, so it must be withheld there.
+    #[test]
+    fn restrict_flags_log_post_exec_denials_from_abi_7() {
+        for abi in 0..7 {
+            assert_eq!(restrict_flags(abi), 0, "ABI {abi} predates the log flags");
+        }
+        for abi in 7..10 {
+            assert_eq!(
+                restrict_flags(abi),
+                RESTRICT_SELF_LOG_NEW_EXEC_ON,
+                "ABI {abi} must log denials after execve"
+            );
+        }
+        // Only the opt-in: never the SAME_EXEC_OFF (1 << 0) or SUBDOMAINS_OFF (1 << 2) opt-outs.
+        assert_eq!(RESTRICT_SELF_LOG_NEW_EXEC_ON, 0b10);
+    }
+
+    /// A ruleset seals with the flags for the ABI it was built against.
+    #[test]
+    fn a_ruleset_seals_with_the_running_kernels_flags() {
+        let (Ok(rs), Ok(abi)) = (Ruleset::new(), abi_version()) else {
+            return; // no Landlock on this host
+        };
+        assert_eq!(rs.restrict_flags(), restrict_flags(abi));
     }
 
     /// Build and install a ruleset (`create_ruleset` + `add_rule`) without sealing —
