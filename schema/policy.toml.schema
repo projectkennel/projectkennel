@@ -1365,6 +1365,10 @@
       "additionalProperties": false,
       "description": "`fs.read`, `fs.write`, `fs.deny`, and `exec.allow`.",
       "properties": {
+        "mmap_exec": {
+          "description": "Allow executable file mappings (`mmap(PROT_EXEC)`, `dlopen`) from this writable grant",
+          "type": "boolean"
+        },
         "path": {
           "description": "The path(s) to add or remove. Accepts a single string or an array of strings, so a",
           "items": {

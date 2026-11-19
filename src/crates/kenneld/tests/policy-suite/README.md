@@ -34,6 +34,7 @@ missing prerequisite aborts with the precise cause.
 | `fs-redirect`     | none | a `source`-redirected grant (W15) serves the view path from a different host inode, over-mounting the symmetric parent; the never-granted store is ENOENT. Setup stages the host tree. |
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `tmp-mmap-exec`   | constrained | `[fs.tmp] mmap_exec`: `/tmp` is mounted without `noexec`, a `.so` copied there loads, and `execve` from `/tmp` is still refused (#218) |
+| `write-bind-noexec` | constrained | writable binds are `noexec,nosuid,nodev` by default (a `.so` written there does not load); a grant with `mmap_exec = true` loads it; `execve` is refused from both (#229). Setup creates the two host dirs. |
 | `proc-curated`    | none | children/grandchildren read their own `/proc/self`; `/proc/{cpuinfo,stat,meminfo,version}` are synthesized and agree with `nproc`; ungranted host-global entries (`kallsyms`, `loadavg`, `sys`) are masked empty (#218) |
 | `net-none`        | none | total isolation: own empty netns, connect to loopback **and** a public address both fail |
 | `net-loopback`    | constrained | the kennel's own `lo` is open by default: a server on an ephemeral `127.0.0.1`/`::1` port is reached by a separate child process, with no `[net.bpf]` grant; direct public egress is still refused (#218) |

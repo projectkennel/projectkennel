@@ -672,6 +672,36 @@ fn fold_fs(p: &FsSection, c: &FsSection, warn: &mut Vec<String>) -> FsSection {
         // an authority the leaf owns end-to-end, not a set to union into).
         cwd: or(&c.cwd, &p.cwd),
         redirect: fold_redirects(p, c),
+        mmap_exec: fold_write_mmap_exec(p, c),
+    }
+}
+
+/// Fold the `mmap_exec` write grants (#229) one chain step, on the `fs.write` axis, exactly as a
+/// redirect folds: a child that *replaces* `fs.write` (`Set`) clobbers them (bare strings carry no
+/// flag); a `Delta` inherits them, drops any whose path it removes, and adds (or, with
+/// `mmap_exec = false`, drops) one per flagged add's paths; an absent field inherits unchanged.
+fn fold_write_mmap_exec(p: &FsSection, c: &FsSection) -> Vec<String> {
+    match &c.write {
+        None => p.mmap_exec.clone(),
+        Some(PathField::Set(_)) => Vec::new(),
+        Some(PathField::Delta(d)) => {
+            let mut out = p.mmap_exec.clone();
+            out.retain(|path| !d.remove.iter().any(|e| e.path.contains(path)));
+            for e in &d.add {
+                match e.mmap_exec {
+                    Some(true) => {
+                        for path in &e.path {
+                            if !out.contains(path) {
+                                out.push(path.clone());
+                            }
+                        }
+                    }
+                    Some(false) => out.retain(|path| !e.path.contains(path)),
+                    None => {}
+                }
+            }
+            out
+        }
     }
 }
 
@@ -1037,6 +1067,33 @@ mod tests {
         include_str!("../../../../toml/templates/ai-coding-strict/policy.toml");
     const UNTRUSTED_BUILD: &str =
         include_str!("../../../../toml/templates/untrusted-build/policy.toml");
+
+    /// `mmap_exec` write grants (#229) ride their entry through the fold like a redirect: a
+    /// delta inherits and can drop them (remove, or re-add with `false`); a set replaces them.
+    #[test]
+    fn write_mmap_exec_folds_with_its_entry() {
+        let parent = parse(
+            b"template_name = \"p\"\n[[fs.write.add]]\npath = \"~/proj/**\"\nreason = \"r\"\nmmap_exec = true\n",
+        )
+        .expect("parent");
+        let folded = fold_fs(
+            &FsSection::default(),
+            parent.fs.as_ref().expect("p fs"),
+            &mut Vec::new(),
+        );
+        assert_eq!(folded.mmap_exec, vec!["~/proj/**".to_owned()]);
+        let inherit = fold_fs(&folded, &FsSection::default(), &mut Vec::new());
+        assert_eq!(inherit.mmap_exec, folded.mmap_exec);
+        for child in [
+            &b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.write.remove]]\npath = \"~/proj/**\"\nreason = \"r\"\n"[..],
+            &b"name = \"k\"\ntemplate_base = \"p\"\n[[fs.write.add]]\npath = \"~/proj/**\"\nreason = \"r\"\nmmap_exec = false\n"[..],
+            &b"name = \"k\"\ntemplate_base = \"p\"\n[fs]\nwrite = [\"~/proj/**\"]\n"[..],
+        ] {
+            let c = parse(child).expect("child");
+            let f = fold_fs(&folded, c.fs.as_ref().expect("c fs"), &mut Vec::new());
+            assert!(f.mmap_exec.is_empty(), "{}", String::from_utf8_lossy(child));
+        }
+    }
 
     /// Redirects (W15) ride their granting entry through the fold, per axis.
     #[test]

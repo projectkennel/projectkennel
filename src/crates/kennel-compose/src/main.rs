@@ -431,6 +431,7 @@ fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
                 source: None,
                 reason: Some("operator-specified write access".to_owned()),
                 threats: None,
+                mmap_exec: None,
             },
         );
     }
@@ -460,6 +461,7 @@ fn populate_exec_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::Probe
             source: None,
             reason: Some(format!("probed from {}", probe_result.workload)),
             threats: None,
+            mmap_exec: None,
         })
         .collect();
     leaf.exec = Some(ExecSection {
@@ -484,6 +486,7 @@ fn populate_fs_from_probe(leaf: &mut SourcePolicy, probe_result: &probe::ProbeRe
             source: None,
             reason: Some(grant.reason.clone()),
             threats: None,
+            mmap_exec: None,
         })
         .collect();
     let fs = leaf.fs.get_or_insert_with(FsSection::default);

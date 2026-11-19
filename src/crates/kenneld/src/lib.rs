@@ -1097,6 +1097,7 @@ fn bring_up<P: Privileged + Sync>(
                         writable: false,
                         exclusive: false,
                         redirected: false,
+                        mmap_exec: false,
                     });
                 }
             } else {
@@ -1107,6 +1108,7 @@ fn bring_up<P: Privileged + Sync>(
                         writable: false,
                         exclusive: false,
                         redirected: false,
+                        mmap_exec: false,
                     });
                 }
             }
@@ -1119,6 +1121,7 @@ fn bring_up<P: Privileged + Sync>(
                     writable: false,
                     exclusive: false,
                     redirected: false,
+                    mmap_exec: false,
                 });
             }
             // OCI launcher (§7.11): when the image's own entrypoint is run, bind the trusted
@@ -1132,6 +1135,7 @@ fn bring_up<P: Privileged + Sync>(
                     writable: false,
                     exclusive: false,
                     redirected: false,
+                    mmap_exec: false,
                 });
             }
             if let Some(cfg) = &oci.config_src {
@@ -1141,6 +1145,7 @@ fn bring_up<P: Privileged + Sync>(
                     writable: false,
                     exclusive: false,
                     redirected: false,
+                    mmap_exec: false,
                 });
             }
             command.env("HOME", &view.shim_root);
@@ -1641,6 +1646,7 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
             writable: false,
             exclusive: false,
             redirected: false,
+            mmap_exec: false,
         });
     }
     plan.landlock_fs
@@ -1700,6 +1706,7 @@ fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, piv
             writable: false,
             exclusive: false,
             redirected: false,
+            mmap_exec: false,
         });
     }
     plan.landlock_fs
@@ -1769,6 +1776,7 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
             writable: false,
             exclusive: false,
             redirected: false,
+            mmap_exec: false,
         });
     }
     plan.landlock_fs.push((
@@ -1821,6 +1829,7 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
             writable: false,
             exclusive: false,
             redirected: false,
+            mmap_exec: false,
         });
     }
     plan.landlock_fs.push((
@@ -1913,6 +1922,7 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
             writable: false,
             exclusive: false,
             redirected: false,
+            mmap_exec: false,
         });
     }
     plan.landlock_fs

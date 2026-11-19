@@ -249,6 +249,22 @@ attempted target, so the audit log is the first place to look when a workload
 (§5). Check `kennel audit <name> --resource network` for the denied destination,
 then add a `[[net.proxy.allow]]` (or a `[net.bpf]` CIDR rule in `host` mode).
 
+**`failed to map segment from shared object`.** The workload tried to load native code (a
+`.so`, a Node `.node` addon, a Python extension module, a Rust proc-macro) from a path mounted
+`noexec`. Writable grants are `noexec` by default, because native code planted there would
+persist. If the tree legitimately loads its own native code, opt that grant out:
+
+```toml
+[[fs.write.add]]
+path = "~/projects/myproj/**"
+reason = "the project; its node_modules carry native addons"
+mmap_exec = true
+```
+
+If the file is under `/tmp` (a runtime that unpacks native code at run time, such as Bun
+single-file executables), use the `ai-coding-native` template instead, which sets
+`[fs.tmp] mmap_exec = true`. Neither allows running a program from those paths with `execve`.
+
 **A workload gets "Permission denied" on a file.** The path is not granted, so
 Landlock refuses it. On kernel 6.15+ (Landlock ABI 7) each denial is written to
 the kernel audit log as a `LANDLOCK_ACCESS` record naming the path and the

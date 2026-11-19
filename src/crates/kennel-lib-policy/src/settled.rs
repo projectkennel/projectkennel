@@ -480,6 +480,11 @@ pub struct FsPolicy {
     /// without redirects signs exactly as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirect: Vec<FsRedirect>,
+    /// Writable grants whose binds allow executable file mappings (#229): every other writable
+    /// bind is mounted `noexec`. Each entry is a path from `write`, as written there. Omitted
+    /// when empty, so an artefact that grants no such opt-out serialises exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_mmap_exec: Vec<String>,
     /// The invocation-cwd grant. Declared among the sub-tables so the canonical TOML
     /// emits it as a table; omitted entirely when default, so a policy without a
     /// `[fs.cwd]` signs exactly as before.
@@ -1755,6 +1760,7 @@ pub fn sample_settled() -> SettledPolicy {
                 home_persist: Vec::new(),
                 home_readonly: false,
                 redirect: Vec::new(),
+                write_mmap_exec: Vec::new(),
                 cwd: CwdPolicy::default(),
                 tmp: TmpPolicy {
                     writable: true,

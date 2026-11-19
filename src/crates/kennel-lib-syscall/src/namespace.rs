@@ -268,6 +268,57 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
+/// Harden the mount at `target` and every mount beneath it (#229).
+///
+/// Sets `nosuid` and `nodev` recursively (`AT_RECURSIVE`), and `noexec` too unless
+/// `allow_exec_mappings`. Used on writable binds, whose
+/// host flags would otherwise carry through; a plain `MS_REMOUNT` reaches only the top mount, so a
+/// submount inside a granted tree would escape it. Only *adds* restrictions, which is permitted on
+/// the kennel's own mounts in its user namespace.
+///
+/// # Errors
+///
+/// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
+pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let c = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut set = libc::MOUNT_ATTR_NOSUID | libc::MOUNT_ATTR_NODEV;
+    if !allow_exec_mappings {
+        set |= libc::MOUNT_ATTR_NOEXEC;
+    }
+    let attr = libc::mount_attr {
+        attr_set: set,
+        attr_clr: 0,
+        propagation: 0,
+        userns_fd: 0,
+    };
+    // SAFETY: `mount_setattr(dirfd, path, flags, attr, size)` reads the NUL-terminated `path` and
+    // `size` bytes of `attr`; both are live, correctly sized locals for the duration of the call,
+    // and the kernel retains neither pointer.
+    //
+    // INVARIANTS UPHELD: `attr_clr` is 0 and `propagation`/`userns_fd` are 0 with no
+    // MOUNT_ATTR_IDMAP, so the call only ADDS restriction flags; AT_RECURSIVE applies them to the
+    // whole subtree under `target`.
+    //
+    // FAILURE MODE: -1 + errno (EINVAL/EPERM/ENOSYS), surfaced as Err; no partial unsafety.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            libc::AT_FDCWD,
+            c.as_ptr(),
+            libc::AT_RECURSIVE,
+            std::ptr::addr_of!(attr),
+            std::mem::size_of::<libc::mount_attr>(),
+        )
+    };
+    if rc < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// `move_mount(detached_fd → target)` — attach a detached mount (from [`open_tree_clone`]).
 ///
 /// The other half of the mesh handoff: a process holding `CAP_SYS_ADMIN` in its own user namespace

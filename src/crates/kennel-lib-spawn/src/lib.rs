@@ -213,6 +213,12 @@ pub fn substitute(
         *path = substitute_path(path, subst, &user, &group);
         reject_leftover("fs.exclusive", path)?;
     }
+    // The `mmap_exec` opt-outs (#229) name `write` paths: substitute them identically, or a `~/`
+    // opt-out never matches its substituted bind and the bind silently stays noexec.
+    for path in &mut fs.write_mmap_exec {
+        *path = substitute_path(path, subst, &user, &group);
+        reject_leftover("fs.write_mmap_exec", path)?;
+    }
     // Redirects (W15): `path` must keep matching its (substituted) grant in `read`/`write`,
     // and `source` is a bind-backed host path like any grant — both substitute identically.
     for r in &mut fs.redirect {
@@ -827,6 +833,11 @@ fn materialize_binds(binds: &[BindMount], under: &impl Fn(&Path) -> PathBuf) -> 
             })?;
             // `fd` is dropped here — after mount::bind has consumed the
             // /proc/self/fd/N path and the bind is in place.
+            // #229: a writable bind no longer carries the host mount's exec/suid/dev flags.
+            // Harden the whole subtree (submounts too) noexec,nosuid,nodev; a grant that opted
+            // into executable mappings keeps exec (nosuid,nodev still apply).
+            kennel_lib_syscall::namespace::harden_mount_tree(&dest, b.mmap_exec)
+                .map_err(|e| io::Error::new(e.kind(), format!("harden {}: {e}", dest.display())))?;
         } else {
             // A *redirected* read-only source (W15) resolves with RESOLVE_NO_MAGICLINKS:
             // the source path is an operator assertion of origin, and a procfs/sysfs magic
@@ -1176,6 +1187,7 @@ mod tests {
                     home_persist: Vec::new(),
                     home_readonly: false,
                     redirect: Vec::new(),
+                    write_mmap_exec: Vec::new(),
                     cwd: kennel_lib_policy::settled::CwdPolicy::default(),
                     tmp: TmpPolicy {
                         writable: true,
@@ -2142,6 +2154,73 @@ mod tests {
             .expect("plan");
             assert_eq!(plan.view.as_ref().expect("view").tmp_mmap_exec, on);
         }
+    }
+
+    /// #229: only the writable grants listed in `write_mmap_exec` keep executable mappings;
+    /// every other writable bind (and every read-only one) carries `mmap_exec = false`.
+    #[test]
+    fn write_mmap_exec_marks_only_its_writable_binds() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.write = vec!["/srv/proj/**".to_owned(), "/srv/other".to_owned()];
+        p.effective_policy.fs.write_mmap_exec = vec!["/srv/proj/**".to_owned()];
+        let plan = Plan::from_policy(
+            &substitute(&p, &subst()).expect("subst"),
+            7,
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let flag = |t: &str| {
+            view.binds
+                .iter()
+                .find(|b| b.target == Path::new(t))
+                .map(|b| (b.writable, b.mmap_exec))
+        };
+        assert_eq!(flag("/srv/proj"), Some((true, true)));
+        assert_eq!(flag("/srv/other"), Some((true, false)));
+        assert!(view
+            .binds
+            .iter()
+            .filter(|b| !b.writable)
+            .all(|b| !b.mmap_exec));
+    }
+
+    /// Regression (#229 e2e): a `~/` opt-out must survive spawn-time substitution exactly like
+    /// its `fs.write` grant, or the two never match and the bind silently stays noexec.
+    #[test]
+    fn a_home_relative_write_mmap_exec_survives_substitution() {
+        let mut p = policy_with_placeholders();
+        p.effective_policy.fs.write = vec!["~/proj/**".to_owned(), "~/other".to_owned()];
+        p.effective_policy.fs.write_mmap_exec = vec!["~/proj/**".to_owned()];
+        let substituted = substitute(&p, &subst()).expect("subst");
+        assert_eq!(
+            substituted.effective_policy.fs.write_mmap_exec,
+            substituted
+                .effective_policy
+                .fs
+                .write
+                .iter()
+                .filter(|w| w.ends_with("/proj/**"))
+                .cloned()
+                .collect::<Vec<_>>(),
+            "substituted identically to its fs.write grant"
+        );
+        let plan =
+            Plan::from_policy(&substituted, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let view = plan.view.as_ref().expect("view");
+        let marked: Vec<_> = view
+            .binds
+            .iter()
+            .filter(|b| b.mmap_exec)
+            .map(|b| b.source.clone())
+            .collect();
+        assert_eq!(
+            marked,
+            vec![PathBuf::from("/home/dev/proj")],
+            "{:?}",
+            view.binds
+        );
     }
 
     #[test]

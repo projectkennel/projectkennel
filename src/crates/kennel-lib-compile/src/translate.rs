@@ -1403,6 +1403,8 @@ fn translate_fs(
     // framework invariants.
     let redirect = translate_fs_redirects(fs, &read, &write, deferred)?;
 
+    let write_mmap_exec = translate_write_mmap_exec(fs, &write, deferred)?;
+
     // The kenneld control socket — the CLI→daemon trust boundary — is ungrantable by rule: reaching
     // it from inside a kennel is privilege escalation, not a footgun (the same refusal `[[unix.allow]]`
     // makes on the socket leaf, here extended to fs binds, which name a *directory* that can contain
@@ -1453,6 +1455,7 @@ fn translate_fs(
         home_persist,
         home_readonly: home.readonly.unwrap_or(false),
         redirect,
+        write_mmap_exec,
         cwd,
         tmp,
         dev,
@@ -1468,6 +1471,25 @@ fn translate_fs(
 /// path under `/proc` is a fresh namespaced mount, not a host bind, so a redirect there would
 /// silently not materialise — refuse. An `/etc` redirect *does* materialise — the `/etc` overlay
 /// honours the `source` — so it is allowed. The write-set floor lives in `invariant::validate`,
+/// The `mmap_exec` writable grants (#229): substituted like `write`, and each must still be a
+/// write grant (a cross-axis remove can orphan one; refuse rather than carry an opt-out for a path
+/// that binds nothing writable). Sorted + deduped for a stable canonical form.
+fn translate_write_mmap_exec(
+    fs: &crate::source::FsSection,
+    write: &[String],
+    deferred: &mut BTreeSet<String>,
+) -> Result<Vec<String>, PolicyError> {
+    let mut out = subst_each(&fs.mmap_exec, deferred);
+    if let Some(p) = out.iter().find(|p| !write.contains(p)) {
+        return Err(translation(format!(
+            "fs.write `{p}` carries `mmap_exec` but is no longer granted in fs.write"
+        )));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 /// post-assembly, beside the other framework invariants.
 fn translate_fs_redirects(
     fs: &crate::source::FsSection,
