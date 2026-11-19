@@ -8,6 +8,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **`kennel review` can no longer be steered by the workspace it reviews.** A cloned repository
+  could ship its own trust manifest with trigger paths outside the workspace, and `--revert`
+  would write the repository's blobs there. A workload could swap a pinned trigger for a symlink
+  and have `--revert` overwrite the link's target, or change a file between the displayed diff
+  and the re-pin. The manifest is now validated when read, revert and re-pin act only inside the
+  workspace without following the trigger, a restored blob must match its hash, and a trigger
+  that changed after it was reviewed is not pinned.
 - **A mesh provider can no longer redirect kenneld's connection, and a capability name can no
   longer be a path.** For an af-unix capability, kenneld connects from the host to the provider's
   socket in a directory the provider can write. A provider that put a symlink there sent the

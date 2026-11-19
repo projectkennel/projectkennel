@@ -26,6 +26,39 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — the trust manifest is validated on load; revert and re-pin act inside the workspace
+
+- **Bears-on:** Kennel book Vol 2, the workspace trust-manifest chapter (§7.4, T2.8) — the
+  `kennel review` flow.
+- **Change:** `kennel review` runs as the operator, on the host, over a workspace a confined
+  workload could write and which may be a freshly cloned repository. It trusted both.
+  - **The manifest itself.** `Manifest::from_json` checked only the schema version. Trigger keys
+    were joined to the workspace root and written to on `--revert`; a content hash was used as a
+    blob file name. A repository could ship a `.trust-manifest.json` whose trigger path was
+    `../../.config/autostart/x.desktop` and a matching blob. `Manifest::validate` now runs on
+    load: a trigger path must be relative plain names, a content hash exactly `sha256:` plus 64
+    lowercase hex digits. `read_blob` refuses anything else too.
+  - **Revert.** `restore_entry` did `fs::write` and `chmod` on the path, which follow a symlink:
+    a pinned `Makefile` swapped for a link to `~/.bashrc` had the pinned content written over the
+    link's target. It now resolves the path inside the workspace by descriptor
+    (`fd::RootDir`), removes whatever is there and creates the file new; a planted trigger is
+    removed the same way. The blob is hashed and must match its pin before it is written
+    anywhere, and set-id bits are not restored.
+  - **Enumeration.** A catalogue directory trigger (`.git/hooks/`) replaced by a symlink to
+    another directory was listed through, so files outside the workspace appeared as "new
+    triggers" — removed on revert, copied into the store on re-pin. A directory trigger must now
+    be a real directory.
+  - **Re-pin.** `apply_review` re-read and re-hashed each file at confirm time and never compared
+    the result with what the review had shown; a still-running workload could swap the content
+    after the diff. It now pins only if the fresh signature equals the reviewed one, and reports
+    the trigger otherwise.
+- **Why:** the reviewer's tool must not be steerable by the thing under review.
+- **Not changed:** `review` still does not require the kennel to be stopped; `New` triggers are
+  still pinned without their content being displayed; the diff and trigger paths are still
+  printed without terminal sanitisation; `disk_signature` and `pin_entry` still read through a
+  symlinked parent directory of a trigger that was pinned before the directory was swapped.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — mesh names are one safe path component; the rendezvous connect is pinned to a socket; signing stages nothing on disk
 
 - **Bears-on:** Kennel book Vol 2, the service catalogue and mesh chapters (§7.13.3, §7.13.4b);

@@ -219,6 +219,7 @@ dependencies = [
 name = "kennel-lib-manifest"
 version = "0.8.0"
 dependencies = [
+ "kennel-lib-syscall",
  "serde",
  "serde_json",
 ]

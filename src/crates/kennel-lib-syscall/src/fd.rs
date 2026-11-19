@@ -434,6 +434,63 @@ impl RootDir {
         dst.set_permissions(std::fs::Permissions::from_mode(mode))
     }
 
+    /// Remove the non-directory entry at `path` (a file or a symlink — the link itself, never
+    /// its target). An absent path, or one whose parent is missing, is not an error.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for a path that is not plain names; `EISDIR` for a directory; any other
+    /// `unlinkat` error.
+    pub fn remove(&self, path: &Path) -> io::Result<()> {
+        use nix::errno::Errno;
+        use nix::unistd::{unlinkat, UnlinkatFlags};
+        let mut names = plain_names(path)?;
+        let Some(name) = names.pop() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path names the root itself",
+            ));
+        };
+        let parent: std::path::PathBuf = names.iter().collect();
+        let Some(parent) = self.walk(&parent, None)? else {
+            return Ok(());
+        };
+        match unlinkat(&parent, name.as_os_str(), UnlinkatFlags::NoRemoveDir) {
+            Ok(()) | Err(Errno::ENOENT) => Ok(()),
+            Err(e) => Err(io::Error::from(e)),
+        }
+    }
+
+    /// Create the file `path` with `bytes` and permission bits `mode & 0o777`, creating parent
+    /// directories. The file must not exist: nothing is overwritten and nothing is followed.
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure`](Self::ensure) for the parent; `EEXIST` if `path` exists (a symlink counts);
+    /// any write or chmod error.
+    pub fn write_new(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
+        use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
+        use nix::sys::stat::Mode;
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let (parent, name) = self.parent_of(path)?;
+        let mode = mode & 0o777;
+        let how = OpenHow::new()
+            .flags(
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_EXCL
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+            )
+            .mode(Mode::from_bits_truncate(mode))
+            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+        let mut file =
+            std::fs::File::from(openat2(&parent, name.as_os_str(), how).map_err(io::Error::from)?);
+        file.write_all(bytes)?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+    }
+
     /// Create the symlink `path` → `text` inside the root (parents created as directories).
     ///
     /// # Errors
