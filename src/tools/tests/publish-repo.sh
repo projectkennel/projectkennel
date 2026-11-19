@@ -79,14 +79,22 @@ cat >"$TMP/remote.keys" <<-'EOF'
 EOF
 
 # The fake aws: log each call (one line, args joined by a unit separator) and answer the
-# bucket listing from remote.keys, one key per line as `--query 'Contents[].[Key]' --output
-# text` does.
+# recursive bucket listing from remote.keys in `aws s3 ls --recursive` format
+# ("<date> <time> <size> <key>"). FAKE_AWS_LS_FAIL=1 makes the listing fail, as `aws s3api`
+# does on some aws-cli builds ("badly formed help string") — the publisher must stop then,
+# not take the failure for an empty bucket.
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/aws" <<-'EOF'
 	#!/usr/bin/env bash
 	( IFS=$'\x1f'; echo "$*" ) >>"$FAKE_AWS_LOG"
-	if [[ "$1 $2" = "s3api list-objects-v2" ]]; then
-		cat "$FAKE_AWS_REMOTE"
+	if [[ "$1 $2" = "s3 ls" ]]; then
+		if [[ "${FAKE_AWS_LS_FAIL:-0}" = 1 ]]; then
+			echo "simulated listing failure" >&2
+			exit 255
+		fi
+		while IFS= read -r key; do
+			[[ -n "$key" ]] && printf '2026-07-15 15:07:08 %10d %s\n' 42 "$key"
+		done <"$FAKE_AWS_REMOTE"
 	fi
 	exit 0
 EOF
@@ -182,6 +190,14 @@ FIRST="$TMP/first.log"
 check "first publish into an empty bucket exits 0" run_publish "$FIRST"
 first_deletes_nothing() { ! grep -q $'^s3\x1frm' "$FIRST"; }
 check "first publish deletes nothing" first_deletes_nothing
+
+# ── the bucket listing fails ──────────────────────────────────────────────────────────
+printf '%s\n' deb/pool/main/k/kennel/kennel_0.7.1_amd64.deb >"$TMP/remote.keys"
+LSFAIL="$TMP/lsfail.log"
+listing_failure_fails() { ! FAKE_AWS_LS_FAIL=1 run_publish "$LSFAIL"; }
+check "a failed bucket listing fails the publish" listing_failure_fails
+listing_failure_deletes_nothing() { ! grep -q $'^s3\x1frm' "$LSFAIL"; }
+check "a failed bucket listing deletes nothing" listing_failure_deletes_nothing
 
 echo "publish-repo.sh tests: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]
