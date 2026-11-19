@@ -663,13 +663,14 @@ pub fn sshsig_sign(
     key_id_override: Option<&str>,
     trust_dirs: &[PathBuf],
 ) -> Result<(String, String), String> {
-    let dir = std::env::temp_dir().join(format!("kennel-sign-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating sign scratch dir: {e}"))?;
-    let guard = ScratchDir(dir);
-    let msg = guard.0.join("canonical");
-    std::fs::write(&msg, canonical).map_err(|e| format!("staging canonical bytes: {e}"))?;
-
-    let status = std::process::Command::new("ssh-keygen")
+    // The message goes to `ssh-keygen` on stdin and the signature comes back on stdout: with no
+    // file argument `-Y sign` works as a filter. Nothing is staged on disk. (It used to be written
+    // to `/tmp/kennel-sign-<pid>/canonical` — a predictable, pre-creatable path, which root also
+    // went through when signing with the host key: whoever owned that directory could swap the
+    // bytes being signed, or point the write at another file.) A passphrase prompt is unaffected:
+    // ssh-keygen asks on the terminal, not on stdin.
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("ssh-keygen")
         .args([
             "-Y",
             "sign",
@@ -679,15 +680,30 @@ pub fn sshsig_sign(
             "-f",
         ])
         .arg(key)
-        .arg(&msg)
-        .status()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
-    if !status.success() {
+    // Feed the message from a thread, so a signer that writes before it has read everything
+    // cannot deadlock against us on two full pipes.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "ssh-keygen: no stdin pipe".to_owned())?;
+    let message = canonical.to_vec();
+    let feeder = std::thread::spawn(move || stdin.write_all(&message));
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for ssh-keygen: {e}"))?;
+    let fed = feeder
+        .join()
+        .map_err(|_| "ssh-keygen: the input thread panicked".to_owned())?;
+    if !output.status.success() {
         return Err(format!("ssh-keygen -Y sign failed for key `{key}`"));
     }
-    let sig_path = guard.0.join("canonical.sig");
-    let armor =
-        std::fs::read_to_string(&sig_path).map_err(|e| format!("reading the signature: {e}"))?;
+    fed.map_err(|e| format!("passing the message to ssh-keygen: {e}"))?;
+    let armor = String::from_utf8(output.stdout)
+        .map_err(|_| "ssh-keygen produced a signature that is not text".to_owned())?;
 
     // The SSHSIG embeds the public key; read it back to resolve the trust-store name.
     let parsed = kennel_lib_policy::sshsig::SshSig::parse_armored(&armor)
@@ -719,15 +735,6 @@ pub fn sshsig_sign(
         }
     };
     Ok((key_id, armor))
-}
-
-/// A scratch directory removed when dropped.
-struct ScratchDir(PathBuf);
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 /// Assemble a signed settled document from an SSHSIG armor and the resolved `key_id`.
