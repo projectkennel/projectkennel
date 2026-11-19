@@ -2961,6 +2961,7 @@ mod tests {
                     AccessFs::READ_FILE | AccessFs::READ_DIR | AccessFs::EXECUTE,
                 )],
                 landlock_net: Vec::new(),
+                landlock_net_handled: kennel_lib_syscall::landlock::AccessNet::empty(),
                 seccomp_deny: Vec::new(),
                 seccomp_deny_action: Action::KillProcess,
                 bpf_allow_v4: Vec::new(),

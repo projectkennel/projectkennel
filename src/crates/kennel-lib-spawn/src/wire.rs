@@ -301,6 +301,7 @@ pub fn encode_plan(p: &Plan) -> Vec<u8> {
         w.u16(*port);
         w.u64(access.bits());
     }
+    w.u64(p.landlock_net_handled.bits());
 
     // seccomp_deny: Vec<i64>
     w.count(p.seccomp_deny.len());
@@ -458,6 +459,19 @@ fn get_proc_view(r: &mut Reader<'_>) -> Result<ProcView, PlanWireError> {
     }
 }
 
+/// Decode the Landlock TCP port rules and the handled TCP rights (#218).
+fn get_landlock_net(
+    r: &mut Reader<'_>,
+) -> Result<(Vec<(u16, AccessNet)>, AccessNet), PlanWireError> {
+    let mut landlock_net = Vec::new();
+    for _ in 0..r.count()? {
+        let port = r.u16()?;
+        let access = AccessNet::from_bits_truncate(r.u64()?);
+        landlock_net.push((port, access));
+    }
+    Ok((landlock_net, AccessNet::from_bits_truncate(r.u64()?)))
+}
+
 fn put_view(w: &mut Writer, v: &ShimView) {
     w.path(&v.shim_root);
     w.count(v.binds.len());
@@ -550,12 +564,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         landlock_fs.push((path, access));
     }
 
-    let mut landlock_net = Vec::new();
-    for _ in 0..r.count()? {
-        let port = r.u16()?;
-        let access = AccessNet::from_bits_truncate(r.u64()?);
-        landlock_net.push((port, access));
-    }
+    let (landlock_net, landlock_net_handled) = get_landlock_net(&mut r)?;
 
     let mut seccomp_deny = Vec::new();
     for _ in 0..r.count()? {
@@ -621,6 +630,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
         new_root,
         landlock_fs,
         landlock_net,
+        landlock_net_handled,
         seccomp_deny,
         seccomp_deny_action,
         bpf_allow_v4: bpf.allow_v4,
@@ -858,6 +868,7 @@ pub fn encode_supervision(s: &Supervision) -> Vec<u8> {
         w.u16(*port);
         w.u64(access.bits());
     }
+    w.u64(s.landlock_net_handled.bits());
 
     w.count(s.seccomp_deny.len());
     for n in &s.seccomp_deny {
@@ -940,12 +951,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         let access = AccessFs::from_bits_truncate(r.u64()?);
         landlock_fs.push((path, access));
     }
-    let mut landlock_net = Vec::new();
-    for _ in 0..r.count()? {
-        let port = r.u16()?;
-        let access = AccessNet::from_bits_truncate(r.u64()?);
-        landlock_net.push((port, access));
-    }
+    let (landlock_net, landlock_net_handled) = get_landlock_net(&mut r)?;
 
     let mut seccomp_deny = Vec::new();
     for _ in 0..r.count()? {
@@ -992,6 +998,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
         groups,
         landlock_fs,
         landlock_net,
+        landlock_net_handled,
         seccomp_deny,
         seccomp_deny_action,
         ulimits,
@@ -1218,6 +1225,7 @@ mod tests {
                 ),
             ],
             landlock_net: vec![(443, AccessNet::CONNECT_TCP), (8080, AccessNet::BIND_TCP)],
+            landlock_net_handled: AccessNet::CONNECT_TCP,
             seccomp_deny: vec![101, 202, 303],
             seccomp_deny_action: Action::Errno(38),
             bpf_allow_v4: vec![([1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16])],
@@ -1309,6 +1317,7 @@ mod tests {
             new_root: None,
             landlock_fs: Vec::new(),
             landlock_net: Vec::new(),
+            landlock_net_handled: AccessNet::empty(),
             seccomp_deny: Vec::new(),
             seccomp_deny_action: Action::KillProcess,
             bpf_allow_v4: Vec::new(),
@@ -1370,6 +1379,7 @@ mod tests {
                 (PathBuf::from("/home/kennel"), AccessFs::READ_FILE),
             ],
             landlock_net: vec![(443, AccessNet::CONNECT_TCP)],
+            landlock_net_handled: AccessNet::CONNECT_TCP,
             seccomp_deny: vec![101, 202],
             seccomp_deny_action: Action::Errno(1),
             ulimits: vec![(resource_by_name("nofile").expect("nofile"), 1024, 4096)],
@@ -1410,6 +1420,7 @@ mod tests {
             groups: None,
             landlock_fs: Vec::new(),
             landlock_net: Vec::new(),
+            landlock_net_handled: AccessNet::empty(),
             seccomp_deny: Vec::new(),
             seccomp_deny_action: Action::KillProcess,
             ulimits: Vec::new(),

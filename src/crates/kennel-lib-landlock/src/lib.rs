@@ -453,6 +453,26 @@ impl Ruleset {
         restrict_flags(self.abi)
     }
 
+    /// Stop handling the TCP rights outside `keep`: the ruleset no longer gates them at all
+    /// (an unhandled right is permitted), so another layer must. Narrowing only — a right the
+    /// kernel lacks is never added. Port rules already recorded keep only the still-handled bits.
+    ///
+    /// kennel uses this where the cgroup BPF ACL is the authoritative TCP gate and a Landlock
+    /// port rule cannot express the grant (any-port loopback inside the kennel's own network
+    /// namespace; a port *range*), so Landlock never denies what the BPF ACL permits (#218).
+    pub fn handle_net_only(&mut self, keep: AccessNet) {
+        self.handled_net &= keep;
+        for (_, access) in &mut self.net_rules {
+            *access &= self.handled_net;
+        }
+    }
+
+    /// The TCP rights this ruleset handles (gates).
+    #[must_use]
+    pub const fn handled_net(&self) -> AccessNet {
+        self.handled_net
+    }
+
     /// Allow `access` (masked to the handled set) on TCP `port`.
     pub fn allow_port(&mut self, port: u16, access: AccessNet) {
         self.net_rules.push((port, access & self.handled_net));
@@ -898,6 +918,109 @@ mod tests {
 
     /// Child body: seal `rs`, then check the forbidden path is denied and the
     /// allowed path is permitted. Returns the process exit code (0 = correct).
+    /// Narrowing the handled TCP rights masks them out of the ruleset and out of port rules,
+    /// and never adds a right the kernel lacks.
+    #[test]
+    fn handle_net_only_narrows_and_masks_port_rules() {
+        let Ok(mut rs) = Ruleset::new() else {
+            return; // no Landlock
+        };
+        let supported = rs.handled_net();
+        rs.allow_port(8080, AccessNet::BIND_TCP | AccessNet::CONNECT_TCP);
+        rs.handle_net_only(AccessNet::CONNECT_TCP);
+        assert_eq!(rs.handled_net(), supported & AccessNet::CONNECT_TCP);
+        assert!(
+            rs.net_rules
+                .iter()
+                .all(|(_, a)| !a.contains(AccessNet::BIND_TCP)),
+            "an unhandled right is dropped from recorded port rules: {:?}",
+            rs.net_rules
+        );
+        rs.allow_port(9090, AccessNet::BIND_TCP);
+        assert!(
+            rs.net_rules.last().is_some_and(|(_, a)| a.is_empty()),
+            "a later grant of an unhandled right is a no-op"
+        );
+        // Widening is not possible.
+        rs.handle_net_only(AccessNet::BIND_TCP | AccessNet::CONNECT_TCP);
+        assert_eq!(rs.handled_net(), supported & AccessNet::CONNECT_TCP);
+        rs.handle_net_only(AccessNet::empty());
+        assert_eq!(rs.handled_net(), AccessNet::empty());
+        rs.build_fd()
+            .expect("a ruleset handling no TCP rights still builds");
+    }
+
+    /// With TCP unhandled, a sealed process may `connect(2)` to any port (BPF is the gate);
+    /// with it handled and no port rule, Landlock denies. Run in forked children against a
+    /// loopback listener the parent opened on an ephemeral port.
+    #[test]
+    fn unhandled_tcp_connect_is_not_gated() {
+        if Ruleset::new().map_or(true, |rs| rs.handled_net().is_empty()) {
+            return; // no Landlock, or no TCP rights before ABI 4
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let port = listener.local_addr().expect("addr").port();
+        for (handled, want_ok) in [(AccessNet::empty(), true), (AccessNet::CONNECT_TCP, false)] {
+            let mut rs = Ruleset::new().expect("ruleset");
+            rs.handle_net_only(handled);
+            // SAFETY: fork() in a test; the child does only async-signal-safe work (the
+            // Landlock syscalls, socket/connect/close, _exit) — every allocation (the ruleset)
+            // happened before the fork.
+            match unsafe { nix::unistd::fork() }.expect("fork") {
+                nix::unistd::ForkResult::Child => {
+                    let code = connect_verdict(rs, port);
+                    // SAFETY: _exit after fork, no Drop/atexit.
+                    unsafe { libc::_exit(code) };
+                }
+                nix::unistd::ForkResult::Parent { child } => {
+                    let status = nix::sys::wait::waitpid(child, None).expect("waitpid");
+                    let want = i32::from(!want_ok);
+                    assert!(
+                        matches!(status, nix::sys::wait::WaitStatus::Exited(_, c) if c == want),
+                        "handled={handled:?}: child verdict {status:?}, wanted exit {want} \
+                         (0 = connected, 1 = EACCES, 2 = seal failed, 3 = other error)"
+                    );
+                }
+            }
+        }
+    }
+
+    fn connect_verdict(rs: Ruleset, port: u16) -> i32 {
+        if rs.restrict_current_process().is_err() {
+            return 2;
+        }
+        // SAFETY: plain socket(2) with constant args; returns an fd or -1.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        if fd < 0 {
+            return 3;
+        }
+        let addr = libc::sockaddr_in {
+            sin_family: libc::sa_family_t::try_from(libc::AF_INET).unwrap_or_default(),
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr {
+                s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
+            },
+            sin_zero: [0; 8],
+        };
+        // SAFETY: `addr` is a valid sockaddr_in that outlives the call; the length matches.
+        let rc = unsafe {
+            libc::connect(
+                fd,
+                std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_in>())
+                    .unwrap_or_default(),
+            )
+        };
+        let err = std::io::Error::last_os_error().raw_os_error();
+        // SAFETY: closing the fd we opened.
+        unsafe { libc::close(fd) };
+        match (rc, err) {
+            (0, _) => 0,
+            (_, Some(libc::EACCES)) => 1,
+            _ => 3,
+        }
+    }
+
     fn child_verdict(rs: Ruleset, allowed: &std::ffi::CStr, forbidden: &std::ffi::CStr) -> i32 {
         if rs.restrict_current_process().is_err() {
             return 3; // sealing itself failed
