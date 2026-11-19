@@ -295,10 +295,19 @@ pub fn supported_scope(abi: u32) -> Scope {
 pub const RESTRICT_SELF_LOG_NEW_EXEC_ON: u32 = 1 << 1;
 
 /// The `landlock_restrict_self` flags to seal with on an `abi` kernel.
+///
+/// kennel seals in the forked child and then `execve`s the workload. From ABI 7 the kernel
+/// audit-logs Landlock denials, but by default only for the executable that called
+/// `landlock_restrict_self` — so without [`RESTRICT_SELF_LOG_NEW_EXEC_ON`] no workload denial
+/// is ever logged. Below ABI 7 no flag exists (passing one is `EINVAL`), so this is `0`.
+/// Records reach the kernel audit log (`AUDIT_LANDLOCK_ACCESS`) only when audit is enabled.
 #[must_use]
-pub fn restrict_flags(abi: u32) -> u32 {
-    let _ = abi;
-    todo!("landlock audit logging (#218)")
+pub const fn restrict_flags(abi: u32) -> u32 {
+    if abi >= 7 {
+        RESTRICT_SELF_LOG_NEW_EXEC_ON
+    } else {
+        0
+    }
 }
 
 /// Create a ruleset fd governing the handled access rights in `attr`.
@@ -341,19 +350,22 @@ fn add_net_rule(ruleset: BorrowedFd<'_>, access: AccessNet, port: u16) -> io::Re
 }
 
 /// Irreversibly restrict the calling process to `ruleset`. Requires
-/// `no_new_privs` to already be set (the caller does this).
-fn restrict_self(ruleset: BorrowedFd<'_>) -> io::Result<()> {
+/// `no_new_privs` to already be set (the caller does this). `flags` are the
+/// [`restrict_flags`] for the running ABI (the audit-log controls).
+fn restrict_self(ruleset: BorrowedFd<'_>, flags: u32) -> io::Result<()> {
     // SAFETY: `ruleset` is a valid open Landlock ruleset fd (BorrowedFd). The
     // syscall reads no user memory; it enrolls the calling thread group under
     // the ruleset.
     //
-    // INVARIANTS UPHELD: flags 0; no_new_privs is set by the caller beforehand
-    // (else the kernel returns EPERM rather than any unsafe behaviour).
+    // INVARIANTS UPHELD: `flags` comes from `restrict_flags`, so it is 0 below ABI 7
+    // and only the defined LOG_NEW_EXEC_ON bit from ABI 7; no_new_privs is set by the
+    // caller beforehand (else the kernel returns EPERM rather than any unsafe behaviour).
     //
-    // FAILURE MODE: missing no_new_privs or a bad fd returns -1 + errno (Err).
-    // The effect, on success, is irreversible for this process — by design.
+    // FAILURE MODE: missing no_new_privs, a bad fd, or a flag the kernel does not
+    // define returns -1 + errno (Err). The effect, on success, is irreversible for
+    // this process — by design.
     let ret =
-        unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), 0_u32) };
+        unsafe { libc::syscall(libc::SYS_landlock_restrict_self, ruleset.as_raw_fd(), flags) };
     if ret == 0 {
         Ok(())
     } else {
@@ -378,6 +390,9 @@ fn open_o_path(path: &Path) -> io::Result<File> {
 /// ruleset is inherited across `execve`, so a spawn path builds it and seals
 /// just before exec.
 pub struct Ruleset {
+    /// The running kernel's Landlock ABI, probed once in [`Ruleset::new`]; selects the
+    /// handled sets and the seal's [`restrict_flags`].
+    abi: u32,
     handled_fs: AccessFs,
     handled_net: AccessNet,
     handled_scope: Scope,
@@ -399,6 +414,7 @@ impl Ruleset {
     pub fn new() -> io::Result<Self> {
         let abi = abi_version()?;
         Ok(Self {
+            abi,
             handled_fs: supported_fs(abi),
             handled_net: supported_net(abi),
             handled_scope: supported_scope(abi),
@@ -433,8 +449,8 @@ impl Ruleset {
 
     /// The `landlock_restrict_self` flags [`Ruleset::restrict_current_process`] seals with.
     #[must_use]
-    pub fn restrict_flags(&self) -> u32 {
-        todo!("landlock audit logging (#218)")
+    pub const fn restrict_flags(&self) -> u32 {
+        restrict_flags(self.abi)
     }
 
     /// Allow `access` (masked to the handled set) on TCP `port`.
@@ -476,7 +492,7 @@ impl Ruleset {
     pub fn restrict_current_process(self) -> io::Result<()> {
         let ruleset = self.build_fd()?;
         set_no_new_privs()?;
-        restrict_self(ruleset.as_fd())
+        restrict_self(ruleset.as_fd(), self.restrict_flags())
     }
 }
 

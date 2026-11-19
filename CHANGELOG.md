@@ -6,6 +6,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Runtime & enforcement
+
+- **Landlock denials inside a kennel are now audit-logged.** The seal now passes
+  `LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON` to `landlock_restrict_self` on Landlock ABI 7+
+  (kernel 6.15+). kennel seals in the spawn child and then `execve`s the workload, and the
+  kernel's default logs only denials from the executable that sealed — so until now no workload
+  denial ever produced a `LANDLOCK_ACCESS` audit record, leaving "Permission denied" with no trace
+  of what was blocked. Below ABI 7 the flag does not exist and is withheld. Records reach the
+  kernel audit log only when audit is enabled on the host (`auditd`, or journald's audit socket);
+  see HOWTO §7. (#218)
+
 ### Internal / supply chain
 
 - **`basic-toml` is now the first-party `kennel-lib-toml`.** RUSTSEC-2026-0374 marked
