@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 44088,
+  "total_sloc": 44229,
   "tcb_crate_count": 17,
-  "tcb_sloc": 27005,
+  "tcb_sloc": 27104,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7976,
+      "sloc": 7999,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5585,
+      "sloc": 5624,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 5327,
+      "sloc": 5330,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -45,6 +45,16 @@
       "external_deps": []
     },
     {
+      "name": "kennel-lib-policy",
+      "sloc": 2711,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["cli", "compile", "compose", "kenneld", "spawn", "tun-broker"],
+      "first_party_deps": ["kennel-lib-toml"],
+      "external_deps": ["ed25519-compact", "object", "serde"]
+    },
+    {
       "name": "kennel-lib-toml",
       "sloc": 2673,
       "uses_unsafe": false,
@@ -53,16 +63,6 @@
       "consumers": ["compile", "compose", "config", "kenneld", "policy"],
       "first_party_deps": [],
       "external_deps": ["serde"]
-    },
-    {
-      "name": "kennel-lib-policy",
-      "sloc": 2661,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["cli", "compile", "compose", "kenneld", "spawn", "tun-broker"],
-      "first_party_deps": ["kennel-lib-toml"],
-      "external_deps": ["ed25519-compact", "object", "serde"]
     },
     {
       "name": "kennel-lib-binder",
@@ -86,7 +86,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1733,
+      "sloc": 1759,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
