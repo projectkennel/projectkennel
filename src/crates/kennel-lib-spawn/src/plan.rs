@@ -395,6 +395,38 @@ pub struct BindMount {
     pub redirected: bool,
 }
 
+/// How the view's fresh `/proc` is served (#218, [`kennel_lib_policy::procfs`]).
+///
+/// Landlock cannot follow `/proc/self` across processes (a rule anchors on the sealing
+/// process's own `/proc/<pid>`), so every `fs.read` grant under `/proc` becomes one read rule
+/// on `/proc` itself, and what that exposes is controlled here instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcView {
+    /// The real, uncurated procfs: the policy granted `/proc` or `/proc/**`.
+    Full,
+    /// The curated procfs: per-process entries are real; every other top-level entry is
+    /// over-mounted with a synthesized file (`synthesize`), left real (`passthrough`, an
+    /// entry the policy named), or masked empty.
+    Curated {
+        /// Top-level files rendered from templates, sorted, deduplicated.
+        synthesize: Vec<kennel_lib_policy::procfs::Synth>,
+        /// Top-level entry names left uncovered, sorted, deduplicated.
+        passthrough: Vec<String>,
+    },
+}
+
+/// Derive the [`ProcView`] from the `fs.read` set.
+///
+/// # Errors
+///
+/// [`SpawnError::InvalidPolicy`] for a grant the curated view cannot honour (a path inside a
+/// host-global entry, or a non-canonical path) — the compiler refuses these; this re-check
+/// fails closed on a hand-crafted settled policy.
+pub fn proc_view(read: &[String]) -> Result<ProcView, SpawnError> {
+    let _ = read;
+    todo!("procfs curation (#218)")
+}
+
 /// The constructed-`$HOME` view (§7.4.5).
 ///
 /// What the mount seal needs to build a fresh root for the kennel and
@@ -420,6 +452,8 @@ pub struct ShimView {
     pub tmp_size_mib: u32,
     /// Mount `/proc` with `hidepid=2`.
     pub proc_hidepid: bool,
+    /// What the fresh `/proc` exposes (#218).
+    pub proc: ProcView,
     /// Mount a per-kennel binderfs instance in the view and expose the standard
     /// `binder` device + `/dev/binder` symlink. Always set: the binder bus is the
     /// universal control plane, and kenneld takes node 0 via `/proc` at spawn.
@@ -1284,6 +1318,7 @@ impl Plan {
             dev_allow,
             tmp_size_mib: ep.fs.tmp.size_mib,
             proc_hidepid: ep.proc.hidepid,
+            proc: ProcView::Full,
             binder: true,
             mask_paths,
             mask_dir_paths,

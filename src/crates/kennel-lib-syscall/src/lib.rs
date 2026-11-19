@@ -75,6 +75,7 @@ pub mod random;
 pub mod seccomp;
 pub mod signal;
 pub mod spawn;
+pub mod sysinfo;
 pub mod tun;
 pub mod wake;
 
