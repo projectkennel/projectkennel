@@ -14,7 +14,7 @@
 // skeleton for CI.
 //
 // "How can I do less" — the output is a `SourcePolicy` struct serialised to TOML
-// via `basic_toml::to_string()`. Template/fragment discovery uses the same
+// via `kennel_lib_toml::to_string()`. Template/fragment discovery uses the same
 // cascade and parsers (`kennel_lib_config`, `kennel_lib_compile`) every other
 // tool uses. Validation feeds the emitted bytes through `build_settled()`.
 
@@ -503,8 +503,8 @@ fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Serialise via basic_toml — the same serialiser every other tool uses.
-    let toml_text = match basic_toml::to_string(leaf) {
+    // Serialise via kennel-lib-toml — the same serialiser every other tool uses.
+    let toml_text = match kennel_lib_toml::to_string(leaf) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("kennel-compose: serialisation failed: {e}");
@@ -512,7 +512,7 @@ fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
         }
     };
 
-    // Prepend a comment header (basic_toml doesn't emit comments).
+    // Prepend a comment header (kennel-lib-toml doesn't emit comments).
     let kind = if leaf.exec.is_some() {
         if is_script {
             "probed script"
@@ -711,7 +711,7 @@ mod tests {
     /// returning the settled policy — so a test can assert not just that it compiles but
     /// that the grant SURVIVES the fold (the silent-drop the delta form would cause).
     fn compile_leaf(leaf: &SourcePolicy) -> Result<kennel_lib_policy::SettledPolicy, String> {
-        let bytes = basic_toml::to_string(leaf).map_err(|e| e.to_string())?;
+        let bytes = kennel_lib_toml::to_string(leaf).map_err(|e| e.to_string())?;
         let entry =
             kennel_lib_compile::parse_source(bytes.as_bytes()).map_err(|e| e.to_string())?;
         let trust = kennel_lib_compile::source_sig::Trust::dev();

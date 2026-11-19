@@ -123,20 +123,9 @@ notes = "Direct dependency of kennel-lib-syscall: compiles and installs seccomp-
 # ---- data/cli/caps batch (§5.5-approved; reviewer remco). Provenance proven
 # independent of crates.io via tools/audit-source.sh (verified-against below).
 # Vendored ahead of use; wired into each consumer as that crate is built
-# (caps -> kennel-lib-syscall; serde/basic-toml/ed25519-compact -> kennel-lib-policy;
+# (caps -> kennel-lib-syscall; serde/ed25519-compact -> kennel-lib-policy;
 # time -> kennel-lib-audit; lexopt -> kennel-cli). All config is TOML — no serde_json;
 # audit JSONL is hand-rolled. The BPF loader deps are decided separately.
-
-[crate."basic-toml"]
-version = "=0.1.10"
-crate-sha256 = "ba62675e8242a4c4e806d12f11d136e626e6c8361d6b829310732241652a178a"
-audited-by = "remco"
-audited-on = "2026-05-31"
-verified-against = [
-    "crates.io static.crates.io .crate download — sha256 matches",
-    "github.com/dtolnay/basic-toml @ c54c9bd3ade1a609f5da6e31cf6ee72d6c7552fb (tag 0.1.10) — 176 source files byte-identical via tools/audit-source.sh",
-]
-notes = "Direct dep (parse policy TOML into typed structs). serde-only; chosen over the toml crate to avoid its ~10-crate winnow tree."
 
 [crate."caps"]
 version = "=0.5.6"

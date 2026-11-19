@@ -11,7 +11,7 @@ repository.workspace = true
 
 [dependencies]
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
-basic-toml = "=0.1.10"
+kennel-lib-toml = { path = "../kennel-lib-toml" }
 ed25519-compact = { version = "=2.3.0", default-features = false, features = ["std"] }
 # Bare SHA-512 for the SSHSIG signature preimage (the verifier hashes the canonical
 # bytes before the Ed25519 check). default-features = false → no `sha384`/`traits`,

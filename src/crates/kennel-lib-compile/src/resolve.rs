@@ -1495,7 +1495,7 @@ mod tests {
             .as_bytes(),
         )
         .expect("parse parent");
-        let signed = basic_toml::to_string(&sign_source(&parent, &key).expect("sign"))
+        let signed = kennel_lib_toml::to_string(&sign_source(&parent, &key).expect("sign"))
             .expect("ser")
             .into_bytes();
         let src = MapSource::new().with("p", "v1", &signed);

@@ -35,7 +35,7 @@ kennel-lib-binder = { path = "../kennel-lib-binder" }
 # Writing the per-kennel egress-proxy TOML config (kenneld writes, the netproxy
 # reads). Both already vendored (kennel-lib-policy/host-netproxy use them).
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
-basic-toml = "=0.1.10"
+kennel-lib-toml = { path = "../kennel-lib-toml" }
 # The host-side conduit delegates' shared wire (the `netproxy` + `inetd` library modules):
 # kenneld reuses the netproxy conduit codec for the INet egress decision (§7.5.2, crate::inet),
 # round-trips the proxy config through the netproxy parser (writer can't drift), and uses the

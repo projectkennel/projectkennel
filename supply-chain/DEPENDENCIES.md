@@ -39,7 +39,7 @@ Each direct dependency gets an entry:
 The short list of things we use a dependency for rather than writing ourselves (§5.1); expanding it is a maintainer decision:
 
 - Cryptography (e.g. `ring`, `ed25519-dalek`, `rustls`).
-- TOML, for every config artefact including the settled policy (`serde`, `basic-toml`). There is **no** JSON config: the audit log is JSON Lines (a fixed-schema output stream) written by a small hand-rolled emitter, not `serde_json`.
+- TOML, for every config artefact including the settled policy (`serde`; the TOML codec itself is the first-party `kennel-lib-toml`, basic-toml 0.1.10 brought in-tree in #221). There is **no** JSON config: the audit log is JSON Lines (a fixed-schema output stream) written by a small hand-rolled emitter, not `serde_json`.
 - Security-ABI helpers where the kernel ABI is genuinely non-trivial: `seccompiler` (seccomp-BPF bytecode). Landlock and the BPF loader were instead hand-rolled (their vetted crates' cost — proc-macros/TCB for `landlock`; ~1435 vendored C files for `libbpf-sys`, 19 crates for `aya` — outweighed the small `unsafe` they save); the BPF loader uses `object` for ELF parsing only.
 - One async runtime, in the proxy and server crates only — never in the privhelper.
 - Hashing for the checksum verifier (`sha2`), itself bootstrapped per §5.5.1.

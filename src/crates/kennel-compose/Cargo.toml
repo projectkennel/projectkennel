@@ -11,7 +11,7 @@ name = "kennel-compose"
 path = "src/main.rs"
 
 [dependencies]
-basic-toml         = "=0.1.10"
+kennel-lib-toml         = { path = "../kennel-lib-toml" }
 kennel-lib-compile = { path = "../kennel-lib-compile" }
 kennel-lib-config  = { path = "../kennel-lib-config" }
 kennel-lib-policy  = { path = "../kennel-lib-policy" }

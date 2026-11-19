@@ -8,11 +8,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
-- **RUSTSEC-2026-0374 (`basic-toml` unmaintained) is a documented, time-boxed ignore** in
-  `deny.toml` and the new `.cargo/audit.toml`. It is an unmaintained notice, not a vulnerability.
-  `basic-toml` parses the settled policy on the TCB path, so rather than migrate to `toml` (a chain
-  of new external crates into the TCB) it is being brought in-tree as a first-party crate; the
-  ignore is removed when that lands (#221).
+- **`basic-toml` is now the first-party `kennel-lib-toml`.** RUSTSEC-2026-0374 marked
+  `basic-toml` 0.1.10 unmaintained (upstream archived 2025-03-02). It parses the settled policy on
+  the TCB path, so rather than migrate to `toml` (a chain of new external crates into the TCB) its
+  source is brought in-tree: the first commit is byte-identical to the audited vendored `.crate`,
+  then the crate is renamed, wired in, and `unsafe` is forbidden. Upstream's licence (MIT OR
+  Apache-2.0) and copyright are kept (NOTICE). The vendored `.crate`, its CHECKSUMS/vet records and
+  the interim RUSTSEC-2026-0374 ignore are removed. Third-party crate count drops by one; no new
+  dependencies. The workspace lint pass over the parser is the follow-up (#221).
 - **`mini-sansio-dbus` 5.0.1 → 6.0.1; the one local vendor patch is dropped and byte-identical
   vendoring is restored.** Upstream merged our header-field-decoder fix (the wire-reachable
   `unreachable!()` on a bogus field-code byte, found by the kennel-fuzz harness and carried since

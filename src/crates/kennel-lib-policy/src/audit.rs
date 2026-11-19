@@ -217,7 +217,7 @@ pub fn translate_audit_section(
 /// unknown sink/level/facility or a malformed size.
 pub fn parse_audit_defaults(toml: &str) -> Result<AuditRuntime, PolicyError> {
     let section: AuditSection =
-        basic_toml::from_str(toml).map_err(|e| PolicyError::Parse(e.to_string()))?;
+        kennel_lib_toml::from_str(toml).map_err(|e| PolicyError::Parse(e.to_string()))?;
     translate_audit_section(&section, str::to_owned)
 }
 

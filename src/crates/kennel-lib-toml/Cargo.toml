@@ -1,0 +1,28 @@
+[package]
+name = "kennel-lib-toml"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel's in-tree TOML (de)serializer for Serde: basic-toml 0.1.10 (dtolnay/basic-toml, archived upstream 2025-03-02) brought in as a first-party crate so the settled-policy parser on the TCB path has an owner (#221). Its only dependency is serde."
+edition.workspace = true
+rust-version.workspace = true
+# Upstream's licence is kept, as both licences require for derived work. The project's
+# Apache-2.0-only rule (CODING-STANDARDS §3) covers code we author; this crate is the one
+# documented exception (NOTICE carries the upstream copyright).
+license = "MIT OR Apache-2.0"
+authors = ["Alex Crichton <alex@alexcrichton.com>", "David Tolnay <dtolnay@gmail.com>", "Project Kennel contributors"]
+repository.workspace = true
+
+[dependencies]
+serde = { version = "=1.0.228", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
+serde_derive = "=1.0.228"
+serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
+
+# The workspace lint set (clippy pedantic + no indexing/arithmetic/panic) is not yet applied:
+# this commit keeps upstream's code as-is so the import stays reviewable as a copy. Bringing
+# it up to the workspace standard is the #221 follow-up. `unsafe` is forbidden now (upstream
+# has none).
+[lints.rust]
+unsafe_code = "forbid"
