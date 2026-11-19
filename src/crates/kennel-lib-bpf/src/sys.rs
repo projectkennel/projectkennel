@@ -222,7 +222,13 @@ pub fn prog_load(
         license: license.as_ptr() as u64,
         log_level: u32::from(!log.is_empty()),
         log_size: u32::try_from(log.len()).unwrap_or(0),
-        log_buf: log.as_mut_ptr() as u64,
+        // No log: the kernel requires a NULL buffer (an empty slice's pointer is dangling, not
+        // null, and a buffer without a length is rejected).
+        log_buf: if log.is_empty() {
+            0
+        } else {
+            log.as_mut_ptr() as u64
+        },
         kern_version: 0,
         prog_flags: 0,
         prog_name: [0; 16],

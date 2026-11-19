@@ -23,24 +23,50 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// `std` predicates are unstable.
 #[must_use]
 pub const fn is_special_use(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(a) => {
-            a.is_private()
-                || a.is_loopback()
-                || a.is_link_local()
-                || a.is_broadcast()
-                || a.is_documentation()
-                || a.is_unspecified()
-                || a.is_multicast()
-                || is_cgnat(a)
-        }
+    match canonical(addr) {
+        IpAddr::V4(a) => special_use_v4(a),
         IpAddr::V6(a) => {
             a.is_loopback()
                 || a.is_unspecified()
                 || a.is_multicast()
                 || is_ula(a)
                 || is_v6_link_local(a)
+                || is_v4_compatible(a)
+                || match translated_v4(a) {
+                    Some(v4) => special_use_v4(v4),
+                    None => false,
+                }
         }
+    }
+}
+
+/// The IPv4 half of [`is_special_use`].
+const fn special_use_v4(a: Ipv4Addr) -> bool {
+    a.is_private()
+        || a.is_loopback()
+        || a.is_link_local()
+        || a.is_broadcast()
+        || a.is_documentation()
+        || a.is_unspecified()
+        || a.is_multicast()
+        || is_cgnat(a)
+}
+
+/// `addr` as the kernel will dial it: an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) becomes the
+/// IPv4 address it names; anything else is returned unchanged.
+///
+/// A dual-stack socket connecting to `::ffff:127.0.0.1` makes an **IPv4** connection to
+/// `127.0.0.1`. Classifying or CIDR-matching the mapped form as IPv6 therefore misses every IPv4
+/// rule — loopback, RFC1918, the metadata address. Every address a kennel names, and every address
+/// a name resolves to, goes through this before it is judged, pinned or dialled.
+#[must_use]
+pub const fn canonical(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => addr,
+        },
+        IpAddr::V4(_) => addr,
     }
 }
 
@@ -56,17 +82,52 @@ pub const fn is_special_use(addr: IpAddr) -> bool {
 /// broker's port-53/5353 deny, so a resolver on a reachable internal address is still refused.)
 #[must_use]
 pub const fn is_nonroutable_egress(addr: IpAddr) -> bool {
-    match addr {
-        IpAddr::V4(a) => {
-            a.is_loopback()
-                || a.is_link_local()
-                || a.is_unspecified()
-                || a.is_broadcast()
-                || a.is_multicast()
-        }
+    match canonical(addr) {
+        IpAddr::V4(a) => nonroutable_v4(a),
         IpAddr::V6(a) => {
-            a.is_loopback() || a.is_unspecified() || a.is_multicast() || is_v6_link_local(a)
+            a.is_loopback()
+                || a.is_unspecified()
+                || a.is_multicast()
+                || is_v6_link_local(a)
+                || is_v4_compatible(a)
+                || match translated_v4(a) {
+                    Some(v4) => nonroutable_v4(v4),
+                    None => false,
+                }
         }
+    }
+}
+
+/// The IPv4 half of [`is_nonroutable_egress`].
+const fn nonroutable_v4(a: Ipv4Addr) -> bool {
+    a.is_loopback()
+        || a.is_link_local()
+        || a.is_unspecified()
+        || a.is_broadcast()
+        || a.is_multicast()
+}
+
+/// Whether `a` is a deprecated IPv4-compatible address (`::a.b.c.d`, i.e. `::/96`) other than
+/// `::` and `::1`. Never a real destination; refused outright.
+const fn is_v4_compatible(addr: Ipv6Addr) -> bool {
+    match addr.octets() {
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, first, second, third, last] => {
+            !(first == 0 && second == 0 && third == 0 && last <= 1)
+        }
+        _ => false,
+    }
+}
+
+/// The IPv4 address a translation prefix embeds, if `a` is in one: the NAT64 well-known prefix
+/// (`64:ff9b::/96`, RFC 6052) or 6to4 (`2002::/16`, RFC 3056). A gateway turns these into an IPv4
+/// connection, so the embedded address is classified as IPv4.
+const fn translated_v4(addr: Ipv6Addr) -> Option<Ipv4Addr> {
+    match addr.octets() {
+        [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0, first, second, third, last]
+        | [0x20, 0x02, first, second, third, last, ..] => {
+            Some(Ipv4Addr::new(first, second, third, last))
+        }
+        _ => None,
     }
 }
 
@@ -98,6 +159,51 @@ mod tests {
     }
     fn v6(s: &str) -> IpAddr {
         IpAddr::V6(s.parse::<Ipv6Addr>().expect("v6 literal"))
+    }
+
+    #[test]
+    fn addresses_that_dial_ipv4_are_classified_as_ipv4() {
+        // IPv4-mapped: the kernel dials the IPv4 address.
+        for s in [
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:10.0.0.5",
+            "::ffff:192.168.1.1",
+            "::ffff:0.0.0.0",
+        ] {
+            assert!(is_special_use(v6(s)), "{s} is special-use");
+        }
+        assert!(
+            !is_special_use(v6("::ffff:8.8.8.8")),
+            "a mapped public address is not"
+        );
+        assert!(is_nonroutable_egress(v6("::ffff:127.0.0.1")));
+        assert!(is_nonroutable_egress(v6("::ffff:169.254.169.254")));
+        assert!(
+            !is_nonroutable_egress(v6("::ffff:10.0.0.5")),
+            "RFC1918 stays routable egress"
+        );
+        assert_eq!(canonical(v6("::ffff:10.1.2.3")), v4("10.1.2.3"));
+        assert_eq!(canonical(v6("2001:db8::1")), v6("2001:db8::1"));
+        // IPv4-compatible (::a.b.c.d) is never a destination; :: and ::1 keep their own classes.
+        assert!(is_special_use(v6("::127.0.0.1")));
+        assert!(is_special_use(v6("::8.8.8.8")));
+        // NAT64 and 6to4 embed an IPv4 address a gateway will dial.
+        assert!(is_special_use(v6("64:ff9b::7f00:1")), "NAT64 → 127.0.0.1");
+        assert!(
+            is_special_use(v6("64:ff9b::a9fe:a9fe")),
+            "NAT64 → 169.254.169.254"
+        );
+        assert!(
+            !is_special_use(v6("64:ff9b::808:808")),
+            "NAT64 → 8.8.8.8 is public"
+        );
+        assert!(is_special_use(v6("2002:7f00:1::1")), "6to4 → 127.0.0.1");
+        assert!(is_special_use(v6("2002:a00:5::1")), "6to4 → 10.0.0.5");
+        assert!(
+            !is_special_use(v6("2002:808:808::1")),
+            "6to4 → 8.8.8.8 is public"
+        );
     }
 
     #[test]

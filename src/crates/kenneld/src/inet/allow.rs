@@ -130,10 +130,13 @@ impl Cidr {
         Ok(Self { base, prefix_len })
     }
 
-    /// Whether `addr` falls within this network. A family mismatch (v4 address
-    /// against a v6 network, or vice versa) is never a match.
+    /// Whether `addr` falls within this network. An IPv4-mapped IPv6 address is matched as the
+    /// IPv4 address it names; otherwise a family mismatch is never a match.
     #[must_use]
     pub fn contains(&self, addr: IpAddr) -> bool {
+        // An IPv4-mapped address is the IPv4 address it names: match it as such, so an IPv4 rule
+        // (a deny of the metadata address, say) cannot be stepped around by spelling it in IPv6.
+        let addr = kennel_lib_policy::netaddr::canonical(addr);
         match (self.base, addr) {
             (IpAddr::V4(base), IpAddr::V4(other)) => {
                 octets_match(&base.octets(), &other.octets(), self.prefix_len)

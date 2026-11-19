@@ -369,13 +369,28 @@ fn section_relocations(
 }
 
 /// `BPF_PROG_LOAD` `insns` as `prog`, surfacing the verifier log on failure.
+///
+/// The first attempt asks for **no** log. With a log buffer the kernel fails the load `ENOSPC`
+/// when the log outgrows the buffer — even for a program the verifier accepts — so a program that
+/// merely grew would stop loading. Only a rejected program is loaded again, with a buffer, to
+/// say why.
 fn finish_load(prog: &ProgramSpec, insns: &[u8]) -> io::Result<OwnedFd> {
-    let mut log = vec![0u8; 64 * 1024];
-    sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log).map_err(|e| {
-        let end = log.iter().position(|&b| b == 0).unwrap_or(0);
-        let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
-        other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
-    })
+    let first = match sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut []) {
+        Ok(fd) => return Ok(fd),
+        Err(e) => e,
+    };
+    let mut log = vec![0u8; 1 << 20];
+    match sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log) {
+        // Not expected (the same program was just rejected), but a load that succeeds is a load.
+        Ok(fd) => Ok(fd),
+        Err(again) => {
+            let end = log.iter().position(|&b| b == 0).unwrap_or(0);
+            let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
+            Err(other(format!(
+                "prog_load failed: {first}\nverifier log (second attempt: {again}):\n{text}"
+            )))
+        }
+    }
 }
 
 /// Create every map in `map_specs`, returning them keyed by symbol name.

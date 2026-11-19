@@ -128,6 +128,26 @@ kennel_entry_permits(const struct allow_entry *entry, __u8 protocol, __u16 port_
 	return port_host >= entry->port_min && port_host <= entry->port_max;
 }
 
+/* True if the 16-byte address is the unspecified address (::). */
+static __always_inline int kennel_is_unspecified6(const __u8 a[16])
+{
+	for (int i = 0; i < 16; i++) {
+		if (a[i] != 0)
+			return 0;
+	}
+	return 1;
+}
+
+/* True if the 16-byte address is IPv4-mapped (::ffff:a.b.c.d). */
+static __always_inline int kennel_is_v4mapped(const __u8 a[16])
+{
+	for (int i = 0; i < 10; i++) {
+		if (a[i] != 0)
+			return 0;
+	}
+	return a[10] == 0xff && a[11] == 0xff;
+}
+
 /*
  * IPv4 connect/sendmsg decision. daddr_be and port_be are network byte order.
  * Deny-first: the invariant deny trie is consulted before the allow trie, so
@@ -137,6 +157,10 @@ static __always_inline int
 kennel_decide_v4(__u32 daddr_be, __u16 port_be, __u8 protocol, __u16 deny_kind, __u16 allow_kind,
 		 const struct kennel_meta *meta)
 {
+	/* A connect to the unspecified address is routed to this host's loopback, so that is the
+	 * destination the ACL must judge: otherwise 0.0.0.0 walks past a deny of 127.0.0.0/8. */
+	if (daddr_be == 0)
+		daddr_be = bpf_htonl(0x7f000001);
 	struct lpm_v4_key key = { .prefixlen = 32, .addr = daddr_be };
 	__u16 port_host = bpf_ntohs(port_be);
 
@@ -153,11 +177,30 @@ kennel_decide_v4(__u32 daddr_be, __u16 port_be, __u8 protocol, __u16 deny_kind, 
 	return KENNEL_DENY;
 }
 
-/* IPv6 connect/sendmsg decision. daddr points at 16 bytes; port_be is net order. */
+/*
+ * IPv6 connect/sendmsg decision. daddr_in points at 16 bytes; port_be is net order.
+ *
+ * Two addresses are not what they look like, and are judged as what the kernel will dial:
+ *   - IPv4-mapped (::ffff:a.b.c.d): an AF_INET6 socket makes an IPv4 connection to a.b.c.d, and
+ *     only this hook sees it — so the IPv4 tries decide. Without this, every IPv4 deny (the
+ *     metadata address, RFC1918, an author's CIDR) is skipped whenever an allow covers ::/0.
+ *   - the unspecified address (::): routed to this host's loopback, so it is judged as ::1.
+ */
 static __always_inline int
-kennel_decide_v6(const __u8 daddr[16], __u16 port_be, __u8 protocol, __u16 deny_kind,
+kennel_decide_v6(const __u8 daddr_in[16], __u16 port_be, __u8 protocol, __u16 deny_kind,
 		 __u16 allow_kind, const struct kennel_meta *meta)
 {
+	__u8 daddr[16];
+	__builtin_memcpy(daddr, daddr_in, 16);
+
+	if (kennel_is_v4mapped(daddr)) {
+		__u32 v4_be;
+		__builtin_memcpy(&v4_be, daddr + 12, 4);
+		return kennel_decide_v4(v4_be, port_be, protocol, deny_kind, allow_kind, meta);
+	}
+	if (kennel_is_unspecified6(daddr))
+		daddr[15] = 1;
+
 	struct lpm_v6_key key = { .prefixlen = 128 };
 	__u16 port_host = bpf_ntohs(port_be);
 

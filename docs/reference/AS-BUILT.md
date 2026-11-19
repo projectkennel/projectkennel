@@ -26,6 +26,43 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — an address is judged as the destination the kernel will dial
+
+- **Bears-on:** Kennel book Vol 2, the network chapter (§7.5: the proxied modes' special-use gate,
+  the `host`-mode cgroup BPF ACL, §7.5.6 the kennel loopback); the BPF ABI. THREATS T1.6.
+- **Change:** three address forms were judged as something other than what gets dialled.
+  Confirmed on the test VM before the fix.
+  - **IPv4-mapped IPv6 (`::ffff:a.b.c.d`).** A dual-stack socket makes an IPv4 connection to
+    `a.b.c.d`. The proxy's `is_special_use` and `Cidr::contains` treated it as IPv6, so it was
+    neither loopback nor covered by any IPv4 deny: in `unconstrained` mode `CONNECT
+    [::ffff:127.0.0.1]` reached the host's loopback. `netaddr::canonical` now maps it to the IPv4
+    address before an address is classified, CIDR-matched, pinned or dialled, for literals and
+    for every address a name resolves to. IPv4-compatible (`::/96`) is refused outright, and the
+    IPv4 address embedded in NAT64 (`64:ff9b::/96`) or 6to4 (`2002::/16`) is classified as IPv4.
+  - **The same at the BPF layer.** `connect6` consulted only the IPv6 tries, and a `*` allow
+    covers `::/0`. `kennel_decide_v6` now hands a mapped address to `kennel_decide_v4`. An
+    IPv4-mapped **bind** is refused (it binds an IPv4 address the IPv6 tries cannot judge).
+  - **The unspecified address.** A connect to `0.0.0.0` or `::` is routed to the host's
+    loopback, so it walked past a deny of `127.0.0.1`/`::1`. Both decide functions now judge it
+    as loopback.
+  - **Host mode and the proxy stamp.** `bring_up` stamped the "kennel's own loopback" allow
+    (any port on `127.0.0.1`/`::1`, plus the loopback bind subnet) whenever the mode was not
+    `none`. In `host` mode there is no private net namespace, so that opened the **host's**
+    loopback: a host-mode kennel with no loopback rule could send UDP to `127.0.0.1` on any port.
+    The stamp is now made only in the proxied modes.
+- **Also fixed (found while testing):** the BPF loader always requested a verifier log into a
+  fixed 64 KiB buffer, and the kernel fails `BPF_PROG_LOAD` with `ENOSPC` when the log outgrows
+  the buffer — even for a program it accepts. A small addition to `bind6` was enough to stop
+  every host-mode kennel from starting. The loader now loads without a log and asks for one (1
+  MiB) only to explain a rejection.
+- **Why:** an ACL that matches the spelling of an address, not its destination, is bypassed by
+  respelling it.
+- **Not changed:** `sock_create` still admits every inet socket type (ICMP ping sockets), and a
+  `listen()` on an unbound socket or a UDP bind to port 0 still skips the bind policy. The
+  `IPV6_V6ONLY` setsockopt hook is left as it was; it is no longer what the mapped-address
+  defence rests on.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — node-0 registration verbs authorise their sender
 
 - **Bears-on:** Kennel book Vol 2, the service-catalogue and mesh chapters (§7.13.4a/c), the tun

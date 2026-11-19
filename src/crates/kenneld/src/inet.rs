@@ -218,6 +218,12 @@ pub fn decide(
     port: u16,
     transport: Transport,
 ) -> InetDecision {
+    // Judge — and pin — the address the kernel will actually dial: an IPv4-mapped literal is
+    // the IPv4 address it names (see `netaddr::canonical`).
+    let dest = &match dest {
+        Destination::Addr(addr) => Destination::Addr(kennel_lib_policy::netaddr::canonical(*addr)),
+        Destination::Name(name) => Destination::Name(name.clone()),
+    };
     // Sanctioned host-loopback services are an explicit allow-exception, checked ahead of the
     // ruleset's deny-before-allow (a literal bastion address would be caught by the host-loopback
     // invariant deny). Only an exact literal addr:port qualifies — never a name.
@@ -252,6 +258,7 @@ pub fn decide(
                 };
                 let pinned: Vec<IpAddr> = addrs
                     .into_iter()
+                    .map(kennel_lib_policy::netaddr::canonical)
                     .filter(|addr| {
                         rt.ruleset.decide_resolved(*addr, port, transport) == Decision::Allow
                             && (rt.accept_private_resolved || !is_special_use(*addr))

@@ -816,7 +816,6 @@ fn bring_up<P: Privileged + Sync>(
     // loopback adds, delegate launch — is skipped: there is nothing to gate when there is no
     // network. Every INet request is refused (`NetRuntime::denied()`), and the empty
     // `egress_bytes` tells the factory to attach no programs.
-    let no_network = net.mode == NetMode::None;
 
     // The cgroup egress BPF is the PRIMARY egress gate ONLY in `host` mode (shared host stack, no
     // proxy — `07-5` §"cgroup BPF connect"). In `none`/`constrained`/`unconstrained` the per-kennel
@@ -829,9 +828,12 @@ fn bring_up<P: Privileged + Sync>(
     let bpf_egress = net.mode == NetMode::Host;
 
     // Stamp the egress proxy into the plan before deriving the BPF payload — proxied modes
-    // only. This adds the flagged allow-entry that lets the workload reach its proxy (and
-    // records the proxy in kennel_meta); without it the BPF would deny the proxy too.
-    if proxy.is_some() && !no_network {
+    // ONLY. This adds the flagged allow-entry that lets the workload reach its proxy (and
+    // records the proxy in kennel_meta); without it the BPF would deny the proxy too. The entry
+    // is an any-port allow on `127.0.0.1`/`::1`, which is the kennel's OWN loopback only where
+    // the kennel has its own net namespace. In `host` mode there is none: the same entry would
+    // open the host's loopback, so it must not be stamped there.
+    if proxy.is_some() && proxied {
         // The facade listens on the kennel's own loopback (`127.0.0.1`/`::1`), so the BPF must
         // permit the workload to reach it there — not a per-kennel address.
         plan.stamp_proxy(&ProxyEndpoint {

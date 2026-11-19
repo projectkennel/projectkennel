@@ -8,6 +8,22 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **Respelling an address no longer gets it past the network policy.** An IPv4-mapped IPv6
+  address (`::ffff:127.0.0.1`) is the IPv4 address it names, but both the proxy and the
+  host-mode BPF ACL judged it as IPv6: in `unconstrained` mode it reached the host's loopback and
+  the metadata address, and in `host` mode it skipped every IPv4 deny under a `*` allow. A
+  connect to `0.0.0.0` or `::` likewise reached a denied loopback. Addresses are now judged as
+  the destination the kernel dials. Separately, a `host`-mode kennel was given an any-port allow
+  on the host's own `127.0.0.1` and `::1` meant for the proxied modes; it no longer is.
+  **Behaviour change:** in `host` mode an IPv4-mapped *bind* is refused, and nothing reaches host
+  loopback without a rule.
+
+### Fixed
+
+- **Host-mode kennels no longer fail to start when a BPF program's verifier log grows.** The
+  loader asked for a log on every load into a fixed buffer, and the kernel fails such a load
+  when the log does not fit, even for a valid program.
+
 - **A kennel can no longer register itself as another kennel's provider.** Three binder verbs
   handed their sender a cross-kennel role without checking who sent them. Any kennel could send
   `REGISTER_TUN_SINK` and receive every `[net.udp]` kennel's UDP egress, DNS included. Any kennel
