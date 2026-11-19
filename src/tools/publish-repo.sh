@@ -104,10 +104,16 @@ s3_sync --exclude '*' --include '*.deb' --include '*.rpm' --include '*/repodata/
 echo "publish-repo.sh: [2/3] signed metadata, key, index → s3://$R2_BUCKET ${dry:+[dry-run]}"
 s3_sync
 
+# The bucket listing comes from `aws s3 ls --recursive` ("<date> <time> <size> <key>"), not
+# `aws s3api`, which fails outright on some aws-cli builds ("badly formed help string").
+# A failed listing stops here: treating it as an empty bucket would silently retire nothing.
 # Byte-order (C) collation on both sides, so the set difference is exact.
 local_keys="$(cd "$repo" && find . -type f | sed 's#^\./##' | LC_ALL=C sort)"
-remote_keys="$(aws s3api list-objects-v2 --bucket "$R2_BUCKET" --endpoint-url "$R2_ENDPOINT" \
-	--query 'Contents[].[Key]' --output text | grep -vx 'None' | LC_ALL=C sort || true)"
+if ! listing="$(aws s3 ls "s3://$R2_BUCKET/" --recursive --endpoint-url "$R2_ENDPOINT")"; then
+	echo "publish-repo.sh: could not list s3://$R2_BUCKET; uploaded, but retired nothing" >&2
+	exit 1
+fi
+remote_keys="$(printf '%s\n' "$listing" | sed -nE 's/^[0-9-]+ [0-9:]+ +[0-9]+ //p' | LC_ALL=C sort)"
 retired="$(LC_ALL=C comm -23 <(printf '%s\n' "$remote_keys" | sed '/^$/d') \
 	<(printf '%s\n' "$local_keys"))"
 
