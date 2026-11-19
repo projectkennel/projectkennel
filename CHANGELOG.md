@@ -8,6 +8,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A symlink can no longer steer where a kennel's view is built.** Bind mount points, the
+  trust-manifest masks and the staged `/etc` and home files were resolved by name before
+  `pivot_root`. A symlink left in a writable grant by an earlier workload — or shipped in an OCI
+  image — could send a copy onto another of the operator's files, or make a mask land on the
+  link's target and leave the masked path under the workload's control. Destinations are now
+  resolved by descriptor inside the new root, and a symlink at a mount point makes the kennel
+  refuse to start. `kennel-bin-init` creates a mesh mount point only on the view's own
+  scaffolding, so a mesh `at` or `endpoint` inside a bound host directory is refused.
 - **The privileged helper builds a kennel's view with the operator's filesystem identity, not
   root's.** Its construction child is host root until `pivot_root`, and it created directories,
   copied files and mounted an overlay on paths supplied by its caller. Anyone who ran the helper

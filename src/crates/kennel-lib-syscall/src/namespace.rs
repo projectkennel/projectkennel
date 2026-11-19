@@ -318,32 +318,32 @@ pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) ->
     Ok(())
 }
 
-/// `move_mount(detached_fd → target)` — attach a detached mount (from [`open_tree_clone`]).
+/// Attach the detached mount `detached` onto the directory `target` names **by descriptor**
+/// (`move_mount(2)` with an empty from-path and an empty to-path).
 ///
-/// The other half of the mesh handoff: a process holding `CAP_SYS_ADMIN` in its own user namespace
-/// attaches a detached binderfs clone (passed to it via `SCM_RIGHTS`) onto `target` in its mount
-/// namespace — even when the clone was created by a different (the holder's) user namespace.
+/// The target is an already-resolved handle, not a name, so the mount lands on exactly that
+/// directory: nothing is looked up again, and no symlink can redirect it. `kennel-bin-init` uses
+/// this to place the mesh binderfs clones `kenneld` hands it.
 ///
 /// # Errors
 ///
-/// The OS error if `move_mount` fails (`EPERM` without `CAP_SYS_ADMIN` in the target's mount ns, …).
+/// The OS error if `move_mount` fails (`EINVAL` for a mount that is not detached, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace).
 pub fn move_mount_fd(
     detached: std::os::fd::BorrowedFd<'_>,
-    target: &std::path::Path,
+    target: std::os::fd::BorrowedFd<'_>,
 ) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    let t = std::ffi::CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: from_fd is the detached mount; to-path is `target`; flags name an empty from-path.
+    // SAFETY: both descriptors are live for the call; both paths are the empty string, which the
+    // two EMPTY_PATH flags make "the descriptor itself". The kernel retains no pointer.
     let r = unsafe {
         libc::syscall(
             libc::SYS_move_mount,
             detached.as_raw_fd(),
             c"".as_ptr(),
-            libc::AT_FDCWD,
-            t.as_ptr(),
-            libc::MOVE_MOUNT_F_EMPTY_PATH,
+            target.as_raw_fd(),
+            c"".as_ptr(),
+            libc::MOVE_MOUNT_F_EMPTY_PATH | libc::MOVE_MOUNT_T_EMPTY_PATH,
         )
     };
     if r < 0 {

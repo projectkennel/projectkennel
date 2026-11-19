@@ -90,6 +90,377 @@ pub fn open_no_magiclinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
     openat2_o_path(dir_fd, path, RESOLVE_NO_MAGICLINKS)
 }
 
+/// Make sure the directory `path` exists and lies entirely on **kennel scaffolding**, creating
+/// missing components, and return an `O_PATH` handle to it.
+///
+/// For `kennel-bin-init`, which is the kennel's uid 0 — host root — inside a view that also holds
+/// binds of host directories. It is told by its bus peer where to attach the mesh mounts; creating
+/// that directory by name would be a root `mkdir` wherever the name leads, including onto a bound
+/// host inode. So the path is walked from `/` by descriptor, no symlink is followed in any
+/// component, and every directory on the way — existing or created — must be on the same
+/// filesystem as one of `anchors`: mounts the factory itself created (`/`, `/dev`, `/tmp`). A step
+/// onto anything else (every bind is something else) is refused.
+///
+/// # Errors
+///
+/// `InvalidInput` if `path` is not absolute plain names; `PermissionDenied` if a component is
+/// not on scaffolding; `ELOOP` for a symlink; any other `openat2`/`mkdirat`/`fstat` error.
+pub fn scaffold_dir(path: &Path, anchors: &[&Path]) -> io::Result<OwnedFd> {
+    use nix::errno::Errno;
+    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::{fstat, mkdirat, stat, Mode};
+
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not an absolute path", path.display()),
+        ));
+    }
+    let names = plain_names(path)?;
+    let mut devices = Vec::new();
+    for anchor in anchors {
+        if let Ok(st) = stat(*anchor) {
+            devices.push(st.st_dev);
+        }
+    }
+    let on_scaffold = |fd: &OwnedFd| -> io::Result<()> {
+        let st = fstat(fd).map_err(io::Error::from)?;
+        if devices.contains(&st.st_dev) {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} does not lie on kennel scaffolding (it crosses onto a bound filesystem)",
+                    path.display()
+                ),
+            ))
+        }
+    };
+    let mut current = open(
+        Path::new("/"),
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    on_scaffold(&current)?;
+    for name in &names {
+        let how = || {
+            OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+                .resolve(
+                    ResolveFlag::RESOLVE_BENEATH
+                        | ResolveFlag::RESOLVE_NO_SYMLINKS
+                        | ResolveFlag::RESOLVE_NO_MAGICLINKS,
+                )
+        };
+        let next = match openat2(&current, name.as_os_str(), how()) {
+            Ok(fd) => fd,
+            Err(Errno::ENOENT) => {
+                // `current` was just checked to be scaffolding, so this creates there.
+                mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
+                    .map_err(io::Error::from)?;
+                openat2(&current, name.as_os_str(), how()).map_err(io::Error::from)?
+            }
+            Err(e) => return Err(io::Error::from(e)),
+        };
+        on_scaffold(&next)?;
+        current = next;
+    }
+    Ok(current)
+}
+
+/// What a path inside a [`RootDir`] is required to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeKind {
+    /// A directory.
+    Directory,
+    /// Anything that is neither a directory nor a symlink (a regular file, a device node, …).
+    File,
+}
+
+/// A directory that paths are resolved **inside**, as the view being built will see them.
+///
+/// The privhelper factory builds a kennel's view under a staging root while the host filesystem is
+/// still mounted, and parts of that tree are not its own: writable grants are host directories an
+/// earlier workload could fill, and an OCI root is image content. A path resolved by name there
+/// can be steered by a symlink — out of the root altogether (an absolute target resolves against
+/// the HOST root before the pivot), or onto a different path than the one a mount is meant to
+/// cover. `RootDir` resolves by descriptor instead:
+///
+/// - a path must be plain names — no `..`;
+/// - a symlink in a **parent** component is followed only within the root (`RESOLVE_IN_ROOT`),
+///   exactly as it will resolve once the root is `/`;
+/// - the **final** component is never followed. [`ensure`](Self::ensure) refuses a symlink there,
+///   so a mount point is always the path itself and the build fails closed on a planted link.
+///
+/// Callers act on the returned handle (through [`proc_path`]) rather than re-resolving the name.
+pub struct RootDir {
+    fd: OwnedFd,
+}
+
+impl RootDir {
+    /// Open `path` as a resolution root.
+    ///
+    /// # Errors
+    ///
+    /// The OS error if `path` is not an openable directory.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+        let fd = open(
+            path,
+            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io::Error::from)?;
+        Ok(Self { fd })
+    }
+
+    /// An `O_PATH` handle to `path` if it exists, without following a final symlink (the
+    /// `lstat` question). `None` if it is absent, or a parent is missing or not a directory.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for a path that is not plain names; any unexpected `openat2` error.
+    pub fn lookup(&self, path: &Path) -> io::Result<Option<OwnedFd>> {
+        self.walk(path, None)
+    }
+
+    /// An `O_PATH` handle to wherever `path` leads inside the root, following symlinks —
+    /// including a final one — but never out of the root. `None` if it leads nowhere.
+    ///
+    /// For a path the operator declared about content they do not author (an OCI image's
+    /// `/bin`, which may be a link to `usr/bin`): the thing to act on is the link's target, as the
+    /// view will resolve it. Not for a mount point that must cover the path itself — use
+    /// [`ensure`](Self::ensure) for that.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` for a path that is not plain names; any unexpected `openat2` error.
+    pub fn resolve(&self, path: &Path) -> io::Result<Option<OwnedFd>> {
+        use nix::errno::Errno;
+        use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
+        let names = plain_names(path)?;
+        if names.is_empty() {
+            return Ok(Some(self.fd.try_clone()?));
+        }
+        let rel: std::path::PathBuf = names.iter().collect();
+        let how = OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+            .resolve(ResolveFlag::RESOLVE_IN_ROOT | ResolveFlag::RESOLVE_NO_MAGICLINKS);
+        match openat2(&self.fd, rel.as_path(), how) {
+            Ok(fd) => Ok(Some(fd)),
+            Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ELOOP) => Ok(None),
+            Err(e) => Err(io::Error::from(e)),
+        }
+    }
+
+    /// Whether `path` exists and is a directory (a final symlink is not followed).
+    ///
+    /// # Errors
+    ///
+    /// As [`lookup`](Self::lookup).
+    pub fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        match self.lookup(path)? {
+            Some(fd) => Ok(file_type(&fd)? == nix::sys::stat::SFlag::S_IFDIR),
+            None => Ok(false),
+        }
+    }
+
+    /// Make sure `path` exists as `kind`, creating it and any missing parent directories, and
+    /// return an `O_PATH` handle to it. An existing node is left untouched.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` if the path is not plain names, if the final component is a symlink, or
+    /// if it exists as the other kind; the OS error if a component cannot be created or opened.
+    pub fn ensure(&self, path: &Path, kind: NodeKind) -> io::Result<OwnedFd> {
+        use nix::sys::stat::SFlag;
+        let fd = self.walk(path, Some(kind))?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} could not be resolved inside the root", path.display()),
+            )
+        })?;
+        let found = file_type(&fd)?;
+        let fits = match kind {
+            NodeKind::Directory => found == SFlag::S_IFDIR,
+            NodeKind::File => found != SFlag::S_IFDIR && found != SFlag::S_IFLNK,
+        };
+        if fits {
+            Ok(fd)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{} exists but is not the {} the view needs there (a symlink is never accepted)",
+                    path.display(),
+                    if kind == NodeKind::Directory { "directory" } else { "file" },
+                ),
+            ))
+        }
+    }
+
+    /// Copy the file `source` (a host path, opened with the caller's current identity) to `path`
+    /// inside the root, creating parent directories. The destination's final component is not
+    /// followed; set-id and sticky bits are not carried over.
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure`](Self::ensure) for the parent; `ELOOP` if the destination is a symlink; any
+    /// open, copy or chmod error.
+    pub fn copy_into(&self, source: &Path, path: &Path) -> io::Result<()> {
+        use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
+        use nix::sys::stat::Mode;
+        use std::os::unix::fs::PermissionsExt as _;
+        let (parent, name) = self.parent_of(path)?;
+        let mut src = std::fs::File::open(source)?;
+        let mode = src.metadata()?.permissions().mode() & 0o777;
+        let how = OpenHow::new()
+            .flags(
+                OFlag::O_WRONLY
+                    | OFlag::O_CREAT
+                    | OFlag::O_TRUNC
+                    | OFlag::O_NOFOLLOW
+                    | OFlag::O_CLOEXEC,
+            )
+            .mode(Mode::from_bits_truncate(mode))
+            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+        let mut dst =
+            std::fs::File::from(openat2(&parent, name.as_os_str(), how).map_err(io::Error::from)?);
+        std::io::copy(&mut src, &mut dst)?;
+        dst.set_permissions(std::fs::Permissions::from_mode(mode))
+    }
+
+    /// Create the symlink `path` → `text` inside the root (parents created as directories).
+    ///
+    /// # Errors
+    ///
+    /// As [`ensure`](Self::ensure) for the parent; `EEXIST` if `path` already exists.
+    pub fn symlink(&self, text: &Path, path: &Path) -> io::Result<()> {
+        let (parent, name) = self.parent_of(path)?;
+        nix::unistd::symlinkat(text, &parent, name.as_os_str()).map_err(io::Error::from)
+    }
+
+    /// The (ensured) parent directory of `path`, and its final name.
+    fn parent_of(&self, path: &Path) -> io::Result<(OwnedFd, std::ffi::OsString)> {
+        let mut names = plain_names(path)?;
+        let name = names.pop().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "path names the root itself")
+        })?;
+        let parent: std::path::PathBuf = names.iter().collect();
+        Ok((self.ensure(&parent, NodeKind::Directory)?, name))
+    }
+
+    /// Resolve `path` one name at a time. `create` makes missing components (directories, and
+    /// for the last one whatever `create` says); with `None` a missing component yields `None`.
+    fn walk(&self, path: &Path, create: Option<NodeKind>) -> io::Result<Option<OwnedFd>> {
+        use nix::errno::Errno;
+        use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
+        use nix::sys::stat::{mkdirat, Mode, SFlag};
+
+        let names = plain_names(path)?;
+        let step = |dir: &OwnedFd, name: &std::ffi::OsStr| -> io::Result<Option<OwnedFd>> {
+            let how = OpenHow::new()
+                .flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+                .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_MAGICLINKS);
+            match openat2(dir, name, how) {
+                Ok(fd) => Ok(Some(fd)),
+                Err(Errno::ENOENT) => Ok(None),
+                Err(e) => Err(io::Error::from(e)),
+            }
+        };
+
+        let mut current = self.fd.try_clone()?;
+        let mut walked = std::path::PathBuf::new();
+        for (index, name) in names.iter().enumerate() {
+            let last = index.saturating_add(1) == names.len();
+            walked.push(name);
+            let mut next = step(&current, name)?;
+            if next.is_none() {
+                let Some(kind) = create else { return Ok(None) };
+                if last && kind == NodeKind::File {
+                    let how = OpenHow::new()
+                        .flags(
+                            OFlag::O_WRONLY
+                                | OFlag::O_CREAT
+                                | OFlag::O_EXCL
+                                | OFlag::O_NOFOLLOW
+                                | OFlag::O_CLOEXEC,
+                        )
+                        .mode(Mode::from_bits_truncate(0o644))
+                        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+                    openat2(&current, name.as_os_str(), how).map_err(io::Error::from)?;
+                } else {
+                    mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
+                        .map_err(io::Error::from)?;
+                }
+                next = step(&current, name)?;
+            }
+            let Some(mut node) = next else {
+                return Ok(None);
+            };
+            let kind = file_type(&node)?;
+            if kind == SFlag::S_IFLNK && !last {
+                // A symlink in a parent component: follow it as the view will — inside the root.
+                let how = OpenHow::new()
+                    .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC)
+                    .resolve(ResolveFlag::RESOLVE_IN_ROOT | ResolveFlag::RESOLVE_NO_MAGICLINKS);
+                node = match openat2(&self.fd, walked.as_path(), how) {
+                    Ok(fd) => fd,
+                    Err(Errno::ENOENT | Errno::ENOTDIR) if create.is_none() => return Ok(None),
+                    Err(e) => return Err(io::Error::from(e)),
+                };
+            } else if kind != SFlag::S_IFDIR && !last {
+                if create.is_none() {
+                    return Ok(None);
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::NotADirectory,
+                    format!("{} is not a directory", walked.display()),
+                ));
+            }
+            current = node;
+        }
+        Ok(Some(current))
+    }
+}
+
+/// The `/proc/self/fd/N` path that names an open descriptor's inode, for a syscall wrapper that
+/// takes a path. The descriptor must stay open for as long as the path is used.
+#[must_use]
+pub fn proc_path(fd: &impl AsRawFd) -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+}
+
+/// The file-type bits of an open descriptor.
+fn file_type(fd: &OwnedFd) -> io::Result<nix::sys::stat::SFlag> {
+    use nix::sys::stat::{fstat, SFlag};
+    let mode = fstat(fd).map_err(io::Error::from)?.st_mode;
+    Ok(SFlag::from_bits_truncate(mode) & SFlag::S_IFMT)
+}
+
+/// Split a view path into its plain names (a leading `/` and `.` are dropped; anything else that
+/// is not a plain name — notably `..` — is refused).
+fn plain_names(path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
+    use std::path::Component;
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => names.push(name.to_owned()),
+            Component::RootDir | Component::CurDir => {}
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not made of plain names", path.display()),
+                ))
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// Create the mount point `rel` beneath `root` — a directory, or an empty file — together with any
 /// missing parent directories, **without leaving `root`'s mount**.
 ///

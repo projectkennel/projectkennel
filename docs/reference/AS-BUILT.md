@@ -26,6 +26,47 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-19 — view destinations are resolved by descriptor inside the new root; a symlink at a mount point is refused
+
+- **Bears-on:** Kennel book Vol 2, the filesystem chapter's view construction (§7.4) and the
+  trust-manifest masks (T2.8); the OCI substrate (§7.11.4a/c); the mesh rendezvous (§7.13.4a);
+  `kennel-bin-init` (§7.2). THREATS T5.4.
+- **Change:** view construction built every destination as a string (`new_root` + the in-view
+  path) and handed it to `create_dir_all`, `File::create`, `fs::copy` and `mount(2)`, all of which
+  follow symlinks. Parts of that tree are not the factory's: a writable grant is a host directory
+  an earlier workload could fill, and an OCI root is image content plus, with `persist`, a
+  workload-written upper. A symlink there could send a copy onto another file the operator owns,
+  or make a mask or bind land on the link's target and leave the path itself unprotected — on
+  main, a symlink at `.trust-manifest.d` in a writable grant made the kennel start with that mask
+  misplaced. As-built now:
+  - `kennel_lib_syscall::fd::RootDir` resolves a view path by descriptor, one plain name at a
+    time (`..` refused). A symlink in a **parent** component is followed only inside the root
+    (`RESOLVE_IN_ROOT`), as it will resolve after the pivot. The **final** component is never
+    followed: `ensure` refuses a symlink there.
+  - Every destination in `build_view_and_pivot`, the OCI head and the seal tail goes through it:
+    bind mount points, `/etc` overlays, masks, the `/dev` nodes, binderfs, `/proc`, `/tmp`,
+    `/dev/shm`, the home directory and `put_old`. Mounts are made on the returned handle
+    (`/proc/self/fd/N`) and the name is resolved again afterwards to act on the new mount.
+  - A mount point that is a symlink makes construction **fail**: the kennel does not start.
+  - Staged files are copied with `RootDir::copy_into`, which does not follow the destination and
+    drops set-id and sticky bits.
+  - OCI closure-lock paths (`[rootfs].readonly` / `writable`) name image content, so a link such
+    as `/bin` → `usr/bin` is still followed — but inside the root (`RootDir::resolve`).
+  - `kennel-bin-init`, which is root in a view holding host binds, no longer creates a mesh
+    mount target by name. `fd::scaffold_dir` walks from `/` by descriptor, follows no symlink,
+    and requires every component to be on a filesystem the factory created (`/`, `/dev`, `/tmp`);
+    the mount is attached to that descriptor (`move_mount` with `MOVE_MOUNT_T_EMPTY_PATH`). A mesh
+    `at`/`endpoint` whose directory lies inside a bound host path is therefore refused.
+  - `create_bind_target` is removed.
+- **Why:** before the pivot a name is resolved against the host; the view's own resolution is the
+  only safe meaning for a path inside it.
+- **Still by name, and why that is safe:** the `/proc` curation scratch directory
+  (`<root>/tmp/.kennel-proc`, created and removed by name on the tmpfs just mounted at a `/tmp`
+  already checked to be a real directory), and `pivot_root`'s `put_old` (checked likewise).
+- **Not covered:** `kennel-bin-init`'s other root path uses are a `chdir` to the workload's
+  directory and a `stat` while resolving the program; neither writes.
+- **Source:** branch `fix/root-owned-kennel-userns`.
+
 ## 2026-11-19 — the view is built with the operator's filesystem identity, not root's
 
 - **Bears-on:** Kennel book Vol 2 ch.2 (Process and Privilege Model) — the factory's construction
@@ -55,12 +96,8 @@ under `docs/archive/` when the trees moved.
   - Side effect: the trust-manifest mask placeholders construction creates inside a writable
     grant are now the operator's on the host, not root's.
 - **Why:** a privileged helper acting on its caller's paths must use its caller's authority.
-- **Residual (open):** the view contains binds of host paths the caller chose, and
-  `kennel-bin-init` is kuid 0 inside it. Any path operation init performs at its peer's direction
-  (e.g. creating a mesh mount target) is a root operation that can land on a bound host inode.
-  Destination paths under the new root are also still resolved by name, so a symlink in a
-  writable grant can redirect an operator-identity write or a mount target within the operator's
-  own reach. Both are recorded as open in the 2026-11-19 review tracker (rows R-42, R-43).
+- **Follow-up:** the two residuals this left — destinations resolved by name, and
+  `kennel-bin-init` creating a peer-directed path as root — are closed by the entry above.
 - **Source:** branch `fix/root-owned-kennel-userns`.
 
 ## 2026-11-19 — the kennel user namespace is root-owned; kenneld holds descriptors, not namespace access

@@ -69,6 +69,11 @@ const START_LIMIT_BURST: usize = 5;
 /// The window the burst is counted over (systemd `StartLimitIntervalSec`).
 const START_LIMIT_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The mounts in a kennel's view that the factory itself created, and nothing else can be: the
+/// pivoted root, and the tmpfs instances the seal mounts last at `/dev` and `/tmp`. A directory
+/// `kennel-bin-init` creates as uid 0 must be on one of these — never on a bind of a host path.
+const SCAFFOLD_MOUNTS: &[&str] = &["/", "/dev", "/tmp"];
+
 /// Per-facade supervisor state: which `Supervision::aux` entry it runs, and the recent
 /// start instants used to enforce the restart burst limit.
 struct FacadeState {
@@ -157,8 +162,17 @@ fn place_mesh_mounts(sup: &mut Supervision, tr: &kennel_lib_config::Tracer) -> i
     for (mount, target) in
         kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)
     {
-        std::fs::create_dir_all(&target)?;
-        kennel_lib_syscall::namespace::move_mount_fd(mount.as_fd(), &target)?;
+        // We are host root here, and the view holds binds of host directories. The target comes
+        // from our bus peer, so it is not created or mounted on by name: it must lie on the
+        // scaffolding the factory built, and the mount attaches to that exact directory.
+        let anchors: Vec<&Path> = SCAFFOLD_MOUNTS.iter().map(Path::new).collect();
+        let place = kennel_lib_syscall::fd::scaffold_dir(&target, &anchors).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("mesh mount target {}: {e}", target.display()),
+            )
+        })?;
+        kennel_lib_syscall::namespace::move_mount_fd(mount.as_fd(), place.as_fd())?;
         let device = target.join("binder");
         tr.step(&format!("placed mesh binderfs at {}", target.display()));
         sup.landlock_fs.push((target, AccessFs::READ_DIR));
