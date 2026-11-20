@@ -45,7 +45,7 @@ Policies are signed, versioned, and inheritable. They describe access rather tha
 
 ## Status
 
-**0.8.x** ([CHANGELOG](CHANGELOG.md)). Kennel runs on Linux with kernel ≥ 6.10 and Landlock ABI ≥ 6. End-to-end runs have been verified on Debian/Ubuntu with AppArmor and Fedora with enforcing SELinux. Interfaces may change before 1.0.
+**0.8.x** ([CHANGELOG](CHANGELOG.md)). Kennel runs on Linux with kernel ≥ 6.10 (Landlock ABI 5). A policy with `net.mode = "host"` needs Landlock ABI 6 (kernel ≥ 6.12) and is refused below it. End-to-end runs have been verified on Debian/Ubuntu with AppArmor and Fedora with enforcing SELinux. Interfaces may change before 1.0.
 
 ## Read more
 

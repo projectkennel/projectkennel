@@ -47,6 +47,9 @@ mod kind {
     pub const SOCK_DENY: u16 = 5;
     pub const SETSOCKOPT_FORCED: u16 = 6;
     pub const SENDMSG_DENY: u16 = 7;
+    pub const BIND_ALLOW: u16 = 8;
+    pub const LISTEN_DENY: u16 = 9;
+    pub const INGRESS_DENY: u16 = 10;
 }
 
 /// A running drain: the worker thread plus its stop flag, wake eventfd, and pin dir.
@@ -100,6 +103,10 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
     // Unprivileged BPF_OBJ_GET of the group/owner-accessible pin (the pin dir is
     // chowned to us, the caller). Absent pin ⇒ no drain.
     let fd = kennel_lib_bpf::sys::obj_get(&cpath).ok()?;
+    // The lost-event counter beside it. Absent (an older helper) ⇒ losses go unreported, as before.
+    let lost = CString::new(pin_dir.join("audit_lost").as_os_str().as_encoded_bytes())
+        .ok()
+        .and_then(|path| kennel_lib_bpf::sys::obj_get(&path).ok());
 
     let stop = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop);
@@ -113,6 +120,7 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
         .spawn(move || {
             drain_loop(
                 &fd,
+                lost.as_ref(),
                 capacity,
                 ctx,
                 &writer,
@@ -133,6 +141,7 @@ pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
 /// once more so events committed just before the stop are not lost.
 fn drain_loop(
     fd: &OwnedFd,
+    lost: Option<&OwnedFd>,
     capacity: usize,
     ctx: u16,
     writer: &Writer,
@@ -143,15 +152,43 @@ fn drain_loop(
         return;
     };
     let poll_ms = i32::try_from(POLL_INTERVAL.as_millis()).unwrap_or(200);
+    let mut reported: u64 = 0;
     while !stop.load(Ordering::Acquire) {
         match rb.poll_or_wake(wake, poll_ms) {
             Ok(true) => drain_available(&mut rb, ctx, writer),
             Ok(false) => {}
             Err(_) => break,
         }
+        report_lost(lost, &mut reported, writer);
     }
     // Final sweep: anything committed between the last poll and the stop.
     drain_available(&mut rb, ctx, writer);
+    report_lost(lost, &mut reported, writer);
+}
+
+/// Record events the programs could not write because the ringbuf was full.
+///
+/// The programs count each one; `reported` is how many this drain has already put on the record.
+/// A workload can make connects faster than the drain reads, and the events it would most like
+/// to lose are the denies in such a burst — so the loss itself is an event, with its size.
+fn report_lost(lost: Option<&OwnedFd>, reported: &mut u64, writer: &Writer) {
+    let Some(total) = lost.and_then(|fd| kennel_lib_bpf::audit_lost_count(fd.as_fd()).ok()) else {
+        return;
+    };
+    if let Some(event) = lost_event(total, reported) {
+        writer.emit(&event);
+    }
+}
+
+/// The event for a lost-count that has grown past `reported` (which is advanced), or `None`.
+fn lost_event(total: u64, reported: &mut u64) -> Option<Event> {
+    let newly = total.checked_sub(*reported).filter(|n| *n > 0)?;
+    *reported = total;
+    Some(
+        Event::new("net.audit-lost", Resource::Net, Outcome::Error, Source::Bpf)
+            .field("lost", Value::Uint(newly))
+            .field("lost_total", Value::Uint(total)),
+    )
 }
 
 /// How often the drain wakes to check for events and the stop flag.
@@ -185,10 +222,12 @@ fn parse_event(sample: &[u8], ctx: u16) -> Option<Event> {
         .comm(comm);
 
     match event_kind {
-        kind::CONNECT_DENY | kind::CONNECT_ALLOW | kind::SENDMSG_DENY => {
+        kind::CONNECT_DENY | kind::CONNECT_ALLOW | kind::SENDMSG_DENY | kind::INGRESS_DENY => {
             connect_fields(event, sample)
         }
-        kind::BIND_REWRITE | kind::BIND_DENY => bind_fields(event, sample),
+        kind::BIND_REWRITE | kind::BIND_DENY | kind::BIND_ALLOW | kind::LISTEN_DENY => {
+            bind_fields(event, sample)
+        }
         kind::SOCK_DENY => Some(sock_fields(event, sample)),
         kind::SETSOCKOPT_FORCED => Some(sockopt_fields(event, sample)),
         _ => None,
@@ -202,9 +241,12 @@ const fn action_for(event_kind: u16) -> Option<(&'static str, Outcome)> {
         kind::CONNECT_ALLOW => ("net.connect-allow", Outcome::Allow),
         kind::BIND_REWRITE => ("net.bind-rewrite", Outcome::Allow),
         kind::BIND_DENY => ("net.bind-deny", Outcome::Deny),
+        kind::BIND_ALLOW => ("net.bind-allow", Outcome::Allow),
         kind::SOCK_DENY => ("net.sock-create-deny", Outcome::Deny),
         kind::SETSOCKOPT_FORCED => ("net.setsockopt-forced", Outcome::Info),
         kind::SENDMSG_DENY => ("net.sendmsg-deny", Outcome::Deny),
+        kind::LISTEN_DENY => ("net.listen-deny", Outcome::Deny),
+        kind::INGRESS_DENY => ("net.ingress-deny", Outcome::Deny),
         _ => return None,
     };
     Some(mapped)
@@ -391,6 +433,25 @@ mod tests {
         s.extend_from_slice(&port.to_be_bytes());
         s.extend_from_slice(&addr);
         s
+    }
+
+    #[test]
+    fn a_growing_lost_count_is_reported_once_per_increase() {
+        let mut reported = 0;
+        assert!(lost_event(0, &mut reported).is_none(), "nothing lost");
+        assert!(lost_event(5, &mut reported).is_some(), "five lost");
+        assert_eq!(reported, 5);
+        assert!(lost_event(5, &mut reported).is_none(), "already reported");
+        assert!(lost_event(7, &mut reported).is_some(), "two more");
+        assert_eq!(reported, 7);
+    }
+
+    #[test]
+    fn an_allowed_bind_is_an_event() {
+        assert_eq!(
+            action_for(kind::BIND_ALLOW),
+            Some(("net.bind-allow", Outcome::Allow))
+        );
     }
 
     #[test]

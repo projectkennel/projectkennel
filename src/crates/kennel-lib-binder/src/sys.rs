@@ -50,6 +50,7 @@ const SZ_BINDERFS_DEVICE: libc::c_ulong = 264; // [u8;256] + 2 * u32
 const BINDER_WRITE_READ: libc::c_ulong = ioc(DIR_RW, b'b', 1, SZ_WRITE_READ);
 const BINDER_SET_MAX_THREADS: libc::c_ulong = ioc(DIR_WRITE, b'b', 5, SZ_U32);
 const BINDER_SET_CONTEXT_MGR: libc::c_ulong = ioc(DIR_WRITE, b'b', 7, SZ_S32);
+const BINDER_THREAD_EXIT: libc::c_ulong = ioc(DIR_WRITE, b'b', 8, SZ_S32);
 const BINDER_VERSION: libc::c_ulong = ioc(DIR_RW, b'b', 9, SZ_VERSION);
 const BINDER_GET_EXTENDED_ERROR: libc::c_ulong = ioc(DIR_RW, b'b', 17, 12);
 /// `BINDER_CTL_ADD` (`<linux/android/binderfs.h>`): allocate a named device.
@@ -234,6 +235,36 @@ pub fn set_context_mgr(fd: BorrowedFd<'_>) -> io::Result<()> {
             fd.as_raw_fd(),
             BINDER_SET_CONTEXT_MGR,
             std::ptr::from_mut(&mut zero),
+        )
+    };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Discard the calling thread's binder state on `fd` (`BINDER_THREAD_EXIT`).
+///
+/// The driver keeps per-thread state (the transaction stack, queued work). This releases it for
+/// the calling thread: a transaction the thread sent and is still waiting on is detached, so a
+/// late reply fails at the replier instead of arriving here. The thread's next binder call
+/// starts a fresh state.
+///
+/// # Errors
+///
+/// Returns the OS error if the ioctl fails.
+pub fn thread_exit(fd: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: BINDER_THREAD_EXIT takes no argument the driver reads; a null pointer is passed and
+    // nothing is written through it.
+    //
+    // INVARIANTS UPHELD: `fd` is a live binder endpoint for the duration of the call.
+    //
+    // FAILURE MODE: -1 + errno on a non-binder fd.
+    let ret = unsafe {
+        libc::ioctl(
+            fd.as_raw_fd(),
+            BINDER_THREAD_EXIT,
+            std::ptr::null_mut::<libc::c_int>(),
         )
     };
     if ret < 0 {

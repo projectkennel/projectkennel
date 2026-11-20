@@ -92,6 +92,8 @@ pub struct Lifecycle {
 /// `Some` iff it is a `[net.udp]` tun consumer (its presence is the grant).
 struct TunCtx<'a> {
     sink: &'a crate::tun_sink::TunSink,
+    /// Whether this kennel's signed policy provides the tun capability — required to register.
+    provider: bool,
     session: Option<&'a [u8]>,
     cm: &'a Arc<ContextManager>,
 }
@@ -146,6 +148,7 @@ pub fn spawn(
     catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
     tun_sink: crate::tun_sink::TunSink,
+    tun_provider: bool,
     tun_session: Option<Vec<u8>>,
 ) -> io::Result<Manager> {
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
@@ -172,6 +175,7 @@ pub fn spawn(
     let handler: Handler = Arc::new(move |incoming: &Incoming, conn: &Connection| {
         let tun = TunCtx {
             sink: &tun_sink,
+            provider: tun_provider,
             session: tun_session.as_deref(),
             cm: &cm_for_handler,
         };
@@ -195,7 +199,9 @@ pub fn spawn(
     // A watched node died: the tun-broker's sink (clear it) or an inbound mirror handle (drop it,
     // §7.5.7 guard 1). The sink is keyed by a sentinel cookie distinct from every mirror cookie.
     let death: DeathHandler = Arc::new(move |cookie: u64, conn: &Connection| {
-        if cookie == crate::tun_sink::SINK_DEATH_COOKIE {
+        // Only the tun-broker's own manager ever watches the sink node, and only it may clear the
+        // daemon-global record.
+        if cookie == crate::tun_sink::SINK_DEATH_COOKIE && tun_provider {
             tun_sink_for_death.clear();
             let _ = conn.dead_binder_done(cookie);
             return;
@@ -704,36 +710,48 @@ fn svc_connect_handoff(
         }
     }
     // The host rendezvous socket: kenneld's derived directory + the provider's policy endpoint leaf,
-    // the same inode bound into the provider's view (§7.13.4b). A plain connect, the §4.3 fd-broker.
-    let path = crate::mesh::host_rp_socket(sel.tier, name, sel.key.as_deref(), &sel.endpoint);
-    kennel_lib_syscall::net::connect_unix_timeout(&path, AFUNIX_CONNECT_DEADLINE).map_or_else(
-        // Granted but unreachable (provider not yet bound / gone): never tie up the looper.
-        |_| {
-            emit_svc_connect(
-                writer,
-                incoming,
-                ctx,
-                name,
-                Outcome::Error,
-                status::UNAVAILABLE,
+    // the same inode bound into the provider's view (§7.13.4b). The §4.3 fd-broker.
+    // The provider can WRITE that directory (it must, to bind its socket), and this connect is
+    // made by kenneld, on the host. So it is not made by name: a symlink left there would send
+    // the connection — and the consumer — to whatever host socket it points at, kenneld's own
+    // control socket included. Pin the entry inside the directory, require it to be a socket,
+    // and connect to that inode.
+    let (dir, leaf) = crate::mesh::host_rp_parts(sel.tier, name, sel.key.as_deref(), &sel.endpoint);
+    kennel_lib_syscall::fd::socket_in_dir(&dir, &leaf)
+        .and_then(|sock| {
+            kennel_lib_syscall::net::connect_unix_timeout(
+                &kennel_lib_syscall::fd::proc_path(&sock),
+                AFUNIX_CONNECT_DEADLINE,
             )
-        },
-        |stream| {
-            writer.emit(
-                &Event::new(
-                    "binder.svc-connect",
-                    Resource::Binder,
-                    Outcome::Allow,
-                    Source::Kenneld,
+        })
+        .map_or_else(
+            // Granted but unreachable (provider not yet bound / gone): never tie up the looper.
+            |_| {
+                emit_svc_connect(
+                    writer,
+                    incoming,
+                    ctx,
+                    name,
+                    Outcome::Error,
+                    status::UNAVAILABLE,
                 )
-                .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
-                .field("name", Value::untrusted(name.to_owned()))
-                .field("provider", Value::untrusted(sel.provider.clone()))
-                .field("ctx", Value::Uint(u64::from(ctx))),
-            );
-            Reply::Fd(OwnedFd::from(stream))
-        },
-    )
+            },
+            |stream| {
+                writer.emit(
+                    &Event::new(
+                        "binder.svc-connect",
+                        Resource::Binder,
+                        Outcome::Allow,
+                        Source::Kenneld,
+                    )
+                    .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+                    .field("name", Value::untrusted(name.to_owned()))
+                    .field("provider", Value::untrusted(sel.provider.clone()))
+                    .field("ctx", Value::Uint(u64::from(ctx))),
+                );
+                Reply::Fd(OwnedFd::from(stream))
+            },
+        )
 }
 
 /// Audit one `SVC_CONNECT` outcome and reply with the status byte (no connector object on a non-OK).
@@ -827,6 +845,14 @@ fn inet_connect(
         Destination::Name(name) => name.clone(),
         Destination::Addr(addr) => addr.to_string(),
     };
+    // The conduit this verb mints is a TCP stream. A request for UDP that a `protocol = "udp"`
+    // rule admits would be answered with a TCP connection to the same host and port: a
+    // different service from the one the rule allows. UDP leaves through the tun path
+    // (`[net.udp]`), never through here.
+    if transport == crate::inet::allow::Transport::Udp {
+        writer.emit(&inet_event(incoming, ctx, &label, port, Outcome::Deny));
+        return Reply::Data(one(status::DENIED));
+    }
     let (outcome, reply) = match crate::inet::decide(net, &SystemResolver, &dest, port, transport) {
         crate::inet::InetDecision::Denied => (Outcome::Deny, Reply::Data(one(status::DENIED))),
         crate::inet::InetDecision::Unreachable => {
@@ -867,7 +893,6 @@ fn register_mirror(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
     use kennel_lib_binder::service::inet::decode_port_prefix;
 
     let Some((_transport, port)) = decode_port_prefix(&incoming.data) else {
@@ -895,12 +920,7 @@ fn register_mirror(
     }
     // The node object the facade sent is the trailing flat_binder_object; the driver translated it
     // to a handle for us.
-    let handle = incoming
-        .data
-        .len()
-        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
-        .and_then(|off| incoming.data.get(off..))
-        .and_then(flat_binder_object_handle_value);
+    let handle = incoming.trailing_handle();
     let Some(handle) = handle else {
         writer.emit(&inet_event(
             incoming,
@@ -945,8 +965,9 @@ fn register_mirror(
 /// is daemon-global — not per-kennel — because the broker and its consumers run in different kennels
 /// (different binder instances), so a consumer's deliver reaches the broker over *its* connection.
 ///
-/// Only the tun-broker's own per-kennel bus ever carries this verb (a consumer never holds the sink
-/// node), so reaching the handler is the authorization. The reply is a status byte.
+/// Any kennel can send this verb to its own node 0, so the handler authorises it: only a kennel
+/// whose signed policy provides the tun capability ([`TunCtx::provider`], read by the daemon from
+/// the settled policy it verified) may register. The reply is a status byte.
 fn register_tun_sink(
     tun: &TunCtx<'_>,
     incoming: &Incoming,
@@ -954,16 +975,22 @@ fn register_tun_sink(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
+    // The sink is daemon-global: whoever registers it receives every `[net.udp]` kennel's egress
+    // session. Every kennel can send this verb to its own node 0, so the verb arriving proves
+    // nothing — only a kennel whose signed policy provides the tun capability may register.
+    if !tun.provider {
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Deny,
+        ));
+        return Reply::Data(one(status::DENIED));
+    }
 
     // The node object the broker sent is the trailing flat_binder_object (the driver translated it to
     // a handle for us); REGISTER_TUN_SINK carries no data before it.
-    let handle = incoming
-        .data
-        .len()
-        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
-        .and_then(|off| incoming.data.get(off..))
-        .and_then(flat_binder_object_handle_value);
+    let handle = incoming.trailing_handle();
     let Some(handle) = handle else {
         writer.emit(&tun_event(
             incoming,

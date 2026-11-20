@@ -10,9 +10,31 @@
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::time::{Duration, Instant};
 
 use crate::proto::{self, Br, TransactionData};
 use crate::sys::{self, BinderWriteRead, Mapping};
+
+/// How long a transaction this side sent may go unanswered on a non-blocking endpoint.
+///
+/// Generous for a peer that is merely busy; what it bounds is a peer that never answers.
+pub const TRANSACT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The instant a transaction started now must be answered by.
+fn transact_deadline() -> Instant {
+    Instant::now()
+        .checked_add(TRANSACT_DEADLINE)
+        .unwrap_or_else(Instant::now)
+}
+
+thread_local! {
+    /// Whether the calling thread announced itself as a looper, so it can do so again after its
+    /// binder state is discarded.
+    static IS_LOOPER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set between `abandon_thread` and the thread's next `recv_batch`: the transactions it was
+    /// serving were detached with its binder state, so they can no longer be replied to.
+    static REPLIES_ORPHANED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Read-buffer capacity for one `BINDER_WRITE_READ` cycle (room for several
 /// framed `BR_*` commands; the loop spans cycles if more arrive).
@@ -36,6 +58,12 @@ pub struct Incoming {
     /// push delivers the conduit fd this way — `07-5` §7.5.7). Empty for the registry verbs
     /// and for node 0, which is created with `accept_fds = 0` so a request can carry none.
     pub fds: Vec<OwnedFd>,
+    /// Where in [`data`](Self::data) the transaction's binder objects sit: the offsets array the
+    /// **driver** delivered. The driver checks every listed object and translates it into the
+    /// receiver's terms (a node becomes a handle in our table, a handle is re-mapped to ours), so
+    /// an object at a listed offset is one the sender really held. Bytes that merely look like an
+    /// object, at an offset not listed here, are the sender's own data and prove nothing.
+    pub objects: Vec<usize>,
     /// The sending process pid (kernel-attested).
     pub sender_pid: i32,
     /// The sending process euid (kernel-attested).
@@ -49,6 +77,9 @@ pub struct Incoming {
     /// The kernel buffer holding the data, to release with `BC_FREE_BUFFER` after
     /// the reply is sent.
     pub buffer: u64,
+    /// Whether the sender asked for no reply (`TF_ONE_WAY`). A one-way transaction has no
+    /// transaction stack to reply onto: its buffer is freed and nothing is sent back.
+    pub one_way: bool,
 }
 
 /// One cycle's inbound work from [`Connection::recv_batch`].
@@ -74,6 +105,28 @@ pub struct RecvBatch {
 pub struct Connection {
     fd: OwnedFd,
     map: Mapping,
+}
+
+impl Incoming {
+    /// The handle of the binder object that ends this transaction's data, if the driver delivered
+    /// one there.
+    ///
+    /// The registration verbs carry a node as their last object, which the driver turns into a
+    /// handle in our table. A handle is only taken from an offset the driver listed
+    /// ([`objects`](Self::objects)): otherwise a sender could write the bytes of a handle object
+    /// itself, naming a number in *our* table — some other kennel's node — and have it treated as
+    /// a node the sender passed.
+    #[must_use]
+    pub fn trailing_handle(&self) -> Option<u32> {
+        let at = self
+            .data
+            .len()
+            .checked_sub(proto::FLAT_BINDER_OBJECT_SIZE)?;
+        if !self.objects.contains(&at) {
+            return None;
+        }
+        proto::flat_binder_object_handle_value(self.data.get(at..)?)
+    }
 }
 
 impl Connection {
@@ -123,7 +176,9 @@ impl Connection {
     pub fn enter_looper(&self) -> io::Result<()> {
         let mut w = Vec::new();
         proto::write_cmd(&mut w, proto::BC_ENTER_LOOPER);
-        self.write_only(&w)
+        self.write_only(&w)?;
+        IS_LOOPER.with(|l| l.set(true));
+        Ok(())
     }
 
     /// Announce this thread as a binder looper the driver requested via
@@ -137,7 +192,9 @@ impl Connection {
     pub fn register_looper(&self) -> io::Result<()> {
         let mut w = Vec::new();
         proto::write_cmd(&mut w, proto::BC_REGISTER_LOOPER);
-        self.write_only(&w)
+        self.write_only(&w)?;
+        IS_LOOPER.with(|l| l.set(true));
+        Ok(())
     }
 
     /// Put the endpoint's fd in non-blocking mode, so a `BINDER_WRITE_READ` read with nothing
@@ -181,8 +238,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -226,8 +284,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -289,8 +348,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -352,8 +412,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -459,8 +520,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -538,8 +600,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -580,9 +643,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -605,9 +666,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -636,9 +695,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -661,8 +718,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -790,9 +848,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         self.write_only(&write)
     }
 
@@ -886,6 +942,9 @@ impl Connection {
     ///
     /// Returns the OS error if the `BINDER_WRITE_READ` or a payload copy fails.
     pub fn recv_batch(&self) -> io::Result<RecvBatch> {
+        // What this thread reads from here on belongs to its current binder state, so a reply to
+        // it is in order again (see `abandon_thread`).
+        REPLIES_ORPHANED.with(|o| o.set(false));
         let brs = self.cycle(&[])?;
         self.ack_refcounts(&brs)?;
         let mut transactions = Vec::new();
@@ -902,14 +961,17 @@ impl Connection {
                         .ok_or_else(|| io::Error::other("transaction buffer out of range"))?
                         .to_vec();
                     let fds = self.extract_fds(&td);
+                    let objects = self.object_offsets(&td);
                     transactions.push(Incoming {
                         code: td.code,
                         data,
                         fds,
+                        objects,
                         sender_pid: td.sender_pid,
                         sender_euid: td.sender_euid,
                         node_cookie: td.cookie,
                         buffer: td.buffer,
+                        one_way: td.flags & proto::TF_ONE_WAY != 0,
                     });
                 }
                 Br::SpawnLooper => spawn_looper = true,
@@ -926,6 +988,21 @@ impl Connection {
             dead,
             released,
         })
+    }
+
+    /// The offsets, within the transaction's data, of the binder objects the driver delivered.
+    /// An entry that cannot be read is skipped.
+    fn object_offsets(&self, td: &TransactionData) -> Vec<usize> {
+        let count = usize::try_from(td.offsets_size / 8).unwrap_or(0);
+        (0..count)
+            .filter_map(|i| {
+                let at = td
+                    .offsets
+                    .wrapping_add(u64::try_from(i).ok()?.wrapping_mul(8));
+                let bytes = <[u8; 8]>::try_from(self.map.read_at(at, 8)?).ok()?;
+                usize::try_from(u64::from_ne_bytes(bytes)).ok()
+            })
+            .collect()
     }
 
     /// Extract and take ownership of every `BINDER_TYPE_FD` object a received transaction
@@ -960,6 +1037,31 @@ impl Connection {
         fds
     }
 
+    /// The `BINDER_WRITE_READ` write for answering `incoming` with `td`: **free the inbound
+    /// buffer first, then reply**.
+    ///
+    /// The driver stops processing a write at the first command that fails, and still returns
+    /// success. With the reply first, any reply the peer could make fail — it died, it sent
+    /// one-way, it did not accept the fd being returned — left the `BC_FREE_BUFFER` behind it
+    /// unprocessed, and the inbound buffer stayed allocated for the life of the endpoint: a peer
+    /// could pin node 0's whole buffer. Freeing first makes the free unconditional. It is safe:
+    /// the reply rides the thread's transaction stack, not the buffer, and a handler has already
+    /// taken its own reference to anything it keeps from the buffer.
+    ///
+    /// A one-way transaction gets no `BC_REPLY` at all — there is nothing to reply onto, and the
+    /// attempt would only arm an error on this thread.
+    fn reply_write(incoming: &Incoming, td: &TransactionData) -> Vec<u8> {
+        let mut write = Vec::new();
+        proto::write_free_buffer(&mut write, incoming.buffer);
+        // After `abandon_thread` the transaction this would answer is no longer on the thread's
+        // stack; a `BC_REPLY` would only arm an error for the next read. The buffer is still ours
+        // to free.
+        if !incoming.one_way && !REPLIES_ORPHANED.with(std::cell::Cell::get) {
+            proto::write_transaction(&mut write, true, td);
+        }
+        write
+    }
+
     /// Reply to the most recently received transaction with `data`, then free its
     /// inbound buffer. Must be called on the same thread that `recv`d it (binder
     /// tracks the transaction stack per thread).
@@ -973,9 +1075,7 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, true, &td);
-        proto::write_free_buffer(&mut write, incoming.buffer);
+        let write = Self::reply_write(incoming, &td);
         // Write-only: the BR_TRANSACTION_COMPLETE for this reply is drained by the
         // next serve cycle; blocking to read it here would stall the looper.
         self.write_only(&write)
@@ -1030,6 +1130,53 @@ impl Connection {
         // SAFETY: `write_buffer` points at `write` (live for the call) with `write_size` set to
         // its length; the read side is zero-sized. The kernel reads only those `write_size` bytes.
         unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) }
+    }
+
+    /// One step of waiting on a transaction this thread sent: run a [`cycle`](Self::cycle), and if
+    /// it brought nothing, sleep in `poll` until the driver has something for this thread or
+    /// `deadline` passes.
+    ///
+    /// On a blocking endpoint the cycle itself waits in the kernel and this adds nothing. On a
+    /// non-blocking one (the daemon's looper pool) an empty cycle used to be retried at once, so a
+    /// peer that never answered held a daemon thread at full CPU for ever. The peer of a
+    /// daemon-initiated transaction is a process inside a kennel, so its silence has to be
+    /// survivable: the wait sleeps, and at the deadline the thread's binder state is thrown away
+    /// ([`abandon_thread`](Self::abandon_thread)) and the caller gets [`io::ErrorKind::TimedOut`].
+    fn turn(&self, write: &[u8], deadline: Instant) -> io::Result<Vec<Br>> {
+        let brs = self.cycle(write)?;
+        if !brs.is_empty() {
+            return Ok(brs);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            self.abandon_thread();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the binder peer did not answer in time",
+            ));
+        }
+        let wait_ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1);
+        self.poll(wait_ms)?;
+        Ok(Vec::new())
+    }
+
+    /// Discard the calling thread's binder state (`BINDER_THREAD_EXIT`) after a transaction it
+    /// sent went unanswered, so the thread can serve again.
+    ///
+    /// A thread waiting for a reply keeps that transaction on its stack; the driver hands it no
+    /// other work, and a reply arriving later would be read as the answer to whatever the thread
+    /// sends next. Exiting the thread detaches the transaction — a late reply now fails at the
+    /// replier — and the next binder call from this OS thread starts with a clean state. A looper
+    /// re-announces itself. Any transaction this thread was in the middle of serving is detached
+    /// with it, so replies to it are skipped until the next [`recv_batch`](Self::recv_batch); its
+    /// sender is not told, and stays blocked until the silent peer answers or exits. That sender
+    /// is the party that asked for the unanswered work.
+    fn abandon_thread(&self) {
+        let _ = sys::thread_exit(self.fd.as_fd());
+        REPLIES_ORPHANED.with(|o| o.set(true));
+        if IS_LOOPER.with(std::cell::Cell::get) {
+            let _ = self.enter_looper();
+        }
     }
 
     /// Run one `BINDER_WRITE_READ`: hand the driver `write` (`BC_*` commands) and
@@ -1116,5 +1263,50 @@ impl Drop for BufferGuard<'_> {
         let mut w = Vec::new();
         proto::write_free_buffer(&mut w, self.buffer);
         let _ = self.conn.write_only(&w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A received transaction whose data is `name`, padding, then the bytes of a handle object
+    /// for `handle`; `objects` is the offsets array the driver delivered.
+    fn incoming(name: &[u8], handle: u32, listed: bool) -> Incoming {
+        let mut data = name.to_vec();
+        data.resize(data.len().next_multiple_of(8), 0);
+        let at = data.len();
+        let mut object = proto::flat_binder_object_binder(0, 0, 0);
+        if let Some(tag) = object.get_mut(..4) {
+            tag.copy_from_slice(&proto::BINDER_TYPE_HANDLE.to_ne_bytes());
+        }
+        if let Some(value) = object.get_mut(8..12) {
+            value.copy_from_slice(&handle.to_ne_bytes());
+        }
+        data.extend_from_slice(&object);
+        Incoming {
+            code: 0,
+            data,
+            fds: Vec::new(),
+            objects: if listed { vec![at] } else { Vec::new() },
+            sender_pid: 1,
+            sender_euid: 1000,
+            node_cookie: 0,
+            buffer: 0,
+            one_way: false,
+        }
+    }
+
+    #[test]
+    fn a_handle_is_taken_only_from_an_object_the_driver_delivered() {
+        // The driver listed the object: it translated a node the sender held.
+        assert_eq!(incoming(b"svc", 42, true).trailing_handle(), Some(42));
+        // The same bytes with no object listed are the sender's own data: they name a number
+        // in OUR handle table, which the sender never held.
+        assert_eq!(incoming(b"svc", 42, false).trailing_handle(), None);
+        // An object listed somewhere else does not vouch for the trailing bytes.
+        let mut elsewhere = incoming(b"svc", 42, false);
+        elsewhere.objects = vec![0];
+        assert_eq!(elsewhere.trailing_handle(), None);
     }
 }

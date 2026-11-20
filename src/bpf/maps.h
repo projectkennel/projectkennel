@@ -22,7 +22,7 @@
 
 /* Sentinels (architecture/02-7). */
 #define KENNEL_META_MAGIC 0x4B4E454Cu /* "KNEL" */
-#define KENNEL_ABI_VERSION 1
+#define KENNEL_ABI_VERSION 2
 
 /* allow_entry.flags bits. */
 #define KENNEL_ALLOW_FLAG_PROXY 0x01u /* this entry is the kennel's SOCKS5 proxy */
@@ -47,16 +47,33 @@ struct kennel_meta {
 	__u8 policy_hash[32]; /* SHA-256 of the resolved policy */
 };
 
-/*
- * Value type for the allow/deny LPM tries. The v4 and v6 tries share this
- * value layout; they differ only in key width.
- */
-struct allow_entry {
+/* The most port/protocol rules one LPM entry carries. */
+#define KENNEL_ENTRY_RULES 8
+
+/* One port range on one protocol. */
+struct port_rule {
 	__u16 port_min;	  /* inclusive, host byte order */
 	__u16 port_max;	  /* inclusive, host byte order */
 	__u8 protocol;	  /* IPPROTO_TCP / IPPROTO_UDP, or KENNEL_PROTO_ANY */
+	__u8 _pad;
+};
+
+/*
+ * Value type for the allow/deny LPM tries. The v4 and v6 tries share this
+ * value layout; they differ only in key width.
+ *
+ * An LPM lookup returns the single most specific entry for an address, so that
+ * entry has to carry every rule that applies to it: the rules written for its
+ * own prefix AND those of every wider prefix that contains it. The loader
+ * builds entries that way (kennel-lib-bpf, acl.rs). An entry therefore holds a
+ * small set of rules, not one; a policy needing more than KENNEL_ENTRY_RULES
+ * on one prefix is refused at load.
+ */
+struct allow_entry {
+	__u8 n_rules;	  /* valid entries in rules[] */
 	__u8 flags;	  /* KENNEL_ALLOW_FLAG_* */
 	__u8 _pad[2];
+	struct port_rule rules[KENNEL_ENTRY_RULES];
 };
 
 /* LPM trie keys. addr fields are in network byte order. */
@@ -171,6 +188,15 @@ struct {
 	__type(key, __u32);
 	__type(value, struct bind_subnet);
 } bind_subnet_map SEC(".maps");
+
+/* Audit events lost because the ringbuf was full (index 0). The programs add to it; kenneld
+ * reads it and records the loss, so a burst that outruns the reader is itself on the record. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} audit_lost SEC(".maps");
 
 /* Shared audit ringbuf (drained by kenneld). 1 MiB default. */
 struct {

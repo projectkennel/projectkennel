@@ -85,6 +85,15 @@ impl Lockfile {
                         entry.name
                     )));
                 }
+                // The signer is part of the pin: the same signature text under another key id
+                // is a different statement about who vouched for the artefact.
+                if prev.signing_key_id != entry.signing_key_id {
+                    return Err(PolicyError::LockMismatch(format!(
+                        "`{}` is now signed by `{}`, but the lockfile pins signer `{}`; \
+                         re-pin by recompiling",
+                        entry.name, entry.signing_key_id, prev.signing_key_id
+                    )));
+                }
             }
         }
         Ok(())
@@ -140,6 +149,18 @@ mod tests {
         let prev = Lockfile::from_chain(&[link("base-confined", "AAAA")]);
         let now = Lockfile::from_chain(&[link("base-confined", "AAAA")]);
         assert!(now.verify_against(&prev).is_ok());
+    }
+
+    #[test]
+    fn a_changed_signer_is_a_mismatch() {
+        let pinned = Lockfile::from_chain(&[link("base", "sig")]);
+        let mut resigned = link("base", "sig");
+        resigned.signing_key_id = Some("someone-else".to_owned());
+        let now = Lockfile::from_chain(&[resigned]);
+        assert!(matches!(
+            now.verify_against(&pinned),
+            Err(PolicyError::LockMismatch(_))
+        ));
     }
 
     #[test]

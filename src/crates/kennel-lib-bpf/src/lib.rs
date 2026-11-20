@@ -25,13 +25,14 @@
 
 #![allow(unsafe_code)]
 
+pub mod acl;
 pub mod loader;
 pub mod ringbuf;
 pub mod sys;
 
 pub use loader::{
-    create_maps, freeze_maps, load_program, load_program_against, update_kennel_map, Loaded,
-    MapSpec, ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS,
+    audit_lost_count, create_maps, freeze_maps, load_program, load_program_against,
+    update_kennel_map, Loaded, MapSpec, ProgramSpec, KENNEL_MAPS, KENNEL_PROGRAMS,
 };
 pub use ringbuf::RingBuffer;
 

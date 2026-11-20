@@ -21,34 +21,34 @@ the code whose compromise would break confinement.
 
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
-| `kenneld` | 7905 | — | **yes** | *(2 bins)* | serde |
-| `kennel-lib-compile` | 5585 | — | — | cli, compose | serde |
-| `kennel-cli` | 5411 | — | — | *(binary)* | lexopt, serde, serde_json |
-| `kennel-lib-toml` | 2673 | — | **yes** | compile, compose, config, kenneld, policy | serde |
-| `kennel-lib-policy` | 2619 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, object, serde |
-| `kennel-lib-spawn` | 2568 | — | **yes** | bin-init, kenneld, privhelper | — |
-| `kennel-lib-binder` | 2225 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn, tun-broker | libc |
-| `kennel-privhelper` | 1798 | — | **yes** | kenneld | — |
+| `kenneld` | 8135 | — | **yes** | *(2 bins)* | serde |
+| `kennel-lib-compile` | 5896 | — | — | cli, compose | serde |
+| `kennel-cli` | 5500 | — | — | *(binary)* | lexopt, serde, serde_json |
+| `kennel-lib-policy` | 2789 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, object, serde |
+| `kennel-lib-spawn` | 2764 | — | **yes** | bin-init, kenneld, privhelper | — |
+| `kennel-lib-toml` | 2717 | — | **yes** | compile, compose, config, kenneld, policy | serde |
+| `kennel-lib-binder` | 2314 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn, tun-broker | libc |
+| `kennel-privhelper` | 1920 | — | **yes** | kenneld | — |
+| `kennel-lib-syscall` | 1858 | **yes** | **yes** | bin-init, binder, bpf, cli, control, facade, kenneld, manifest, privhelper, spawn, tun-broker | bitflags, libc, nix, seccompiler |
 | `kennel-facade` | 1607 | — | — | *(11 bins)* | — |
-| `kennel-lib-syscall` | 1292 | **yes** | **yes** | bin-init, binder, bpf, cli, control, facade, kenneld, privhelper, spawn, tun-broker | bitflags, libc, nix, seccompiler |
-| `kennel-lib-audit` | 1289 | — | **yes** | cli, kenneld | — |
+| `kennel-lib-audit` | 1371 | — | **yes** | cli, kenneld | — |
+| `kennel-lib-bpf` | 1007 | **yes** | **yes** | kenneld, spawn | libc, object |
 | `kennel-tun-broker` | 968 | — | — | *(2 bins)* | nix, simple-dns |
-| `kennel-lib-bpf` | 816 | **yes** | **yes** | kenneld, spawn | libc, object |
-| `kennel-lib-control` | 801 | — | **yes** | cli, compile, kenneld | — |
-| `kennel-lib-dbus` | 780 | — | — | dbus-broker, facade | mini-sansio-dbus |
-| `kennel-compose` | 750 | — | — | *(binary)* | termion |
+| `kennel-lib-dbus` | 866 | — | — | dbus-broker, facade | mini-sansio-dbus |
+| `kennel-lib-control` | 807 | — | **yes** | cli, compile, kenneld | — |
+| `kennel-compose` | 761 | — | — | *(binary)* | termion |
+| `kennel-lib-manifest` | 617 | — | — | cli | serde, serde_json |
+| `kennel-dbus-broker` | 613 | — | — | *(binary)* | mini-sansio-dbus, nix |
 | `kennel-lib-config` | 596 | — | **yes** | bin-init, cli, compile, compose, kenneld, privhelper | serde |
-| `kennel-dbus-broker` | 588 | — | — | *(binary)* | mini-sansio-dbus, nix |
-| `kennel-lib-manifest` | 553 | — | — | cli | serde, serde_json |
-| `kennel-bin-init` | 443 | — | **yes** | *(binary)* | — |
-| `kennel-lib-os` | 396 | — | **yes** | syscall | libc, nix |
-| `kennel-host-delegate` | 278 | — | **yes** | kenneld, tun-broker | — |
+| `kennel-bin-init` | 457 | — | **yes** | *(binary)* | — |
+| `kennel-lib-os` | 414 | — | **yes** | syscall | libc, nix |
+| `kennel-host-delegate` | 302 | — | **yes** | kenneld, tun-broker | — |
 | `kennel-lib-landlock` | 273 | **yes** | **yes** | syscall | bitflags, libc |
 | `kennel-schema-derive` | 272 | — | — | — | proc-macro2, quote, syn |
 | `kennel-lib-cli` | 220 | — | — | cli, facade | — |
-| `kennel-lib-scm` | 200 | **yes** | **yes** | facade, host-delegate, syscall | nix |
 | `kennel-bin-oci-entry` | 159 | — | — | *(binary)* | serde, serde_json |
 | `kennel-lib-term` | 157 | — | — | cli | vte |
+| `kennel-lib-scm` | 151 | **yes** | **yes** | facade, host-delegate, syscall | nix |
 | `kennel-schema` | 104 | — | — | — | — |
 | `kennel-lib-text` | 73 | — | **yes** | audit, cli | — |
 | `kennel-shim` | 13 | — | — | *(binary)* | — |
@@ -68,6 +68,7 @@ the code whose compromise would break confinement.
 - `kennel-lib-config` → toml
 - `kennel-lib-control` → syscall
 - `kennel-lib-dbus` → binder
+- `kennel-lib-manifest` → syscall
 - `kennel-lib-policy` → toml
 - `kennel-lib-spawn` → binder, bpf, policy, syscall
 - `kennel-lib-syscall` → landlock, os, scm
@@ -75,7 +76,7 @@ the code whose compromise would break confinement.
 - `kennel-tun-broker` → host-delegate, binder, policy, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, toml, privhelper
 
-**Totals.** 31 crates, **43412 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 17 crates, **26245 SLOC**; the remaining 14 crates (17167 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 31 crates, **45701 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 17 crates, **27948 SLOC**; the remaining 14 crates (17753 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 

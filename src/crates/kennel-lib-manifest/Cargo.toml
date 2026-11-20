@@ -16,6 +16,9 @@ repository.workspace = true
 # Vendored + §5.5-audited; pulls zmij (its Schubfach float formatter) as a normal dep.
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "=1.0.150", default-features = false, features = ["std"] }
+# Descriptor-based resolution inside the workspace root (`fd::RootDir`): revert and re-pin act on a
+# tree a confined workload — or the author of a cloned repository — controls.
+kennel-lib-syscall = { path = "../kennel-lib-syscall" }
 # SHA-256 of execution triggers is computed via the system `sha256sum`, exactly as kenneld's
 # workload-pin verify does (server.rs `verify_workload_digest`): no in-crate crypto dep
 # (no-hand-rolled-crypto; the Rust sha2 twin is a contingent §5.5.1 call, not owed here).

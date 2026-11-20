@@ -263,6 +263,17 @@ pub fn loaded_from_settled(
     let substituted = kennel_lib_spawn::substitute(verified, subst).map_err(|e| e.to_string())?;
     let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
         .map_err(|e| e.to_string())?;
+    // The redirect floor again, on what will actually be mounted: the settle-time check saw
+    // unsubstituted strings and no spawn patch. A redirected source the workload can write
+    // through another bind is refused here, before anything is built.
+    if let Some((source, writable)) = plan.writable_redirect_source() {
+        return Err(format!(
+            "redirect source {} is writable by the workload through {}; a source the workload \
+             can write is a confused-deputy hole (fs.redirect.write-set)",
+            source.display(),
+            writable.display()
+        ));
+    }
     // Backstop the control-socket ungrantability at the privileged factory (W15 F1). The compiler
     // refuses an `fs` grant that would expose the control socket (the loud primary guard), but a
     // grant written with the deferred `<uid>` placeholder resolves only at `substitute`, *after*

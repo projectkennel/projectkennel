@@ -1,0 +1,61 @@
+# ============================================================================
+# Suite case: net-mapped-literal — the proxy's special-use gate cannot be spelled around.
+#
+# In a proxied mode the workload asks kenneld to dial for it, and kenneld refuses a special-use
+# destination (loopback, link-local/metadata, RFC1918, …) unless the policy opts in. An
+# IPv4-mapped IPv6 literal (::ffff:a.b.c.d) names an IPv4 address: the host dials 127.0.0.1 for
+# `::ffff:127.0.0.1`. It must be classified, matched and pinned as that IPv4 address — treated
+# as IPv6 it is neither loopback nor covered by any IPv4 deny.
+#
+# The workload sends HTTP CONNECT through the kennel's proxy for each form and exits 0 iff the
+# plain literals AND their mapped spellings are all refused. `unconstrained` is the mode where
+# the special-use gate is the only thing in the way.
+# ============================================================================
+
+template_name = "net-mapped-literal"
+template_base = "base-confined"
+
+[net]
+mode = "unconstrained"
+reason = "e2e: the special-use gate is the only gate in this mode"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import os, socket, sys, urllib.parse as u
+p = u.urlparse(os.environ['HTTP_PROXY'])
+def connect(target):
+    s = socket.socket(); s.settimeout(8)
+    try:
+        s.connect((p.hostname, p.port))
+        s.sendall(('CONNECT %s HTTP/1.1\\r\\nHost: %s\\r\\n\\r\\n' % (target, target)).encode())
+        return s.recv(128).split(b'\\r\\n')[0].decode('latin1')
+    except OSError as e:
+        return 'error: %s' % e
+    finally:
+        s.close()
+targets = [
+    '127.0.0.1:9', '[::1]:9',                      # controls: the plain literals
+    '[::ffff:127.0.0.1]:9',                        # mapped loopback
+    '[::ffff:169.254.169.254]:80',                 # mapped metadata address
+    '[::ffff:10.0.0.1]:9',                         # mapped RFC1918
+    '[::127.0.0.1]:9',                             # IPv4-compatible
+    '[64:ff9b::7f00:1]:9',                         # NAT64 → 127.0.0.1
+]
+bad = 0
+for t in targets:
+    line = connect(t)
+    opened = line.split()[1:2] == ['200']
+    bad += opened
+    print('%-34s -> %s%s' % (t, line, '   <-- TUNNEL OPENED' if opened else ''))
+sys.exit(1 if bad else 0)
+""",
+]

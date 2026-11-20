@@ -54,18 +54,23 @@ int kennel_bind6(struct bpf_sock_addr *ctx)
 
 	__u8 rewritten[16] = {};
 
+	/* An IPv4-mapped bind (::ffff:a.b.c.d) binds an IPv4 address, which the IPv6 bind tries know
+	 * nothing about and the IPv4 hook never sees. Nothing legitimate needs it: it is refused
+	 * below, on the same path as a bind under the floor (and is never the port-0 exemption). */
+	int mapped = kennel_is_v4mapped(addr);
+
 	/* Ephemeral bind (port 0): a kernel-allocated source port, not a reachable listening
 	 * surface — mirroring bind4. Allow it unconditionally (no floor, no port allowlist, no
 	 * address ACL, no wildcard rewrite: an outbound socket needs `::` to stay unspecified so
 	 * the kernel picks the source per route). Lets host-mode's outbound UDP dial bind `:0`. */
-	if (port_be == 0) {
+	if (port_be == 0 && !mapped) {
 		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET6, port_be, addr, rewritten, meta);
 		return KENNEL_ALLOW;
 	}
 
 	/* The bind floor (§7.3.7): deny a bind below `bind_port_min` before the address
 	 * logic — the privileged-port protection (T6), mirroring bind4. 0 = no floor. */
-	if (meta->bind_port_min != 0 && bpf_ntohs(port_be) < meta->bind_port_min) {
+	if (mapped || (meta->bind_port_min != 0 && bpf_ntohs(port_be) < meta->bind_port_min)) {
 		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, addr, rewritten, meta);
 		return KENNEL_DENY;
 	}

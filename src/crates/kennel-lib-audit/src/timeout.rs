@@ -40,11 +40,17 @@ impl TimeoutSink {
         let name = inner.name();
         let (tx, rx) = sync_channel::<Record>(capacity.max(1));
         let worker = std::thread::spawn(move || {
-            // The worker owns `inner` and performs the blocking write. The inner
-            // error is swallowed here (off the writer's thread); the reported
-            // failure mode is the drop-on-full in `write` below.
+            // The worker owns `inner` and performs the blocking write, off the writer's
+            // thread, so a failure here cannot be handed to the other sinks as a drop
+            // record the way the drop-on-full in `write` below is. It is still never
+            // silent: the daemon's stderr carries it.
             for record in rx {
-                let _ = inner.write(&record);
+                if let Err(err) = inner.write(&record) {
+                    eprintln!(
+                        "kennel-lib-audit: sink {} lost an event ({}): {}",
+                        err.sink, record.event_type, err.message
+                    );
+                }
             }
         });
         Self {

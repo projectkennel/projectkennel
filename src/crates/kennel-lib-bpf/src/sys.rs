@@ -11,6 +11,7 @@ use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd, RawFd};
 
 // bpf commands (enum bpf_cmd).
 const BPF_MAP_CREATE: libc::c_int = 0;
+const BPF_MAP_LOOKUP_ELEM: libc::c_int = 1;
 const BPF_MAP_UPDATE_ELEM: libc::c_int = 2;
 const BPF_PROG_LOAD: libc::c_int = 5;
 const BPF_OBJ_PIN: libc::c_int = 6;
@@ -153,6 +154,46 @@ pub fn map_create(
     owned_fd(ret)
 }
 
+/// Read one element of a map into `value` (`BPF_MAP_LOOKUP_ELEM`).
+///
+/// # Safety
+///
+/// `key` must be at least the map's `key_size` bytes and `value` at least its `value_size`
+/// bytes: the kernel reads the former and writes the latter by those sizes, not the slices'.
+///
+/// # Errors
+///
+/// The OS error if the lookup fails (`ENOENT` for an absent key).
+pub unsafe fn map_lookup(map: BorrowedFd<'_>, key: &[u8], value: &mut [u8]) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let attr = MapElemAttr {
+        map_fd: u32::try_from(map.as_raw_fd())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "fd out of range"))?,
+        key: key.as_ptr() as u64,
+        value: value.as_mut_ptr() as u64,
+        ..MapElemAttr::default()
+    };
+    // SAFETY: `attr` is fully initialised; `key` is valid for reads and `value` for writes of
+    // the map's key_size/value_size bytes for the duration of the call (the caller's contract),
+    // and the kernel retains neither pointer.
+    //
+    // INVARIANTS UPHELD: `value` is exclusively borrowed, so the kernel's write aliases nothing.
+    //
+    // FAILURE MODE: -1 + errno, surfaced as Err; `value` is then unspecified but initialised.
+    let ret = unsafe {
+        bpf(
+            BPF_MAP_LOOKUP_ELEM,
+            std::ptr::from_ref(&attr).cast(),
+            std::mem::size_of::<MapElemAttr>(),
+        )
+    };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Insert or overwrite one element of a map (`BPF_MAP_UPDATE_ELEM`).
 ///
 /// # Safety
@@ -222,7 +263,13 @@ pub fn prog_load(
         license: license.as_ptr() as u64,
         log_level: u32::from(!log.is_empty()),
         log_size: u32::try_from(log.len()).unwrap_or(0),
-        log_buf: log.as_mut_ptr() as u64,
+        // No log: the kernel requires a NULL buffer (an empty slice's pointer is dangling, not
+        // null, and a buffer without a length is rejected).
+        log_buf: if log.is_empty() {
+            0
+        } else {
+            log.as_mut_ptr() as u64
+        },
         kern_version: 0,
         prog_flags: 0,
         prog_name: [0; 16],

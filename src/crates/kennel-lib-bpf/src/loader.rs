@@ -19,9 +19,11 @@ const F_NO_PREALLOC: u32 = 1;
 const F_RDONLY_PROG: u32 = 0x80;
 
 // Program type / attach types (enum bpf_prog_type / bpf_attach_type).
+const PROG_TYPE_CGROUP_SKB: u32 = 8;
 const PROG_TYPE_CGROUP_SOCK: u32 = 9;
 const PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 const PROG_TYPE_CGROUP_SOCKOPT: u32 = 25;
+const CGROUP_INET_INGRESS: u32 = 0;
 const CGROUP_INET_SOCK_CREATE: u32 = 2;
 const CGROUP_INET4_BIND: u32 = 8;
 const CGROUP_INET6_BIND: u32 = 9;
@@ -49,6 +51,11 @@ pub struct MapSpec {
     pub map_flags: u32,
 }
 
+/// `sizeof(struct allow_entry)`: the value of every allow/deny LPM trie.
+// The entry is 52 bytes; the cast cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
+const ENTRY_VALUE_SIZE: u32 = crate::acl::ENTRY_SIZE as u32;
+
 /// The maps of `bpf/maps.h`. Value sizes match the structs there.
 pub const KENNEL_MAPS: &[MapSpec] = &[
     MapSpec {
@@ -63,7 +70,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "deny_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -71,7 +78,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "deny_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -79,7 +86,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "allow_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -87,7 +94,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "allow_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -95,7 +102,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_deny_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -103,7 +110,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_deny_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -111,7 +118,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_allow_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -119,7 +126,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_allow_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -128,6 +135,14 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         map_type: MAP_TYPE_ARRAY,
         key_size: 4,
         value_size: 44,
+        max_entries: 1,
+        map_flags: 0,
+    },
+    MapSpec {
+        name: "audit_lost",
+        map_type: MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: 8,
         max_entries: 1,
         map_flags: 0,
     },
@@ -158,8 +173,8 @@ pub struct ProgramSpec {
 /// Every program in `bpf/*.bpf.c`.
 ///
 /// The `cgroup/sock_addr` family (connect/bind/sendmsg, v4/v6), plus
-/// `sock_create` (`cgroup/sock`) and `setsockopt` (`cgroup/sockopt`), which use
-/// distinct program and attach types.
+/// `sock_create` (`cgroup/sock`), `setsockopt` (`cgroup/sockopt`) and `ingress`
+/// (`cgroup_skb`), which use distinct program and attach types.
 pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
     ProgramSpec {
         name: "connect4",
@@ -202,6 +217,12 @@ pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
         section: "cgroup/sock_create",
         prog_type: PROG_TYPE_CGROUP_SOCK,
         attach_type: CGROUP_INET_SOCK_CREATE,
+    },
+    ProgramSpec {
+        name: "ingress",
+        section: "cgroup_skb/ingress",
+        prog_type: PROG_TYPE_CGROUP_SKB,
+        attach_type: CGROUP_INET_INGRESS,
     },
     ProgramSpec {
         name: "setsockopt",
@@ -369,13 +390,28 @@ fn section_relocations(
 }
 
 /// `BPF_PROG_LOAD` `insns` as `prog`, surfacing the verifier log on failure.
+///
+/// The first attempt asks for **no** log. With a log buffer the kernel fails the load `ENOSPC`
+/// when the log outgrows the buffer — even for a program the verifier accepts — so a program that
+/// merely grew would stop loading. Only a rejected program is loaded again, with a buffer, to
+/// say why.
 fn finish_load(prog: &ProgramSpec, insns: &[u8]) -> io::Result<OwnedFd> {
-    let mut log = vec![0u8; 64 * 1024];
-    sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log).map_err(|e| {
-        let end = log.iter().position(|&b| b == 0).unwrap_or(0);
-        let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
-        other(format!("prog_load failed: {e}\nverifier log:\n{text}"))
-    })
+    let first = match sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut []) {
+        Ok(fd) => return Ok(fd),
+        Err(e) => e,
+    };
+    let mut log = vec![0u8; 1 << 20];
+    match sys::prog_load(prog.prog_type, prog.attach_type, insns, c"GPL", &mut log) {
+        // Not expected (the same program was just rejected), but a load that succeeds is a load.
+        Ok(fd) => Ok(fd),
+        Err(again) => {
+            let end = log.iter().position(|&b| b == 0).unwrap_or(0);
+            let text = String::from_utf8_lossy(log.get(..end).unwrap_or(&[]));
+            Err(other(format!(
+                "prog_load failed: {first}\nverifier log (second attempt: {again}):\n{text}"
+            )))
+        }
+    }
 }
 
 /// Create every map in `map_specs`, returning them keyed by symbol name.
@@ -403,6 +439,26 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
         maps.insert(spec.name.to_owned(), fd);
     }
     Ok(maps)
+}
+
+/// The number of audit events the programs could not record because the ringbuf was full: the
+/// single element of the `audit_lost` map behind `map`.
+///
+/// # Errors
+///
+/// The OS error if the lookup fails (for instance `map` is not that map).
+pub fn audit_lost_count(map: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut value = [0u8; 8];
+    // SAFETY: `audit_lost` is declared in `KENNEL_MAPS` with a 4-byte key and an 8-byte value;
+    // the key and value buffers here are exactly those sizes and live for the call.
+    //
+    // INVARIANTS UPHELD: the buffers match the map geometry the kernel reads and writes by.
+    //
+    // FAILURE MODE: an error is returned; a wrong map type cannot overrun, since a map with a
+    // larger value would need a larger buffer only if it were this fd, which the caller obtained
+    // from the `audit_lost` pin.
+    unsafe { sys::map_lookup(map, &0u32.to_ne_bytes(), &mut value) }?;
+    Ok(u64::from_ne_bytes(value))
 }
 
 /// Freeze the named maps so neither userspace nor BPF programs can update them.
@@ -632,15 +688,21 @@ mod root_tests {
     /// Build the `(key, value)` byte pair for an `allow_v4` entry: a /32 LPM key
     /// for `addr` (network-order bytes) and an `allow_entry` permitting any
     /// protocol on `[port_min, port_max]`. Layouts match `bpf/maps.h`.
-    fn allow_v4_entry(addr: [u8; 4], port_min: u16, port_max: u16) -> ([u8; 8], [u8; 8]) {
+    fn allow_v4_entry(
+        addr: [u8; 4],
+        port_min: u16,
+        port_max: u16,
+    ) -> ([u8; 8], [u8; crate::acl::ENTRY_SIZE]) {
         let mut key = [0u8; 8];
         key[0..4].copy_from_slice(&32u32.to_ne_bytes()); // prefixlen
         key[4..8].copy_from_slice(&addr); // addr, already network order
-        let mut val = [0u8; 8]; // allow_entry: port_min, port_max, protocol, flags, _pad[2]
-        val[0..2].copy_from_slice(&port_min.to_ne_bytes());
-        val[2..4].copy_from_slice(&port_max.to_ne_bytes());
-        // val[4] protocol = 0 (KENNEL_PROTO_ANY); val[5] flags = 0; val[6..8] pad.
-        (key, val)
+        let mut rule = [0u8; 8]; // port_min, port_max, protocol (0 = any), flags, pad
+        rule[0..2].copy_from_slice(&port_min.to_ne_bytes());
+        rule[2..4].copy_from_slice(&port_max.to_ne_bytes());
+        crate::acl::build_entries(&[(key, rule)])
+            .expect("one rule builds")
+            .pop()
+            .expect("one entry")
     }
 
     /// Fork a child that joins `cg`, attempts one connect to 127.0.0.1:9, and

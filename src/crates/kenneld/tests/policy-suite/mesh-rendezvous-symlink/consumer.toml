@@ -1,0 +1,24 @@
+# Suite case: mesh-rendezvous-symlink — the consumer half. It connects to the capability and
+# reports what, if anything, answers. `run.sh` decides the verdict from the host side.
+name = "rendezvous-link-consumer"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/bin/**", "/lib/**", "/lib64/**"]
+
+[exec]
+allow = ["/usr/bin/python3", "/usr/bin/python3.*", "/bin/sh"]
+
+[workload]
+argv = ["/usr/bin/python3", "-u", "-c", "import socket,time\nlast=None\nfor i in range(12):\n    s=socket.socket(socket.AF_UNIX); s.settimeout(5)\n    try:\n        s.connect('/tmp/mesh-in.sock'); s.sendall(b'ping'); d=s.recv(64)\n        if d:\n            print('consumer received:', d.decode()); break\n        last='empty reply'\n    except OSError as e:\n        last=str(e)\n    finally:\n        s.close()\n    time.sleep(0.5)\nelse:\n    print('consumer got no reply:', last)\n"]
+pinned = true
+
+[[consumes]]
+name = "test.mesh.rendezvous"
+shape = "af-unix"
+at = "/tmp/mesh-in.sock"
+required = true
+reason = "reach the provider over the mesh"

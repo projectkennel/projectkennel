@@ -1,0 +1,72 @@
+# ============================================================================
+# net-host-port-rules — every rule written for an address applies to it.
+#
+# The host-mode ACL is a longest-prefix-match map: an address finds one entry. Each rule used to
+# be written as its own entry, so:
+#   * two ports on one CIDR were one key, and the second rule replaced the first;
+#   * a deny matched on the address alone, so a deny of one port closed every port.
+# An entry now carries the set of rules for its prefix and for every wider prefix containing it,
+# and a deny is matched on port and protocol like an allow.
+#
+# Nothing listens on these ports: an allowed connect reaches the stack (ECONNREFUSED), a refused
+# one is EPERM. The workload exits 0 iff each connect gets the verdict the policy states.
+# ============================================================================
+
+template_name = "net-host-port-rules"
+template_base = "base-confined"
+
+[net]
+mode = "host"
+reason = "e2e: several port rules on one CIDR all apply"
+
+[net.bpf.connect]
+allow = [
+    { cidr = "127.0.0.9/32", ports = [47131, 47132, 47133], reason = "three ports, one address" },
+    { cidr = "127.0.1.0/24", ports = [47134, 47135], reason = "two ports on a subnet" },
+]
+deny = [
+    { cidr = "127.0.1.0/24", ports = [47134], reason = "one port of the subnet is denied" },
+    { cidr = "127.0.1.1/32", ports = [47139], reason = "a narrower deny of an unrelated port" },
+]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import errno, socket, sys
+def tcp(addr, port):
+    s = socket.socket(socket.AF_INET); s.settimeout(3)
+    try:
+        s.connect((addr, port)); return 0
+    except OSError as e:
+        return e.errno
+    finally:
+        s.close()
+# The cgroup ACL refuses with EPERM; a port no rule names is refused earlier, by Landlock (EACCES).
+DENIED = (errno.EPERM, errno.EACCES)
+checks = [
+    # (what, errno observed, must it be the BPF deny?)
+    ('first of three ports on one address', tcp('127.0.0.9', 47131), False),
+    ('second of three ports on one address', tcp('127.0.0.9', 47132), False),
+    ('third of three ports on one address', tcp('127.0.0.9', 47133), False),
+    ('a port with no rule on that address', tcp('127.0.0.9', 47130), True),
+    ('subnet port that is allowed and not denied', tcp('127.0.1.7', 47135), False),
+    ('subnet port that is denied', tcp('127.0.1.7', 47134), True),
+    ('the wide deny still applies under a narrower deny', tcp('127.0.1.1', 47134), True),
+    ('a deny of one port does not close the others', tcp('127.0.1.1', 47135), False),
+]
+bad = 0
+for what, got, want_denied in checks:
+    ok = (got in DENIED) == want_denied
+    bad += not ok
+    print('%-52s -> %s%s' % (what, errno.errorcode.get(got, got), '' if ok else '   <-- WRONG'))
+sys.exit(1 if bad else 0)
+""",
+]

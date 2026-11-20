@@ -1,0 +1,80 @@
+# ============================================================================
+# Suite case: net-host-aliases — under mode=host, an address is judged as what the kernel dials.
+#
+# In host mode the cgroup BPF connect/sendmsg hooks are the egress gate. Three ways an address
+# is not what it looks like, each of which used to walk past the ACL:
+#
+#   * IPv4-mapped IPv6 (::ffff:a.b.c.d): an AF_INET6 socket makes an IPv4 connection, and only
+#     the connect6 hook sees it — so it must be judged by the IPv4 tries, or every IPv4 deny is
+#     skipped whenever an allow covers ::/0 (the `*` below does).
+#   * the unspecified address (::): the kernel routes it to this host's loopback, so it must be
+#     judged as ::1.
+#   * the host's own loopback: `127.0.0.1` is the KENNEL's loopback only where the kennel has its
+#     own net namespace. In host mode it is the host's, and nothing may allow it implicitly.
+#
+# No listener is needed: a connect the ACL DENIES fails EPERM (the BPF verdict), while one it
+# allows reaches the stack and fails ECONNREFUSED — the errno is the verdict. Exit 0 ⇒ all hold.
+# ============================================================================
+
+template_name = "net-host-aliases"
+template_base = "base-confined"
+
+[net]
+mode = "host"
+reason = "e2e: an aliased address is judged as the destination the kernel will dial"
+
+[net.bpf.connect]
+allow = [{ cidr = "*", ports = [47111], reason = "any host on the test port" }]
+deny = [
+    { cidr = "127.0.0.2/32", reason = "the IPv4 host the allow must not reach" },
+    { cidr = "::1/128", reason = "the IPv6 host the allow must not reach" },
+]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import errno, socket, sys
+P = 47111
+def tcp(family, addr):
+    s = socket.socket(family); s.settimeout(3)
+    try:
+        s.connect((addr, P)); return 0
+    except OSError as e:
+        return e.errno
+    finally:
+        s.close()
+def udp(family, addr, port):
+    s = socket.socket(family, socket.SOCK_DGRAM)
+    try:
+        s.sendto(b'x', (addr, port)); return 0
+    except OSError as e:
+        return e.errno
+    finally:
+        s.close()
+DENIED = errno.EPERM
+checks = [
+    # (what, errno observed, must it be the BPF deny?)
+    ('control: allowed IPv4 host 127.0.0.3 reaches the stack', tcp(socket.AF_INET, '127.0.0.3'), False),
+    ('control: denied IPv4 host 127.0.0.2 is refused', tcp(socket.AF_INET, '127.0.0.2'), True),
+    ('IPv4-mapped ::ffff:127.0.0.2 is judged as 127.0.0.2', tcp(socket.AF_INET6, '::ffff:127.0.0.2'), True),
+    ('IPv4-mapped ::ffff:127.0.0.3 is judged as 127.0.0.3', tcp(socket.AF_INET6, '::ffff:127.0.0.3'), False),
+    ('unspecified :: is judged as ::1 (denied)', tcp(socket.AF_INET6, '::'), True),
+    ('host loopback 127.0.0.1 on a port with no rule (UDP)', udp(socket.AF_INET, '127.0.0.1', P + 1), True),
+    ('host loopback ::1 on a port with no rule (UDP)', udp(socket.AF_INET6, '::1', P + 1), True),
+]
+bad = 0
+for what, got, want_denied in checks:
+    ok = (got == DENIED) == want_denied
+    bad += not ok
+    print('%-58s -> %s%s' % (what, errno.errorcode.get(got, got), '' if ok else '   <-- WRONG'))
+sys.exit(1 if bad else 0)
+""",
+]

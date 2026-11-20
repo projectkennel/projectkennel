@@ -405,7 +405,20 @@ fn validate_and_mint(
             )
         })?;
 
-    // 3. Resolve the template from the (mutable) trust store.
+    // 3. Atomically claim a max_instances slot (§7.12.7) — the fork-bomb bound — BEFORE the work
+    //    below. Reading the template and verifying its signature cost the daemon real CPU on a
+    //    shared looper; a requester at its ceiling must not be able to buy that by asking again.
+    //    The guard releases the slot on any refusal further down (it drops with the error) and is
+    //    otherwise held until the spawned kennel terminates.
+    let max = rt.grant.max_instances;
+    let slot = claim_slot(&rt.live, max, &rt.parent_alive).ok_or_else(|| {
+        deny(
+            status::CEILING_FULL,
+            format!("max_instances ceiling ({max}) is full"),
+        )
+    })?;
+
+    // 4. Resolve the template from the (mutable) trust store.
     let bytes = resolve_template(&rt.template_dirs, template_ref).ok_or_else(|| {
         deny(
             status::DENIED,
@@ -414,33 +427,23 @@ fn validate_and_mint(
     })?;
     tr.step("spawn: grant ok, template resolved from trust store");
 
-    // 4. Content-pin + cryptographic verify against the trust keys (§7.12.8).
+    // 5. Content-pin + cryptographic verify against the trust keys (§7.12.8).
     let template =
         kennel_lib_policy::verify_pinned(&bytes, &rt.keys, &pin.signing_key_id, &pin.signature)
             .map_err(|e| deny(status::DENIED, e.to_string()))?;
     tr.step("spawn: content-pin + signature verified");
 
-    // 5. Re-run spawn-eligibility on the resolved bytes (the authoritative gate).
+    // 6. Re-run spawn-eligibility on the resolved bytes (the authoritative gate).
     kennel_lib_policy::spawn_eligible(&template)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
     tr.step("spawn: eligibility re-check ok");
 
-    // 6. Apply the manifest patch (narrowed per requester) onto the resolved template, producing the
+    // 7. Apply the manifest patch (narrowed per requester) onto the resolved template, producing the
     //    in-memory instance construction runs (never written to disk — §7.12.6).
     let entries = build_patch(pin, &patch_pairs).map_err(|e| deny(status::DENIED, e))?;
     let instance = kennel_lib_policy::patch::instantiate(&template, &entries)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
     tr.step("spawn: manifest patch applied");
-
-    // 7. Atomically claim a max_instances slot (§7.12.7) — the fork-bomb bound. Held until the
-    //    spawned kennel terminates (the construction thread holds the guard); full ⇒ a clean refusal.
-    let max = rt.grant.max_instances;
-    let slot = claim_slot(&rt.live, max, &rt.parent_alive).ok_or_else(|| {
-        deny(
-            status::CEILING_FULL,
-            format!("max_instances ceiling ({max}) is full"),
-        )
-    })?;
 
     // 8. Mint the channel; return the instance plus the requester's and spawned ends and the slot.
     let (requester_ends, channel) =

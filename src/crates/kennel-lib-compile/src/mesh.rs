@@ -98,6 +98,38 @@ fn af_unix_endpoint_under_run(endpoint: &str) -> bool {
             .any(|c| c.as_os_str() == std::ffi::OsStr::new(".."))
 }
 
+/// The `[[consumes]]` half of [`validate`]: each entry needs a well-formed `name` (and `key`),
+/// and a `reason`.
+fn validate_consumes(policy: &SourcePolicy, errs: &mut Vec<String>) {
+    for c in &policy.consumes {
+        if c.name.is_empty() {
+            errs.push("[[consumes]] entry is missing `name`".to_owned());
+        } else if !kennel_lib_policy::meshname::name_ok(&c.name) {
+            errs.push(format!(
+                "[[consumes]] name `{}` is not a well-formed capability name",
+                c.name.escape_debug()
+            ));
+        }
+        if let Some(key) = c
+            .key
+            .as_deref()
+            .filter(|k| !kennel_lib_policy::meshname::key_ok(k))
+        {
+            errs.push(format!(
+                "[[consumes]] `{}` key `{}` is not a well-formed token",
+                who(Some(c.name.as_str())),
+                key.escape_debug()
+            ));
+        }
+        if c.reason.as_deref().unwrap_or("").is_empty() {
+            errs.push(format!(
+                "[[consumes]] `{}` is missing a `reason`",
+                who(Some(c.name.as_str()))
+            ));
+        }
+    }
+}
+
 /// Validate the `[[provides]]` / `[[consumes]]` entries of a resolved source policy.
 ///
 /// `authority` is the tier-aware reserved-namespace gate: a reserved name may be claimed
@@ -121,6 +153,14 @@ pub fn validate(
             errs.push("[[provides]] entry is missing `name`".to_owned());
         } else {
             let name = p.name.as_str();
+            if !kennel_lib_policy::meshname::name_ok(name) {
+                errs.push(format!(
+                    "[[provides]] name `{}` is not a well-formed capability name: use letters, \
+                     digits, `.`, `-` and `_`, starting with a letter or digit, with no empty \
+                     label (`kenneld` uses the name as a directory name)",
+                    name.escape_debug()
+                ));
+            }
             if !authority.permits(name) {
                 errs.push(format!(
                     "[[provides]] `{name}` is a reserved capability name: it may be claimed only \
@@ -136,6 +176,18 @@ pub fn validate(
                      (duplicate provide)"
                 ));
             }
+        }
+        if let Some(key) = p
+            .key
+            .as_deref()
+            .filter(|k| !kennel_lib_policy::meshname::key_ok(k))
+        {
+            errs.push(format!(
+                "[[provides]] `{}` key `{}` is not a well-formed token (letters, digits, `.`, \
+                 `-`, `_`; it becomes part of a directory name)",
+                who(Some(p.name.as_str())),
+                key.escape_debug()
+            ));
         }
         // `shape` is required at parse. An `af-unix` endpoint is optional — `kenneld` defaults it to
         // `/run/<name>[.key]/sock`. When supplied, it must be a safe rendezvous bind target: absolute,
@@ -172,17 +224,7 @@ pub fn validate(
         }
     }
 
-    for c in &policy.consumes {
-        if c.name.is_empty() {
-            errs.push("[[consumes]] entry is missing `name`".to_owned());
-        }
-        if c.reason.as_deref().unwrap_or("").is_empty() {
-            errs.push(format!(
-                "[[consumes]] `{}` is missing a `reason`",
-                who(Some(c.name.as_str()))
-            ));
-        }
-    }
+    validate_consumes(policy, &mut errs);
 
     if errs.is_empty() {
         Ok(Vec::new())

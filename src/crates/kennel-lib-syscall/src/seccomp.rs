@@ -89,7 +89,17 @@ impl Filter {
             arch,
         )
         .map_err(io::Error::other)?;
-        BpfProgram::try_from(filter).map_err(io::Error::other)
+        let program = BpfProgram::try_from(filter).map_err(io::Error::other)?;
+        if cfg!(target_arch = "x86_64") {
+            // The action the filter applies to what it does not allow.
+            let refuse = if self.match_action == Action::Allow {
+                self.mismatch_action
+            } else {
+                self.match_action
+            };
+            return Ok(with_x32_refused(program, refuse));
+        }
+        Ok(program)
     }
 
     /// Compile and install the filter on every thread of the current process.
@@ -104,6 +114,49 @@ impl Filter {
         let prog = self.compile()?;
         seccompiler::apply_filter_all_threads(&prog).map_err(io::Error::other)
     }
+}
+
+/// The bit an `x86_64` kernel sets in the syscall number for the x32 ABI (`__X32_SYSCALL_BIT`).
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+/// Put a guard in front of `program` that applies `refuse` to every x32 syscall.
+///
+/// On an `x86_64` kernel built with the x32 ABI, each syscall has a second number — the same call
+/// with [`X32_SYSCALL_BIT`] set — reported under the *same* audit architecture as the native
+/// one. A filter keyed on native numbers therefore never matches it: every entry of a denylist
+/// (`mount`, `bpf`, `ptrace`, …) could be reached through its x32 twin. No kennel workload is
+/// an x32 binary, so the whole x32 range is refused before the per-syscall rules run.
+///
+/// The guard is three classic-BPF instructions: load the syscall number, skip the next
+/// instruction if it is below the x32 bit, return `refuse`. The rest of the program follows
+/// unchanged (its jumps are relative).
+fn with_x32_refused(program: BpfProgram, refuse: Action) -> BpfProgram {
+    // Classic BPF opcodes (`linux/bpf_common.h`) and the offset of `nr` in `struct seccomp_data`.
+    const LD_W_ABS: u16 = 0x20;
+    const JMP_JGE_K: u16 = 0x35;
+    const RET_K: u16 = 0x06;
+    const SECCOMP_DATA_NR: u32 = 0;
+    let guard = [
+        seccompiler::sock_filter {
+            code: LD_W_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_NR,
+        },
+        seccompiler::sock_filter {
+            code: JMP_JGE_K,
+            jt: 0,
+            jf: 1,
+            k: X32_SYSCALL_BIT,
+        },
+        seccompiler::sock_filter {
+            code: RET_K,
+            jt: 0,
+            jf: 0,
+            k: u32::from(SeccompAction::from(refuse)),
+        },
+    ];
+    guard.into_iter().chain(program).collect()
 }
 
 /// Resolve a syscall *name* to its number on the build target, using the `libc`
@@ -163,6 +216,33 @@ pub fn syscall_number(name: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_x32_guard_refuses_the_whole_range_before_the_rules() {
+        let rules = Filter::denylist(&[libc::SYS_mount], Action::Errno(1))
+            .compile()
+            .expect("compiles");
+        let guarded = with_x32_refused(rules.clone(), Action::Errno(1));
+        assert_eq!(guarded.len(), rules.len().saturating_add(3));
+        let codes: Vec<(u16, u8, u8, u32)> = guarded
+            .iter()
+            .take(3)
+            .map(|i| (i.code, i.jt, i.jf, i.k))
+            .collect();
+        // Load nr; if nr >= the x32 bit fall through to the refusal, else skip it.
+        assert_eq!(
+            codes,
+            [
+                (0x20, 0, 0, 0),
+                (0x35, 0, 1, 0x4000_0000),
+                (0x06, 0, 0, libc::SECCOMP_RET_ERRNO | 1),
+            ]
+        );
+        // The original program follows untouched.
+        let tail: Vec<(u16, u32)> = guarded.iter().skip(3).map(|i| (i.code, i.k)).collect();
+        let original: Vec<(u16, u32)> = rules.iter().map(|i| (i.code, i.k)).collect();
+        assert_eq!(tail, original);
+    }
 
     #[test]
     fn syscall_names_resolve_to_libc_numbers() {

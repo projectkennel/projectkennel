@@ -506,7 +506,8 @@ fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, String
     changes.sort();
     eprintln!("kennel: persisted changes in `{name}` (the diff against the image pin):");
     for (path, marker) in &changes {
-        eprintln!("  {marker} {path}");
+        // A name in the upper is whatever the workload called the file.
+        eprintln!("  {marker} {}", kennel_lib_text::sanitise_for_log(path));
     }
     eprintln!(
         "  restore some: kennel oci revert {name} -- <path>…    all: kennel oci revert {name}"
@@ -553,30 +554,62 @@ fn revert_paths(
             "`{name}` has no persisted upper (discard/readonly) — nothing to revert"
         ));
     }
+    // The upper is written by the workload, so nothing in it is trusted to be what its name
+    // says: a directory on the way to the target may have been replaced by a symlink out of the
+    // store. Each target is therefore reached through a handle on its parent directory, resolved
+    // inside the upper, and only then removed by its final name — never by a path re-walked from
+    // the top.
+    let root = kennel_lib_syscall::fd::RootDir::open(upper)
+        .map_err(|e| format!("opening {}: {e}", upper.display()))?;
     let mut restored = 0_u32;
     for raw in paths {
         let rel = sanitize_rel(raw)?;
-        let target = upper.join(&rel);
-        // Defence in depth against a symlinked component: the resolved target must stay under upper.
-        if !target.starts_with(upper) {
-            return Err(format!("`{raw}` escapes the upper"));
-        }
+        let not_persisted = || {
+            eprintln!(
+                "  /{} is not persisted (already at the image) — skipped",
+                rel.display()
+            );
+        };
+        let Some(leaf) = rel.file_name() else {
+            return Err(format!("`{raw}` is not a path within the image"));
+        };
+        let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent_dir: std::os::fd::OwnedFd = match parent {
+            None => std::fs::File::open(upper)
+                .map_err(|e| format!("opening {}: {e}", upper.display()))?
+                .into(),
+            Some(parent) => {
+                let is_dir = root
+                    .is_dir(parent)
+                    .map_err(|e| format!("resolving `{raw}` in the upper: {e}"))?;
+                let handle = root
+                    .lookup(parent)
+                    .map_err(|e| format!("resolving `{raw}` in the upper: {e}"))?;
+                match handle {
+                    Some(handle) if is_dir => handle,
+                    _ => {
+                        not_persisted();
+                        continue;
+                    }
+                }
+            }
+        };
+        let target = kennel_lib_syscall::fd::proc_path(&parent_dir).join(leaf);
         match std::fs::symlink_metadata(&target) {
             Ok(md) => {
+                // `remove_dir_all` does not follow links inside the tree it removes, and a
+                // symlink at the target itself is removed as a link.
                 if md.is_dir() {
                     std::fs::remove_dir_all(&target)
-                        .map_err(|e| format!("removing {}: {e}", target.display()))?;
+                        .map_err(|e| format!("removing /{}: {e}", rel.display()))?;
                 } else {
                     std::fs::remove_file(&target)
-                        .map_err(|e| format!("removing {}: {e}", target.display()))?;
+                        .map_err(|e| format!("removing /{}: {e}", rel.display()))?;
                 }
                 eprintln!("  restored /{} to the image", rel.display());
                 restored = restored.saturating_add(1);
             }
-            Err(_) => eprintln!(
-                "  /{} is not persisted (already at the image) — skipped",
-                rel.display()
-            ),
+            Err(_) => not_persisted(),
         }
     }
     eprintln!("kennel: reverted {restored} path(s) in `{name}` toward the image pin");
@@ -1271,6 +1304,44 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revert_does_not_follow_a_symlink_planted_in_the_upper() {
+        // The workload replaced a directory in the upper with a symlink to somewhere else of the
+        // operator's. Reverting a path "under" it must not delete through the link.
+        let base = std::env::temp_dir().join(format!("kennel-oci-revert-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let upper = base.join("upper");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(upper.join("etc")).expect("upper");
+        std::fs::create_dir_all(outside.join("precious")).expect("outside");
+        std::fs::write(outside.join("precious/file"), b"keep").expect("write");
+        std::fs::write(upper.join("etc/changed"), b"x").expect("write");
+        std::os::unix::fs::symlink(&outside, upper.join("link")).expect("symlink");
+
+        // Through the planted link: nothing outside is touched.
+        revert_paths("img", &upper, &["/link/precious".to_owned()]).expect("revert");
+        assert!(
+            outside.join("precious/file").exists(),
+            "followed the link out of the upper"
+        );
+        // The link itself is a persisted change and is removed as a link.
+        revert_paths("img", &upper, &["/link".to_owned()]).expect("revert link");
+        assert!(
+            upper.join("link").symlink_metadata().is_err(),
+            "link removed"
+        );
+        assert!(
+            outside.join("precious/file").exists(),
+            "its target is intact"
+        );
+        // An ordinary revert still works, files and directories.
+        revert_paths("img", &upper, &["/etc/changed".to_owned()]).expect("revert file");
+        assert!(!upper.join("etc/changed").exists());
+        revert_paths("img", &upper, &["etc".to_owned()]).expect("revert dir");
+        assert!(!upper.join("etc").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn names_must_be_safe_single_components() {

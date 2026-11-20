@@ -327,10 +327,8 @@ fn ensure_workspace_manifests(settled_bytes: &[u8]) {
         );
     }
     let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
-    for entry in &policy.effective_policy.fs.write {
-        let Some(root) = review::writable_root(entry, &home) else {
-            continue; // not a home-or-absolute path we can resolve to a host dir
-        };
+    let cwd = std::env::current_dir().ok();
+    for root in review::writable_roots(&policy, &home, cwd.as_deref()) {
         if !root.is_dir() {
             continue; // a writable file (not a workspace dir) gets no manifest
         }
@@ -376,10 +374,8 @@ fn workspace_watch_paths(settled_bytes: &[u8]) -> Vec<PathBuf> {
     };
     let catalogue = kennel_lib_manifest::Catalogue::load();
     let mut paths = Vec::new();
-    for entry in &policy.effective_policy.fs.write {
-        let Some(root) = review::writable_root(entry, &home) else {
-            continue;
-        };
+    let cwd = std::env::current_dir().ok();
+    for root in review::writable_roots(&policy, &home, cwd.as_deref()) {
         if !root.is_dir() {
             continue;
         }

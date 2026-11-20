@@ -266,6 +266,10 @@ struct KennelMeta {
     /// selects the named section; it holds no per-service filter table of its own. `None` until the
     /// policy loads (set by [`Shared::set_settled`] after `reserve`, mirroring [`Shared::set_broker`]).
     settled: Option<std::sync::Arc<kennel_lib_policy::SettledPolicy>>,
+    /// The enablement tier this kennel was started at **as a supervised mesh provider**, or `None`
+    /// for an ordinary run. A kennel may register a mesh service only as a provider: this is set
+    /// by the daemon when the supervisor activates it, never by anything the kennel says.
+    provider_tier: Option<crate::catalogue::Tier>,
 }
 
 /// One entry in `KennelMeta::consumed`: the name, expected shape, and whether the
@@ -318,6 +322,22 @@ fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
         &rules.own,
         &rules.deny_talk,
     ))
+}
+
+/// Whether the running kennel at `ctx` is the provider of the mesh service `name` at `tier`.
+///
+/// The authority for a mesh registration: the kennel was started by the supervisor as an enabled
+/// provider at exactly this bus's tier, and its **signed** policy declares the name in
+/// `[[provides]]` (the reserved-namespace gate was applied to that policy at compile and is sealed
+/// in its signature). Both facts are the daemon's own records; nothing here comes from the caller.
+fn provides_at(reg: &Registry, ctx: u16, tier: crate::catalogue::Tier, name: &str) -> bool {
+    reg.kennels.values().any(|m| {
+        m.ctx == ctx
+            && m.provider_tier == Some(tier)
+            && m.settled
+                .as_ref()
+                .is_some_and(|s| s.mesh.provides.iter().any(|p| p.name == name))
+    })
 }
 
 /// The daemon's shared state, cloned (via `Arc`) into each connection thread.
@@ -708,15 +728,25 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
                 // owned by kenneld's own uid); the socket lets kenneld request movable clones.
                 let mount_dir = crate::mesh::host_rp_dir(tier, name, key);
-                let (holder_pid, holder_sock) = crate::mesh_holder::spawn(&mount_dir)?;
+                let holder = crate::mesh_holder::spawn(&mount_dir)?;
+                // Who may register a service on this bus: the supervised provider of that name at
+                // this bus's tier, decided from the daemon's registry (see `provides_at`).
+                let registry = std::sync::Arc::clone(&self.registry);
+                let may_register: crate::mesh_bus::RegisterFn =
+                    std::sync::Arc::new(move |ctx: u16, service: &str| {
+                        let reg = registry
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        provides_at(&reg, ctx, tier, service)
+                    });
                 let mb = crate::mesh_bus::MeshBus::create(
                     tier,
                     name,
                     key,
                     &w,
                     mediation,
-                    holder_pid,
-                    holder_sock,
+                    may_register,
+                    holder,
                 )?;
                 e.insert(mb)
             }
@@ -780,6 +810,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 broker: None,
                 consumed: Vec::new(),
                 settled: None,
+                provider_tier: None,
             },
         );
         drop(reg);
@@ -809,6 +840,17 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(meta) = reg.kennels.get_mut(name) {
             meta.settled = Some(settled);
+        }
+    }
+
+    /// Record that the named kennel runs as a supervised mesh provider enabled at `tier`.
+    fn set_provider_tier(&self, name: &str, tier: crate::catalogue::Tier) {
+        let mut reg = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(meta) = reg.kennels.get_mut(name) {
+            meta.provider_tier = Some(tier);
         }
     }
 
@@ -1046,10 +1088,27 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 }
 
+/// How long the accept loop waits after a failed `accept` before trying again.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many `accept` calls may fail in a row before the listener is taken to be unusable. At
+/// [`ACCEPT_BACKOFF`] apart this is about half a minute of uninterrupted failure.
+const ACCEPT_FAILURE_LIMIT: u32 = 300;
+
+/// Whether the accept loop gives up after `consecutive` failed `accept` calls in a row.
+///
+/// A failure that passes (no free descriptor or memory, a connection the peer aborted, an
+/// interrupted call) must not end the daemon and every kennel it supervises; one that never
+/// passes means the listening socket itself is gone.
+const fn accept_failures_are_fatal(consecutive: u32) -> bool {
+    consecutive >= ACCEPT_FAILURE_LIMIT
+}
+
 /// Accept connections on `listener` forever, handling each on its own thread.
 ///
 /// # Errors
-/// An OS error if accepting a connection fails.
+/// The last OS error once `accept` has failed `ACCEPT_FAILURE_LIMIT` times in a row. A failure
+/// that passes (descriptor exhaustion, an aborted connection) is logged and retried.
 pub fn serve<P, L>(
     shared: &Arc<Shared<P, L>>,
     listener: &std::os::unix::net::UnixListener,
@@ -1067,8 +1126,25 @@ where
         std::sync::Arc::clone(shared),
     )));
     crate::supervisor::autostart(shared);
+    let mut failures: u32 = 0;
     for conn in listener.incoming() {
-        let mut conn = conn?;
+        // One failed `accept` must not end the daemon and every kennel it supervises. Back off
+        // briefly so a persistent condition does not spin, and keep serving.
+        let mut conn = match conn {
+            Ok(conn) => {
+                failures = 0;
+                conn
+            }
+            Err(e) => {
+                failures = failures.saturating_add(1);
+                if accept_failures_are_fatal(failures) {
+                    return Err(e);
+                }
+                eprintln!("kenneld: accept on the control socket failed ({e}); retrying");
+                std::thread::sleep(ACCEPT_BACKOFF);
+                continue;
+            }
+        };
         // Boundary 7 (04-trust-boundaries.md): only the user this daemon serves
         // may drive the control socket. The kernel stamps SO_PEERCRED at connect,
         // so this cannot be spoofed; it is defence-in-depth behind the socket's
@@ -1394,6 +1470,13 @@ pub fn run_kennel<P, L>(
             loaded.unix.sockets.len()
         ));
     }
+    // A policy that depends on Landlock scoping is refused on a kernel that cannot scope, before
+    // anything is built: the kennel would otherwise start with that control silently absent.
+    if let Err(reason) =
+        check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
+    {
+        return fail(shared, &req.kennel, ctx, conn, "landlock", reason);
+    }
     // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
     // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
     // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
@@ -1486,7 +1569,8 @@ pub fn run_kennel<P, L>(
                     loaded.cwd.grant,
                     resolved.display()
                 ));
-                loaded.plan.grant_cwd(resolved, writable);
+                let mask_manifest = loaded.settled.effective_policy.trust.manifest;
+                loaded.plan.grant_cwd(resolved, writable, mask_manifest);
             }
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "fs.cwd", reason),
         }
@@ -1541,15 +1625,16 @@ pub fn run_kennel<P, L>(
     // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
-    // are running the policy's own workload (an unpinned `--` override is a different
-    // command the pin does not cover). On success it returns the OPEN fd of the verified
+    // are running the policy's own program — with or without arguments appended under
+    // `allowed_args` (an unpinned `--` override is a different command the pin does not
+    // cover). On success it returns the OPEN fd of the verified
     // binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
     // `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
     // construction, so it stays in scope until the end of bring-up.
     // Held only to keep the fd open (its raw value is what's used, via the plan); never read.
     #[allow(clippy::collection_is_never_read)]
     let _workload_fd;
-    if !loaded.workload.sha256.is_empty() && req.argv.is_empty() {
+    if !loaded.workload.sha256.is_empty() && runs_policy_program(req, &loaded.workload) {
         match verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256) {
             Ok(fd) => {
                 loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
@@ -1754,7 +1839,7 @@ pub fn run_kennel<P, L>(
         .identity
         .audit_base
         .as_ref()
-        .map(|base| base.join(&req.kennel));
+        .map(|base| base.join(audit_dir_name(&req.kennel)));
     // Hand the seal the interactive return socket's raw fd (it sends the pty master
     // back over it during pre-exec). `return_sock` keeps the fd open until after the
     // spawn returns, so the forked child still has it.
@@ -1970,6 +2055,11 @@ pub fn run_kennel<P, L>(
     // (dbus, tun) can pull the section it needs to police the session — kenneld selects it by the
     // consume's shape, holding no filter table. The `Arc` clone is cheap and leaves `loaded` intact.
     shared.set_settled(&req.kennel, std::sync::Arc::clone(&loaded.settled));
+    // …and, for a supervised provider, the tier it was enabled at: what lets it (and nothing else)
+    // register the services its signed policy provides.
+    if let Some(tier) = provider_tier {
+        shared.set_provider_tier(&req.kennel, tier);
+    }
 
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
@@ -2088,6 +2178,17 @@ pub fn run_kennel<P, L>(
             // The one daemon-global tun-egress sink (§8 / W2): the tun-broker's manager registers into
             // it, and each `[net.udp]` consumer's manager delivers a session through it.
             tun_sink: shared.tun_sink.clone(),
+            // Only a kennel whose SIGNED policy provides the tun capability may register that
+            // sink. The name is in the reserved namespace, so the compiler admitted the provide
+            // only through a template signed at the tier the name requires, and that verdict is
+            // sealed in the settled signature the daemon just verified. (Not "supervised only":
+            // an operator may run the broker by hand.)
+            tun_provider: loaded
+                .settled
+                .mesh
+                .provides
+                .iter()
+                .any(|p| p.name == kennel_lib_binder::service::tun_broker::CAPABILITY),
         });
     }
 
@@ -2520,6 +2621,82 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
     Ok(resolved)
 }
 
+/// The audit directory a kennel's events are written under.
+///
+/// A named kennel has its own. A dynamically spawned kennel is named `spawn-<requester ctx>-<n>`
+/// with a fresh `<n>` every time, and giving each its own directory left one behind per spawn,
+/// for ever: a requester that spawns in a loop grew the audit tree without bound. Spawned kennels
+/// of one requester share `spawn-<requester ctx>`; every event still carries the kennel's full
+/// name and uuid, so nothing is merged that cannot be told apart.
+fn audit_dir_name(kennel: &str) -> &str {
+    let Some(rest) = kennel.strip_prefix("spawn-") else {
+        return kennel;
+    };
+    match rest.split_once('-') {
+        Some((ctx, id))
+            if !ctx.is_empty()
+                && ctx.bytes().all(|b| b.is_ascii_digit())
+                && !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            kennel
+                .get(..kennel.len().saturating_sub(id.len().saturating_add(1)))
+                .unwrap_or(kennel)
+        }
+        _ => kennel,
+    }
+}
+
+/// The Landlock ABI that introduced scoping (abstract `AF_UNIX` sockets and signals; Linux 6.12).
+const LANDLOCK_SCOPE_ABI: u32 = 6;
+
+/// Whether a policy with this network mode depends on Landlock scoping.
+///
+/// A kennel with its own network namespace has an abstract-socket namespace of its own, empty by
+/// construction, so scoping there is defence in depth. A `host`-mode kennel shares the host's
+/// network namespace: every abstract socket a host daemon binds is reachable by name, the policy
+/// cannot grant that (`abstract = "allow"` with `host` does not compile), and the Landlock scope
+/// is the only thing that refuses the connect.
+const fn needs_landlock_scope(mode: kennel_lib_policy::NetMode) -> bool {
+    matches!(mode, kennel_lib_policy::NetMode::Host)
+}
+
+/// Refuse a policy that needs Landlock scoping on a kernel whose Landlock cannot scope.
+///
+/// `abi` is the running kernel's Landlock ABI (the daemon and the kennel share the kernel). The
+/// seal enables every scope the kernel supports and none it lacks, so below ABI 6 a kennel
+/// starts unscoped without any error; for a policy that relies on the scope that must be a
+/// refusal. A policy that does not rely on it is unaffected by the kernel's ABI here.
+fn check_landlock_floor(
+    mode: kennel_lib_policy::NetMode,
+    abi: io::Result<u32>,
+) -> Result<(), String> {
+    if !needs_landlock_scope(mode) {
+        return Ok(());
+    }
+    match abi {
+        Ok(abi) if abi >= LANDLOCK_SCOPE_ABI => Ok(()),
+        Ok(abi) => Err(format!(
+            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI} (Linux 6.12) to keep the \
+             workload off the host's abstract unix sockets; this kernel provides ABI {abi}"
+        )),
+        Err(e) => Err(format!(
+            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI}, and the kernel's \
+             Landlock ABI could not be read: {e}"
+        )),
+    }
+}
+
+/// Whether the command about to run is the policy's own program: no `--` command was given, or the
+/// one given is appended to a pinned workload's argv under `allowed_args`. The sha256 pin binds the
+/// program, so it applies in both cases; appended arguments do not change which binary runs.
+const fn runs_policy_program(
+    req: &StartRequest,
+    workload: &kennel_lib_policy::WorkloadRuntime,
+) -> bool {
+    req.argv.is_empty() || (workload.pinned && workload.allowed_args)
+}
+
 fn effective_workload(
     req: &StartRequest,
     workload: &kennel_lib_policy::WorkloadRuntime,
@@ -2815,6 +2992,64 @@ mod tests {
         let (argv, _) = effective_workload(&start_req(&["--extra", "x"], false), &w)
             .expect("allowed_args appends");
         assert_eq!(argv, vec!["/launcher", "--base", "--extra", "x"]);
+    }
+
+    #[test]
+    fn only_a_persistent_accept_failure_ends_the_loop() {
+        assert!(!accept_failures_are_fatal(1), "one failure is retried");
+        assert!(!accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT - 1));
+        assert!(accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT));
+    }
+
+    #[test]
+    fn spawned_kennels_of_one_requester_share_an_audit_directory() {
+        assert_eq!(audit_dir_name("spawn-7-00000000002a"), "spawn-7");
+        assert_eq!(audit_dir_name("spawn-7-00000000002b"), "spawn-7");
+        // Anything else keeps its own name, including a user kennel that merely starts alike.
+        for own in [
+            "build",
+            "spawn",
+            "spawn-",
+            "spawn-x-1",
+            "spawn-7",
+            "spawn-7-zz",
+        ] {
+            assert_eq!(audit_dir_name(own), own);
+        }
+    }
+
+    #[test]
+    fn host_mode_needs_a_kernel_that_can_scope() {
+        use kennel_lib_policy::NetMode;
+        // Host mode shares the host's abstract-socket namespace: ABI 6 or refuse.
+        assert!(check_landlock_floor(NetMode::Host, Ok(6)).is_ok());
+        assert!(check_landlock_floor(NetMode::Host, Ok(7)).is_ok());
+        let err = check_landlock_floor(NetMode::Host, Ok(5)).expect_err("ABI 5 cannot scope");
+        assert!(err.contains("ABI 5"), "{err}");
+        assert!(check_landlock_floor(
+            NetMode::Host,
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        )
+        .is_err());
+        // A kennel with its own network namespace does not depend on the scope.
+        for mode in [NetMode::None, NetMode::Constrained, NetMode::Unconstrained] {
+            assert!(check_landlock_floor(mode, Ok(5)).is_ok(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn the_digest_pin_covers_a_pinned_program_with_appended_arguments() {
+        let mut w = workload(&["tool"], None, true);
+        // No `--` command: the policy's program.
+        assert!(runs_policy_program(&start_req(&[], false), &w));
+        // A forced override of a pinned workload is a different program.
+        assert!(!runs_policy_program(&start_req(&["other"], true), &w));
+        // Arguments appended under `allowed_args` leave the program the policy's.
+        w.allowed_args = true;
+        assert!(runs_policy_program(&start_req(&["--extra"], false), &w));
+        // Unpinned: a `--` command replaces the program, so the pin does not describe it.
+        w.pinned = false;
+        assert!(!runs_policy_program(&start_req(&["other"], false), &w));
     }
 
     #[test]

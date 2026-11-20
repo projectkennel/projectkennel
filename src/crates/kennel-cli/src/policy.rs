@@ -865,10 +865,13 @@ fn print_risks_human(name: &str, report: &kennel_lib_compile::risks::RiskReport)
             } else {
                 ""
             };
-            println!("  {:<6} {title}{derived}", f.threat_id);
-            println!("         via {}", f.carrier);
+            // The tag, carrier and reason are the policy author's text; the title and residual
+            // come from the embedded catalogue.
+            let clean = kennel_lib_text::sanitise_for_log;
+            println!("  {:<6} {title}{derived}", clean(&f.threat_id));
+            println!("         via {}", clean(&f.carrier));
             if let Some(r) = &f.reason {
-                println!("         reason: {r}");
+                println!("         reason: {}", clean(r));
             }
             if !f.residual.is_empty() {
                 println!("         residual: {}", f.residual);
@@ -889,7 +892,11 @@ fn print_risks_human(name: &str, report: &kennel_lib_compile::risks::RiskReport)
             report.catalogue_version
         );
         for (tag, carrier) in &report.unknown_tags {
-            println!("  {tag}  via {carrier}");
+            println!(
+                "  {}  via {}",
+                kennel_lib_text::sanitise_for_log(tag),
+                kennel_lib_text::sanitise_for_log(carrier)
+            );
         }
     }
     println!("\nFull threat definitions and residuals: docs/reference/THREATS.md");
@@ -1226,7 +1233,9 @@ fn show_file(
 fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
     use kennel_lib_policy::NetMode;
     let ep = &policy.effective_policy;
-    println!("policy `{}`", policy.name);
+    // Everything printed from here is the policy's own text, which may be someone else's.
+    let clean = kennel_lib_text::sanitise_for_log;
+    println!("policy `{}`", clean(&policy.name));
 
     // Network: the mode + the two enforcement planes (§7.5.4). `[net.proxy]` is the
     // user-space egress policy (by-name+cidr, resolve-and-pin) the SOCKS delegate runs in the
@@ -1301,10 +1310,10 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
 
     // Filesystem grants.
     if !ep.fs.read.is_empty() {
-        println!("  fs.read: {}", ep.fs.read.join(", "));
+        println!("  fs.read: {}", clean(&ep.fs.read.join(", ")));
     }
     if !ep.fs.write.is_empty() {
-        println!("  fs.write: {}", ep.fs.write.join(", "));
+        println!("  fs.write: {}", clean(&ep.fs.write.join(", ")));
     }
 
     // Exec allowlist.
@@ -1326,7 +1335,10 @@ fn print_effective_policy(policy: &kennel_lib_policy::SettledPolicy) {
         } else {
             format!(" [{} sha256 pin(s)]", policy.workload.sha256.len())
         };
-        println!("  workload: {}{pin}{sha}", policy.workload.argv.join(" "));
+        println!(
+            "  workload: {}{pin}{sha}",
+            clean(&policy.workload.argv.join(" "))
+        );
     }
 
     // TTL.
@@ -1728,11 +1740,12 @@ fn print_unix_grants(policy: &kennel_lib_policy::SettledPolicy) {
         if unix.sockets.len() == 1 { "" } else { "s" },
     );
     for sock in &unix.sockets {
-        println!("  {}", sock.name);
-        println!("    real:  {}", sock.real);
-        println!("    shim:  {}", sock.shim);
+        let clean = kennel_lib_text::sanitise_for_log;
+        println!("  {}", clean(&sock.name));
+        println!("    real:  {}", clean(&sock.real));
+        println!("    shim:  {}", clean(&sock.shim));
         if let Some(env) = &sock.env {
-            println!("    env:   {env}");
+            println!("    env:   {}", clean(env));
         }
         println!();
     }

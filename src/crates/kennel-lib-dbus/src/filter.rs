@@ -106,6 +106,13 @@ impl Filter {
             .any(|p| pattern_admits(p, &call.destination))
             || call_admits(rules, call)
         {
+            // The bus driver is not an ordinary destination: its methods act on the BUS — own a
+            // name, activate a service, set the environment activated services start with,
+            // become a monitor. A grant of the driver (which every client needs, for `AddMatch`)
+            // admits only the methods a client needs, each checked against the policy.
+            if call.destination == BUS_DRIVER {
+                return driver_decision(rules, call);
+            }
             return Decision::Allow;
         }
         Decision::Deny(format!(
@@ -114,6 +121,113 @@ impl Filter {
             bus_name(call.bus)
         ))
     }
+}
+
+/// The bus driver's well-known name.
+pub const BUS_DRIVER: &str = "org.freedesktop.DBus";
+
+/// Driver methods that only read bus state or manage the caller's own match rules.
+const DRIVER_QUERIES: &[&str] = &[
+    "Hello",
+    "RemoveMatch",
+    "GetNameOwner",
+    "NameHasOwner",
+    "ListNames",
+    "ListActivatableNames",
+    "ListQueuedOwners",
+    "GetId",
+    "GetConnectionUnixUser",
+    "GetConnectionUnixProcessID",
+    "GetConnectionCredentials",
+];
+
+/// Decide a call addressed to the bus driver, once the policy has granted the driver at all.
+///
+/// Default-deny by method. What is admitted:
+///
+/// - the read-only queries in [`DRIVER_QUERIES`], and `Peer`/`Introspectable`/`Properties.Get*`;
+/// - `AddMatch`, unless the rule asks to eavesdrop;
+/// - `RequestName` / `ReleaseName`, only for a name the policy's `own` admits;
+/// - `StartServiceByName`, only for a destination the kennel may call anyway.
+///
+/// Everything else is refused — in particular `UpdateActivationEnvironment` (it sets the
+/// environment of services the bus later starts, outside any kennel) and `BecomeMonitor`. A
+/// method call may omit its interface, and the driver then resolves it by member alone, so an
+/// empty interface is judged as the driver's own.
+fn driver_decision(rules: &BusRules, call: &Call) -> Decision {
+    let refuse = |why: &str| {
+        Decision::Deny(format!(
+            "bus driver method {}.{} is not brokered: {why}",
+            call.interface, call.member
+        ))
+    };
+    let member = call.member.as_str();
+    match call.interface.as_str() {
+        "" | BUS_DRIVER => {}
+        "org.freedesktop.DBus.Peer" if matches!(member, "Ping" | "GetMachineId") => {
+            return Decision::Allow;
+        }
+        "org.freedesktop.DBus.Introspectable" if member == "Introspect" => {
+            return Decision::Allow;
+        }
+        "org.freedesktop.DBus.Properties" if matches!(member, "Get" | "GetAll") => {
+            return Decision::Allow;
+        }
+        _ => return refuse("not a method a client needs"),
+    }
+    if DRIVER_QUERIES.contains(&member) {
+        return Decision::Allow;
+    }
+    match member {
+        "AddMatch" => match first_string_arg(call) {
+            Some(rule) if !rule.contains("eavesdrop") => Decision::Allow,
+            Some(_) => refuse("an eavesdropping match rule"),
+            None => refuse("the match rule could not be read"),
+        },
+        "RequestName" | "ReleaseName" => match first_string_arg(call) {
+            Some(name) if rules.own.iter().any(|p| pattern_admits(p, name)) => Decision::Allow,
+            Some(name) => Decision::Deny(format!(
+                "{name} is not a name this kennel may own (the policy's `own` list)"
+            )),
+            None => refuse("the name could not be read"),
+        },
+        "StartServiceByName" => match first_string_arg(call) {
+            Some(name) if may_reach(rules, name) => Decision::Allow,
+            Some(name) => Decision::Deny(format!(
+                "{name} is not a destination this kennel may call, so it may not start it"
+            )),
+            None => refuse("the service name could not be read"),
+        },
+        _ => refuse("not a method a client needs"),
+    }
+}
+
+/// Whether the kennel may address `name` at all: not refused to brokering, not explicitly
+/// denied, and admitted by `talk` or by the destination half of a `call` entry.
+fn may_reach(rules: &BusRules, name: &str) -> bool {
+    !is_refused(name)
+        && !rules.deny_talk.iter().any(|p| pattern_admits(p, name))
+        && (rules.talk.iter().any(|p| pattern_admits(p, name))
+            || rules.call.iter().any(|entry| {
+                entry
+                    .split_once('=')
+                    .is_some_and(|(dest, _)| pattern_admits(dest, name))
+            }))
+}
+
+/// The first argument of `call`, if it is a string: the body of a message whose signature
+/// starts with `s` begins with a little-endian `u32` length, the bytes, and a NUL.
+fn first_string_arg(call: &Call) -> Option<&str> {
+    if !call.signature.starts_with('s') || call.body_endian != b'l' {
+        return None;
+    }
+    let (len, rest) = call.body.split_first_chunk::<4>()?;
+    let len = usize::try_from(u32::from_le_bytes(*len)).ok()?;
+    let text = rest.get(..len)?;
+    if rest.get(len) != Some(&0) {
+        return None;
+    }
+    std::str::from_utf8(text).ok()
 }
 
 /// Whether a `call` entry (`destination=interface.member`) admits this call: its destination
@@ -184,6 +298,126 @@ mod tests {
             }),
             system: None,
         }
+    }
+
+    /// A call to the bus driver carrying one string argument.
+    fn driver_call(iface: &str, member: &str, arg: Option<&str>) -> Call {
+        let mut c = call(Bus::Session, BUS_DRIVER, iface, member);
+        if let Some(arg) = arg {
+            c.signature = "s".to_owned();
+            c.body = u32::try_from(arg.len())
+                .expect("short")
+                .to_le_bytes()
+                .into_iter()
+                .chain(arg.bytes())
+                .chain([0])
+                .collect();
+        }
+        c
+    }
+
+    fn driver_filter() -> Filter {
+        Filter {
+            session: Some(BusRules {
+                talk: vec![
+                    BUS_DRIVER.to_owned(),
+                    "org.freedesktop.Notifications".to_owned(),
+                ],
+                own: vec!["org.example.App".to_owned()],
+                ..BusRules::default()
+            }),
+            system: None,
+        }
+    }
+
+    #[test]
+    fn a_driver_grant_admits_what_a_client_needs() {
+        let f = driver_filter();
+        for (iface, member, arg) in [
+            (BUS_DRIVER, "GetId", None),
+            ("", "GetNameOwner", Some("org.freedesktop.Notifications")),
+            (
+                BUS_DRIVER,
+                "AddMatch",
+                Some("type='signal',interface='org.x.Y'"),
+            ),
+            (BUS_DRIVER, "RemoveMatch", Some("type='signal'")),
+            (BUS_DRIVER, "ListNames", None),
+            ("org.freedesktop.DBus.Peer", "Ping", None),
+            ("org.freedesktop.DBus.Introspectable", "Introspect", None),
+            (BUS_DRIVER, "RequestName", Some("org.example.App")),
+            (
+                BUS_DRIVER,
+                "StartServiceByName",
+                Some("org.freedesktop.Notifications"),
+            ),
+        ] {
+            assert_eq!(
+                f.decide(&driver_call(iface, member, arg)),
+                Decision::Allow,
+                "{iface}.{member}({arg:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_driver_grant_does_not_open_the_bus() {
+        let f = driver_filter();
+        for (iface, member, arg) in [
+            // Sets the environment of services the bus activates later, outside any kennel.
+            (BUS_DRIVER, "UpdateActivationEnvironment", None),
+            ("", "UpdateActivationEnvironment", None),
+            ("org.freedesktop.DBus.Monitoring", "BecomeMonitor", None),
+            (BUS_DRIVER, "ReloadConfig", None),
+            // A name outside `own`.
+            (
+                BUS_DRIVER,
+                "RequestName",
+                Some("org.freedesktop.Notifications"),
+            ),
+            ("", "RequestName", Some("org.freedesktop.secrets")),
+            (BUS_DRIVER, "RequestName", None),
+            // Activating something the kennel may not call — or that is never brokered.
+            (BUS_DRIVER, "StartServiceByName", Some("org.gnome.Shell")),
+            (
+                BUS_DRIVER,
+                "StartServiceByName",
+                Some("org.freedesktop.systemd1"),
+            ),
+            // Eavesdropping.
+            (
+                BUS_DRIVER,
+                "AddMatch",
+                Some("eavesdrop=true,type='method_call'"),
+            ),
+            (BUS_DRIVER, "AddMatch", None),
+            ("org.freedesktop.DBus.Properties", "Set", None),
+            (BUS_DRIVER, "SomethingNew", None),
+        ] {
+            assert!(
+                matches!(
+                    f.decide(&driver_call(iface, member, arg)),
+                    Decision::Deny(_)
+                ),
+                "{iface}.{member}({arg:?}) must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_string_argument_is_not_read() {
+        let mut c = driver_call(BUS_DRIVER, "RequestName", Some("org.example.App"));
+        c.body.truncate(6);
+        assert!(first_string_arg(&c).is_none(), "truncated");
+        let mut c = driver_call(BUS_DRIVER, "RequestName", Some("org.example.App"));
+        c.body_endian = b'B';
+        assert!(
+            first_string_arg(&c).is_none(),
+            "big-endian bodies are not parsed"
+        );
+        let mut c = driver_call(BUS_DRIVER, "RequestName", Some("org.example.App"));
+        c.signature = "u".to_owned();
+        assert!(first_string_arg(&c).is_none(), "not a string");
     }
 
     #[test]

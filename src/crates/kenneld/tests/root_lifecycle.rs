@@ -91,6 +91,7 @@ fn run_manager() {
         None,
         None,
         kenneld::tun_sink::TunSink::new(),
+        false,
         None,
     )
     .expect("manager: become context manager");

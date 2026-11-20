@@ -65,7 +65,18 @@ impl FileSink {
         compress_after_seconds: Option<u64>,
         retain_count: Option<usize>,
     ) -> std::io::Result<Self> {
-        std::fs::create_dir_all(&dir)?;
+        // The audit trail is the operator's alone (documented 0700 / 0600). Set it explicitly:
+        // left to the umask it is world-readable on a default system, and it records what the
+        // workload reached, ran and was refused.
+        {
+            use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)?;
+            // An existing directory keeps its mode under `create`; tighten it.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(Self {
             dir,
             rotate_at_bytes,
@@ -247,11 +258,15 @@ impl Sink for FileSink {
         }
         let path = self.path_for(record.resource);
         self.maybe_rotate(record.resource, &path, line.len());
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| io_err("file", "open", &e))?;
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| io_err("file", "open", &e))?
+        };
         file.write_all(line.as_bytes())
             .map_err(|e| io_err("file", "write", &e))
     }

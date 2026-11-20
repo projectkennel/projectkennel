@@ -78,6 +78,23 @@ fn run() -> Result<(), u8> {
         return Err(REFUSED);
     }
 
+    // Each address is kernel memory on the host's loopback, and the 64-bit host part of the
+    // reserved subnet makes the space of valid addresses effectively unlimited. kenneld adds a
+    // handful per kennel; a caller driving this helper directly must not be able to add them
+    // without bound.
+    if matches!(op, Op::Add) {
+        let held = std::fs::read_to_string("/proc/net/if_inet6").map_or(0, |table| {
+            reserved_addresses(&table, kennel_privhelper::validate::reserved_prefix(&scope))
+        });
+        if held >= MAX_RESERVED_ADDRESSES {
+            eprintln!(
+                "kennel-privhelper-net: {held} addresses of this user's reserved subnet are \
+                 already on {LOOPBACK} (limit {MAX_RESERVED_ADDRESSES}); refusing to add more"
+            );
+            return Err(REFUSED);
+        }
+    }
+
     let cname = CString::new(LOOPBACK).map_err(|_| PROTOCOL)?;
     let ifindex = netlink::if_index(&cname).map_err(|e| {
         eprintln!("kennel-privhelper-net: resolve {LOOPBACK}: {e}");
@@ -92,6 +109,27 @@ fn run() -> Result<(), u8> {
         eprintln!("kennel-privhelper-net: {op} {addr}/{prefix} on {LOOPBACK}: {e}");
         INTERNAL
     })
+}
+
+/// The most addresses of one user's reserved subnet this helper will put on the loopback.
+const MAX_RESERVED_ADDRESSES: usize = 1024;
+
+/// How many addresses in `/proc/net/if_inet6` text are on the loopback and start with `prefix`.
+/// Each line is `<32 hex digits> <ifindex> <prefix len> <scope> <flags> <ifname>`.
+fn reserved_addresses(table: &str, prefix: [u8; 6]) -> usize {
+    use std::fmt::Write as _;
+    let mut want = String::with_capacity(12);
+    for byte in prefix {
+        let _ = write!(want, "{byte:02x}");
+    }
+    table
+        .lines()
+        .filter(|line| {
+            let mut fields = line.split_whitespace();
+            let addr = fields.next().unwrap_or_default();
+            addr.starts_with(&want) && fields.last() == Some(LOOPBACK)
+        })
+        .count()
 }
 
 /// The two operations: add the mirror address (at construction) or remove it (at
@@ -138,4 +176,30 @@ fn parse_args(args: &[String]) -> Result<(Op, u16, IpAddr, u8), u8> {
         .parse()
         .map_err(|_| usage())?;
     Ok((op, ctx, addr, prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_this_users_loopback_addresses_are_counted() {
+        let table = "\
+fd4b4e0000010001000000000000000001 01 80 00 80       lo
+fd4b4e0000010002000000000000000001 01 80 00 80       lo
+fd4b4e0000020001000000000000000001 01 80 00 80       lo
+fd4b4e0000010001000000000000000002 02 80 00 80     eth0
+00000000000000000000000000000001 01 80 10 80       lo
+";
+        // Two addresses of this user's subnet are on the loopback; one more is on another
+        // interface and one belongs to another user.
+        assert_eq!(
+            reserved_addresses(table, [0xfd, 0x4b, 0x4e, 0x00, 0x00, 0x01]),
+            2
+        );
+        assert_eq!(
+            reserved_addresses(table, [0xfd, 0x4b, 0x4e, 0x00, 0x00, 0x09]),
+            0
+        );
+    }
 }

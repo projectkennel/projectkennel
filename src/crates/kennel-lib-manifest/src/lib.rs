@@ -228,6 +228,10 @@ pub enum Error {
     Hash(String),
     /// The parsed manifest carries an unexpected `version`.
     Version(String),
+    /// The manifest, or the tree it describes, is not what a manifest may be: a trigger path
+    /// that leaves the workspace, a malformed hash, a blob that does not match its pin, or a
+    /// trigger that changed between review and re-pin.
+    Invalid(String),
 }
 
 impl std::fmt::Display for Error {
@@ -240,6 +244,7 @@ impl std::fmt::Display for Error {
                 f,
                 "unsupported manifest version `{v}` (want `{SCHEMA_VERSION}`)"
             ),
+            Self::Invalid(m) => write!(f, "manifest refused: {m}"),
         }
     }
 }
@@ -280,8 +285,60 @@ impl Manifest {
         if m.version != SCHEMA_VERSION {
             return Err(Error::Version(m.version));
         }
+        m.validate()?;
         Ok(m)
     }
+
+    /// Refuse a manifest whose contents could steer a revert or a diff outside the workspace.
+    ///
+    /// A manifest is read from the workspace, and a workspace can be a freshly cloned repository:
+    /// its author wrote the file. Every trigger path is joined to the workspace root and written
+    /// to on `--revert`, and every content hash names a blob file — so a path must be relative
+    /// plain names (no `..`, not absolute), and a content hash must be exactly `sha256:` plus 64
+    /// lowercase hex digits.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] naming the first offending entry.
+    pub fn validate(&self) -> Result<(), Error> {
+        for (path, entry) in &self.execution.triggers {
+            if !is_workspace_relative(path) {
+                return Err(Error::Invalid(format!(
+                    "trigger path `{}` is not a plain path inside the workspace",
+                    path.escape_debug()
+                )));
+            }
+            if entry.kind == TriggerKind::Content && !is_sha256(&entry.sha256) {
+                return Err(Error::Invalid(format!(
+                    "trigger `{}` carries a malformed content hash",
+                    path.escape_debug()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Whether `path` is a relative path made only of plain names (no `..`, no root, not empty).
+fn is_workspace_relative(path: &str) -> bool {
+    use std::path::Component;
+    let mut any = false;
+    for component in Path::new(path).components() {
+        if !matches!(component, Component::Normal(_)) {
+            return false;
+        }
+        any = true;
+    }
+    any && !path.contains('\0')
+}
+
+/// Whether `sha` is `sha256:` followed by exactly 64 lowercase hex digits.
+fn is_sha256(sha: &str) -> bool {
+    sha.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// Compute `sha256:<64-hex>` for a file via the system `sha256sum`, exactly as kenneld's
@@ -330,6 +387,12 @@ pub fn enumerate_triggers(root: &Path, catalogue: &Catalogue) -> Vec<String> {
     }
     for dir in &catalogue.dirs {
         let abs = root.join(dir);
+        // A directory trigger is the directory itself. If the workload replaced it with a symlink
+        // (`.git/hooks` → somewhere else), listing through the link would enumerate files that
+        // are not in the workspace — and a revert would then delete them, a re-pin copy them.
+        if !std::fs::symlink_metadata(&abs).is_ok_and(|m| m.file_type().is_dir()) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(&abs) else {
             continue;
         };
@@ -487,6 +550,11 @@ pub fn store_blob(root: &Path, path: &Path) -> Result<String, Error> {
 /// # Errors
 /// [`Error::Io`] if the blob is missing or unreadable.
 pub fn read_blob(root: &Path, sha: &str) -> Result<Vec<u8>, Error> {
+    // The hash names a file in the store: refuse anything that is not exactly a hash, so it
+    // cannot name a file anywhere else.
+    if !is_sha256(sha) {
+        return Err(Error::Invalid("malformed content hash".to_owned()));
+    }
     Ok(std::fs::read(store_dir(root).join(blob_name(sha)))?)
 }
 
@@ -741,8 +809,18 @@ pub fn apply_review(
     let mut errors = Vec::new();
     for change in changes {
         match change {
-            TriggerChange::Modified { path, .. } | TriggerChange::New { path, .. } => {
+            TriggerChange::Modified { path, current, .. }
+            | TriggerChange::New { path, current } => {
                 match pin_entry(root, path, "builtin", "review") {
+                    // Pin only what the operator was shown. The review hashed the file, the
+                    // operator read the diff and said yes — and a workload that is still running
+                    // can change the file in between. `current` is what the review saw.
+                    Ok(entry) if &signature_of(&entry) != current => {
+                        errors.push(Error::Invalid(format!(
+                            "`{}` changed after it was reviewed; it was not re-pinned",
+                            path.escape_debug()
+                        )));
+                    }
                     Ok(entry) => {
                         manifest.execution.triggers.insert(path.clone(), entry);
                     }
@@ -773,8 +851,9 @@ pub fn revert(root: &Path, change: &TriggerChange) -> Result<(), Error> {
             restore_entry(root, path, entry)
         }
         TriggerChange::New { path, .. } => {
-            // A catalogue-matching file with no pin is a planted trigger — remove it.
-            std::fs::remove_file(root.join(path))?;
+            // A catalogue-matching file with no pin is a planted trigger — remove it. The entry
+            // itself, inside the workspace: never whatever a symlink on the way points at.
+            workspace(root)?.remove(Path::new(path))?;
             Ok(())
         }
         TriggerChange::Unchanged { .. } => Ok(()),
@@ -784,33 +863,58 @@ pub fn revert(root: &Path, change: &TriggerChange) -> Result<(), Error> {
 /// Recreate `path` from its pinned [`TriggerEntry`] — blob bytes + mode for a content
 /// trigger, the pinned link target for a symlink.
 fn restore_entry(root: &Path, path: &str, entry: &TriggerEntry) -> Result<(), Error> {
-    let abs = root.join(path);
+    // The workspace is a tree the workload could write (and, for a cloned repository, one its
+    // author shaped). Resolve `path` INSIDE it by descriptor: a symlink in a parent directory is
+    // followed only within the workspace, and the entry itself is replaced, never followed — so
+    // a pinned `Makefile` swapped for a link to `~/.bashrc` restores the Makefile, not the link's
+    // target.
+    let tree = workspace(root)?;
+    let rel = Path::new(path);
     match entry.kind {
         TriggerKind::Content => {
-            let bytes = read_blob(root, &entry.sha256)?;
-            if let Some(parent) = abs.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&abs, bytes)?;
-            set_mode(&abs, &entry.mode)?;
+            let bytes = read_verified_blob(root, &entry.sha256)?;
+            let mode = u32::from_str_radix(&entry.mode, 8)
+                .map_err(|e| Error::Invalid(format!("bad mode `{}`: {e}", entry.mode)))?;
+            tree.remove(rel)?;
+            tree.write_new(rel, &bytes, mode)?;
         }
         TriggerKind::Symlink => {
-            if abs.symlink_metadata().is_ok() {
-                std::fs::remove_file(&abs)?;
-            }
-            std::os::unix::fs::symlink(entry.target.as_deref().unwrap_or(""), &abs)?;
+            tree.remove(rel)?;
+            tree.symlink(Path::new(entry.target.as_deref().unwrap_or("")), rel)?;
         }
     }
     Ok(())
 }
 
-/// Apply an octal mode string (`"0755"`) to `path`.
-fn set_mode(path: &Path, mode: &str) -> Result<(), Error> {
-    use std::os::unix::fs::PermissionsExt;
-    let bits =
-        u32::from_str_radix(mode, 8).map_err(|e| Error::Hash(format!("bad mode `{mode}`: {e}")))?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits))?;
-    Ok(())
+/// The workspace `root` as a descriptor-resolution root.
+fn workspace(root: &Path) -> Result<kennel_lib_syscall::fd::RootDir, Error> {
+    Ok(kennel_lib_syscall::fd::RootDir::open(root)?)
+}
+
+/// What a freshly pinned `entry` says the trigger is — the value a review records as `current`:
+/// the content hash, or the link target.
+fn signature_of(entry: &TriggerEntry) -> String {
+    match entry.kind {
+        TriggerKind::Content => entry.sha256.clone(),
+        TriggerKind::Symlink => entry.target.clone().unwrap_or_default(),
+    }
+}
+
+/// Read the pinned blob `sha` and check it IS that content before it is written anywhere.
+///
+/// The store sits in the workspace; a cloned repository can ship its own. A blob that does not
+/// hash to its name is not the pinned content.
+fn read_verified_blob(root: &Path, sha: &str) -> Result<Vec<u8>, Error> {
+    if !is_sha256(sha) {
+        return Err(Error::Invalid("malformed content hash".to_owned()));
+    }
+    let blob = store_dir(root).join(blob_name(sha));
+    if hash_file(&blob)? != sha {
+        return Err(Error::Invalid(format!(
+            "the stored blob for {sha} does not have that hash"
+        )));
+    }
+    Ok(std::fs::read(blob)?)
 }
 
 /// The absolute path of the manifest at a workspace `root`.
@@ -1023,6 +1127,171 @@ mod tests {
             "the executable bit survives the revert (got {mode:o})"
         );
         cleanup(&dir);
+    }
+
+    #[test]
+    fn a_manifest_that_points_outside_the_workspace_is_refused() {
+        let wrap = |triggers: &str| {
+            format!(
+                r#"{{"version":"{SCHEMA_VERSION}","generator":"x","execution":{{"triggers":{{{triggers}}},"boundaries":{{"untrusted_paths":[]}}}}}}"#
+            )
+        };
+        let sha = format!("sha256:{}", "a".repeat(64));
+        let entry = |hash: &str| {
+            format!(
+                r#"{{"kind":"content","sha256":"{hash}","mode":"0644","pattern":"builtin","pinned":"compile"}}"#
+            )
+        };
+        // A well-formed manifest still parses.
+        let good = wrap(&format!(r#""Makefile":{}"#, entry(&sha)));
+        assert!(Manifest::from_json(good.as_bytes()).is_ok(), "{good}");
+        // A trigger path that leaves the workspace, or is absolute, is refused.
+        for path in [
+            "../../.config/autostart/x.desktop",
+            "/etc/passwd",
+            "a/../../b",
+            "",
+        ] {
+            let json = wrap(&format!(r#""{path}":{}"#, entry(&sha)));
+            assert!(
+                matches!(Manifest::from_json(json.as_bytes()), Err(Error::Invalid(_))),
+                "path {path:?} must be refused"
+            );
+        }
+        // A content hash that is not exactly a hash would name a file outside the blob store.
+        for hash in ["../../.ssh/id_ed25519", "sha256:abc", "sha256:../x", ""] {
+            let json = wrap(&format!(r#""Makefile":{}"#, entry(hash)));
+            assert!(
+                matches!(Manifest::from_json(json.as_bytes()), Err(Error::Invalid(_))),
+                "hash {hash:?} must be refused"
+            );
+        }
+        assert!(matches!(
+            read_blob(Path::new("/"), "../etc/passwd"),
+            Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn revert_replaces_a_symlinked_trigger_and_never_writes_through_it() {
+        let dir = tmpdir();
+        let outside = tmpdir();
+        std::fs::write(outside.join("victim"), b"the operator's own file\n").expect("write");
+        std::fs::write(dir.join("Makefile"), b"all:\n\techo trusted\n").expect("write");
+        let cat = sample_catalogue();
+        let (m, errors) = generate(&dir, "kennel-test", &cat);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // The workload swaps the pinned trigger for a link to a file outside the workspace.
+        std::fs::remove_file(dir.join("Makefile")).expect("rm");
+        std::os::unix::fs::symlink(outside.join("victim"), dir.join("Makefile")).expect("symlink");
+
+        for change in review(&m, &dir, &cat).expect("review") {
+            if change.is_divergence() {
+                revert(&dir, &change).expect("revert");
+            }
+        }
+        assert_eq!(
+            std::fs::read(outside.join("victim")).expect("read victim"),
+            b"the operator's own file\n",
+            "the link's target must be untouched"
+        );
+        let restored = std::fs::symlink_metadata(dir.join("Makefile")).expect("lstat");
+        assert!(
+            restored.file_type().is_file(),
+            "the trigger is a regular file again"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("Makefile")).expect("read"),
+            b"all:\n\techo trusted\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn a_symlinked_trigger_directory_is_not_listed_through() {
+        let dir = tmpdir();
+        let outside = tmpdir();
+        std::fs::write(outside.join("id_ed25519"), b"secret\n").expect("write");
+        std::fs::create_dir_all(dir.join(".git")).expect("mkdir");
+        // `.git/hooks` is a directory trigger; here it is a link out of the workspace.
+        std::os::unix::fs::symlink(&outside, dir.join(".git/hooks")).expect("symlink");
+        let found = enumerate_triggers(&dir, &sample_catalogue());
+        assert!(
+            !found.iter().any(|p| p.starts_with(".git/hooks/")),
+            "files behind the link must not be enumerated: {found:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn a_revert_refuses_a_blob_that_is_not_the_pinned_content() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("Makefile"), b"trusted\n").expect("write");
+        let cat = sample_catalogue();
+        let (m, _) = generate(&dir, "kennel-test", &cat);
+        let entry = m
+            .execution
+            .triggers
+            .get("Makefile")
+            .expect("pinned")
+            .clone();
+        // Someone swaps the stored blob (a cloned repository ships its own store).
+        std::fs::write(
+            store_dir(&dir).join(blob_name(&entry.sha256)),
+            b"malicious\n",
+        )
+        .expect("overwrite blob");
+        std::fs::write(dir.join("Makefile"), b"tampered\n").expect("write");
+        let change = TriggerChange::Modified {
+            path: "Makefile".to_owned(),
+            entry,
+            current: String::new(),
+        };
+        assert!(matches!(revert(&dir, &change), Err(Error::Invalid(_))));
+        assert_eq!(
+            std::fs::read(dir.join("Makefile")).expect("read"),
+            b"tampered\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_repin_refuses_a_trigger_that_changed_after_it_was_reviewed() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("Makefile"), b"original\n").expect("write");
+        let cat = sample_catalogue();
+        let (mut m, _) = generate(&dir, "kennel-test", &cat);
+        let pinned = m
+            .execution
+            .triggers
+            .get("Makefile")
+            .expect("pinned")
+            .sha256
+            .clone();
+
+        std::fs::write(dir.join("Makefile"), b"what the operator was shown\n").expect("write");
+        let changes = review(&m, &dir, &cat).expect("review");
+        // …and the still-running workload changes it again before the operator answers.
+        std::fs::write(dir.join("Makefile"), b"what gets pinned instead\n").expect("write");
+
+        let errs = apply_review(&mut m, &dir, &changes, "kennel-test");
+        assert!(
+            errs.iter().any(|e| matches!(e, Error::Invalid(_))),
+            "the swap must be reported: {errs:?}"
+        );
+        assert_eq!(
+            m.execution
+                .triggers
+                .get("Makefile")
+                .expect("still pinned")
+                .sha256,
+            pinned,
+            "the old pin stands"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

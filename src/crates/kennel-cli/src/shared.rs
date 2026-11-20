@@ -474,6 +474,25 @@ fn is_legacy_raw_b64(text: &str) -> bool {
     kennel_lib_policy::b64::decode(text.trim().as_bytes()).is_some_and(|b| b.len() == 32)
 }
 
+/// `dirs` in the order their keys take precedence: the vendor store, then the host store, then
+/// everything else as given.
+///
+/// A signer's tier is decided by its key id (which store carries `<id>.pub`), and a key set
+/// resolves an id to the first key loaded under it. If a user directory were read before the
+/// vendor one, a user's `vendor-id.pub` would be the key that verifies while the id still read as
+/// vendor. Reading the system stores first makes the key that verifies the one whose tier is
+/// reported, whatever order the caller listed the directories in — the daemon's own precedence.
+fn by_trust_precedence(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let rank = |dir: &PathBuf| match tier_of_path(dir) {
+        "vendor" => 0_u8,
+        "host" => 1,
+        _ => 2,
+    };
+    let mut ordered = dirs.to_vec();
+    ordered.sort_by_key(rank); // stable: the caller's order holds within a tier
+    ordered
+}
+
 /// Load a trust store: every `<key_id>.pub` under each directory.
 ///
 /// Each file must be an OpenSSH public-key line — `ssh-ed25519 <base64-blob>
@@ -488,7 +507,7 @@ fn is_legacy_raw_b64(text: &str) -> bool {
 /// Ed25519 public key, or cannot be inserted into the key set.
 pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
     let mut keys = kennel_lib_policy::KeySet::new();
-    for dir in dirs {
+    for dir in &by_trust_precedence(dirs) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -506,8 +525,20 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
                 let (pubkey_bytes, _comment) =
                     kennel_lib_policy::openssh::parse_public_key(&contents)
                         .map_err(|e| format!("key {}: {e}", path.display()))?;
-                keys.insert(key_id, &pubkey_bytes)
-                    .map_err(|e| format!("key {}: {e}", path.display()))?;
+                // A key id names one key. The first directory in precedence order defines it;
+                // a later file of the same name is not a second definition, and saying so
+                // matters: the signer's tier is read off the id.
+                match keys.get(key_id) {
+                    Some(have) if **have != pubkey_bytes => eprintln!(
+                        "kennel: warning: ignoring {} — the key id `{key_id}` is already \
+                         defined by a higher-precedence trust directory with a different key",
+                        path.display()
+                    ),
+                    Some(_) => {}
+                    None => keys
+                        .insert(key_id, &pubkey_bytes)
+                        .map_err(|e| format!("key {}: {e}", path.display()))?,
+                }
             } else if is_legacy_raw_b64(&contents) {
                 return Err(format!(
                     "key {}: legacy raw-base64 public key (format removed in 0.6.0) — \
@@ -770,13 +801,14 @@ pub fn sshsig_sign(
     key_id_override: Option<&str>,
     trust_dirs: &[PathBuf],
 ) -> Result<(String, String), String> {
-    let dir = std::env::temp_dir().join(format!("kennel-sign-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating sign scratch dir: {e}"))?;
-    let guard = ScratchDir(dir);
-    let msg = guard.0.join("canonical");
-    std::fs::write(&msg, canonical).map_err(|e| format!("staging canonical bytes: {e}"))?;
-
-    let status = std::process::Command::new("ssh-keygen")
+    // The message goes to `ssh-keygen` on stdin and the signature comes back on stdout: with no
+    // file argument `-Y sign` works as a filter. Nothing is staged on disk. (It used to be written
+    // to `/tmp/kennel-sign-<pid>/canonical` — a predictable, pre-creatable path, which root also
+    // went through when signing with the host key: whoever owned that directory could swap the
+    // bytes being signed, or point the write at another file.) A passphrase prompt is unaffected:
+    // ssh-keygen asks on the terminal, not on stdin.
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("ssh-keygen")
         .args([
             "-Y",
             "sign",
@@ -786,15 +818,30 @@ pub fn sshsig_sign(
             "-f",
         ])
         .arg(key)
-        .arg(&msg)
-        .status()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
-    if !status.success() {
+    // Feed the message from a thread, so a signer that writes before it has read everything
+    // cannot deadlock against us on two full pipes.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "ssh-keygen: no stdin pipe".to_owned())?;
+    let message = canonical.to_vec();
+    let feeder = std::thread::spawn(move || stdin.write_all(&message));
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("waiting for ssh-keygen: {e}"))?;
+    let fed = feeder
+        .join()
+        .map_err(|_| "ssh-keygen: the input thread panicked".to_owned())?;
+    if !output.status.success() {
         return Err(format!("ssh-keygen -Y sign failed for key `{key}`"));
     }
-    let sig_path = guard.0.join("canonical.sig");
-    let armor =
-        std::fs::read_to_string(&sig_path).map_err(|e| format!("reading the signature: {e}"))?;
+    fed.map_err(|e| format!("passing the message to ssh-keygen: {e}"))?;
+    let armor = String::from_utf8(output.stdout)
+        .map_err(|_| "ssh-keygen produced a signature that is not text".to_owned())?;
 
     // The SSHSIG embeds the public key; read it back to resolve the trust-store name.
     let parsed = kennel_lib_policy::sshsig::SshSig::parse_armored(&armor)
@@ -826,15 +873,6 @@ pub fn sshsig_sign(
         }
     };
     Ok((key_id, armor))
-}
-
-/// A scratch directory removed when dropped.
-struct ScratchDir(PathBuf);
-
-impl Drop for ScratchDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 /// Assemble a signed settled document from an SSHSIG armor and the resolved `key_id`.
@@ -977,6 +1015,27 @@ mod signer_tests {
 
     fn signing_key(seed: u8) -> kennel_lib_policy::SigningKey {
         kennel_lib_policy::SigningKey::from_seed("seed", &[seed; 32]).expect("32-byte seed")
+    }
+
+    #[test]
+    fn system_trust_dirs_are_read_before_any_other() {
+        // Whatever order the caller lists them in (`--trust-dir` first, the vendor store last),
+        // the vendor and host stores define a key id before a user directory can.
+        let listed = [
+            PathBuf::from("/home/u/.config/kennel/keys"),
+            PathBuf::from("/tmp/extra-keys"),
+            PathBuf::from("/etc/kennel/keys"),
+            PathBuf::from("/usr/lib/kennel/keys"),
+        ];
+        assert_eq!(
+            by_trust_precedence(&listed),
+            [
+                PathBuf::from("/usr/lib/kennel/keys"),
+                PathBuf::from("/etc/kennel/keys"),
+                PathBuf::from("/home/u/.config/kennel/keys"),
+                PathBuf::from("/tmp/extra-keys"),
+            ]
+        );
     }
 
     #[test]

@@ -140,6 +140,15 @@ impl std::fmt::Display for Refusal {
 
 impl std::error::Error for Refusal {}
 
+/// The six leading bytes every loopback address reserved for `scope`'s user starts with:
+/// `fd | KENNEL(16) | uid_subnet(24)`.
+#[must_use]
+pub fn reserved_prefix(scope: &ReservedScope) -> [u8; 6] {
+    let [k0, k1] = KENNEL_ULA;
+    let [u0, u1, u2] = uid_subnet(scope.uid);
+    [0xfd, k0, k1, u0, u1, u2]
+}
+
 /// Validate an address request against the reserved scope.
 ///
 /// # Errors

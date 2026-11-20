@@ -33,7 +33,7 @@ const HOST_LIBEXEC_DIR: &str = "/usr/libexec/kennel";
 /// `KENNEL_META_MAGIC` ("KNEL") from `bpf/maps.h`.
 const KENNEL_META_MAGIC: u32 = 0x4B4E_454C;
 /// `KENNEL_ABI_VERSION` from `bpf/maps.h`.
-const KENNEL_ABI_VERSION: u16 = 1;
+const KENNEL_ABI_VERSION: u16 = 2;
 /// `IPPROTO_TCP` / `IPPROTO_UDP` as the BPF `allow_entry.protocol` byte
 /// (`KENNEL_PROTO_ANY` is 0).
 const IPPROTO_TCP: u8 = 6;
@@ -154,6 +154,27 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
     Ok((v4, v6))
 }
 
+/// Deny rules as enforced: a deny on every port denies every protocol.
+///
+/// The cgroup ACL used to match a deny on the address alone; it now matches port and protocol
+/// like an allow. A deny written with no `ports` and no `protocol` was settled as "TCP, every
+/// port" by compilers before that change, and enforcing it literally would open UDP to an address
+/// the author denied. So an every-port deny is widened to every protocol here, whatever protocol
+/// it names: a signed policy never denies less than it did. A deny limited to particular ports
+/// is enforced as written.
+fn whole_address_denies(rules: &[NetRule]) -> Vec<NetRule> {
+    rules
+        .iter()
+        .cloned()
+        .map(|mut rule| {
+            if rule.port_min == 0 && rule.port_max == u16::MAX {
+                rule.protocol = Protocol::Any;
+            }
+            rule
+        })
+        .collect()
+}
+
 /// The eight cgroup-BPF LPM ACL vectors a plan carries: the connect ACL (deny-first, allow
 /// non-empty only in `host` mode) and the inbound BIND ACL (§7.5.7, deny-first, default-deny).
 struct BpfAcls {
@@ -185,9 +206,9 @@ impl BpfAcls {
         let mut deny_rules = net.deny_invariant.clone();
         deny_rules.extend(net.bpf_connect_deny.iter().cloned());
         deny_rules.extend(net.deny_author.iter().cloned());
-        let (deny_v4, deny_v6) = encode(&deny_rules)?;
+        let (deny_v4, deny_v6) = encode(&whole_address_denies(&deny_rules))?;
         let (mut bind_allow_v4, mut bind_allow_v6) = encode(&net.bpf_bind_allow)?;
-        let (bind_deny_v4, bind_deny_v6) = encode(&net.bpf_bind_deny)?;
+        let (bind_deny_v4, bind_deny_v6) = encode(&whole_address_denies(&net.bpf_bind_deny))?;
         // The own-net-ns loopback, open by default in both directions (#218).
         let (lo_v4, lo_v6) = own_netns_loopback(net.mode);
         let (mut allow_v4, mut allow_v6) = (allow_v4, allow_v6);
@@ -1090,6 +1111,31 @@ impl Plan {
             .find(|src| src.starts_with(dir) || dir.starts_with(src))
     }
 
+    /// A read-only redirected source the workload can write through another bind, if any: the
+    /// redirected source and the writable host path that covers (or is covered by) it.
+    ///
+    /// The settle-time floor (`fs.redirect.write-set`) compares the policy's strings, before the
+    /// per-user placeholders are substituted and before a spawn patch is applied, and it does not
+    /// count the host side of a *writable* redirect as writable. This is the same rule on the
+    /// plan: resolved host paths, every writable bind. A redirect presents `source` at a view
+    /// path as operator-provided content; if the workload can write `source` some other way, it
+    /// authors what it is later shown as the operator's.
+    #[must_use]
+    pub fn writable_redirect_source(&self) -> Option<(&Path, &Path)> {
+        let binds = &self.view.as_ref()?.binds;
+        binds
+            .iter()
+            .filter(|b| b.redirected && !b.writable)
+            .find_map(|redirect| {
+                binds
+                    .iter()
+                    .filter(|b| b.writable)
+                    .map(|b| b.source.as_path())
+                    .find(|w| redirect.source.starts_with(w) || w.starts_with(&redirect.source))
+                    .map(|w| (redirect.source.as_path(), w))
+            })
+    }
+
     /// Grant an already-resolved host directory into the view at its own path — the
     /// materialised `[fs.cwd]` invocation grant (§7.9).
     ///
@@ -1098,7 +1144,11 @@ impl Plan {
     /// Unlike the policy fs grants the path is **not** remapped — it keeps its absolute host
     /// path, so the workload's cwd (the same path) is valid in the view. No EXECUTE is granted
     /// on the tree: the workload execs only its `exec.allow` binaries, never project files.
-    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool) {
+    ///
+    /// With `mask_manifest` (the policy's `[trust].manifest`), a writable cwd gets the same
+    /// trust-manifest mask every other writable bind gets: the workload must not read or
+    /// rewrite the integrity pins of the workspace it is working in (T2.8).
+    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool, mask_manifest: bool) {
         let access = if writable {
             write_access()
         } else {
@@ -1108,6 +1158,10 @@ impl Plan {
         // absolute path (not remapped), so target == source == host_dir.
         self.landlock_fs.push((host_dir.clone(), access));
         if let Some(view) = self.view.as_mut() {
+            if writable && mask_manifest {
+                view.mask_paths.push(host_dir.join(".trust-manifest.json"));
+                view.mask_dir_paths.push(host_dir.join(".trust-manifest.d"));
+            }
             view.binds.push(BindMount {
                 source: host_dir.clone(),
                 target: host_dir,
@@ -1626,6 +1680,28 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_every_port_deny_covers_every_protocol() {
+        let rule = |port_min, port_max, protocol| NetRule {
+            cidr: "10.0.0.0".to_owned(),
+            prefix_len: 8,
+            port_min,
+            port_max,
+            protocol,
+        };
+        // What an older compiler settled for a deny with no ports and no protocol: it must not
+        // start letting UDP through now that denies match on protocol.
+        let widened = whole_address_denies(&[
+            rule(0, u16::MAX, Protocol::Tcp),
+            rule(22, 22, Protocol::Tcp),
+        ]);
+        assert_eq!(
+            widened.iter().map(|r| r.protocol).collect::<Vec<_>>(),
+            [Protocol::Any, Protocol::Tcp],
+            "the every-port deny is widened; the one-port deny is enforced as written"
+        );
+    }
 
     #[test]
     fn bind_port_min_lands_in_the_meta_pad_slot() {

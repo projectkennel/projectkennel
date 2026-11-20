@@ -138,7 +138,17 @@ fn attach_egress_programs(path: &std::path::Path, payload: &EgressPayload) -> Re
     // Seal the write-once meta map (02-7-bpf-abi.md): BPF_F_RDONLY_PROG (set at creation)
     // prevents BPF-program writes; BPF_MAP_FREEZE prevents userspace writes. Frozen after
     // populate (which writes it once) and before the programs attach.
-    if let Err(e) = kennel_lib_bpf::freeze_maps(&maps, &["kennel_meta_map"]) {
+    // Every map the programs decide by is written once, here, and then frozen: the pins below
+    // are owned by the caller, which is the uid the workload runs as, and an unfrozen ACL map
+    // behind such a pin could be rewritten by anything holding that uid. Freezing stops writes
+    // from userspace; the programs still read them (and still count into `audit_lost`). The
+    // ringbuf is left alone: its consumer maps it writable.
+    let frozen: Vec<&str> = kennel_lib_bpf::KENNEL_MAPS
+        .iter()
+        .map(|m| m.name)
+        .filter(|name| *name != "audit_ringbuf")
+        .collect();
+    if let Err(e) = kennel_lib_bpf::freeze_maps(&maps, &frozen) {
         eprintln!("kennel-privhelper-bpf: freeze_maps: {e}");
         return Response::internal(errno_of(&e));
     }
@@ -293,29 +303,27 @@ fn populate_maps(
     if let Some(value) = bind_subnet_value(&payload.meta, &payload.bind_allowed_ports) {
         update("bind_subnet_map", &0u32.to_ne_bytes(), &value)?;
     }
-    for (key, value) in &payload.allow_v4 {
-        update("allow_v4", key, value)?;
+    // Each trie gets one entry per prefix, carrying every rule that applies to it (the rules of
+    // its own prefix and of every wider one): a lookup returns only the most specific entry.
+    for (name, rules) in [
+        ("allow_v4", &payload.allow_v4),
+        ("deny_v4", &payload.deny_v4),
+        ("bind_allow_v4", &payload.bind_allow_v4),
+        ("bind_deny_v4", &payload.bind_deny_v4),
+    ] {
+        for (key, value) in kennel_lib_bpf::acl::build_entries(rules)? {
+            update(name, &key, &value)?;
+        }
     }
-    for (key, value) in &payload.deny_v4 {
-        update("deny_v4", key, value)?;
-    }
-    for (key, value) in &payload.allow_v6 {
-        update("allow_v6", key, value)?;
-    }
-    for (key, value) in &payload.deny_v6 {
-        update("deny_v6", key, value)?;
-    }
-    for (key, value) in &payload.bind_allow_v4 {
-        update("bind_allow_v4", key, value)?;
-    }
-    for (key, value) in &payload.bind_deny_v4 {
-        update("bind_deny_v4", key, value)?;
-    }
-    for (key, value) in &payload.bind_allow_v6 {
-        update("bind_allow_v6", key, value)?;
-    }
-    for (key, value) in &payload.bind_deny_v6 {
-        update("bind_deny_v6", key, value)?;
+    for (name, rules) in [
+        ("allow_v6", &payload.allow_v6),
+        ("deny_v6", &payload.deny_v6),
+        ("bind_allow_v6", &payload.bind_allow_v6),
+        ("bind_deny_v6", &payload.bind_deny_v6),
+    ] {
+        for (key, value) in kennel_lib_bpf::acl::build_entries(rules)? {
+            update(name, &key, &value)?;
+        }
     }
     Ok(())
 }

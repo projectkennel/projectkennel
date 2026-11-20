@@ -1,0 +1,90 @@
+# ============================================================================
+# net-host-unbound-listen — a socket the bind policy never saw receives nothing.
+#
+# The bind hooks judge a bind() call. Two sockets receive without one the policy judged:
+#   * listen() on an unbound TCP socket: the kernel binds it to the wildcard address on a port
+#     it picks, and no hook runs;
+#   * a bind to port 0, which is admitted without the address rules (an outbound socket needs
+#     it) and then receives on the port the kernel picks.
+# In host mode either was a service reachable from the network. Inbound traffic is now judged
+# where it arrives: a listener must itself pass the bind policy, and a datagram is delivered
+# only to a socket that passes it or from a peer the kennel may send to.
+#
+# Everything here is on loopback, and the kennel may connect anywhere in 127.0.0.0/8 except
+# 127.0.0.7, so each check isolates the inbound decision. The workload exits 0 iff every check
+# gets the verdict stated.
+# ============================================================================
+
+template_name = "net-host-unbound-listen"
+template_base = "base-confined"
+
+[net]
+mode = "host"
+reason = "e2e: inbound traffic is judged, not only bind()"
+
+[net.bpf.connect]
+allow = [{ cidr = "127.0.0.0/8", protocol = "any", reason = "loopback, any port, TCP and UDP: outbound is not what is under test" }]
+deny = [{ cidr = "127.0.0.7/32", reason = "a peer the kennel may not talk to" }]
+
+[net.bpf.bind]
+allow = [
+    { cidr = "127.0.0.0/8", ports = [47141], protocol = "tcp", reason = "the admitted TCP service" },
+    { cidr = "127.0.0.0/8", ports = [47142], protocol = "udp", reason = "the admitted UDP service" },
+]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import socket, sys
+def tcp_reachable(listener):
+    addr, port = listener.getsockname()[:2]
+    if addr == '0.0.0.0': addr = '127.0.0.1'
+    c = socket.socket(); c.settimeout(2)
+    try:
+        c.connect((addr, port)); return True
+    except OSError:
+        return False
+    finally:
+        c.close()
+def udp_delivered(receiver, sender_addr):
+    addr, port = receiver.getsockname()[:2]
+    if addr == '0.0.0.0': addr = '127.0.0.1'
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind((sender_addr, 0))
+    receiver.settimeout(2)
+    try:
+        s.sendto(b'x', (addr, port)); receiver.recvfrom(16); return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+bound = socket.socket(); bound.bind(('127.0.0.1', 47141)); bound.listen(4)
+unbound = socket.socket(); unbound.listen(4)
+service = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); service.bind(('127.0.0.1', 47142))
+ephemeral = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ephemeral.bind(('0.0.0.0', 0))
+
+checks = [
+    # (what, observed, expected)
+    ('control: a listener bound through the policy accepts', tcp_reachable(bound), True),
+    ('listen() with no bind is not reachable', tcp_reachable(unbound), False),
+    ('control: an admitted UDP service receives from anyone', udp_delivered(service, '127.0.0.7'), True),
+    ('control: a port-0 socket receives a reply from an allowed peer', udp_delivered(ephemeral, '127.0.0.1'), True),
+    ('a port-0 socket receives nothing from a denied peer', udp_delivered(ephemeral, '127.0.0.7'), False),
+]
+bad = 0
+for what, got, want in checks:
+    ok = got == want
+    bad += not ok
+    print('%-62s -> %s%s' % (what, 'delivered' if got else 'dropped', '' if ok else '   <-- WRONG'))
+sys.exit(1 if bad else 0)
+""",
+]

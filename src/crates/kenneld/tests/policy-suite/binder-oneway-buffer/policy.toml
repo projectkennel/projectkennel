@@ -1,0 +1,63 @@
+# ============================================================================
+# Suite case: binder-oneway-buffer — node 0 frees the buffer of a transaction it cannot answer.
+#
+# Every transaction a kennel sends to node 0 lands in a buffer in kenneld's mapping, which
+# kenneld must free. It used to send `[BC_REPLY][BC_FREE_BUFFER]` in one write — and the binder
+# driver stops at the first command that fails. A reply the SENDER can make fail (send one-way,
+# so there is nothing to reply to) left the free unprocessed: the buffer stayed allocated for the
+# life of the bus, and a workload could pin all of it. With the one-way half full, the kennel's
+# own `kennel-bin-init` could no longer deliver its TTL-expiry notice.
+#
+# The workload sends 40 one-way transactions of 8 KiB to node 0 — 320 KiB through a 64 KiB
+# one-way allowance. Exit 0 iff every one is accepted, which is only possible if each buffer is
+# freed. It touches only this kennel's own bus.
+# ============================================================================
+
+template_name = "binder-oneway-buffer"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import ctypes, fcntl, os, struct, sys, time
+BINDER_WRITE_READ = 0xc0306201
+BC_TRANSACTION = 0x40406300
+TF_ONE_WAY = 1
+BR_COMPLETE, BR_NOOP, BR_FAILED, BR_DEAD = 0x7206, 0x720c, 0x7211, 0x7205
+fd = os.open('/dev/binderfs/binder', os.O_RDWR | os.O_CLOEXEC)
+def one_way(size):
+    payload = ctypes.create_string_buffer(size)
+    td = struct.pack('<QQIIiIQQQQ', 0, 0, 0x7fffff00, TF_ONE_WAY, 0, 0, size, 0,
+                     ctypes.addressof(payload), 0)
+    out = ctypes.create_string_buffer(struct.pack('<I', BC_TRANSACTION) + td)
+    rd = ctypes.create_string_buffer(256)
+    bwr = ctypes.create_string_buffer(struct.pack(
+        '<QQQQQQ', len(out) - 1, 0, ctypes.addressof(out), 256, 0, ctypes.addressof(rd)))
+    fcntl.ioctl(fd, BINDER_WRITE_READ, bwr)
+    got = struct.unpack('<QQQQQQ', bwr.raw[:48])[4]
+    seen = [struct.unpack_from('<I', rd.raw, i)[0] for i in range(0, got - got % 4, 4)]
+    return BR_COMPLETE in seen and BR_FAILED not in seen and BR_DEAD not in seen
+SIZE, COUNT = 8192, 40
+accepted = 0
+for n in range(COUNT):
+    if not one_way(SIZE):
+        break
+    accepted += 1
+    time.sleep(0.05)
+print('one-way transactions accepted by node 0: %d of %d (%d bytes each)' % (accepted, COUNT, SIZE))
+if accepted != COUNT:
+    print('node 0 stopped accepting after %d bytes: the buffers are not being freed' % (accepted * SIZE))
+sys.exit(0 if accepted == COUNT else 1)
+""",
+]

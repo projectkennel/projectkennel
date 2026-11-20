@@ -72,6 +72,61 @@ impl Record {
         out
     }
 
+    /// Shorten this record until its JSON Lines entry (with the newline) fits in `max` bytes.
+    ///
+    /// The line sinks write one event with one `write` of at most `max` bytes so concurrent
+    /// writers cannot interleave, and they refuse a longer line. An event's size is set by what
+    /// it reports (a spawned command line, a path, a D-Bus member), which the workload chooses, so
+    /// an oversized event must still leave a record: the event-specific values are cut down,
+    /// longest string first, and the record is marked `"truncated": true`. The envelope (who,
+    /// what, when, outcome) is never cut.
+    pub(crate) fn fit(&mut self, max: usize) {
+        /// Room kept for `,"truncated":true` and the trailing newline.
+        const MARK: usize = 24;
+        if self.to_jsonl().len().saturating_add(1) <= max {
+            return;
+        }
+        let budget = max.saturating_sub(MARK);
+        while self.to_jsonl().len() > budget {
+            let longest = self
+                .fields
+                .iter_mut()
+                .filter(|(key, _)| !is_envelope_key(key))
+                .filter_map(|(_, value)| longest_string(value))
+                .max_by_key(|s| s.len());
+            match longest {
+                Some(s) if s.len() > SHORTEST_CUT => halve(s),
+                // Nothing left to shorten: the size is in the number of values, so shed those.
+                _ => {
+                    if !self.shed_one() {
+                        break;
+                    }
+                }
+            }
+        }
+        self.fields.push(("truncated", Rendered::Bool(true)));
+    }
+
+    /// Drop one value from the last event-specific field (an array loses its last item; anything
+    /// else is removed whole). Returns `false` when only the envelope is left.
+    fn shed_one(&mut self) -> bool {
+        let Some(index) = self
+            .fields
+            .iter()
+            .rposition(|(key, _)| !is_envelope_key(key))
+        else {
+            return false;
+        };
+        if let Some((_, Rendered::Array(items))) = self.fields.get_mut(index) {
+            if items.len() > 1 {
+                items.pop();
+                return true;
+            }
+        }
+        self.fields.remove(index);
+        true
+    }
+
     /// A human-readable one-line summary for the journald/syslog `MESSAGE`.
     /// Consumers read the structured fields; this is for eyeballing.
     #[must_use]
@@ -110,6 +165,35 @@ pub(crate) const ENVELOPE_KEYS: [&str; 11] = [
     "pid",
     "comm",
 ];
+
+/// A string this short is not worth cutting further; [`Record::fit`] sheds values instead.
+const SHORTEST_CUT: usize = 16;
+
+/// The longest string anywhere inside `value`, for [`Record::fit`] to shorten.
+fn longest_string(value: &mut Rendered) -> Option<&mut String> {
+    match value {
+        Rendered::Str(s) => Some(s),
+        Rendered::Array(items) => items
+            .iter_mut()
+            .filter_map(longest_string)
+            .max_by_key(|s| s.len()),
+        Rendered::Object(entries) => entries
+            .iter_mut()
+            .filter_map(|(_, v)| longest_string(v))
+            .max_by_key(|s| s.len()),
+        Rendered::Int(_) | Rendered::Uint(_) | Rendered::Bool(_) | Rendered::Null => None,
+    }
+}
+
+/// Cut `s` to half its length (on a character boundary) and mark the cut with an ellipsis.
+fn halve(s: &mut String) {
+    let mut cut = s.len() / 2;
+    while !s.is_char_boundary(cut) {
+        cut = cut.saturating_sub(1);
+    }
+    s.truncate(cut);
+    s.push('\u{2026}');
+}
 
 fn is_envelope_key(key: &str) -> bool {
     ENVELOPE_KEYS.contains(&key) || key == "sanitised"

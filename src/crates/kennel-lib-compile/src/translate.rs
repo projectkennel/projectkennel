@@ -1196,21 +1196,28 @@ fn translate_bpf_acl(
     let Some(acl) = acl else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let allow = translate_bpf_rules(acl.allow.resolved(), deferred)?;
-    let deny = translate_bpf_rules(acl.deny.resolved(), deferred)?;
+    // An allow with no `protocol` is TCP. A deny with no `protocol` is every protocol: the
+    // author wrote "not this address", and a deny that quietly left UDP open would not be that.
+    let allow = translate_bpf_rules(acl.allow.resolved(), Protocol::Tcp, deferred)?;
+    let deny = translate_bpf_rules(acl.deny.resolved(), Protocol::Any, deferred)?;
     Ok((allow, deny))
 }
 
 /// Expand a list of [`BpfRule`](crate::source::BpfRule)s into settled [`NetRule`]s: one rule
 /// per (cidr, port) pair (or per cidr when `ports` is empty), with `"*"` expanding to both
-/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error.
+/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error. `unstated_protocol` is what a rule
+/// with no `protocol` means.
 fn translate_bpf_rules(
     rules: &[crate::source::BpfRule],
+    unstated_protocol: Protocol,
     deferred: &mut BTreeSet<String>,
 ) -> Result<Vec<NetRule>, PolicyError> {
     let mut out: Vec<NetRule> = Vec::new();
     for rule in rules {
-        let protocol = parse_protocol(rule.protocol.as_deref())?;
+        let protocol = match rule.protocol.as_deref() {
+            None => unstated_protocol,
+            stated => parse_protocol(stated)?,
+        };
         let Some(cidr) = &rule.cidr else {
             return Err(translation("net.bpf rule needs a cidr".to_owned()));
         };
@@ -1304,16 +1311,33 @@ fn parse_protocol(p: Option<&str>) -> Result<Protocol, PolicyError> {
 }
 
 /// Split `"<addr>/<prefix>"`; a bare address takes the host prefix (32 v4 / 128 v6).
+///
+/// The address must be an IP literal and the prefix must fit its family. A rule that does not
+/// parse is refused here, at compile: the enforcement side cannot match on it, and a deny that
+/// silently matches nothing is worse than no deny, because the author believes it is in force.
 fn parse_cidr(cidr: &str) -> Result<(String, u8), PolicyError> {
-    if let Some((addr, plen)) = cidr.split_once('/') {
-        let prefix = plen
-            .parse::<u8>()
-            .map_err(|_| translation(format!("CIDR `{cidr}` has a bad prefix length")))?;
-        Ok((addr.to_owned(), prefix))
-    } else {
-        let prefix = if cidr.contains(':') { 128 } else { 32 };
-        Ok((cidr.to_owned(), prefix))
+    let (addr, prefix) = match cidr.split_once('/') {
+        Some((addr, plen)) => {
+            let prefix = plen
+                .parse::<u8>()
+                .map_err(|_| translation(format!("CIDR `{cidr}` has a bad prefix length")))?;
+            (addr, Some(prefix))
+        }
+        None => (cidr, None),
+    };
+    let ip = addr.parse::<std::net::IpAddr>().map_err(|_| {
+        translation(format!(
+            "`{cidr}` is not an IP address or CIDR (`{addr}` does not parse as an address)"
+        ))
+    })?;
+    let width: u8 = if ip.is_ipv4() { 32 } else { 128 };
+    let prefix = prefix.unwrap_or(width);
+    if prefix > width {
+        return Err(translation(format!(
+            "CIDR `{cidr}` has prefix length {prefix}, longer than the {width} bits of its address"
+        )));
     }
+    Ok((addr.to_owned(), prefix))
 }
 
 // ---- fs ------------------------------------------------------------------------
@@ -3435,6 +3459,22 @@ mod tests {
             ("fd00:ec2::254".to_owned(), 128)
         );
         assert!(parse_cidr("10.0.0.0/999").is_err());
+        // An address that does not parse, or a prefix wider than the family, is refused at
+        // compile; it used to sign and then match nothing.
+        for bad in [
+            "10.0.0/8",
+            "10.0.0.256",
+            "example.com",
+            "10.0.0.0/33",
+            "fd00::/129",
+            "",
+        ] {
+            assert!(parse_cidr(bad).is_err(), "`{bad}` must not compile");
+        }
+        assert_eq!(
+            parse_cidr("fd00::/8").expect("v6"),
+            ("fd00::".to_owned(), 8)
+        );
     }
 
     #[test]

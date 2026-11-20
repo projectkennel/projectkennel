@@ -86,9 +86,43 @@ fn decode_command(data: &[u8]) -> Option<(u16, Vec<IpAddr>)> {
 /// conduit fd to the upstream. Loops until `listener` errors unrecoverably; each connection carries
 /// exactly one command and one conduit fd.
 pub fn serve_conduit(listener: &UnixListener) {
+    let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
-        std::thread::spawn(move || handle_conduit(&stream));
+        // Each conduit is a thread and two descriptors in this delegate, for as long as the
+        // workload keeps the connection open, and the workload decides how many it opens. Past
+        // the cap a new one is closed unanswered, which the workload sees as a failed connect.
+        let claimed = live
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |n| (n < MAX_CONDUITS).then(|| n.saturating_add(1)),
+            )
+            .is_ok();
+        if !claimed {
+            continue;
+        }
+        let slot = ConduitSlot(std::sync::Arc::clone(&live));
+        // `Builder::spawn` reports a refused thread instead of panicking; the slot is released
+        // when the closure (or the failed spawn) drops it.
+        let _ = std::thread::Builder::new()
+            .name("conduit".to_owned())
+            .spawn(move || {
+                let _slot = slot;
+                handle_conduit(&stream);
+            });
+    }
+}
+
+/// The most conduits one delegate carries at once.
+pub const MAX_CONDUITS: usize = 1024;
+
+/// One claimed conduit slot; released on drop.
+struct ConduitSlot(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConduitSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 

@@ -63,7 +63,7 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         },
-        Some("unmount") => unmount_exclusive(host),
+        Some("unmount") => unmount_exclusive(host, uid),
         _ => {
             eprintln!("usage: kennel-privhelper-mounts {{mount|unmount}} <host-path>");
             ExitCode::from(2)
@@ -81,14 +81,39 @@ fn main() -> ExitCode {
 /// A human-readable reason if `host` is not a directory owned by `owner_uid`, or the over-mount
 /// fails.
 fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
-    check_owned_dir(host, owner_uid)?;
+    use kennel_lib_syscall::fd;
+    // Pin the directory first, then check and mount THAT inode. The path is the caller's, and
+    // this helper holds CAP_SYS_ADMIN in the host mount namespace: checking a name and then
+    // mounting on the name would let the caller swap what it leads to in between. No symlink is
+    // followed in any component (the same rule a writable bind's source already obeys).
+    let dir = fd::open_no_symlinks(fd::AT_FDCWD, host)
+        .map_err(|e| format!("cannot open {}: {e}", host.display()))?;
+    check_owned_dir(&dir, host, owner_uid)?;
+    let under = std::fs::metadata(fd::proc_path(&dir))
+        .map_err(|e| format!("cannot stat {}: {e}", host.display()))?
+        .dev();
     // mode 0755 so the operator can see the sentinel.
-    mount::mount_tmpfs(host, Some(1), Some("0755"), false, false)
+    mount::mount_tmpfs(&fd::proc_path(&dir), Some(1), Some("0755"), false, false)
         .map_err(|e| format!("exclusive over-mount of {} failed: {e}", host.display()))?;
+    // Resolve the path again to reach the mount just made, and make sure that is what we got: a
+    // fresh, empty tmpfs of the caller's, on a different device from the directory it covers.
+    let top = fd::open_no_symlinks(fd::AT_FDCWD, host)
+        .map_err(|e| format!("cannot reopen {}: {e}", host.display()))?;
+    let top_path = fd::proc_path(&top);
+    let fresh = check_owned_dir(&top, host, owner_uid).is_ok()
+        && mount::is_tmpfs(&top_path).unwrap_or(false)
+        && std::fs::metadata(&top_path).is_ok_and(|m| m.dev() != under)
+        && std::fs::read_dir(&top_path).is_ok_and(|mut entries| entries.next().is_none());
+    if !fresh {
+        return Err(format!(
+            "{} changed while it was being over-mounted; the lock was not sealed",
+            host.display()
+        ));
+    }
     // Drop the sentinel, then seal the over-mount read-only (best-effort — the shadow itself is
     // the control; the read-only remount is hardening).
-    let _ = std::fs::write(host.join(SENTINEL), SENTINEL_BODY);
-    if let Err(e) = mount::remount_readonly(host) {
+    let _ = std::fs::write(top_path.join(SENTINEL), SENTINEL_BODY);
+    if let Err(e) = mount::remount_readonly(&top_path) {
         eprintln!(
             "kennel-privhelper-mounts: sealing exclusive over-mount of {} read-only failed: {e}",
             host.display()
@@ -101,15 +126,40 @@ fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
 ///
 /// Gated on the over-mount carrying our sentinel (so the helper unmounts only mounts it created,
 /// never an arbitrary host mount). Exit code: 0 ok, 1 refused (not our sentinel), 3 internal.
-fn unmount_exclusive(host: &Path) -> ExitCode {
-    if !host.join(SENTINEL).is_file() {
+fn unmount_exclusive(host: &Path, owner_uid: u32) -> ExitCode {
+    use kennel_lib_syscall::fd;
+    let refuse = |why: &str| {
         eprintln!(
-            "kennel-privhelper-mounts: refusing release: {} is not a kennel exclusive over-mount",
+            "kennel-privhelper-mounts: refusing release: {} is not a kennel exclusive over-mount \
+             of yours ({why})",
             host.display()
         );
-        return ExitCode::from(1);
+        ExitCode::from(1)
+    };
+    // Pin what the path leads to, then test and unmount THAT. An exclusive over-mount is a tmpfs
+    // mount root, owned by the caller (this helper mounted it as them), carrying the sentinel. A
+    // sentinel file alone proves nothing — anyone can create one in a directory they can write.
+    let Ok(dir) = fd::open_no_symlinks(fd::AT_FDCWD, host) else {
+        return refuse("cannot open it without following a symlink");
+    };
+    let at = fd::proc_path(&dir);
+    if check_owned_dir(&dir, host, owner_uid).is_err() {
+        return refuse("not a directory you own");
     }
-    match mount::unmount_detach(host) {
+    if !mount::is_tmpfs(&at).unwrap_or(false) {
+        return refuse("not a tmpfs");
+    }
+    // A mount root: its parent is on another filesystem.
+    let (Ok(here), Ok(parent)) = (std::fs::metadata(&at), std::fs::metadata(at.join(".."))) else {
+        return refuse("cannot stat it");
+    };
+    if here.dev() == parent.dev() {
+        return refuse("not a mount point");
+    }
+    if !std::fs::symlink_metadata(at.join(SENTINEL)).is_ok_and(|m| m.file_type().is_file()) {
+        return refuse("no sentinel");
+    }
+    match mount::unmount_detach(&at) {
         Ok(()) => ExitCode::from(0),
         Err(e) => {
             eprintln!(
@@ -121,14 +171,13 @@ fn unmount_exclusive(host: &Path) -> ExitCode {
     }
 }
 
-/// The ownership predicate (parameterised by `uid` for testability): `Ok` iff `host` exists, is
-/// a directory, and is owned by `uid`. A non-owned path is the overreach case.
-fn check_owned_dir(host: &Path, uid: u32) -> Result<(), String> {
-    match std::fs::symlink_metadata(host) {
-        Ok(meta) if !meta.file_type().is_dir() => {
-            Err(format!("{} is not a directory", host.display()))
-        }
-        Ok(meta) if meta.uid() != uid => Err(format!(
+/// The ownership predicate (parameterised by `uid` for testability): `Ok` iff the opened `dir`
+/// (reached as `host`, named only in messages) is a directory owned by `uid`. A non-owned path is
+/// the overreach case. It tests the pinned inode, never the name.
+fn check_owned_dir(dir: &std::os::fd::OwnedFd, host: &Path, uid: u32) -> Result<(), String> {
+    match kennel_lib_syscall::fd::owner_and_kind(dir) {
+        Ok((_, false)) => Err(format!("{} is not a directory", host.display())),
+        Ok((owner, true)) if owner != uid => Err(format!(
             "{} is not owned by uid {uid} (an exclusive blind-mount over a path you do not own \
              would be overreach)",
             host.display()
@@ -147,25 +196,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kennel-excl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let me = kennel_lib_syscall::unistd::real_uid();
-        // A directory the caller owns is accepted; the same path under a foreign uid is refused.
-        assert!(check_owned_dir(&dir, me).is_ok(), "owned dir accepted");
+        let open = |p: &Path| {
+            kennel_lib_syscall::fd::open_no_symlinks(kennel_lib_syscall::fd::AT_FDCWD, p)
+        };
+        // A directory the caller owns is accepted; the same inode under a foreign uid is refused.
+        let fd = open(&dir).expect("open dir");
+        assert!(check_owned_dir(&fd, &dir, me).is_ok(), "owned dir accepted");
         let other = me.wrapping_add(1);
         assert!(
-            check_owned_dir(&dir, other).is_err(),
+            check_owned_dir(&fd, &dir, other).is_err(),
             "a path not owned by the (pretend) caller is overreach"
         );
         // A regular file is not a valid exclusive target.
         let file = dir.join("f");
         std::fs::write(&file, b"x").expect("write");
+        let ffd = open(&file).expect("open file");
         assert!(
-            check_owned_dir(&file, me).is_err(),
+            check_owned_dir(&ffd, &file, me).is_err(),
             "a file is not a directory"
         );
-        // A missing path is refused (cannot own what is not there).
-        assert!(
-            check_owned_dir(&dir.join("nope"), me).is_err(),
-            "absent path refused"
-        );
+        // A missing path cannot even be pinned.
+        assert!(open(&dir.join("nope")).is_err(), "absent path refused");
+        // Nor can a path with a symlink in it.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&dir, &link).expect("symlink");
+        assert!(open(&link).is_err(), "a symlinked path is refused");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

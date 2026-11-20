@@ -380,8 +380,19 @@ install_reference_policies() {
 	# (`gui-session` overlays /etc/kennel/config/labwc at the view's /etc/xdg/labwc). Host-independent
 	# and identical everywhere; a confined desktop never inherits the host's compositor assumptions.
 	if [[ -d "$pkg_root/dist/config/gui" ]]; then
-		install -d -m 0755 /etc/kennel/config
-		cp -a "$pkg_root/dist/config/gui/." /etc/kennel/config/
+		run install -d -m 0755 -o root -g root /etc/kennel/config
+		# Installed file by file as root:root, 0755 dirs and 0644 files (0755 if executable in the
+		# payload). `cp -a` would carry over whoever unpacked the tarball as the owner, and that
+		# user could then rewrite config every kennel's GUI session reads from /etc.
+		local gui_src="$pkg_root/dist/config/gui" rel mode
+		while IFS= read -r -d '' rel; do
+			run install -d -m 0755 -o root -g root "/etc/kennel/config/$rel"
+		done < <(cd "$gui_src" && find . -mindepth 1 -type d -print0)
+		while IFS= read -r -d '' rel; do
+			mode=0644
+			[[ -x "$gui_src/$rel" ]] && mode=0755
+			run install -m "$mode" -o root -g root "$gui_src/$rel" "/etc/kennel/config/$rel"
+		done < <(cd "$gui_src" && find . -type f -print0)
 		echo "install.sh: installed the confined-GUI default configs (/etc/kennel/config)"
 	fi
 }
@@ -465,7 +476,15 @@ sweep_named_dirs() {
 
 sweep_retired_payload() {
 	echo "install.sh: sweeping the managed directories against the payload manifest"
-	sweep_flat "$libexec" "$bindir"
+	# The default libexec dir is Kennel's alone. A --prefix may name a directory other software
+	# shares (/usr/local/bin, /opt/tools); sweeping it would delete every file there that this
+	# payload does not ship. So a relocated prefix is never swept: a retired binary may linger
+	# there, which is the lesser harm.
+	if [[ "$libexec" == "$default_libexec" ]]; then
+		sweep_flat "$libexec" "$bindir"
+	else
+		echo "install.sh: not sweeping $libexec (a --prefix directory may be shared); remove retired Kennel binaries there by hand"
+	fi
 	sweep_flat "$facades_dir" "$pkg_root/facades"
 	# ($pathbin_dir is /usr/bin — shared with the whole OS, never swept; the shim is one file.)
 	# Vendor trust anchors: payload-exact (a stray key here is vendor-tier authority).

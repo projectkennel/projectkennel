@@ -3,16 +3,15 @@
 //!
 //! # Why
 //!
-//! `kennel-bin-init` pulls its supervision-half over binder node 0, which `kenneld` claims by opening
-//! the kennel's binderfs via `/proc/<init>/root`. That open only succeeds once `kennel-bin-init` has
-//! actually `fexecve`'d (a blocked, pre-exec construction child is not reachable that way), so the
-//! claim cannot precede the exec — yet the pull must not precede the claim. The factory therefore
-//! cannot gate the *exec*; it gates the *pull*, from inside `kennel-bin-init`, over a socket the
-//! factory hands it at [`BOOT_SYNC_FD`]:
+//! `kennel-bin-init` pulls its supervision-half over binder node 0, which `kenneld` claims through
+//! the binder device handle the factory hands back. The pull must not precede the claim, so the
+//! factory gates the *pull*, from inside `kennel-bin-init`, over a socket it hands the init at
+//! [`BOOT_SYNC_FD`]:
 //!
 //! 1. `kennel-bin-init` execs, then sends `READY` and **blocks** before opening the bus.
-//! 2. `kenneld` (holding the other end) sees `READY`, opens the now-reachable binderfs, claims
-//!    node 0, then sends `GO`.
+//! 2. `kenneld` (holding the other end) sees `READY`, opens the binder device, claims node 0,
+//!    then sends `GO` — followed by one datagram carrying the mesh mounts (see
+//!    [`boot_sync_socket`]).
 //! 3. `kennel-bin-init` wakes and pulls — the context manager is already serving (first-try success).
 //!
 //! Both ends ship from one release, so this module is the single source of the convention.
@@ -73,6 +72,16 @@ pub fn signal_facade_ready(fd_value: Option<&str>) -> io::Result<()> {
 /// here, inherited across the `fexecve` — the sibling of [`crate::pty::PTY_RETURN_FD`].
 pub const BOOT_SYNC_FD: RawFd = 4;
 
+/// Borrow `kennel-bin-init`'s inherited boot-sync socket ([`BOOT_SYNC_FD`]).
+///
+/// After the READY/GO handshake the same socket carries one more datagram from `kenneld`: the mesh
+/// rendezvous (the detached connector-binderfs mounts to place in the view). Only meaningful in
+/// `kennel-bin-init`, where the factory placed the socket at this number before the `fexecve`.
+#[must_use]
+pub const fn boot_sync_socket() -> BorrowedFd<'static> {
+    borrow(BOOT_SYNC_FD)
+}
+
 /// The fixed descriptor for the **sha256-pinned workload binary** (`07-4` §7.4).
 ///
 /// When the policy pins the workload's digest, kenneld opens the resolved binary, hashes it
@@ -108,7 +117,7 @@ pub const INJECT_STDERR_FD: RawFd = 8;
 /// Absent when the policy has no `[net.udp]`. Sibling of [`WORKLOAD_FD`].
 pub const TUN_FD: RawFd = 9;
 
-/// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d; my binderfs is reachable via `/proc/<me>/root`."
+/// `kennel-bin-init` → `kenneld`: "I have `fexecve`'d and am waiting for the bus."
 const READY: u8 = 1;
 /// `kenneld` → `kennel-bin-init`: "node 0 is claimed and serving — pull now."
 const GO: u8 = 2;

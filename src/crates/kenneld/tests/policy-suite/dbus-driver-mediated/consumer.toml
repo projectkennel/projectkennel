@@ -1,0 +1,54 @@
+# ============================================================================
+# Suite case: dbus-driver-mediated — granting the bus driver does not open the bus.
+#
+# Every D-Bus client talks to the driver (`org.freedesktop.DBus`): without `AddMatch` no signal
+# ever arrives. So every `[dbus]` policy grants it — and the driver's methods act on the BUS,
+# not on a peer: own a name, start a service, set the environment that services the bus
+# activates later (outside any kennel) will run with. The broker therefore does not treat the
+# driver as an ordinary `talk` destination. With the driver granted and NOTHING in `own`:
+#
+#   * a query a client needs (`GetId`) passes;
+#   * `RequestName` for a name the policy does not let the kennel own is refused;
+#   * `UpdateActivationEnvironment` is refused.
+#
+# Exit 0 ⇒ all three hold.
+# ============================================================================
+
+name = "dbus-driver-mediated"
+template_base = "base-confined"
+
+[dbus.session]
+enabled = true
+
+[dbus.session.allow]
+talk = ["org.freedesktop.DBus"]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**", "/bin/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/dbus-send"]
+
+[[consumes]]
+name = "org.projectkennel.dbus"
+shape = "dbus-name"
+required = true
+reason = "reach the standing D-Bus broker's mediation over the connector mesh"
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    call() { dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus "$@" >/dev/null 2>&1; }
+    call org.freedesktop.DBus.GetId \
+        || { echo 'GetId was refused: the driver grant is not working at all'; exit 1; }
+    if call org.freedesktop.DBus.RequestName string:org.projectkennel.e2e.NotMine uint32:4; then
+        echo 'RequestName succeeded for a name outside `own`'; exit 1
+    fi
+    if call org.freedesktop.DBus.UpdateActivationEnvironment dict:string:string:KENNEL_E2E_PROBE,1; then
+        echo 'UpdateActivationEnvironment was forwarded to the bus'; exit 1
+    fi
+    echo 'driver grant: GetId passes; RequestName (not in own) and UpdateActivationEnvironment are refused'
+    """,
+]

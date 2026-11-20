@@ -149,8 +149,15 @@ pub fn listener() -> io::Result<UnixListener> {
 /// Bind a fresh control socket at `path`, creating its parent directory and
 /// removing any stale socket first.
 fn bind(path: &std::path::Path) -> io::Result<UnixListener> {
+    use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        // The socket is the daemon's whole control surface. The peer-credential check on each
+        // connection is the gate; the documented 0700 directory and 0600 socket are the layer
+        // in front of it, and neither should depend on the umask.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
     }
     // A leftover socket from a previous run would make bind fail with EADDRINUSE.
     match std::fs::remove_file(path) {
@@ -158,7 +165,9 @@ fn bind(path: &std::path::Path) -> io::Result<UnixListener> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    UnixListener::bind(path)
+    let listener = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 #[cfg(test)]

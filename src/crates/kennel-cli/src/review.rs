@@ -74,10 +74,8 @@ pub fn review(args: &[String]) -> Result<ExitCode, String> {
 
     let mut roots_reviewed = 0usize;
     let mut total_divergences = 0usize;
-    for entry in &policy.effective_policy.fs.write {
-        let Some(root) = writable_root(entry, &home) else {
-            continue;
-        };
+    let cwd = std::env::current_dir().ok();
+    for root in writable_roots(&policy, &home, cwd.as_deref()) {
         let (reviewed, divergences) = review_one_root(&root, &generator, assume_yes, do_revert)?;
         if reviewed {
             roots_reviewed = roots_reviewed.saturating_add(1);
@@ -132,8 +130,10 @@ fn review_one_root(
         {
             for change in &divergences {
                 match kennel_lib_manifest::revert(root, change) {
-                    Ok(()) => println!("  reverted {}", change_path_of(change)),
-                    Err(e) => eprintln!("  warning: revert {}: {e}", change_path_of(change)),
+                    Ok(()) => println!("  reverted {}", clean(change_path_of(change))),
+                    Err(e) => {
+                        eprintln!("  warning: revert {}: {e}", clean(change_path_of(change)));
+                    }
                 }
             }
         } else {
@@ -164,9 +164,10 @@ fn review_one_root(
 fn print_trigger_change(change: &kennel_lib_manifest::TriggerChange) {
     use kennel_lib_manifest::TriggerChange;
     match change {
-        TriggerChange::Modified { path, .. } => println!("  ~ {path} (modified)"),
-        TriggerChange::Removed { path, .. } => println!("  - {path} (removed)"),
-        TriggerChange::New { path, .. } => println!("  + {path} (new, unpinned)"),
+        // A trigger's path is a file name in a workspace the workload writes.
+        TriggerChange::Modified { path, .. } => println!("  ~ {} (modified)", clean(path)),
+        TriggerChange::Removed { path, .. } => println!("  - {} (removed)", clean(path)),
+        TriggerChange::New { path, .. } => println!("  + {} (new, unpinned)", clean(path)),
         TriggerChange::Unchanged { .. } => {}
     }
 }
@@ -197,30 +198,50 @@ fn show_trigger_diff(root: &Path, change: &kennel_lib_manifest::TriggerChange) {
     let Ok(pinned) = kennel_lib_manifest::read_blob(root, &entry.sha256) else {
         return;
     };
-    // Stage the pinned bytes in a temp file and diff the live file against it.
-    let tmp = std::env::temp_dir().join(format!(
-        "kennel-pin-{}-{}",
-        std::process::id(),
-        entry.sha256.replace(':', "_")
-    ));
-    if std::fs::write(&tmp, &pinned).is_err() {
+    // The file on disk is the workload's: only a regular file is shown (never a link's target,
+    // a device or a pipe), and what it contains is sanitised before it reaches the terminal.
+    let live = root.join(path);
+    if !std::fs::symlink_metadata(&live).is_ok_and(|m| m.is_file()) {
+        println!("    (not a regular file on disk; not shown)");
         return;
     }
-    if let Ok(out) = std::process::Command::new("diff")
+    // The pinned bytes go to `diff` on its standard input; nothing is staged in a temp file.
+    let Ok(mut child) = std::process::Command::new("diff")
         .arg("-u")
         .arg("--label")
         .arg(format!("{path} (pinned)"))
         .arg("--label")
         .arg(format!("{path} (on disk)"))
-        .arg(&tmp)
-        .arg(root.join(path))
-        .output()
-    {
+        .arg("-")
+        .arg(&live)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    // Feed stdin from its own thread: `diff` may fill the output pipe before it has read all
+    // of its input.
+    let feeder = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(&pinned);
+        })
+    });
+    if let Ok(out) = child.wait_with_output() {
         for line in String::from_utf8_lossy(&out.stdout).lines() {
-            println!("    {line}");
+            println!("    {}", clean(line));
         }
     }
-    let _ = std::fs::remove_file(&tmp);
+    if let Some(feeder) = feeder {
+        let _ = feeder.join();
+    }
+}
+
+/// Neutralise terminal control sequences in text that came from a workspace.
+fn clean(text: &str) -> String {
+    kennel_lib_text::sanitise_for_log(text)
 }
 
 /// Prompt `question` on stderr and read a `y`/`n` answer from stdin. Non-`y` (incl. EOF) is
@@ -375,6 +396,36 @@ pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every host directory the policy lets the workload write as a workspace.
+///
+/// That is the root of each `fs.write` grant and, when the policy grants `[fs.cwd] write`, the
+/// directory the command is run from — the workspace that grant makes writable.
+///
+/// The manifest pre-flight, the live tripwire and `kennel review` all walk this one list, so a
+/// project reached through the cwd grant is pinned, watched and reviewed like one named in
+/// `fs.write`. `cwd` is the invocation directory (`None` if it cannot be read).
+#[must_use]
+pub fn writable_roots(
+    policy: &kennel_lib_policy::SettledPolicy,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Vec<PathBuf> {
+    let fs = &policy.effective_policy.fs;
+    let mut roots: Vec<PathBuf> = fs
+        .write
+        .iter()
+        .filter_map(|entry| writable_root(entry, home))
+        .collect();
+    if matches!(fs.cwd.grant, kennel_lib_policy::settled::CwdGrant::Write) {
+        if let Some(cwd) = cwd {
+            if !roots.iter().any(|r| r == cwd) {
+                roots.push(cwd.to_path_buf());
+            }
+        }
+    }
+    roots
 }
 
 /// Derive the writable root directory from a glob-like `fs.write` entry, expanding

@@ -69,6 +69,11 @@ const START_LIMIT_BURST: usize = 5;
 /// The window the burst is counted over (systemd `StartLimitIntervalSec`).
 const START_LIMIT_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The mounts in a kennel's view that the factory itself created, and nothing else can be: the
+/// pivoted root, and the tmpfs instances the seal mounts last at `/dev` and `/tmp`. A directory
+/// `kennel-bin-init` creates as uid 0 must be on one of these — never on a bind of a host path.
+const SCAFFOLD_MOUNTS: &[&str] = &["/", "/dev", "/tmp"];
+
 /// Per-facade supervisor state: which `Supervision::aux` entry it runs, and the recent
 /// start instants used to enforce the restart burst limit.
 struct FacadeState {
@@ -89,31 +94,10 @@ fn main() -> ExitCode {
 /// Open the bus, pull the supervision-half, own the spawn, and supervise to exit.
 fn run() -> io::Result<u8> {
     require_kennel_userns()?;
-    // Authorise the operator kenneld to traverse our `/proc/<init>/root` under Yama
-    // `ptrace_scope=1` (07-2 §7.2.1a): it claims binder node 0 that way, but it is neither
-    // our process ancestor nor a holder of CAP_SYS_PTRACE in the initial userns Yama checks.
-    // Done BEFORE READY so the flag is set when kenneld opens the device. `_ANY` because
-    // kenneld lives in an ancestor PID namespace and has no pid we (kennel pid 1) could name;
-    // Yama's uid check still bars the lower-privileged operator-uid workload/facades from the
-    // uid-0 init. Best-effort: a kernel without Yama needs no relaxation, so a failure here
-    // must not abort the boot — surface it and continue to READY.
-    if let Err(e) = kennel_lib_syscall::process::set_ptracer_any() {
-        eprintln!("kennel-bin-init: PR_SET_PTRACER_ANY (Yama relaxation) failed, continuing: {e}");
-    }
-    // Mesh rendezvous (§7.13.4a): bind the datagram socket BEFORE READY, so it exists when kenneld
-    // sends the detached connector-binderfs clones (it does so right after our READY, reaching us via
-    // /proc/<init>/root). We receive + `move_mount` them below, before forking the workload. Bound
-    // unconditionally; a kennel with no mesh participation just receives a count-0 datagram.
-    let rendezvous = kennel_lib_syscall::scm::bind_dgram(Path::new(
-        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
-    ))?;
-    // We are the kennel's userns-0 (host root via `0 0 1`), so the socket is root-owned; make it
-    // writable so the operator-uid kenneld can send to it. Safe: it is removed before the workload
-    // forks, so no kennel process ever races it.
-    std::fs::set_permissions(
-        kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK,
-        std::os::unix::fs::PermissionsExt::from_mode(0o666),
-    )?;
+    // No Yama relaxation and no in-view rendezvous socket: the kennel userns is root-owned, so
+    // nothing outside it — kenneld included — may traverse `/proc/<init>/root`. kenneld claims
+    // node 0 through the device handle the factory handed it, and sends the mesh mounts over the
+    // boot-sync socket (below).
     // Boot-sync (07-2 §7.2.1a): announce we have execed and block until kenneld has claimed binder
     // node 0, so the pull below is a single first-try transaction (no retry). The factory placed
     // our end of the sync socket at `BOOT_SYNC_FD` before our `fexecve`.
@@ -141,7 +125,23 @@ fn run() -> io::Result<u8> {
     // Place the connector mesh mounts kenneld handed us (§7.13.4a): `move_mount` each detached
     // binderfs clone into its in-view target and grant the workload Landlock access to the device,
     // before we fork the workload (which opens it by path). A count-0 datagram is the no-mesh case.
-    place_mesh_mounts(&rendezvous, &mut sup, &tr)?;
+    place_mesh_mounts(&mut sup, &tr)?;
+    // The descriptors the factory handed init at fixed numbers are init's: the boot-sync socket
+    // to kenneld, the pty return socket, the injected stdio (which is `dup`ed onto 0/1/2 for the
+    // workload, leaving these copies behind). Mark them close-on-exec now, before anything is
+    // forked, so neither the workload nor a facade inherits one across its `execve`. They stay
+    // usable in init and in the pre-exec seal. The tun descriptor is marked in the workload's
+    // seal only, since a facade is its intended recipient; the pinned workload descriptor is
+    // left as it is, because the kernel needs it open to exec a script.
+    for fd in [
+        kennel_lib_syscall::boot::BOOT_SYNC_FD,
+        kennel_lib_syscall::pty::PTY_RETURN_FD,
+        kennel_lib_syscall::boot::INJECT_STDIN_FD,
+        kennel_lib_syscall::boot::INJECT_STDOUT_FD,
+        kennel_lib_syscall::boot::INJECT_STDERR_FD,
+    ] {
+        kennel_lib_syscall::fd::set_cloexec_at(fd)?;
+    }
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
@@ -157,27 +157,38 @@ fn run() -> io::Result<u8> {
 
 /// Receive the mesh rendezvous datagram and `move_mount` each detached binderfs clone into the view.
 ///
-/// kenneld sent (after our READY) one datagram naming each clone's in-view target directory, with the
-/// detached mount fds as `SCM_RIGHTS`. For each, we create the target dir, `move_mount` the binderfs
-/// onto it (we hold `CAP_SYS_ADMIN` in the kennel userns, so a sibling-userns clone attaches fine),
-/// and append the device dir + node to the workload's Landlock grants — so the workload, sealed when
-/// it is forked, may open `<target>/binder`. A count-0 datagram (a kennel with no mesh) is a no-op.
-fn place_mesh_mounts(
-    rendezvous: &std::os::fd::OwnedFd,
-    sup: &mut Supervision,
-    tr: &kennel_lib_config::Tracer,
-) -> io::Result<()> {
+/// kenneld sends (right after its GO) one datagram on the boot-sync socket naming each clone's
+/// in-view target directory, with the detached mount fds as `SCM_RIGHTS`. For each, we create the
+/// target dir, `move_mount` the binderfs onto it (we hold `CAP_SYS_ADMIN` in the kennel userns, so a
+/// sibling-userns clone attaches fine), and append the device dir + node to the workload's Landlock
+/// grants — so the workload, sealed when it is forked, may open `<target>/binder`. A count-0
+/// datagram (a kennel with no mesh) is a no-op. It is always sent, so an empty read means kenneld
+/// went away mid-bring-up: fail closed rather than start a workload missing its mesh mounts.
+fn place_mesh_mounts(sup: &mut Supervision, tr: &kennel_lib_config::Tracer) -> io::Result<()> {
     use kennel_lib_syscall::landlock::AccessFs;
     use std::os::fd::AsFd as _;
     let mut buf = [0u8; 4096];
-    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(rendezvous.as_fd(), &mut buf)?;
-    // The socket has served its purpose; clear it so the workload's /dev carries no stray node.
-    let _ = std::fs::remove_file(kennel_lib_spawn::mesh_rendezvous::RENDEZVOUS_SOCK);
+    let sync = kennel_lib_syscall::boot::boot_sync_socket();
+    let (n, fds) = kennel_lib_syscall::scm::recv_with_fds(sync, &mut buf)?;
+    if n == 0 {
+        return Err(io::Error::other(
+            "mesh rendezvous: kenneld closed the boot-sync socket before sending the mesh mounts",
+        ));
+    }
     for (mount, target) in
         kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)
     {
-        std::fs::create_dir_all(&target)?;
-        kennel_lib_syscall::namespace::move_mount_fd(mount.as_fd(), &target)?;
+        // We are host root here, and the view holds binds of host directories. The target comes
+        // from our bus peer, so it is not created or mounted on by name: it must lie on the
+        // scaffolding the factory built, and the mount attaches to that exact directory.
+        let anchors: Vec<&Path> = SCAFFOLD_MOUNTS.iter().map(Path::new).collect();
+        let place = kennel_lib_syscall::fd::scaffold_dir(&target, &anchors).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("mesh mount target {}: {e}", target.display()),
+            )
+        })?;
+        kennel_lib_syscall::namespace::move_mount_fd(mount.as_fd(), place.as_fd())?;
         let device = target.join("binder");
         tr.step(&format!("placed mesh binderfs at {}", target.display()));
         sup.landlock_fs.push((target, AccessFs::READ_DIR));
@@ -237,6 +248,15 @@ fn spawn_all(
     envp: &[CString],
     tr: kennel_lib_config::Tracer,
 ) -> io::Result<(i32, Vec<i32>)> {
+    // The workload and facades never run with gid 0. We are told the persona by our bus peer,
+    // and gid 0 is always mapped (it is ours), so refuse it here: the factory vouches only for
+    // the non-zero gids it mapped, which are the caller's own groups.
+    if sup.drop_gid == 0 || sup.groups.as_deref().is_some_and(|g| g.contains(&0)) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "refusing a persona with gid 0: the workload never holds the kennel root's group",
+        ));
+    }
     let groups = sup.groups.as_deref();
     let envp_ref = borrow(envp);
 
@@ -361,6 +381,8 @@ fn spawn_all(
         if sup.stdio_injected {
             kennel_lib_syscall::boot::place_injected_stdio()?;
         }
+        // The tun descriptor is for the tun facade, not for the workload.
+        kennel_lib_syscall::fd::set_cloexec_at(kennel_lib_syscall::boot::TUN_FD)?;
         Ok(())
     };
     let workload_pid = fork_drop_exec_confined(
@@ -571,10 +593,14 @@ fn supervise(
                 return Ok(u8::try_from(code & 0xff).unwrap_or(1));
             }
             Reaped::Exited { pid, .. } => {
-                notify(conn, lifecycle::NOTIFY_FACADE_CRASH, &pid.to_le_bytes());
+                // Init is PID 1, so it also reaps every orphan the workload leaves behind (a
+                // daemonised child, a shell's background job). Those are not facades: only a
+                // pid init itself forked as one is reported as a facade crash, or the audit
+                // trail would record a helper failing every time a workload process exits.
                 let Some(mut state) = facades.remove(&pid) else {
-                    continue; // not a tracked facade (already given up, or a stray)
+                    continue;
                 };
+                notify(conn, lifecycle::NOTIFY_FACADE_CRASH, &pid.to_le_bytes());
                 // `state.aux` was set from an enumerate over `sup.aux`, so this always hits;
                 // `.get` keeps it panic-free regardless.
                 let Some(facade) = sup.aux.get(state.aux) else {

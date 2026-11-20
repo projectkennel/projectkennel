@@ -72,8 +72,7 @@ pub fn unshare(ns: Namespaces) -> io::Result<()> {
 /// itself PID 1 of the new PID namespace (a `clone(CLONE_NEWPID)` child *is* the
 /// namespace init, unlike an `unshare` caller, which is not), so no
 /// second fork is needed. The parent gets the child's **host** pid back — the fact
-/// kenneld needs to gate the binder lifecycle verbs and to open
-/// `/proc/<pid>/root/dev/binderfs/binder`.
+/// kenneld needs to gate the binder lifecycle verbs.
 ///
 /// # The map-write handshake (caller's responsibility)
 ///
@@ -281,13 +280,34 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
 /// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
 /// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
 pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
-    let c = std::ffi::CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut set = libc::MOUNT_ATTR_NOSUID | libc::MOUNT_ATTR_NODEV;
     if !allow_exec_mappings {
         set |= libc::MOUNT_ATTR_NOEXEC;
     }
+    restrict_mount_tree(target, set)
+}
+
+/// Make the mount at `target` and every mount beneath it read-only.
+///
+/// A read-only grant is bound recursively, so a filesystem mounted inside the granted tree comes
+/// along as its own mount. A plain `MS_REMOUNT | MS_RDONLY` reaches only the top mount and would
+/// leave that inner one writable; this seals the whole subtree in one call. Where the kennel's
+/// Landlock rules do not also deny the write (an OCI root, whose read-only paths are held by the
+/// mount alone), this is the only thing that does. The other flags of each mount are untouched.
+///
+/// # Errors
+///
+/// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
+pub fn readonly_mount_tree(target: &std::path::Path) -> io::Result<()> {
+    restrict_mount_tree(target, libc::MOUNT_ATTR_RDONLY)
+}
+
+/// Add the restriction flags `set` to the mount at `target` and every mount beneath it.
+fn restrict_mount_tree(target: &std::path::Path, set: u64) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let c = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let attr = libc::mount_attr {
         attr_set: set,
         attr_clr: 0,
@@ -319,32 +339,32 @@ pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) ->
     Ok(())
 }
 
-/// `move_mount(detached_fd → target)` — attach a detached mount (from [`open_tree_clone`]).
+/// Attach the detached mount `detached` onto the directory `target` names **by descriptor**
+/// (`move_mount(2)` with an empty from-path and an empty to-path).
 ///
-/// The other half of the mesh handoff: a process holding `CAP_SYS_ADMIN` in its own user namespace
-/// attaches a detached binderfs clone (passed to it via `SCM_RIGHTS`) onto `target` in its mount
-/// namespace — even when the clone was created by a different (the holder's) user namespace.
+/// The target is an already-resolved handle, not a name, so the mount lands on exactly that
+/// directory: nothing is looked up again, and no symlink can redirect it. `kennel-bin-init` uses
+/// this to place the mesh binderfs clones `kenneld` hands it.
 ///
 /// # Errors
 ///
-/// The OS error if `move_mount` fails (`EPERM` without `CAP_SYS_ADMIN` in the target's mount ns, …).
+/// The OS error if `move_mount` fails (`EINVAL` for a mount that is not detached, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace).
 pub fn move_mount_fd(
     detached: std::os::fd::BorrowedFd<'_>,
-    target: &std::path::Path,
+    target: std::os::fd::BorrowedFd<'_>,
 ) -> io::Result<()> {
     use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    let t = std::ffi::CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    // SAFETY: from_fd is the detached mount; to-path is `target`; flags name an empty from-path.
+    // SAFETY: both descriptors are live for the call; both paths are the empty string, which the
+    // two EMPTY_PATH flags make "the descriptor itself". The kernel retains no pointer.
     let r = unsafe {
         libc::syscall(
             libc::SYS_move_mount,
             detached.as_raw_fd(),
             c"".as_ptr(),
-            libc::AT_FDCWD,
-            t.as_ptr(),
-            libc::MOVE_MOUNT_F_EMPTY_PATH,
+            target.as_raw_fd(),
+            c"".as_ptr(),
+            libc::MOVE_MOUNT_F_EMPTY_PATH | libc::MOVE_MOUNT_T_EMPTY_PATH,
         )
     };
     if r < 0 {

@@ -6,6 +6,188 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Security
+
+- **More low-severity hardening.** The constructed view's `/` and `/etc` are no longer group- or
+  world-writable; the workload and facades no longer inherit init's internal descriptors; a
+  terminal that stops reading is detached instead of stalling `kennel list`; a `protocol = "udp"`
+  proxy allow is no longer answered with a TCP connection; the D-Bus broker, the egress delegate
+  and the loopback helper have caps on sessions, queued frames, conduits and addresses; a
+  `[rootfs].readonly` path missing from the image is created and locked; spawned kennels share
+  one audit directory per requester; `review`, `risks`, `show` and `oci revert --list` sanitise
+  what they print; the lockfile pins the signer; `kennel-compose` grants a script-named
+  interpreter as one file; and the installer installs GUI config root-owned and never sweeps a
+  `--prefix` directory.
+- **Low-severity hardening.** A `"` in an `[ssh]` destination or option can no longer end the
+  bastion's forced command; descriptors received with a truncated control message are closed;
+  audit files and the control socket get their documented 0700/0600 modes whatever the umask;
+  `SPAWN` checks `max_instances` before doing its expensive work; BPF audit events lost to a full
+  buffer are reported (`net.audit-lost`) and allowed binds are recorded (`net.bind-allow`); the
+  host-mode ACL maps are frozen once written; and the metadata-deny invariant must cover every
+  port and protocol. **Behaviour change:** a kennel whose `exclusive` path cannot be shadowed no
+  longer starts; it used to run with the path shared.
+- **The policy parser has limits.** It runs before a signature is checked and had no size cap or
+  nesting bound; it now refuses documents over 1 MiB, nesting deeper than 64 and more than 4096
+  tables.
+- **`fs.dev.allow` accepts only the baseline pseudo-devices.** Any other device must use
+  `[[fs.dev.passthrough]]`, with its reason and threat tag. **Behaviour change:** a policy that
+  listed a real device in `fs.dev.allow` no longer compiles.
+- **The CLI reads the vendor and host key stores before any other**, as the daemon does, so a
+  user key file cannot take over a vendor key's id.
+- **Included fragments are validated**, and can no longer set `[fs.cwd]`, `fs.dev.allow` or
+  `[net.udp]`.
+- **`kennel policy diff` reports changes to `[dbus]`, `[fs.cwd]`, `fs.home.persist`, `[env]`,
+  `[seccomp]`, `fs.deny` and the other sections it used to pass over in silence.**
+- **kenneld takes a binder node only from an object the kernel delivered.** The registration
+  verbs read a handle number from the request's bytes; a kennel could write those bytes itself
+  and name another kennel's node in kenneld's table.
+- **x32 syscalls are refused on `x86_64`.** On kernels with the x32 ABI every entry of the
+  seccomp denylist had a second, unfiltered number.
+- **`kennel oci revert -- <path>` no longer follows a symlink the workload left in the persisted
+  layer**, which could make it delete outside the image store.
+- **A project made writable by `[fs.cwd]` is covered by the trust manifest.** Its manifest is
+  masked from the workload, its triggers are watched, and `kennel review` run from that directory
+  reviews it. Before, only `fs.write` paths were.
+- **The `fs.redirect` write-set rule is re-checked at start on the real paths**, after
+  substitution and spawn patches, and counts the host side of a writable redirect as writable.
+- **A `host`-mode kennel can no longer receive on a socket the bind policy never saw.**
+  `listen()` on an unbound socket, and a bind to port 0, skipped the bind rules and gave the
+  workload a service reachable from the network. Inbound traffic is now judged on arrival: a
+  listener must itself pass the bind policy, and a datagram is delivered only to a socket that
+  passes it or from a peer the kennel may send to. Refusals are audited as `net.listen-deny`
+  and `net.ingress-deny`.
+- **A `[net.bpf]` deny with no `protocol` denies every protocol**, not only TCP.
+- **A `host`-mode kennel can create TCP and UDP sockets and no others.** The network ACL judges TCP and
+  UDP; an ICMP "ping" socket, which needs no privilege, carried data to a denied address with no
+  audit event, and SCTP, UDP-Lite and MPTCP sockets could be created too. All are now refused at
+  `socket()`. **Behaviour change:** `ping` no longer works inside a `host`-mode kennel.
+- **Every `[net.bpf]` rule written for an address now applies.** Several ports or protocols on
+  one CIDR used to collapse to the last rule, and a deny with `ports` denied every port. Rules
+  on the same or a wider CIDR are now combined, and denies match on port and protocol. A policy
+  needing more than eight port rules on one prefix is refused at start.
+- **`net.mode = "host"` is refused on a kernel without Landlock scoping** (ABI 6, Linux 6.12).
+  On an older kernel such a kennel used to start with nothing keeping it off the host's abstract
+  unix sockets.
+- **A mesh peer that stops answering no longer pins a kenneld thread.** kenneld waited for a
+  broker's reply in a busy loop with no deadline: a broker that went silent cost one daemon thread
+  at full CPU per waiting consumer, for as long as it stayed silent. The wait now sleeps, and
+  after 30 seconds kenneld abandons the transaction and the thread serves again.
+- **The workload digest pin is checked when arguments are appended.** With `allowed_args = true`
+  the policy's own program runs with the caller's arguments, and the `sha256` pin was skipped on
+  that path.
+- **The SSH bastion's host-side `ssh` no longer reads escapes or carries forwardings.** It runs
+  with `EscapeChar=none` and `ClearAllForwardings=yes`, ahead of the operator's options.
+- **An oversized audit event is truncated and marked, not lost.** An event over 4096 bytes (a
+  long spawned command line) was refused by the sink and the refusal discarded: no record and no
+  drop record. The event is now cut down and carries `"truncated": true`.
+- **A read-only grant is read-only all the way down.** The bind was recursive but the read-only
+  seal was not, so a filesystem mounted inside a granted tree stayed writable at the mount layer;
+  in an OCI root nothing else denied the write.
+- **A failed `accept` no longer ends kenneld**, and the queue of inbound connections waiting for
+  a facade is bounded at 64 per mirrored port.
+- **A policy can no longer carry content its signature does not cover.** `[workload]` without
+  `argv`, `[rootfs]` without `path` and `[dbus]` without an enabled bus are left out of the signed
+  bytes, but their other fields (`pinned`, `sha256`, `writable`, `audit_level`, …) were still read
+  and honoured, so they could be added to a settled file without breaking its signature. Such a
+  policy now neither signs nor loads.
+- **A template's deny increments are no longer lost down the chain.** When a template used the
+  `{ add, remove }` form and a policy based on it added entries of its own, the template's
+  entries were dropped. This affected every increment list, including
+  `[[net.proxy.deny.policy.add]]`, `[[net.bpf.connect.deny.add]]` and `[[fs.deny.add]]`.
+- **A malformed address rule no longer compiles.** `10.0.0/8`, a hostname, or a prefix longer
+  than the address used to compile and sign, and the rule was then silently dropped at run time;
+  for a deny, the author believed in a rule that was not in force. The compiler now refuses it
+  and the daemon refuses to load a signed policy that contains one.
+- **Granting the D-Bus driver no longer opens the bus.** Every D-Bus client needs
+  `org.freedesktop.DBus` in `talk`, and with it the broker forwarded every driver method: a
+  kennel could own any free name, start any activatable service, and call
+  `UpdateActivationEnvironment`, which changes the environment of services the bus starts later,
+  outside any kennel. The `own` list was never enforced. Driver calls are now decided by method:
+  queries and `AddMatch` pass, `RequestName` needs the name in `own`, `StartServiceByName` needs
+  a destination the kennel may call, and the rest are refused. **Behaviour change:** an
+  application that requests its own bus name needs that name in `own`.
+- **A workload can no longer pin kenneld's binder buffer.** kenneld replied to each transaction
+  and freed its buffer in one write, and the binder driver skips the rest of a write after a
+  command fails. A workload that sent one-way transactions made every reply fail, so no buffer
+  was ever freed: eight sends filled the allowance, after which the kennel's own TTL-expiry
+  notice could not be delivered, and on a shared mesh bus other kennels' connects failed.
+  kenneld now frees the buffer before it replies, and does not reply to a one-way transaction.
+- **`kennel review` can no longer be steered by the workspace it reviews.** A cloned repository
+  could ship its own trust manifest with trigger paths outside the workspace, and `--revert`
+  would write the repository's blobs there. A workload could swap a pinned trigger for a symlink
+  and have `--revert` overwrite the link's target, or change a file between the displayed diff
+  and the re-pin. The manifest is now validated when read, revert and re-pin act only inside the
+  workspace without following the trigger, a restored blob must match its hash, and a trigger
+  that changed after it was reviewed is not pinned.
+- **A mesh provider can no longer redirect kenneld's connection, and a capability name can no
+  longer be a path.** For an af-unix capability, kenneld connects from the host to the provider's
+  socket in a directory the provider can write. A provider that put a symlink there sent the
+  consumer to any host socket the operator can reach, kenneld's control socket included; kenneld
+  now connects only to a real socket in that directory. Separately, a `[[provides]]` `name` or
+  `key` such as `x/../../home/…` compiled, and kenneld would then create, chmod and bind the
+  directory it named; names and keys must now be plain identifiers, checked at compile, at load
+  and in the daemon.
+- **Signing no longer stages the message in `/tmp`.** The bytes to sign were written to
+  `/tmp/kennel-sign-<pid>/`, a path any local user could create first, and root signed through it
+  with the host key at install. The message is now piped to `ssh-keygen`.
+- **Respelling an address no longer gets it past the network policy.** An IPv4-mapped IPv6
+  address (`::ffff:127.0.0.1`) is the IPv4 address it names, but both the proxy and the
+  host-mode BPF ACL judged it as IPv6: in `unconstrained` mode it reached the host's loopback and
+  the metadata address, and in `host` mode it skipped every IPv4 deny under a `*` allow. A
+  connect to `0.0.0.0` or `::` likewise reached a denied loopback. Addresses are now judged as
+  the destination the kernel dials. Separately, a `host`-mode kennel was given an any-port allow
+  on the host's own `127.0.0.1` and `::1` meant for the proxied modes; it no longer is.
+  **Behaviour change:** in `host` mode an IPv4-mapped *bind* is refused, and nothing reaches host
+  loopback without a rule.
+
+### Fixed
+
+- **Host-mode kennels no longer fail to start when a BPF program's verifier log grows.** The
+  loader asked for a log on every load into a fixed buffer, and the kernel fails such a load
+  when the log does not fit, even for a valid program.
+
+- **A kennel can no longer register itself as another kennel's provider.** Three binder verbs
+  handed their sender a cross-kennel role without checking who sent them. Any kennel could send
+  `REGISTER_TUN_SINK` and receive every `[net.udp]` kennel's UDP egress, DNS included. Any kennel
+  with a `[dbus]` section could send `ADD_SERVICE` on the shared mesh bus and replace the D-Bus
+  broker for all the others, or read their filters with `GET_SESSION_POLICY`. kenneld now honours
+  each only from the kennel its own registry says is that capability's provider, and audits a
+  refusal.
+- **The privileged helpers no longer trust their caller for three things.** Supplementary gids
+  to map into a kennel must be groups the caller is in, and a workload is never given gid 0. The
+  per-user bpffs for host-mode egress is mounted on a directory reached without following a
+  symlink and owned by the caller; before, a symlink at `/run/user/<uid>/kennel/bpf` put the mount
+  wherever it pointed. `kennel-privhelper-mounts` pins the directory before checking and mounting
+  it, and releases only a tmpfs mount of the caller's that carries the lock sentinel; before, a
+  sentinel file alone let any user detach a mount whose root they could write.
+- **A symlink can no longer steer where a kennel's view is built.** Bind mount points, the
+  trust-manifest masks and the staged `/etc` and home files were resolved by name before
+  `pivot_root`. A symlink left in a writable grant by an earlier workload — or shipped in an OCI
+  image — could send a copy onto another of the operator's files, or make a mask land on the
+  link's target and leave the masked path under the workload's control. Destinations are now
+  resolved by descriptor inside the new root, and a symlink at a mount point makes the kennel
+  refuse to start. `kennel-bin-init` creates a mesh mount point only on the view's own
+  scaffolding, so a mesh `at` or `endpoint` inside a bound host directory is refused.
+- **The privileged helper builds a kennel's view with the operator's filesystem identity, not
+  root's.** Its construction child is host root until `pivot_root`, and it created directories,
+  copied files and mounted an overlay on paths supplied by its caller. Anyone who ran the helper
+  directly could have root read or write a host file, and a symlink left in a writable grant by
+  an earlier workload could redirect the same operations. The child now sets its filesystem uid
+  and gid to the operator's for the whole build, so the kernel refuses anything the caller could
+  not do. An OCI overlay is mounted on directories opened and checked as the operator, and a
+  persistent upper must be operator-owned. Placeholders the build creates inside a writable grant
+  are now owned by the operator on the host, not by root.
+- **A kennel's user namespace is now owned by root, not by the operator.** The namespace maps host
+  uid 0, and the factory made the operator its owner so `kenneld` could open the kennel's binderfs
+  through `/proc/<init>/root`. A namespace's owner holds every capability inside it, so any
+  process at the operator's uid could `setns` into a running kennel's user namespace, become uid 0
+  there, and act as host root on the host filesystem — or enter the kennel itself. The factory now
+  creates the namespace with effective uid 0, so nothing at the operator's uid can enter a
+  kennel-built namespace or read its view from outside. `kenneld` is handed what it needs as
+  descriptors: a handle to the binder device, and the boot-sync socket, which now also carries the
+  mesh mounts. `kennel-bin-init` no longer sets `PR_SET_PTRACER_ANY`, and the mode-0666 rendezvous
+  socket in the view is gone. An operator can no longer `nsenter` into their own kennel.
+
 ### CLI changes
 
 - **A bare `<policy>` word is a policy name before it is a file in the current directory.**

@@ -341,7 +341,10 @@ fn rank(section: &str) -> u8 {
         "mesh" => 6,
         "identity" => 7,
         "workload" => 8,
-        _ => 9, // lifecycle / tty / trust and other posture toggles
+        "dbus" => 9,
+        "env" => 10,
+        "seccomp" => 11,
+        _ => 12, // lifecycle / tty / trust and other posture toggles
     }
 }
 
@@ -663,7 +666,211 @@ fn grants(p: &SourcePolicy) -> Vec<Grant> {
         }
     }
 
+    posture_grants(p, &mut out);
     out
+}
+
+/// A deny atom (its presence narrows the workload's reach).
+fn simple_deny(prefix: &'static str, section: &'static str, carrier: &str, item: &str) -> Grant {
+    Grant {
+        polarity: Polarity::Deny,
+        ..simple_allow(prefix, section, carrier, item)
+    }
+}
+
+/// One atom for a whole section, valued by its rendered content, so that any change inside it
+/// is reported even where no finer atom describes it. `None` (the section is absent) adds none.
+fn whole_section<T: Serialize + std::fmt::Debug>(
+    out: &mut Vec<Grant>,
+    key: &'static str,
+    section: &'static str,
+    carrier: &'static str,
+    value: Option<&T>,
+) {
+    let Some(value) = value else { return };
+    // One line: the TOML rendering with its lines joined; the debug form if it has none (a
+    // section that is not a table on its own).
+    let rendered = kennel_lib_toml::to_string(value).map_or_else(
+        |_| format!("{value:?}"),
+        |text| {
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
+        },
+    );
+    out.push(scalar(key, section, carrier, rendered));
+}
+
+/// The rest of the surface: every section that changes what the workload can reach, hold or be
+/// seen doing, and that the per-grant enumeration above does not itemise.
+///
+/// The enumeration used to stop at the grants the risk engine tags, so a change to `[dbus]`,
+/// `[fs.cwd]`, `fs.home.persist`, `[env].set`, `[seccomp]`, `fs.deny` and others diffed as "no
+/// change". Lists are itemised (an added D-Bus name or a removed seccomp deny is its own line);
+/// sections with no natural items are compared whole.
+#[allow(clippy::too_many_lines)] // a flat enumeration, one block per section.
+fn posture_grants(p: &SourcePolicy, out: &mut Vec<Grant>) {
+    if let Some(fs) = &p.fs {
+        for path in fs.deny.iter().flatten() {
+            out.push(simple_deny("fs.deny", "fs", "[[fs.deny]]", path));
+        }
+        for path in fs.exclusive.iter().flatten() {
+            out.push(simple_allow("fs.exclusive", "fs", "[fs] exclusive", path));
+        }
+        if let Some(home) = &fs.home {
+            for path in &home.persist {
+                out.push(simple_allow(
+                    "fs.home.persist",
+                    "fs",
+                    "[fs.home] persist",
+                    path,
+                ));
+            }
+            if let Some(shadow) = home.shadow {
+                out.push(scalar(
+                    "fs.home.shadow",
+                    "fs",
+                    "[fs.home] shadow",
+                    shadow.to_string(),
+                ));
+            }
+        }
+        if let Some(cwd) = &fs.cwd {
+            if let Some(grant) = &cwd.grant {
+                out.push(scalar(
+                    "fs.cwd.grant",
+                    "fs",
+                    "[fs.cwd] grant",
+                    grant.clone(),
+                ));
+            }
+            for marker in cwd.required.iter().flatten() {
+                out.push(simple_deny(
+                    "fs.cwd.required",
+                    "fs",
+                    "[fs.cwd] required",
+                    marker,
+                ));
+            }
+        }
+        whole_section(out, "fs.tmp", "fs", "[fs.tmp]", fs.tmp.as_ref());
+        whole_section(out, "fs.proc", "fs", "[fs.proc]", fs.proc.as_ref());
+        for dev in fs.dev.iter().flat_map(|d| d.allow.iter().flatten()) {
+            out.push(simple_allow("fs.dev.allow", "fs", "[fs.dev] allow", dev));
+        }
+    }
+    if let Some(exec) = &p.exec {
+        for path in exec.deny.iter().flatten() {
+            out.push(simple_deny("exec.deny", "exec", "[[exec.deny]]", path));
+        }
+    }
+    if let Some(net) = &p.net {
+        whole_section(out, "net.udp", "net", "[net.udp]", net.udp.as_ref());
+        whole_section(out, "net.bind", "net", "[net.bind]", net.bind.as_ref());
+        whole_section(out, "net.ipv6", "net", "[net.ipv6]", net.ipv6.as_ref());
+    }
+    if let Some(dbus) = &p.dbus {
+        for (bus, rules) in [("session", &dbus.session), ("system", &dbus.system)] {
+            let Some(rules) = rules else { continue };
+            if let Some(enabled) = rules.enabled {
+                out.push(scalar(
+                    &format!("dbus.{bus}.enabled"),
+                    "dbus",
+                    &format!("[dbus.{bus}] enabled"),
+                    enabled.to_string(),
+                ));
+            }
+            for (side, list, deny) in [("allow", &rules.allow, false), ("deny", &rules.deny, true)]
+            {
+                let Some(list) = list else { continue };
+                for (verb, names) in [
+                    ("talk", &list.talk),
+                    ("call", &list.call),
+                    ("broadcast", &list.broadcast),
+                    ("own", &list.own),
+                ] {
+                    for name in names {
+                        out.push(Grant {
+                            key: format!("dbus.{bus}.{side}.{verb}:{name}"),
+                            carrier: format!("[dbus.{bus}.{side}] {verb} {name}"),
+                            section: "dbus",
+                            value: name.clone(),
+                            reason: None,
+                            exposed: Vec::new(),
+                            mitigated: Vec::new(),
+                            polarity: if deny {
+                                Polarity::Deny
+                            } else {
+                                Polarity::Allow
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        whole_section(
+            out,
+            "dbus.audit",
+            "dbus",
+            "[dbus.audit]",
+            dbus.audit.as_ref(),
+        );
+    }
+    if let Some(env) = &p.env {
+        for (name, value) in env.set.iter().flatten() {
+            out.push(Grant {
+                key: format!("env.set:{name}"),
+                carrier: format!("[env.set] {name}"),
+                section: "env",
+                value: value.clone(),
+                reason: None,
+                exposed: Vec::new(),
+                mitigated: Vec::new(),
+                polarity: Polarity::Scalar,
+            });
+        }
+        for name in env.pass.iter().flatten() {
+            out.push(simple_allow("env.pass", "env", "[env] pass", name));
+        }
+        for name in env.deny.iter().flatten() {
+            out.push(simple_deny("env.deny", "env", "[env] deny", name));
+        }
+    }
+    if let Some(seccomp) = &p.seccomp {
+        if let Some(profile) = &seccomp.profile {
+            out.push(scalar(
+                "seccomp.profile",
+                "seccomp",
+                "[seccomp] profile",
+                profile.clone(),
+            ));
+        }
+        for syscall in seccomp.deny.iter().flatten() {
+            out.push(simple_deny(
+                "seccomp.deny",
+                "seccomp",
+                "[seccomp] deny",
+                syscall,
+            ));
+        }
+        for syscall in seccomp.allow.iter().flatten() {
+            out.push(simple_allow(
+                "seccomp.allow",
+                "seccomp",
+                "[seccomp] allow",
+                syscall,
+            ));
+        }
+    }
+    whole_section(out, "cap", "misc", "[cap]", p.cap.as_ref());
+    whole_section(out, "rootfs", "misc", "[rootfs]", p.rootfs.as_ref());
+    whole_section(out, "spawn", "misc", "[spawn]", p.spawn.as_ref());
+    whole_section(out, "service", "misc", "[service]", p.service.as_ref());
+    whole_section(out, "unsafe", "misc", "[unsafe]", p.unsafe_section.as_ref());
+    whole_section(out, "ulimits", "misc", "[ulimits]", p.ulimits.as_ref());
+    whole_section(out, "audit", "misc", "[audit]", p.audit.as_ref());
 }
 
 /// A capability-list allow atom carrying no threat tags (its identity *is* its value).
@@ -747,6 +954,57 @@ mod tests {
 
     fn parse(toml: &str) -> SourcePolicy {
         crate::source::parse(toml.as_bytes()).expect("parse source")
+    }
+
+    #[test]
+    fn changes_outside_the_tagged_grants_are_not_silent() {
+        // Each of these used to diff as "no change".
+        let old = parse("name = \"x\"\n");
+        for (what, body, carrier) in [
+            (
+                "a D-Bus name the kennel may own",
+                "[dbus.session]\nenabled = true\n[dbus.session.allow]\nown = [\"org.x.App\"]\n",
+                "own org.x.App",
+            ),
+            (
+                "a writable cwd grant",
+                "[fs.cwd]\ngrant = \"write\"\n",
+                "[fs.cwd] grant",
+            ),
+            (
+                "a persisted home path",
+                "[fs.home]\npersist = [\".config/app\"]\n",
+                "[fs.home] persist",
+            ),
+            (
+                "an environment variable",
+                "[env.set]\nLD_PRELOAD = \"/x.so\"\n",
+                "[env.set] LD_PRELOAD",
+            ),
+            (
+                "a seccomp allow",
+                "[seccomp]\nallow = [\"bpf\"]\n",
+                "[seccomp] allow bpf",
+            ),
+        ] {
+            let new = parse(&format!("name = \"x\"\n{body}"));
+            let d = diff(&old, &new, &cat());
+            assert!(
+                d.changes.iter().any(|c| c.carrier.contains(carrier)),
+                "{what}: nothing reported; got {:?}",
+                d.changes.iter().map(|c| &c.carrier).collect::<Vec<_>>()
+            );
+        }
+        // A removed deny is a widening, and is reported as one.
+        let with_deny = parse("name = \"x\"\n[seccomp]\ndeny = [\"ptrace\"]\n");
+        let d = diff(&with_deny, &old, &cat());
+        let c = d
+            .changes
+            .iter()
+            .find(|c| c.carrier.contains("ptrace"))
+            .expect("the dropped deny shows up");
+        assert_eq!(c.kind, ChangeKind::Removed);
+        assert!(c.widening);
     }
 
     #[test]

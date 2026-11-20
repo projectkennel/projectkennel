@@ -26,6 +26,8 @@ enum audit_kind {
 	AUDIT_NET_SETSOCKOPT_FORCED = 6,
 	AUDIT_NET_SENDMSG_DENY = 7,
 	AUDIT_NET_BIND_ALLOW = 8, /* a bind permitted by the [net.bpf].bind ACL (§7.5.7) */
+	AUDIT_NET_LISTEN_DENY = 9,  /* inbound to a listener the bind ACL does not cover (bind body) */
+	AUDIT_NET_INGRESS_DENY = 10, /* inbound datagram from a peer the ACL does not cover (connect body) */
 };
 
 /* Common header at the front of every event. */
