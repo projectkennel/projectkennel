@@ -1107,7 +1107,7 @@ const fn accept_failures_are_fatal(consecutive: u32) -> bool {
 /// Accept connections on `listener` forever, handling each on its own thread.
 ///
 /// # Errors
-/// The last OS error once `accept` has failed [`ACCEPT_FAILURE_LIMIT`] times in a row. A failure
+/// The last OS error once `accept` has failed `ACCEPT_FAILURE_LIMIT` times in a row. A failure
 /// that passes (descriptor exhaustion, an aborted connection) is logged and retried.
 pub fn serve<P, L>(
     shared: &Arc<Shared<P, L>>,
