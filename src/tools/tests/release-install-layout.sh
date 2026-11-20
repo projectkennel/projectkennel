@@ -34,7 +34,25 @@ if [[ -z "$host_rel_bins" ]] || [[ -z "$host_stat_bins" ]] || [[ -z "$facade_sta
 fi
 
 tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+
+# dist/ also holds two build OUTPUTS, both git-ignored: release/ (build-release.sh) and repo/
+# (build-repo.sh). On a release host both exist from the previous cut. Seed a marker in each so
+# the guard below can show neither is staged; remove only what this test created.
+seeded=()
+for out in release repo; do
+	if [[ ! -d "dist/$out" ]]; then
+		mkdir "dist/$out"
+		seeded+=("dist/$out")
+	fi
+	: > "dist/$out/.stage-tree-test.$$"
+done
+cleanup() {
+	rm -rf "$tmp"
+	rm -f "dist/release/.stage-tree-test.$$" "dist/repo/.stage-tree-test.$$"
+	local d
+	for d in ${seeded[@]+"${seeded[@]}"}; do rmdir "$d" 2>/dev/null || true; done
+}
+trap cleanup EXIT
 
 # Fake the two build-output dirs with empty, present binaries (this guard does not compile anything).
 # REL holds the host-dynamic set plus the host execution unit (kennel-host); STAT holds the static
@@ -57,6 +75,15 @@ if [[ -e "$payload/src" ]] || [[ -e "$payload/target" ]]; then
 	echo "FAIL: payload mirrors the source tree (src/ or target/) — it must be flat" >&2
 	exit 1
 fi
+
+# dist/ ships what install.sh consumes and none of the build outputs. The 0.8.1 cut staged the
+# previous release's signed repo tree (dist/repo) into both tarballs, six times their size.
+for out in release repo; do
+	if [[ -e "$payload/dist/$out" ]]; then
+		echo "FAIL: payload ships the dist/$out build output" >&2
+		exit 1
+	fi
+done
 
 # Every binary install.sh installs must resolve to a file the payload actually contains.
 status=0
@@ -111,5 +138,5 @@ for b in $test_bins; do
 	[[ -e "$payload_t/facades/$b" ]] || { echo "FAIL: --with-test-bins did not stage the test driver $b into facades/" >&2; status=1; }
 done
 
-[[ "$status" -eq 0 ]] && echo "ok: stage-tree.sh payload and install.sh agree (three-dir layout, installer at root, full SHA256SUMS incl. the trust key; test drivers excluded from a release)"
+[[ "$status" -eq 0 ]] && echo "ok: stage-tree.sh payload and install.sh agree (three-dir layout, installer at root, full SHA256SUMS incl. the trust key; test drivers and build outputs excluded from a release)"
 exit "$status"
