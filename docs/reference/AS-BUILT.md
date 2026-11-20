@@ -26,6 +26,40 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — authoring pipeline: parser limits, key precedence, fragments, the diff
+
+- **Bears-on:** Kennel book Vol 2, the policy pipeline chapters (TOML subset; trust tiers,
+  §7.13.5; fragments and `include`; `policy diff`), and the device section (`fs.dev`).
+- **Change:**
+  - *Parser limits.* `kennel-lib-toml` parses a file before its signature is checked. It had no
+    size cap, recursed once per nested `[` or `{`, and indexed tables by pairwise header
+    comparison. It now refuses a document over 1 MiB, nesting (or a header) deeper than 64, and
+    more than 4096 tables.
+  - *Key precedence.* A signer's tier is read off its key id, and a key set resolves an id to
+    the first key loaded under it. The daemon reads the vendor store first; the CLI's
+    `load_trust_store` read directories in the order given, with the vendor store last, so a
+    user's `<vendor-id>.pub` verified a signature whose id then read as vendor. The CLI now
+    orders directories vendor, host, then the rest, and warns when a later file redefines an id
+    with a different key.
+  - *`fs.dev.allow`.* The baseline list takes no reason and no threat tag, and accepted any
+    path, so a host device could be bound without the `[[fs.dev.passthrough]]` requirements. It
+    now accepts only `/dev/null`, `zero`, `full`, `random`, `urandom`, `tty`, `ptmx` and
+    `/dev/pts/**`.
+  - *Fragments.* `is_additive_only` did not look at `fs.cwd`, `fs.dev.allow` or `net.udp`, so a
+    fragment could set them. An included fragment was never validated: it now passes
+    `validate_fragment` (references, redirect sources, mmap-exec entries, D-Bus) and the device
+    rules.
+  - *`policy diff`.* The grant enumeration stopped at the carriers the risk engine tags; a
+    change to `[dbus]`, `[fs.cwd]`, `fs.home.persist`, `[env]`, `[seccomp]`, `fs.deny`,
+    `exec.deny`, `fs.exclusive`, `fs.dev.allow`, `[cap]`, `[rootfs]`, `[spawn]`, `[ulimits]`,
+    `[audit]` and others diffed as no change. Lists are now itemised and the remaining sections
+    compared whole.
+- **Not changed:** the `reason` rule is not applied to fragments, because the shipped,
+  maintainer-signed `gui-desktop` fragment has an `fs.read` entry without one; `policy risks`
+  still derives no exposure from the sections the diff now shows.
+- **Why:** each is a place where the tooling an author relies on to see or bound a policy looked
+  at less than the policy.
+
 ## 2026-11-20 — runtime hardening: handles, x32, OCI revert, the cwd workspace, the redirect floor
 
 - **Bears-on:** Kennel book Vol 2, the binder chapter (registration verbs); the seccomp section

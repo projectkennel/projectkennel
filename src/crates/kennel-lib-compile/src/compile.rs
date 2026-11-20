@@ -330,6 +330,11 @@ fn apply_includes(
                  delta, or an override-prone section); includes are additive-only"
             )]));
         }
+        // A fragment is source like any other: the per-entry rules (reasons, references, redirect
+        // sources, device passthrough tags) apply to what it adds. They used to be checked only
+        // on the policy that included it, before the fragment's entries were folded in.
+        fragment.validate_fragment()?;
+        crate::dev::validate(&fragment)?;
         if let Some(tb) = &fragment.template_base {
             if tb != "base-confined" {
                 return Err(PolicyError::Resolution(format!(

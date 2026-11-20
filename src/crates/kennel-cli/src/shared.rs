@@ -367,6 +367,25 @@ fn is_legacy_raw_b64(text: &str) -> bool {
     kennel_lib_policy::b64::decode(text.trim().as_bytes()).is_some_and(|b| b.len() == 32)
 }
 
+/// `dirs` in the order their keys take precedence: the vendor store, then the host store, then
+/// everything else as given.
+///
+/// A signer's tier is decided by its key id (which store carries `<id>.pub`), and a key set
+/// resolves an id to the first key loaded under it. If a user directory were read before the
+/// vendor one, a user's `vendor-id.pub` would be the key that verifies while the id still read as
+/// vendor. Reading the system stores first makes the key that verifies the one whose tier is
+/// reported, whatever order the caller listed the directories in — the daemon's own precedence.
+fn by_trust_precedence(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let rank = |dir: &PathBuf| match tier_of_path(dir) {
+        "vendor" => 0_u8,
+        "host" => 1,
+        _ => 2,
+    };
+    let mut ordered = dirs.to_vec();
+    ordered.sort_by_key(rank); // stable: the caller's order holds within a tier
+    ordered
+}
+
 /// Load a trust store: every `<key_id>.pub` under each directory.
 ///
 /// Each file must be an OpenSSH public-key line — `ssh-ed25519 <base64-blob>
@@ -381,7 +400,7 @@ fn is_legacy_raw_b64(text: &str) -> bool {
 /// Ed25519 public key, or cannot be inserted into the key set.
 pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
     let mut keys = kennel_lib_policy::KeySet::new();
-    for dir in dirs {
+    for dir in &by_trust_precedence(dirs) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             continue;
         };
@@ -399,8 +418,20 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
                 let (pubkey_bytes, _comment) =
                     kennel_lib_policy::openssh::parse_public_key(&contents)
                         .map_err(|e| format!("key {}: {e}", path.display()))?;
-                keys.insert(key_id, &pubkey_bytes)
-                    .map_err(|e| format!("key {}: {e}", path.display()))?;
+                // A key id names one key. The first directory in precedence order defines it;
+                // a later file of the same name is not a second definition, and saying so
+                // matters: the signer's tier is read off the id.
+                match keys.get(key_id) {
+                    Some(have) if **have != pubkey_bytes => eprintln!(
+                        "kennel: warning: ignoring {} — the key id `{key_id}` is already \
+                         defined by a higher-precedence trust directory with a different key",
+                        path.display()
+                    ),
+                    Some(_) => {}
+                    None => keys
+                        .insert(key_id, &pubkey_bytes)
+                        .map_err(|e| format!("key {}: {e}", path.display()))?,
+                }
             } else if is_legacy_raw_b64(&contents) {
                 return Err(format!(
                     "key {}: legacy raw-base64 public key (format removed in 0.6.0) — \
@@ -877,6 +908,27 @@ mod signer_tests {
 
     fn signing_key(seed: u8) -> kennel_lib_policy::SigningKey {
         kennel_lib_policy::SigningKey::from_seed("seed", &[seed; 32]).expect("32-byte seed")
+    }
+
+    #[test]
+    fn system_trust_dirs_are_read_before_any_other() {
+        // Whatever order the caller lists them in (`--trust-dir` first, the vendor store last),
+        // the vendor and host stores define a key id before a user directory can.
+        let listed = [
+            PathBuf::from("/home/u/.config/kennel/keys"),
+            PathBuf::from("/tmp/extra-keys"),
+            PathBuf::from("/etc/kennel/keys"),
+            PathBuf::from("/usr/lib/kennel/keys"),
+        ];
+        assert_eq!(
+            by_trust_precedence(&listed),
+            [
+                PathBuf::from("/usr/lib/kennel/keys"),
+                PathBuf::from("/etc/kennel/keys"),
+                PathBuf::from("/home/u/.config/kennel/keys"),
+                PathBuf::from("/tmp/extra-keys"),
+            ]
+        );
     }
 
     #[test]

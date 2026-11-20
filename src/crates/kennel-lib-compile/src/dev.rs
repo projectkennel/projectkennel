@@ -38,6 +38,19 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     };
     let mut errs: Vec<String> = Vec::new();
 
+    // `fs.dev.allow` is the baseline of pseudo-devices that expose no hardware and no kernel
+    // driver beyond the trivial ones. It takes no reason and no threat tag, so it must not be a
+    // way to bind a real device quietly: anything else belongs in `[[fs.dev.passthrough]]`.
+    for path in dev.allow.iter().flatten() {
+        if !is_baseline_device(path) {
+            errs.push(format!(
+                "fs.dev.allow `{path}` is not a baseline pseudo-device ({}); a host device is \
+                 exposed with `[[fs.dev.passthrough]]`, which carries a reason and a threat tag",
+                BASELINE_DEVICES.join(", ")
+            ));
+        }
+    }
+
     for entry in &dev.passthrough {
         let who = entry.path.as_deref().unwrap_or("<no-path>");
         match &entry.path {
@@ -60,6 +73,24 @@ pub fn validate(policy: &SourcePolicy) -> Result<(), PolicyError> {
     } else {
         Err(PolicyError::SourceValidation(errs))
     }
+}
+
+/// The pseudo-devices `fs.dev.allow` may name: data sources and sinks, and the kennel's own
+/// terminal. None of them reaches hardware or a host driver's ioctl surface.
+const BASELINE_DEVICES: &[&str] = &[
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
+    "/dev/ptmx",
+    "/dev/pts/**",
+];
+
+/// Whether `p` is one of the [`BASELINE_DEVICES`].
+fn is_baseline_device(p: &str) -> bool {
+    BASELINE_DEVICES.contains(&p)
 }
 
 /// Whether `p` is an absolute device path under `/dev`, free of `..` components.
@@ -103,6 +134,24 @@ mod tests {
                 exposed: vec!["T2.1".to_owned()],
                 mitigated: vec![],
             }),
+        }
+    }
+
+    #[test]
+    fn a_real_device_cannot_ride_in_on_the_baseline_list() {
+        let with_allow = |paths: &[&str]| {
+            let mut p = policy_with(Vec::new());
+            if let Some(dev) = p.fs.as_mut().and_then(|fs| fs.dev.as_mut()) {
+                dev.allow = Some(paths.iter().map(|s| (*s).to_owned()).collect());
+            }
+            p
+        };
+        assert!(validate(&with_allow(&["/dev/null", "/dev/urandom", "/dev/pts/**"])).is_ok());
+        for device in ["/dev/kvm", "/dev/net/tun", "/dev/sda", "/dev/**"] {
+            assert!(
+                validate(&with_allow(&["/dev/null", device])).is_err(),
+                "`{device}` must go through [[fs.dev.passthrough]]"
+            );
         }
     }
 

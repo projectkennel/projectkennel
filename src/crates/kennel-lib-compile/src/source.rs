@@ -1895,6 +1895,30 @@ impl SourcePolicy {
         self.name.is_some() && self.template_name.is_none()
     }
 
+    /// Validate an included **fragment**: the per-entry rules of [`validate`](Self::validate)
+    /// (references, redirect sources, mmap-exec entries, D-Bus) without the two that describe a
+    /// runnable policy — a fragment has no `template_base`, and it may carry an invariant deny.
+    ///
+    /// The `reason` rule is not applied yet: a shipped, maintainer-signed fragment
+    /// (`gui-desktop`) has an entry without one, and requiring it would refuse every policy that
+    /// includes that fragment until it is re-signed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PolicyError::SourceValidation`] carrying one message per problem.
+    pub fn validate_fragment(&self) -> Result<(), PolicyError> {
+        let mut errs: Vec<String> = Vec::new();
+        self.check_references(&mut errs);
+        self.check_redirect_sources(&mut errs);
+        self.check_mmap_exec_entries(&mut errs);
+        self.check_dbus(&mut errs);
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(PolicyError::SourceValidation(errs))
+        }
+    }
+
     fn check_identity(&self, errs: &mut Vec<String>) {
         match (self.template_name.is_some(), self.name.is_some()) {
             (true, true) => {
@@ -2230,7 +2254,11 @@ impl SourcePolicy {
                 && fs.home.is_none()
                 && fs.tmp.is_none()
                 && fs.proc.is_none()
-                && fs.dev.as_ref().is_none_or(|d| d.passthrough.is_additive())
+                && fs.cwd.is_none()
+                && fs
+                    .dev
+                    .as_ref()
+                    .is_none_or(|d| d.allow.is_none() && d.passthrough.is_additive())
         });
         let exec_ok = self.exec.as_ref().is_none_or(|e| {
             path_ok(&e.allow)
@@ -2250,6 +2278,7 @@ impl SourcePolicy {
                 && n.bind.is_none()
                 && n.ipv6.is_none()
                 && n.audit.is_none()
+                && n.udp.as_ref().is_none_or(|u| u.allow.is_additive())
                 && n.proxy.as_ref().is_none_or(|p| {
                     p.allow.is_additive() && p.deny.as_ref().is_none_or(|d| d.policy.is_additive())
                 })

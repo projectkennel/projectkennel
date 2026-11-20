@@ -49,6 +49,15 @@ pub fn from_str<'de, T>(s: &'de str) -> Result<T, crate::Error>
 where
     T: de::Deserialize<'de>,
 {
+    if s.len() > MAX_INPUT_BYTES {
+        return Err(crate::Error::from(*Error::custom(
+            None,
+            format!(
+                "document is {} bytes; the parser accepts at most {MAX_INPUT_BYTES}",
+                s.len()
+            ),
+        )));
+    }
     let mut d = Deserializer::new(s);
     T::deserialize(&mut d).map_err(|e| crate::Error::from(*e))
 }
@@ -157,9 +166,26 @@ enum ErrorKind {
     UnquotedString,
 }
 
+/// The largest document the parser accepts, in bytes.
+///
+/// The parser runs on a file before its signature is checked (the signature is *in* the file), so
+/// its cost is set by whoever can place a file the daemon or CLI will read. A policy is a few
+/// kilobytes; this bound is far above any real one and far below what makes parsing expensive.
+pub const MAX_INPUT_BYTES: usize = 1 << 20;
+
+/// The deepest an array or inline table may nest, and the most parts a table header may have.
+/// Values are parsed by recursion, so without a bound a run of `[` exhausts the stack.
+pub const MAX_NESTING: usize = 64;
+
+/// The most `[table]` / `[[array]]` headers a document may have. Tables are indexed by comparing
+/// headers pairwise, so the work grows with the square of this count.
+pub const MAX_TABLES: usize = 4096;
+
 struct Deserializer<'a> {
     input: &'a str,
     tokens: Tokenizer<'a>,
+    /// How many arrays / inline tables enclose the value being parsed.
+    nesting: usize,
 }
 
 impl<'de> de::Deserializer<'de> for &mut Deserializer<'de> {
@@ -956,7 +982,22 @@ impl<'a> Deserializer<'a> {
         Deserializer {
             tokens: Tokenizer::new(input),
             input,
+            nesting: 0,
         }
+    }
+
+    /// Step into an array or inline table, refusing one nested deeper than [`MAX_NESTING`].
+    fn enter(&mut self, at: usize) -> Result<(), Box<Error>> {
+        if self.nesting >= MAX_NESTING {
+            let mut err = Error::custom(
+                Some(at),
+                format!("values are nested more than {MAX_NESTING} deep"),
+            );
+            err.fix_linecol(|at| self.to_linecol(at));
+            return Err(err);
+        }
+        self.nesting = self.nesting.saturating_add(1);
+        Ok(())
     }
 
     fn tables(&mut self) -> Result<Vec<Table<'a>>, Box<Error>> {
@@ -978,6 +1019,12 @@ impl<'a> Deserializer<'a> {
                     if !cur_table.header.is_empty() || cur_table.values.is_some() {
                         tables.push(cur_table);
                     }
+                    if tables.len() >= MAX_TABLES {
+                        return Err(Error::custom(
+                            Some(at),
+                            format!("document has more than {MAX_TABLES} tables"),
+                        ));
+                    }
                     cur_table = Table {
                         at,
                         header: Vec::new(),
@@ -987,6 +1034,12 @@ impl<'a> Deserializer<'a> {
                     loop {
                         let part = header.next().map_err(|e| self.token_error(e));
                         match part? {
+                            Some(_) if cur_table.header.len() >= MAX_NESTING => {
+                                return Err(Error::custom(
+                                    Some(at),
+                                    format!("a table header has more than {MAX_NESTING} parts"),
+                                ));
+                            }
                             Some(part) => cur_table.header.push(part),
                             None => break,
                         }
@@ -1072,14 +1125,20 @@ impl<'a> Deserializer<'a> {
             Some((span, Token::Keylike(key))) => self.parse_keylike(at, span, key)?,
             Some((span, Token::Plus)) => self.number_leading_plus(span)?,
             Some((Span { start, .. }, Token::LeftBrace)) => {
-                self.inline_table().map(|(Span { end, .. }, table)| Value {
+                self.enter(at)?;
+                let table = self.inline_table();
+                self.nesting = self.nesting.saturating_sub(1);
+                table.map(|(Span { end, .. }, table)| Value {
                     e: E::InlineTable(table),
                     start,
                     end,
                 })?
             }
             Some((Span { start, .. }, Token::LeftBracket)) => {
-                self.array().map(|(Span { end, .. }, array)| Value {
+                self.enter(at)?;
+                let array = self.array();
+                self.nesting = self.nesting.saturating_sub(1);
+                array.map(|(Span { end, .. }, array)| Value {
                     e: E::Array(array),
                     start,
                     end,

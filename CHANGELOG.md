@@ -8,6 +8,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **The policy parser has limits.** It runs before a signature is checked and had no size cap or
+  nesting bound; it now refuses documents over 1 MiB, nesting deeper than 64 and more than 4096
+  tables.
+- **`fs.dev.allow` accepts only the baseline pseudo-devices.** Any other device must use
+  `[[fs.dev.passthrough]]`, with its reason and threat tag. **Behaviour change:** a policy that
+  listed a real device in `fs.dev.allow` no longer compiles.
+- **The CLI reads the vendor and host key stores before any other**, as the daemon does, so a
+  user key file cannot take over a vendor key's id.
+- **Included fragments are validated**, and can no longer set `[fs.cwd]`, `fs.dev.allow` or
+  `[net.udp]`.
+- **`kennel policy diff` reports changes to `[dbus]`, `[fs.cwd]`, `fs.home.persist`, `[env]`,
+  `[seccomp]`, `fs.deny` and the other sections it used to pass over in silence.**
 - **kenneld takes a binder node only from an object the kernel delivered.** The registration
   verbs read a handle number from the request's bytes; a kennel could write those bytes itself
   and name another kennel's node in kenneld's table.
