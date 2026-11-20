@@ -74,10 +74,8 @@ pub fn review(args: &[String]) -> Result<ExitCode, String> {
 
     let mut roots_reviewed = 0usize;
     let mut total_divergences = 0usize;
-    for entry in &policy.effective_policy.fs.write {
-        let Some(root) = writable_root(entry, &home) else {
-            continue;
-        };
+    let cwd = std::env::current_dir().ok();
+    for root in writable_roots(&policy, &home, cwd.as_deref()) {
         let (reviewed, divergences) = review_one_root(&root, &generator, assume_yes, do_revert)?;
         if reviewed {
             roots_reviewed = roots_reviewed.saturating_add(1);
@@ -375,6 +373,36 @@ pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every host directory the policy lets the workload write as a workspace.
+///
+/// That is the root of each `fs.write` grant and, when the policy grants `[fs.cwd] write`, the
+/// directory the command is run from — the workspace that grant makes writable.
+///
+/// The manifest pre-flight, the live tripwire and `kennel review` all walk this one list, so a
+/// project reached through the cwd grant is pinned, watched and reviewed like one named in
+/// `fs.write`. `cwd` is the invocation directory (`None` if it cannot be read).
+#[must_use]
+pub fn writable_roots(
+    policy: &kennel_lib_policy::SettledPolicy,
+    home: &Path,
+    cwd: Option<&Path>,
+) -> Vec<PathBuf> {
+    let fs = &policy.effective_policy.fs;
+    let mut roots: Vec<PathBuf> = fs
+        .write
+        .iter()
+        .filter_map(|entry| writable_root(entry, home))
+        .collect();
+    if matches!(fs.cwd.grant, kennel_lib_policy::settled::CwdGrant::Write) {
+        if let Some(cwd) = cwd {
+            if !roots.iter().any(|r| r == cwd) {
+                roots.push(cwd.to_path_buf());
+            }
+        }
+    }
+    roots
 }
 
 /// Derive the writable root directory from a glob-like `fs.write` entry, expanding

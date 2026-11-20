@@ -1111,6 +1111,31 @@ impl Plan {
             .find(|src| src.starts_with(dir) || dir.starts_with(src))
     }
 
+    /// A read-only redirected source the workload can write through another bind, if any: the
+    /// redirected source and the writable host path that covers (or is covered by) it.
+    ///
+    /// The settle-time floor (`fs.redirect.write-set`) compares the policy's strings, before the
+    /// per-user placeholders are substituted and before a spawn patch is applied, and it does not
+    /// count the host side of a *writable* redirect as writable. This is the same rule on the
+    /// plan: resolved host paths, every writable bind. A redirect presents `source` at a view
+    /// path as operator-provided content; if the workload can write `source` some other way, it
+    /// authors what it is later shown as the operator's.
+    #[must_use]
+    pub fn writable_redirect_source(&self) -> Option<(&Path, &Path)> {
+        let binds = &self.view.as_ref()?.binds;
+        binds
+            .iter()
+            .filter(|b| b.redirected && !b.writable)
+            .find_map(|redirect| {
+                binds
+                    .iter()
+                    .filter(|b| b.writable)
+                    .map(|b| b.source.as_path())
+                    .find(|w| redirect.source.starts_with(w) || w.starts_with(&redirect.source))
+                    .map(|w| (redirect.source.as_path(), w))
+            })
+    }
+
     /// Grant an already-resolved host directory into the view at its own path — the
     /// materialised `[fs.cwd]` invocation grant (§7.9).
     ///
@@ -1119,7 +1144,11 @@ impl Plan {
     /// Unlike the policy fs grants the path is **not** remapped — it keeps its absolute host
     /// path, so the workload's cwd (the same path) is valid in the view. No EXECUTE is granted
     /// on the tree: the workload execs only its `exec.allow` binaries, never project files.
-    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool) {
+    ///
+    /// With `mask_manifest` (the policy's `[trust].manifest`), a writable cwd gets the same
+    /// trust-manifest mask every other writable bind gets: the workload must not read or
+    /// rewrite the integrity pins of the workspace it is working in (T2.8).
+    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool, mask_manifest: bool) {
         let access = if writable {
             write_access()
         } else {
@@ -1129,6 +1158,10 @@ impl Plan {
         // absolute path (not remapped), so target == source == host_dir.
         self.landlock_fs.push((host_dir.clone(), access));
         if let Some(view) = self.view.as_mut() {
+            if writable && mask_manifest {
+                view.mask_paths.push(host_dir.join(".trust-manifest.json"));
+                view.mask_dir_paths.push(host_dir.join(".trust-manifest.d"));
+            }
             view.binds.push(BindMount {
                 source: host_dir.clone(),
                 target: host_dir,

@@ -1512,6 +1512,28 @@ mod tests {
     }
 
     #[test]
+    fn a_writable_cwd_grant_gets_the_trust_manifest_mask() {
+        let masks = |writable: bool, manifest: bool| {
+            let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
+            let mut plan =
+                Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+            plan.grant_cwd(PathBuf::from("/work/project"), writable, manifest);
+            let view = plan.view.expect("constructed view");
+            (
+                view.mask_paths
+                    .contains(&PathBuf::from("/work/project/.trust-manifest.json")),
+                view.mask_dir_paths
+                    .contains(&PathBuf::from("/work/project/.trust-manifest.d")),
+            )
+        };
+        // The workload must not read or rewrite the pins of the workspace it is writing in.
+        assert_eq!(masks(true, true), (true, true));
+        // A read-only cwd carries no manifest; `[trust].manifest = false` opts out.
+        assert_eq!(masks(false, true), (false, false));
+        assert_eq!(masks(true, false), (false, false));
+    }
+
+    #[test]
     fn home_is_writable_by_default_and_readonly_suppresses_the_grant() {
         // shim_root for the default identity (`kennel`).
         let home_root = PathBuf::from("/home/kennel");

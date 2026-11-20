@@ -58,6 +58,12 @@ pub struct Incoming {
     /// push delivers the conduit fd this way — `07-5` §7.5.7). Empty for the registry verbs
     /// and for node 0, which is created with `accept_fds = 0` so a request can carry none.
     pub fds: Vec<OwnedFd>,
+    /// Where in [`data`](Self::data) the transaction's binder objects sit: the offsets array the
+    /// **driver** delivered. The driver checks every listed object and translates it into the
+    /// receiver's terms (a node becomes a handle in our table, a handle is re-mapped to ours), so
+    /// an object at a listed offset is one the sender really held. Bytes that merely look like an
+    /// object, at an offset not listed here, are the sender's own data and prove nothing.
+    pub objects: Vec<usize>,
     /// The sending process pid (kernel-attested).
     pub sender_pid: i32,
     /// The sending process euid (kernel-attested).
@@ -99,6 +105,28 @@ pub struct RecvBatch {
 pub struct Connection {
     fd: OwnedFd,
     map: Mapping,
+}
+
+impl Incoming {
+    /// The handle of the binder object that ends this transaction's data, if the driver delivered
+    /// one there.
+    ///
+    /// The registration verbs carry a node as their last object, which the driver turns into a
+    /// handle in our table. A handle is only taken from an offset the driver listed
+    /// ([`objects`](Self::objects)): otherwise a sender could write the bytes of a handle object
+    /// itself, naming a number in *our* table — some other kennel's node — and have it treated as
+    /// a node the sender passed.
+    #[must_use]
+    pub fn trailing_handle(&self) -> Option<u32> {
+        let at = self
+            .data
+            .len()
+            .checked_sub(proto::FLAT_BINDER_OBJECT_SIZE)?;
+        if !self.objects.contains(&at) {
+            return None;
+        }
+        proto::flat_binder_object_handle_value(self.data.get(at..)?)
+    }
 }
 
 impl Connection {
@@ -933,10 +961,12 @@ impl Connection {
                         .ok_or_else(|| io::Error::other("transaction buffer out of range"))?
                         .to_vec();
                     let fds = self.extract_fds(&td);
+                    let objects = self.object_offsets(&td);
                     transactions.push(Incoming {
                         code: td.code,
                         data,
                         fds,
+                        objects,
                         sender_pid: td.sender_pid,
                         sender_euid: td.sender_euid,
                         node_cookie: td.cookie,
@@ -958,6 +988,21 @@ impl Connection {
             dead,
             released,
         })
+    }
+
+    /// The offsets, within the transaction's data, of the binder objects the driver delivered.
+    /// An entry that cannot be read is skipped.
+    fn object_offsets(&self, td: &TransactionData) -> Vec<usize> {
+        let count = usize::try_from(td.offsets_size / 8).unwrap_or(0);
+        (0..count)
+            .filter_map(|i| {
+                let at = td
+                    .offsets
+                    .wrapping_add(u64::try_from(i).ok()?.wrapping_mul(8));
+                let bytes = <[u8; 8]>::try_from(self.map.read_at(at, 8)?).ok()?;
+                usize::try_from(u64::from_ne_bytes(bytes)).ok()
+            })
+            .collect()
     }
 
     /// Extract and take ownership of every `BINDER_TYPE_FD` object a received transaction
@@ -1218,5 +1263,50 @@ impl Drop for BufferGuard<'_> {
         let mut w = Vec::new();
         proto::write_free_buffer(&mut w, self.buffer);
         let _ = self.conn.write_only(&w);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A received transaction whose data is `name`, padding, then the bytes of a handle object
+    /// for `handle`; `objects` is the offsets array the driver delivered.
+    fn incoming(name: &[u8], handle: u32, listed: bool) -> Incoming {
+        let mut data = name.to_vec();
+        data.resize(data.len().next_multiple_of(8), 0);
+        let at = data.len();
+        let mut object = proto::flat_binder_object_binder(0, 0, 0);
+        if let Some(tag) = object.get_mut(..4) {
+            tag.copy_from_slice(&proto::BINDER_TYPE_HANDLE.to_ne_bytes());
+        }
+        if let Some(value) = object.get_mut(8..12) {
+            value.copy_from_slice(&handle.to_ne_bytes());
+        }
+        data.extend_from_slice(&object);
+        Incoming {
+            code: 0,
+            data,
+            fds: Vec::new(),
+            objects: if listed { vec![at] } else { Vec::new() },
+            sender_pid: 1,
+            sender_euid: 1000,
+            node_cookie: 0,
+            buffer: 0,
+            one_way: false,
+        }
+    }
+
+    #[test]
+    fn a_handle_is_taken_only_from_an_object_the_driver_delivered() {
+        // The driver listed the object: it translated a node the sender held.
+        assert_eq!(incoming(b"svc", 42, true).trailing_handle(), Some(42));
+        // The same bytes with no object listed are the sender's own data: they name a number
+        // in OUR handle table, which the sender never held.
+        assert_eq!(incoming(b"svc", 42, false).trailing_handle(), None);
+        // An object listed somewhere else does not vouch for the trailing bytes.
+        let mut elsewhere = incoming(b"svc", 42, false);
+        elsewhere.objects = vec![0];
+        assert_eq!(elsewhere.trailing_handle(), None);
     }
 }

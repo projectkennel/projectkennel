@@ -26,6 +26,44 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — runtime hardening: handles, x32, OCI revert, the cwd workspace, the redirect floor
+
+- **Bears-on:** Kennel book Vol 2, the binder chapter (registration verbs); the seccomp section
+  (§7.4); the OCI substrate (§7.11.4a, selective revert); the trust manifest (§7.4, T2.8) and
+  `[fs.cwd]` (§7.9); `fs.redirect` (W15).
+- **Change:**
+  - *Binder handles.* `REGISTER_MIRROR`, `REGISTER_TUN_SINK` and mesh `ADD_SERVICE` read the
+    registered node's handle from the last 24 bytes of the payload. Nothing tied those bytes to
+    an object the driver had translated, so a sender could write the bytes of a handle object
+    itself and name any number in kenneld's handle table — another kennel's node. `Incoming`
+    now carries the object offsets the driver delivered, and `Incoming::trailing_handle` returns
+    a handle only for an object at a listed offset.
+  - *x32.* The seccomp filter matches native syscall numbers under `AUDIT_ARCH_X86_64`. On a
+    kernel built with the x32 ABI the same calls exist a second time with bit 30 set, under the
+    same architecture value, so every denylist entry had an unfiltered twin. On `x86_64` the
+    compiled filter is now preceded by three instructions that apply the filter's refusal action
+    to any syscall number at or above `0x40000000`.
+  - *`oci revert -- <path>`.* The persisted upper is written by the workload. The target was
+    `upper.join(path)` with a lexical containment check, so a directory in the upper replaced
+    by a symlink led `remove_dir_all` out of the store. The target is now reached through a
+    handle on its parent, resolved inside the upper (`RootDir`), and removed by its final name.
+  - *`[fs.cwd] write`.* The trust-manifest mask, the pre-flight that writes a baseline manifest,
+    the live tripwire and `kennel review` all walked `fs.write` only. A project made writable by
+    the cwd grant had no mask (the workload could read and rewrite `.trust-manifest.json`), no
+    tripwire and no review. `Plan::grant_cwd` now adds the mask for a writable cwd, and the CLI
+    walks `review::writable_roots`, which adds the invocation directory when the policy grants
+    `[fs.cwd] write`.
+  - *Redirect floor.* The settle-time `fs.redirect.write-set` check compares policy strings:
+    before per-user substitution, before a spawn patch, and without counting the host side of a
+    *writable* redirect as writable. The invariant now counts those sources, and the daemon
+    re-runs the rule on the plan (`Plan::writable_redirect_source`: resolved host paths, every
+    writable bind) and refuses the start.
+- **Behaviour change:** x32 binaries do not run in a kennel on `x86_64`. `kennel review` run from
+  a project directory reviews that directory when the policy grants `[fs.cwd] write`.
+- **Not verified:** x32 was tested as a filter-shape unit test only (the VM is aarch64). The
+  handle rule has no end-to-end case with a forged object. `kennel review` learns the cwd from
+  where it is run, not from where the kennel was run.
+
 ## 2026-11-20 — host mode judges inbound traffic; a deny with no protocol is every protocol
 
 - **Bears-on:** Kennel book Vol 2, the network chapter (§7.5.7 the bind ACL; §7.3.7 the bind

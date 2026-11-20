@@ -8,6 +8,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **kenneld takes a binder node only from an object the kernel delivered.** The registration
+  verbs read a handle number from the request's bytes; a kennel could write those bytes itself
+  and name another kennel's node in kenneld's table.
+- **x32 syscalls are refused on `x86_64`.** On kernels with the x32 ABI every entry of the
+  seccomp denylist had a second, unfiltered number.
+- **`kennel oci revert -- <path>` no longer follows a symlink the workload left in the persisted
+  layer**, which could make it delete outside the image store.
+- **A project made writable by `[fs.cwd]` is covered by the trust manifest.** Its manifest is
+  masked from the workload, its triggers are watched, and `kennel review` run from that directory
+  reviews it. Before, only `fs.write` paths were.
+- **The `fs.redirect` write-set rule is re-checked at start on the real paths**, after
+  substitution and spawn patches, and counts the host side of a writable redirect as writable.
 - **A `host`-mode kennel can no longer receive on a socket the bind policy never saw.**
   `listen()` on an unbound socket, and a bind to port 0, skipped the bind rules and gave the
   workload a service reachable from the network. Inbound traffic is now judged on arrival: a

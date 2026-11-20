@@ -1569,7 +1569,8 @@ pub fn run_kennel<P, L>(
                     loaded.cwd.grant,
                     resolved.display()
                 ));
-                loaded.plan.grant_cwd(resolved, writable);
+                let mask_manifest = loaded.settled.effective_policy.trust.manifest;
+                loaded.plan.grant_cwd(resolved, writable, mask_manifest);
             }
             Err(reason) => return fail(shared, &req.kennel, ctx, conn, "fs.cwd", reason),
         }

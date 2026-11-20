@@ -113,21 +113,49 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
             "the cloud-metadata deny (169.254.169.254) is mandatory and must not be removed",
         ));
     }
-    // The redirect floor (W15): a `source` must not intersect the workload-writable surface.
-    // Signing authenticates the redirect's author, not its correctness — a signed `source`
-    // inside the write set is a valid signature over a confused-deputy hole (the workload
-    // writes the source, reads it back at `path` as operator-provided content). The writable
-    // surface is `write` ∪ `exclusive` ∪ `home_persist` (persist paths are host-side state a
-    // writable home grant carries across runs); `[fs.cwd]` — the one writable surface settle
-    // cannot see — is floor-checked at spawn against the resolved cwd.
+    redirect_violations_into(ep, &mut v);
+    if v.is_empty() {
+        Ok(())
+    } else {
+        Err(v)
+    }
+}
+
+/// The redirect floor (W15): a `source` must not intersect the workload-writable surface.
+/// Signing authenticates the redirect's author, not its correctness — a signed `source`
+/// inside the write set is a valid signature over a confused-deputy hole (the workload
+/// writes the source, reads it back at `path` as operator-provided content). The writable
+/// surface is `write` ∪ `exclusive` ∪ `home_persist` (persist paths are host-side state a
+/// writable home grant carries across runs); `[fs.cwd]` — the one writable surface settle
+/// cannot see — is floor-checked at spawn against the resolved cwd.
+fn redirect_violations_into(ep: &crate::settled::EffectivePolicy, v: &mut Vec<InvariantViolation>) {
+    // A redirect whose view path is itself a write grant makes its *source* workload-writable:
+    // that host path belongs to the writable surface too, under its own name.
+    let is_write_redirect = |r: &crate::settled::FsRedirect| {
+        ep.fs
+            .write
+            .iter()
+            .chain(&ep.fs.exclusive)
+            .any(|w| normalize_grant(w) == normalize_grant(&r.path))
+    };
     for r in &ep.fs.redirect {
+        if is_write_redirect(r) {
+            continue; // its source is meant to be written; it is checked as a writable path
+        }
         let writable = ep
             .fs
             .write
             .iter()
             .chain(&ep.fs.exclusive)
             .map(|w| normalize_grant(w))
-            .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)));
+            .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)))
+            .chain(
+                ep.fs
+                    .redirect
+                    .iter()
+                    .filter(|w| is_write_redirect(w))
+                    .map(|w| normalize_grant(&w.source)),
+            );
         for w in writable {
             if paths_intersect(&r.source, &w) {
                 v.push(InvariantViolation::new(
@@ -141,11 +169,6 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
                 ));
             }
         }
-    }
-    if v.is_empty() {
-        Ok(())
-    } else {
-        Err(v)
     }
 }
 
@@ -293,6 +316,27 @@ mod tests {
                 "`{cidr}/{prefix_len}` must be refused"
             );
         }
+    }
+
+    /// The host side of a writable redirect is writable: a read redirect served from inside it
+    /// is refused, though no `write` grant names that host path.
+    #[test]
+    fn the_source_of_a_write_redirect_counts_as_writable() {
+        let mut p = with_redirect("~/.app/cred.json", "~/stores/app/cred.json");
+        p.effective_policy.fs.write.push("~/work".to_owned());
+        p.effective_policy.fs.redirect.push(FsRedirect {
+            path: "~/work".to_owned(),
+            source: "~/stores/app".to_owned(),
+        });
+        assert_eq!(redirect_violations(&p).len(), 1);
+        // Unrelated host paths: no violation, and the write redirect itself is not one.
+        let mut p = with_redirect("~/.app/cred.json", "~/stores/app/cred.json");
+        p.effective_policy.fs.write.push("~/work".to_owned());
+        p.effective_policy.fs.redirect.push(FsRedirect {
+            path: "~/work".to_owned(),
+            source: "~/scratch".to_owned(),
+        });
+        assert!(redirect_violations(&p).is_empty());
     }
 
     /// The floor (W15): a `source` covered by — or covering — any workload-writable path is

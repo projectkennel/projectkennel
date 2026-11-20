@@ -885,7 +885,6 @@ fn register_mirror(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
     use kennel_lib_binder::service::inet::decode_port_prefix;
 
     let Some((_transport, port)) = decode_port_prefix(&incoming.data) else {
@@ -913,12 +912,7 @@ fn register_mirror(
     }
     // The node object the facade sent is the trailing flat_binder_object; the driver translated it
     // to a handle for us.
-    let handle = incoming
-        .data
-        .len()
-        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
-        .and_then(|off| incoming.data.get(off..))
-        .and_then(flat_binder_object_handle_value);
+    let handle = incoming.trailing_handle();
     let Some(handle) = handle else {
         writer.emit(&inet_event(
             incoming,
@@ -973,8 +967,6 @@ fn register_tun_sink(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_lib_binder::proto::{flat_binder_object_handle_value, FLAT_BINDER_OBJECT_SIZE};
-
     // The sink is daemon-global: whoever registers it receives every `[net.udp]` kennel's egress
     // session. Every kennel can send this verb to its own node 0, so the verb arriving proves
     // nothing — only a kennel whose signed policy provides the tun capability may register.
@@ -990,12 +982,7 @@ fn register_tun_sink(
 
     // The node object the broker sent is the trailing flat_binder_object (the driver translated it to
     // a handle for us); REGISTER_TUN_SINK carries no data before it.
-    let handle = incoming
-        .data
-        .len()
-        .checked_sub(FLAT_BINDER_OBJECT_SIZE)
-        .and_then(|off| incoming.data.get(off..))
-        .and_then(flat_binder_object_handle_value);
+    let handle = incoming.trailing_handle();
     let Some(handle) = handle else {
         writer.emit(&tun_event(
             incoming,

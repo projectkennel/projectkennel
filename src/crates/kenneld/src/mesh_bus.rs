@@ -319,7 +319,11 @@ fn mesh_add_service(
     conn: &Connection,
     writer: &Writer,
 ) -> Reply {
-    let Some((name, handle)) = mesh::decode_add_service(&incoming.data) else {
+    // The name is the sender's bytes; the handle is taken only from an object the driver
+    // delivered, never from bytes that merely have its shape.
+    let decoded = mesh::decode_add_service(&incoming.data)
+        .and_then(|(name, _)| Some((name, incoming.trailing_handle()?)));
+    let Some((name, handle)) = decoded else {
         writer.emit(
             &Event::new(
                 "mesh.add-service",
