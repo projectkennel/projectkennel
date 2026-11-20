@@ -8,6 +8,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A mesh peer that stops answering no longer pins a kenneld thread.** kenneld waited for a
+  broker's reply in a busy loop with no deadline: a broker that went silent cost one daemon thread
+  at full CPU per waiting consumer, for as long as it stayed silent. The wait now sleeps, and
+  after 30 seconds kenneld abandons the transaction and the thread serves again.
 - **The workload digest pin is checked when arguments are appended.** With `allowed_args = true`
   the policy's own program runs with the caller's arguments, and the `sha256` pin was skipped on
   that path.

@@ -10,9 +10,31 @@
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::time::{Duration, Instant};
 
 use crate::proto::{self, Br, TransactionData};
 use crate::sys::{self, BinderWriteRead, Mapping};
+
+/// How long a transaction this side sent may go unanswered on a non-blocking endpoint.
+///
+/// Generous for a peer that is merely busy; what it bounds is a peer that never answers.
+pub const TRANSACT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// The instant a transaction started now must be answered by.
+fn transact_deadline() -> Instant {
+    Instant::now()
+        .checked_add(TRANSACT_DEADLINE)
+        .unwrap_or_else(Instant::now)
+}
+
+thread_local! {
+    /// Whether the calling thread announced itself as a looper, so it can do so again after its
+    /// binder state is discarded.
+    static IS_LOOPER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set between `abandon_thread` and the thread's next `recv_batch`: the transactions it was
+    /// serving were detached with its binder state, so they can no longer be replied to.
+    static REPLIES_ORPHANED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Read-buffer capacity for one `BINDER_WRITE_READ` cycle (room for several
 /// framed `BR_*` commands; the loop spans cycles if more arrive).
@@ -126,7 +148,9 @@ impl Connection {
     pub fn enter_looper(&self) -> io::Result<()> {
         let mut w = Vec::new();
         proto::write_cmd(&mut w, proto::BC_ENTER_LOOPER);
-        self.write_only(&w)
+        self.write_only(&w)?;
+        IS_LOOPER.with(|l| l.set(true));
+        Ok(())
     }
 
     /// Announce this thread as a binder looper the driver requested via
@@ -140,7 +164,9 @@ impl Connection {
     pub fn register_looper(&self) -> io::Result<()> {
         let mut w = Vec::new();
         proto::write_cmd(&mut w, proto::BC_REGISTER_LOOPER);
-        self.write_only(&w)
+        self.write_only(&w)?;
+        IS_LOOPER.with(|l| l.set(true));
+        Ok(())
     }
 
     /// Put the endpoint's fd in non-blocking mode, so a `BINDER_WRITE_READ` read with nothing
@@ -184,8 +210,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -229,8 +256,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -292,8 +320,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -355,8 +384,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -462,8 +492,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -541,8 +572,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -658,8 +690,9 @@ impl Connection {
         let mut write = Vec::new();
         proto::write_transaction(&mut write, false, &td);
         let mut to_send: &[u8] = &write;
+        let deadline = transact_deadline();
         loop {
-            let brs = self.cycle(to_send)?;
+            let brs = self.turn(to_send, deadline)?;
             to_send = &[];
             self.ack_refcounts(&brs)?;
             for br in brs {
@@ -881,6 +914,9 @@ impl Connection {
     ///
     /// Returns the OS error if the `BINDER_WRITE_READ` or a payload copy fails.
     pub fn recv_batch(&self) -> io::Result<RecvBatch> {
+        // What this thread reads from here on belongs to its current binder state, so a reply to
+        // it is in order again (see `abandon_thread`).
+        REPLIES_ORPHANED.with(|o| o.set(false));
         let brs = self.cycle(&[])?;
         self.ack_refcounts(&brs)?;
         let mut transactions = Vec::new();
@@ -972,7 +1008,10 @@ impl Connection {
     fn reply_write(incoming: &Incoming, td: &TransactionData) -> Vec<u8> {
         let mut write = Vec::new();
         proto::write_free_buffer(&mut write, incoming.buffer);
-        if !incoming.one_way {
+        // After `abandon_thread` the transaction this would answer is no longer on the thread's
+        // stack; a `BC_REPLY` would only arm an error for the next read. The buffer is still ours
+        // to free.
+        if !incoming.one_way && !REPLIES_ORPHANED.with(std::cell::Cell::get) {
             proto::write_transaction(&mut write, true, td);
         }
         write
@@ -1046,6 +1085,53 @@ impl Connection {
         // SAFETY: `write_buffer` points at `write` (live for the call) with `write_size` set to
         // its length; the read side is zero-sized. The kernel reads only those `write_size` bytes.
         unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) }
+    }
+
+    /// One step of waiting on a transaction this thread sent: run a [`cycle`](Self::cycle), and if
+    /// it brought nothing, sleep in `poll` until the driver has something for this thread or
+    /// `deadline` passes.
+    ///
+    /// On a blocking endpoint the cycle itself waits in the kernel and this adds nothing. On a
+    /// non-blocking one (the daemon's looper pool) an empty cycle used to be retried at once, so a
+    /// peer that never answered held a daemon thread at full CPU for ever. The peer of a
+    /// daemon-initiated transaction is a process inside a kennel, so its silence has to be
+    /// survivable: the wait sleeps, and at the deadline the thread's binder state is thrown away
+    /// ([`abandon_thread`](Self::abandon_thread)) and the caller gets [`io::ErrorKind::TimedOut`].
+    fn turn(&self, write: &[u8], deadline: Instant) -> io::Result<Vec<Br>> {
+        let brs = self.cycle(write)?;
+        if !brs.is_empty() {
+            return Ok(brs);
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            self.abandon_thread();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the binder peer did not answer in time",
+            ));
+        }
+        let wait_ms = i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1);
+        self.poll(wait_ms)?;
+        Ok(Vec::new())
+    }
+
+    /// Discard the calling thread's binder state (`BINDER_THREAD_EXIT`) after a transaction it
+    /// sent went unanswered, so the thread can serve again.
+    ///
+    /// A thread waiting for a reply keeps that transaction on its stack; the driver hands it no
+    /// other work, and a reply arriving later would be read as the answer to whatever the thread
+    /// sends next. Exiting the thread detaches the transaction — a late reply now fails at the
+    /// replier — and the next binder call from this OS thread starts with a clean state. A looper
+    /// re-announces itself. Any transaction this thread was in the middle of serving is detached
+    /// with it, so replies to it are skipped until the next [`recv_batch`](Self::recv_batch); its
+    /// sender is not told, and stays blocked until the silent peer answers or exits. That sender
+    /// is the party that asked for the unanswered work.
+    fn abandon_thread(&self) {
+        let _ = sys::thread_exit(self.fd.as_fd());
+        REPLIES_ORPHANED.with(|o| o.set(true));
+        if IS_LOOPER.with(std::cell::Cell::get) {
+            let _ = self.enter_looper();
+        }
     }
 
     /// Run one `BINDER_WRITE_READ`: hand the driver `write` (`BC_*` commands) and

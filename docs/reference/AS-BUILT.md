@@ -26,6 +26,29 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — a daemon-initiated binder transaction sleeps, and gives up at a deadline
+
+- **Bears-on:** Kennel book Vol 2, the binder chapter (`02-4-binder.md` §Threading model) and the
+  mesh mediation path (§7.7, §7.13).
+- **Change:** `kenneld` sends two synchronous transactions to a process inside a kennel: the
+  mediation broker's `NEW_SESSION` and the tun broker's `DELIVER_TUN_SESSION`. Its endpoint is
+  non-blocking (the looper pool needs that), and the wait for the reply was `loop { cycle() }`
+  with `EAGAIN` treated as an empty cycle: a busy loop, with no deadline. A peer that did not
+  answer held a daemon thread at full CPU until it did. As-built now (`Connection::turn`), an
+  empty cycle sleeps in `poll` on the binder descriptor, and after `TRANSACT_DEADLINE` (30 s)
+  the thread discards its binder state with `BINDER_THREAD_EXIT`, re-enters the looper, and the
+  caller gets `TimedOut`. Discarding the state detaches the unanswered transaction, so a late
+  reply fails at the replier instead of being read as the answer to the thread's next call.
+- **Consequence:** the inbound transaction the thread was serving (the consumer's connect) is
+  detached with it and is not answered; replies are skipped until the thread's next read. That
+  consumer stays blocked until the silent peer answers or exits — as it was before, without the
+  daemon thread.
+- **Why:** the peer of these transactions is confined code; its silence must cost the daemon a
+  bounded wait and nothing else.
+- **Not changed:** a transaction the peer sends back to the waiting thread (a nested inbound
+  call) is still ignored and its buffer not freed; handles are still taken from payload bytes
+  (R-18).
+
 ## 2026-11-20 — daemon and view hardening: the pin, the bastion, accept, audit size, nested mounts
 
 - **Bears-on:** Kennel book Vol 2 ch.10 (Cryptographic Services, the SSH bastion §7.10.3–6);
