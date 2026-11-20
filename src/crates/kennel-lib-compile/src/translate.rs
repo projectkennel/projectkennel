@@ -1196,21 +1196,28 @@ fn translate_bpf_acl(
     let Some(acl) = acl else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let allow = translate_bpf_rules(acl.allow.resolved(), deferred)?;
-    let deny = translate_bpf_rules(acl.deny.resolved(), deferred)?;
+    // An allow with no `protocol` is TCP. A deny with no `protocol` is every protocol: the
+    // author wrote "not this address", and a deny that quietly left UDP open would not be that.
+    let allow = translate_bpf_rules(acl.allow.resolved(), Protocol::Tcp, deferred)?;
+    let deny = translate_bpf_rules(acl.deny.resolved(), Protocol::Any, deferred)?;
     Ok((allow, deny))
 }
 
 /// Expand a list of [`BpfRule`](crate::source::BpfRule)s into settled [`NetRule`]s: one rule
 /// per (cidr, port) pair (or per cidr when `ports` is empty), with `"*"` expanding to both
-/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error.
+/// `0.0.0.0/0` and `::/0`. A rule with no cidr is an error. `unstated_protocol` is what a rule
+/// with no `protocol` means.
 fn translate_bpf_rules(
     rules: &[crate::source::BpfRule],
+    unstated_protocol: Protocol,
     deferred: &mut BTreeSet<String>,
 ) -> Result<Vec<NetRule>, PolicyError> {
     let mut out: Vec<NetRule> = Vec::new();
     for rule in rules {
-        let protocol = parse_protocol(rule.protocol.as_deref())?;
+        let protocol = match rule.protocol.as_deref() {
+            None => unstated_protocol,
+            stated => parse_protocol(stated)?,
+        };
         let Some(cidr) = &rule.cidr else {
             return Err(translation("net.bpf rule needs a cidr".to_owned()));
         };

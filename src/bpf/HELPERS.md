@@ -22,6 +22,11 @@ by this; CI confirms it across the matrix.)
 | `bpf_ktime_get_ns` | all (audit path) | Timestamp (`CLOCK_MONOTONIC`) for `audit_hdr.ts_ns`. | Pure; no pointer. |
 | `bpf_get_current_pid_tgid` | all (audit path) | Workload PID for `audit_hdr.pid`. | Pure; no pointer. |
 | `bpf_get_current_comm` | all (audit path) | `task->comm` for `audit_hdr.comm`. | Writes into a fixed-size buffer with an explicit size argument. |
+| `bpf_sk_fullsock` | ingress | Turn the packet's socket into a full socket so its state (listening or not), protocol and own address can be read. | Returns NULL-able pointer; null-checked (a request or timewait socket yields NULL and the packet passes as an existing flow). |
+| `bpf_skb_load_bytes` | ingress | Copy the IP header and the UDP source port out of an inbound datagram, to judge its sender. Read-only. | Bounded copy into a fixed stack buffer; a negative return drops the packet. |
+
+`bpf_get_current_pid_tgid` and `bpf_get_current_comm` are **not** called by `ingress`: it runs
+on packet receipt, where there is no current task to name.
 
 ## Explicitly not used
 

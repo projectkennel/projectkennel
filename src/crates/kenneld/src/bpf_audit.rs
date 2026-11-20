@@ -47,6 +47,8 @@ mod kind {
     pub const SOCK_DENY: u16 = 5;
     pub const SETSOCKOPT_FORCED: u16 = 6;
     pub const SENDMSG_DENY: u16 = 7;
+    pub const LISTEN_DENY: u16 = 9;
+    pub const INGRESS_DENY: u16 = 10;
 }
 
 /// A running drain: the worker thread plus its stop flag, wake eventfd, and pin dir.
@@ -185,10 +187,10 @@ fn parse_event(sample: &[u8], ctx: u16) -> Option<Event> {
         .comm(comm);
 
     match event_kind {
-        kind::CONNECT_DENY | kind::CONNECT_ALLOW | kind::SENDMSG_DENY => {
+        kind::CONNECT_DENY | kind::CONNECT_ALLOW | kind::SENDMSG_DENY | kind::INGRESS_DENY => {
             connect_fields(event, sample)
         }
-        kind::BIND_REWRITE | kind::BIND_DENY => bind_fields(event, sample),
+        kind::BIND_REWRITE | kind::BIND_DENY | kind::LISTEN_DENY => bind_fields(event, sample),
         kind::SOCK_DENY => Some(sock_fields(event, sample)),
         kind::SETSOCKOPT_FORCED => Some(sockopt_fields(event, sample)),
         _ => None,
@@ -205,6 +207,8 @@ const fn action_for(event_kind: u16) -> Option<(&'static str, Outcome)> {
         kind::SOCK_DENY => ("net.sock-create-deny", Outcome::Deny),
         kind::SETSOCKOPT_FORCED => ("net.setsockopt-forced", Outcome::Info),
         kind::SENDMSG_DENY => ("net.sendmsg-deny", Outcome::Deny),
+        kind::LISTEN_DENY => ("net.listen-deny", Outcome::Deny),
+        kind::INGRESS_DENY => ("net.ingress-deny", Outcome::Deny),
         _ => return None,
     };
     Some(mapped)

@@ -309,6 +309,70 @@ kennel_bind_decide_v6(const __u8 addr[16], __u16 port_be, __u8 protocol, const _
 #define SOCK_DGRAM 2
 #endif
 
+/*
+ * Verdict-only forms of the ACL lookups, for the ingress program: it runs per packet, in softirq
+ * context, so it emits no allow events and has no current task to name. Same tries, same
+ * deny-first order as the kennel_*_decide_* functions above.
+ */
+static __always_inline int kennel_acl_v4(void *deny, void *allow, __u32 addr_be, __u16 port_be,
+					 __u8 protocol)
+{
+	struct lpm_v4_key key = { .prefixlen = 32, .addr = addr_be };
+	__u16 port_host = bpf_ntohs(port_be);
+	struct allow_entry *denied = bpf_map_lookup_elem(deny, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host))
+		return KENNEL_DENY;
+	struct allow_entry *entry = bpf_map_lookup_elem(allow, &key);
+	if (entry && kennel_entry_matches(entry, protocol, port_host))
+		return KENNEL_ALLOW;
+	return KENNEL_DENY;
+}
+
+static __always_inline int kennel_acl_v6(void *deny, void *allow, const __u8 addr[16],
+					 __u16 port_be, __u8 protocol)
+{
+	struct lpm_v6_key key = { .prefixlen = 128 };
+	__u16 port_host = bpf_ntohs(port_be);
+	__builtin_memcpy(key.addr, addr, 16);
+	struct allow_entry *denied = bpf_map_lookup_elem(deny, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host))
+		return KENNEL_DENY;
+	struct allow_entry *entry = bpf_map_lookup_elem(allow, &key);
+	if (entry && kennel_entry_matches(entry, protocol, port_host))
+		return KENNEL_ALLOW;
+	return KENNEL_DENY;
+}
+
+/* The port half of the bind policy (§7.3.7): the floor, then the allowlist when one is set. */
+static __always_inline int kennel_bind_port_ok(const struct kennel_meta *meta,
+					       const struct bind_subnet *bs, __u16 port_host)
+{
+	if (meta->bind_port_min != 0 && port_host < meta->bind_port_min)
+		return 0;
+	if (bs->n_ports == 0)
+		return 1;
+	int allowed = 0;
+	for (int i = 0; i < 8; i++) {
+		if (i < bs->n_ports && bs->allowed_ports[i] == port_host)
+			allowed = 1;
+	}
+	return allowed;
+}
+
+/* Audit header for an event raised outside any task's context: no pid, no comm. */
+static __always_inline void kennel_audit_hdr_packet(struct audit_hdr *hdr, __u16 kind, __u16 length,
+						    const struct kennel_meta *meta)
+{
+	hdr->magic = KENNEL_AUDIT_MAGIC;
+	hdr->version = KENNEL_AUDIT_VERSION;
+	hdr->kind = kind;
+	hdr->ts_ns = bpf_ktime_get_ns();
+	hdr->ctx_byte = meta->ctx_byte;
+	hdr->length = length;
+	hdr->pid = 0;
+	__builtin_memset(&hdr->comm, 0, sizeof(hdr->comm));
+}
+
 /* Emit a socket-creation deny audit event. */
 static __always_inline void
 kennel_audit_sock(__u16 family, __u16 type, const struct kennel_meta *meta)

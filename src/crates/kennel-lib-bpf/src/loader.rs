@@ -19,9 +19,11 @@ const F_NO_PREALLOC: u32 = 1;
 const F_RDONLY_PROG: u32 = 0x80;
 
 // Program type / attach types (enum bpf_prog_type / bpf_attach_type).
+const PROG_TYPE_CGROUP_SKB: u32 = 8;
 const PROG_TYPE_CGROUP_SOCK: u32 = 9;
 const PROG_TYPE_CGROUP_SOCK_ADDR: u32 = 18;
 const PROG_TYPE_CGROUP_SOCKOPT: u32 = 25;
+const CGROUP_INET_INGRESS: u32 = 0;
 const CGROUP_INET_SOCK_CREATE: u32 = 2;
 const CGROUP_INET4_BIND: u32 = 8;
 const CGROUP_INET6_BIND: u32 = 9;
@@ -163,8 +165,8 @@ pub struct ProgramSpec {
 /// Every program in `bpf/*.bpf.c`.
 ///
 /// The `cgroup/sock_addr` family (connect/bind/sendmsg, v4/v6), plus
-/// `sock_create` (`cgroup/sock`) and `setsockopt` (`cgroup/sockopt`), which use
-/// distinct program and attach types.
+/// `sock_create` (`cgroup/sock`), `setsockopt` (`cgroup/sockopt`) and `ingress`
+/// (`cgroup_skb`), which use distinct program and attach types.
 pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
     ProgramSpec {
         name: "connect4",
@@ -207,6 +209,12 @@ pub const KENNEL_PROGRAMS: &[ProgramSpec] = &[
         section: "cgroup/sock_create",
         prog_type: PROG_TYPE_CGROUP_SOCK,
         attach_type: CGROUP_INET_SOCK_CREATE,
+    },
+    ProgramSpec {
+        name: "ingress",
+        section: "cgroup_skb/ingress",
+        prog_type: PROG_TYPE_CGROUP_SKB,
+        attach_type: CGROUP_INET_INGRESS,
     },
     ProgramSpec {
         name: "setsockopt",

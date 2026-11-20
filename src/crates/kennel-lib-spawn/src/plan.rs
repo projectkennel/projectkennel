@@ -154,6 +154,27 @@ fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), Spawn
     Ok((v4, v6))
 }
 
+/// Deny rules as enforced: a deny on every port denies every protocol.
+///
+/// The cgroup ACL used to match a deny on the address alone; it now matches port and protocol
+/// like an allow. A deny written with no `ports` and no `protocol` was settled as "TCP, every
+/// port" by compilers before that change, and enforcing it literally would open UDP to an address
+/// the author denied. So an every-port deny is widened to every protocol here, whatever protocol
+/// it names: a signed policy never denies less than it did. A deny limited to particular ports
+/// is enforced as written.
+fn whole_address_denies(rules: &[NetRule]) -> Vec<NetRule> {
+    rules
+        .iter()
+        .cloned()
+        .map(|mut rule| {
+            if rule.port_min == 0 && rule.port_max == u16::MAX {
+                rule.protocol = Protocol::Any;
+            }
+            rule
+        })
+        .collect()
+}
+
 /// The eight cgroup-BPF LPM ACL vectors a plan carries: the connect ACL (deny-first, allow
 /// non-empty only in `host` mode) and the inbound BIND ACL (§7.5.7, deny-first, default-deny).
 struct BpfAcls {
@@ -185,9 +206,9 @@ impl BpfAcls {
         let mut deny_rules = net.deny_invariant.clone();
         deny_rules.extend(net.bpf_connect_deny.iter().cloned());
         deny_rules.extend(net.deny_author.iter().cloned());
-        let (deny_v4, deny_v6) = encode(&deny_rules)?;
+        let (deny_v4, deny_v6) = encode(&whole_address_denies(&deny_rules))?;
         let (mut bind_allow_v4, mut bind_allow_v6) = encode(&net.bpf_bind_allow)?;
-        let (bind_deny_v4, bind_deny_v6) = encode(&net.bpf_bind_deny)?;
+        let (bind_deny_v4, bind_deny_v6) = encode(&whole_address_denies(&net.bpf_bind_deny))?;
         // The own-net-ns loopback, open by default in both directions (#218).
         let (lo_v4, lo_v6) = own_netns_loopback(net.mode);
         let (mut allow_v4, mut allow_v6) = (allow_v4, allow_v6);
@@ -1626,6 +1647,28 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_every_port_deny_covers_every_protocol() {
+        let rule = |port_min, port_max, protocol| NetRule {
+            cidr: "10.0.0.0".to_owned(),
+            prefix_len: 8,
+            port_min,
+            port_max,
+            protocol,
+        };
+        // What an older compiler settled for a deny with no ports and no protocol: it must not
+        // start letting UDP through now that denies match on protocol.
+        let widened = whole_address_denies(&[
+            rule(0, u16::MAX, Protocol::Tcp),
+            rule(22, 22, Protocol::Tcp),
+        ]);
+        assert_eq!(
+            widened.iter().map(|r| r.protocol).collect::<Vec<_>>(),
+            [Protocol::Any, Protocol::Tcp],
+            "the every-port deny is widened; the one-port deny is enforced as written"
+        );
+    }
 
     #[test]
     fn bind_port_min_lands_in_the_meta_pad_slot() {

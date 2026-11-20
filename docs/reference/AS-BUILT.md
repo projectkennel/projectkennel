@@ -26,6 +26,36 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — host mode judges inbound traffic; a deny with no protocol is every protocol
+
+- **Bears-on:** Kennel book Vol 2, the network chapter (§7.5.7 the bind ACL; §7.3.7 the bind
+  floor and port allowlist) and the BPF ABI (`02-7-bpf-abi.md`: programs, audit kinds).
+- **Change:**
+  - *A ninth program, `cgroup_skb/ingress`.* The bind hooks judge a `bind()` call, but
+    `listen()` on an unbound TCP socket binds it to the wildcard address on a kernel-chosen port
+    with no hook, and a bind to port 0 is admitted without the address ACL or the wildcard
+    rewrite (an outbound socket needs that). Either gave a host-mode kennel a service reachable
+    from the network that the policy never admitted. There is no cgroup hook on `listen()`, so
+    the decision is made on arrival: a packet for a TCP listener is dropped unless the
+    listener's own address and port pass the bind policy (floor, port allowlist, bind ACL; a
+    wildcard listener never passes, since a bind the policy saw is rewritten to the kennel's
+    loopback); a datagram for a UDP socket is delivered if the socket passes the bind policy or
+    the sender is a peer the connect ACL lets the kennel send to (a reply). Packets for
+    connected TCP sockets pass. Two audit kinds: `net.listen-deny` (9) and `net.ingress-deny`
+    (10); they carry no pid or comm, because there is no task in that context.
+  - *Deny protocol.* With denies now matched on port and protocol (previous entry), a
+    `[net.bpf]` deny written with no `protocol` had become TCP-only, because the compiler's
+    default protocol is TCP. A deny with no `protocol` is now compiled as every protocol, and
+    the plan widens any every-port deny to every protocol whatever it names, so a policy signed
+    by an older compiler does not start admitting UDP to an address it denies.
+- **Behaviour change:** a `host`-mode workload that listened without binding, or relied on
+  unsolicited UDP to a port-0 socket, no longer receives. A deny of `protocol = "tcp"` with no
+  ports also denies UDP (only a port-limited deny is protocol-specific).
+- **Why:** the bind policy is a statement about what can reach the kennel; it has to hold for
+  every socket that can receive, not only for those that called `bind()`.
+- **Not changed:** an IPv6 datagram with extension headers is dropped (the sender's port cannot
+  be read at a fixed offset). ICMP errors for a kennel's sockets are not handled here.
+
 ## 2026-11-20 — host mode: only TCP and UDP sockets, every port rule applies, and a scope floor
 
 - **Bears-on:** Kennel book Vol 2, the network chapter (§7.5.4 the host-mode connect ACL, §7.5.7

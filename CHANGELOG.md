@@ -8,6 +8,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A `host`-mode kennel can no longer receive on a socket the bind policy never saw.**
+  `listen()` on an unbound socket, and a bind to port 0, skipped the bind rules and gave the
+  workload a service reachable from the network. Inbound traffic is now judged on arrival: a
+  listener must itself pass the bind policy, and a datagram is delivered only to a socket that
+  passes it or from a peer the kennel may send to. Refusals are audited as `net.listen-deny`
+  and `net.ingress-deny`.
+- **A `[net.bpf]` deny with no `protocol` denies every protocol**, not only TCP.
 - **A `host`-mode kennel can create TCP and UDP sockets and no others.** The network ACL judges TCP and
   UDP; an ICMP "ping" socket, which needs no privilege, carried data to a denied address with no
   audit event, and SCTP, UDP-Lite and MPTCP sockets could be created too. All are now refused at
