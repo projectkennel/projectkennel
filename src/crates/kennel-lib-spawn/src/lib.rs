@@ -620,12 +620,14 @@ fn build_image_view_and_pivot(
             let mounted = stage.resolve(ro)?.ok_or_else(|| {
                 io::Error::other(format!("closure-lock {} vanished", ro.display()))
             })?;
-            mount::remount_readonly(&proc_path(&mounted)).map_err(|e| {
-                io::Error::new(
-                    e.kind(),
-                    format!("closure-lock ro remount {}: {e}", ro.display()),
-                )
-            })?;
+            kennel_lib_syscall::namespace::readonly_mount_tree(&proc_path(&mounted)).map_err(
+                |e| {
+                    io::Error::new(
+                        e.kind(),
+                        format!("closure-lock ro remount {}: {e}", ro.display()),
+                    )
+                },
+            )?;
         }
     }
 
@@ -1098,10 +1100,12 @@ fn materialize_binds(
                 )
             })?;
             drop(magic_guard); // the bind is in place; the O_PATH fd has served its purpose
+                               // The bind is recursive, so seal recursively: a mount nested in the granted tree
+                               // must not stay writable under a read-only grant.
             let mounted = mounted_at(stage, &b.target)?;
-            mount::remount_readonly(&proc_path(&mounted)).map_err(|e| {
-                io::Error::new(e.kind(), format!("remount_ro {}: {e}", b.target.display()))
-            })?;
+            kennel_lib_syscall::namespace::readonly_mount_tree(&proc_path(&mounted)).map_err(
+                |e| io::Error::new(e.kind(), format!("remount_ro {}: {e}", b.target.display())),
+            )?;
         }
     }
     Ok(())

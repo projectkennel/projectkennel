@@ -280,13 +280,34 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
 /// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
 /// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
 pub fn harden_mount_tree(target: &std::path::Path, allow_exec_mappings: bool) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
-    let c = std::ffi::CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let mut set = libc::MOUNT_ATTR_NOSUID | libc::MOUNT_ATTR_NODEV;
     if !allow_exec_mappings {
         set |= libc::MOUNT_ATTR_NOEXEC;
     }
+    restrict_mount_tree(target, set)
+}
+
+/// Make the mount at `target` and every mount beneath it read-only.
+///
+/// A read-only grant is bound recursively, so a filesystem mounted inside the granted tree comes
+/// along as its own mount. A plain `MS_REMOUNT | MS_RDONLY` reaches only the top mount and would
+/// leave that inner one writable; this seals the whole subtree in one call. Where the kennel's
+/// Landlock rules do not also deny the write (an OCI root, whose read-only paths are held by the
+/// mount alone), this is the only thing that does. The other flags of each mount are untouched.
+///
+/// # Errors
+///
+/// The OS error if `mount_setattr(2)` fails (`EINVAL` for a non-mount `target`, `EPERM` without
+/// `CAP_SYS_ADMIN` over the mount namespace, `ENOSYS` before Linux 5.12).
+pub fn readonly_mount_tree(target: &std::path::Path) -> io::Result<()> {
+    restrict_mount_tree(target, libc::MOUNT_ATTR_RDONLY)
+}
+
+/// Add the restriction flags `set` to the mount at `target` and every mount beneath it.
+fn restrict_mount_tree(target: &std::path::Path, set: u64) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let c = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     let attr = libc::mount_attr {
         attr_set: set,
         attr_clr: 0,

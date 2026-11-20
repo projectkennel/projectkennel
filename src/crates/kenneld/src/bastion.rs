@@ -376,11 +376,12 @@ mod tests {
         let l1 = lines.get(1).copied().unwrap_or_default();
         // The forced command runs `ssh <options> -- <dest> "$SSH_ORIGINAL_COMMAND"`.
         assert!(
-            l0.contains("ssh '-i' '~/.ssh/id_gh' -- 'git@github.com'") && l0.contains("AAAASYN_A"),
+            l0.contains("'-i' '~/.ssh/id_gh' -- 'git@github.com'") && l0.contains("AAAASYN_A"),
             "got {l0}"
         );
         assert!(
-            l1.contains("ssh -- 'git@git.internal'") && l1.contains("AAAASYN_B"),
+            l1.contains("ClearAllForwardings=yes -- 'git@git.internal'")
+                && l1.contains("AAAASYN_B"),
             "got {l1}"
         );
         assert!(lines

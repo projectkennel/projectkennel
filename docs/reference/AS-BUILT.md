@@ -26,6 +26,42 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — daemon and view hardening: the pin, the bastion, accept, audit size, nested mounts
+
+- **Bears-on:** Kennel book Vol 2 ch.10 (Cryptographic Services, the SSH bastion §7.10.3–6);
+  the workload pin (§7.4); the audit schema chapter (`02-3`, event size); the view construction
+  chapter (read-only grants, the OCI closure lock §7.11.4c); the inbound mirror (§7.5.7).
+- **Change:**
+  - *Workload digest pin.* The sha256 pin was checked only when no `--` command was given. A
+    pinned workload with `allowed_args = true` runs the policy's program with the caller's
+    arguments appended, and that path skipped the check. The pin now applies whenever the
+    policy's own program runs (`runs_policy_program`).
+  - *Bastion.* The forced command is now `ssh -o EscapeChar=none -o ClearAllForwardings=yes
+    <options> -- <dest> …`. The session has a pty, so the host-side client read `~` escapes from
+    the workload's bytes (on OpenSSH before 9.2, `~C` opens a command line that adds
+    forwardings from the operator's side), and forwardings set in the operator's `ssh_config`
+    for the destination were honoured. The two options lead, so they win over `options`.
+  - *Control socket.* Any `accept` error ended `serve`, and with it the daemon. A failure is now
+    logged and retried after 100 ms; only 300 consecutive failures end the loop.
+  - *Inbound bounce buffer.* Conduits that arrive before a facade registers are queued per port;
+    the queue was unbounded, each entry an open descriptor in the daemon, the count chosen by
+    whoever connects to the mirrored port. It now holds at most 64 per port; a further conduit
+    is closed.
+  - *Audit event size.* The line sinks refuse an event over 4096 bytes, and behind the timeout
+    wrapper that refusal was discarded: no record and no drop record. An event's size is set by
+    what it reports (a spawned command line). The writer now cuts an oversized event down —
+    longest event-specific string first, then values — and marks it `"truncated": true`; the
+    envelope is never cut. The timeout worker reports a sink failure on stderr.
+  - *Read-only binds.* A read-only grant is bound with `MS_REC` but was sealed with a
+    non-recursive `MS_REMOUNT | MS_RDONLY`, so a filesystem mounted inside the granted tree
+    stayed writable at the mount layer. In an OCI root, whose `readonly` paths are held by the
+    mount alone, nothing else denied the write. Both sites now seal with
+    `mount_setattr(AT_RECURSIVE, MOUNT_ATTR_RDONLY)` (`namespace::readonly_mount_tree`).
+- **Why:** each is a place where an input the workload or a local peer controls decided
+  something the daemon should have decided.
+- **Not verified:** the escape-character behaviour was not exercised against an OpenSSH older
+  than 9.2; the nested-mount case has no suite case (it needs a host mount inside a granted tree).
+
 ## 2026-11-20 — the signed bytes are the policy; a rule that cannot be matched does not sign
 
 - **Bears-on:** Kennel book Vol 2, the policy pipeline chapters (canonical form and signing;

@@ -67,6 +67,9 @@ impl std::fmt::Debug for InboundRuntime {
     }
 }
 
+/// The most conduits held per port while no facade can take them.
+const MAX_BOUNCED: usize = 64;
+
 impl InboundRuntime {
     /// An empty runtime (no mirrored ports). The default for a kennel with no inbound mirror.
     #[must_use]
@@ -167,14 +170,27 @@ impl InboundRuntime {
         mirrors.len() != before
     }
 
-    /// Push a conduit into the per-port bounce buffer.
+    /// Push a conduit into the per-port bounce buffer, up to [`MAX_BOUNCED`] per port.
+    ///
+    /// The buffer holds connections that arrived before a facade registered (or while its node is
+    /// wedged). Each entry is an open descriptor in the daemon, and a host-local peer decides how
+    /// many arrive, so the queue is bounded: past the cap the new conduit is closed, which the
+    /// connecting peer sees as a closed connection — what it would get with nothing listening.
     fn bounce(&self, port: u16, fd: OwnedFd) {
-        self.bounce
+        let mut bounce = self
+            .bounce
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(port)
-            .or_default()
-            .push_back(fd);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let queue = bounce.entry(port).or_default();
+        let refused = if queue.len() < MAX_BOUNCED {
+            queue.push_back(fd);
+            None
+        } else {
+            Some(fd)
+        };
+        drop(bounce);
+        // Close a refused conduit outside the lock.
+        drop(refused);
     }
 
     /// Pop one conduit from the per-port bounce buffer, if any.
@@ -295,6 +311,22 @@ mod tests {
         rt.deliver(3000, kennel.into());
         assert!(rt.pop_bounce(3000).is_some(), "bounced, not dropped");
         assert!(rt.pop_bounce(3000).is_none(), "exactly one");
+    }
+
+    #[test]
+    fn the_bounce_buffer_is_bounded_per_port() {
+        // A peer that connects before any facade registers cannot make the daemon hold an
+        // unbounded number of descriptors: past the cap a conduit is closed, not queued.
+        let rt = InboundRuntime::new();
+        for _ in 0..MAX_BOUNCED.saturating_add(8) {
+            let (_host, kennel) = UnixStream::pair().expect("pair");
+            rt.deliver(3000, kennel.into());
+        }
+        let mut held = 0_usize;
+        while rt.pop_bounce(3000).is_some() {
+            held = held.saturating_add(1);
+        }
+        assert_eq!(held, MAX_BOUNCED);
     }
 
     #[test]

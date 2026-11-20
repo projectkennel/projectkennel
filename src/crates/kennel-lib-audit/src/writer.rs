@@ -19,8 +19,9 @@ pub const SCHEMA_VERSION: u64 = 1;
 
 /// The maximum rendered size of a single event for the line-oriented sinks.
 ///
-/// A `write()` of at most `PIPE_BUF` bytes is atomic on Linux; the file sink
-/// rejects anything larger (a longer event is a bug, not a runtime case).
+/// A `write()` of at most `PIPE_BUF` bytes is atomic on Linux; the line sinks reject anything
+/// larger. The writer cuts an event down to this size before it reaches a sink (and marks it
+/// `truncated`), so a sink's refusal is a backstop, not the way a long event is handled.
 pub const MAX_EVENT_BYTES: usize = 4096;
 
 /// Per-kennel context the writer stamps onto every event.
@@ -212,12 +213,16 @@ impl Writer {
             fields.push(("sanitised", Rendered::Bool(true)));
         }
 
-        Record {
+        let mut record = Record {
             resource: event.resource,
             event_type: event.event,
             outcome: event.outcome,
             fields,
-        }
+        };
+        // An event too long for one atomic line is cut down and marked, never dropped: its size
+        // is chosen by whoever caused it, and a dropped event is the one they would want lost.
+        record.fit(MAX_EVENT_BYTES);
+        record
     }
 
     fn fan_out(&self, record: &Record) {
@@ -373,6 +378,44 @@ mod tests {
         let kn = line.find("\"kennel\"").unwrap_or(0);
         let ad = line.find("addr").unwrap_or(0);
         assert!(sv < kn && kn < ad, "order wrong: {line}");
+    }
+
+    #[test]
+    fn an_oversized_event_is_cut_down_and_marked_never_dropped() {
+        // One long value (a command line), and many short ones (an argv of small words): both
+        // used to exceed the sink's line limit and vanish with no record at all.
+        let (w, cap) = writer_with(Levels::default());
+        let long = Event::new("spawn.exec", Resource::Priv, Outcome::Deny, Source::Kenneld)
+            .field("template", Value::str("build"))
+            .field("command", Value::untrusted("x".repeat(3 * MAX_EVENT_BYTES)));
+        let many = Event::new("spawn.exec", Resource::Priv, Outcome::Deny, Source::Kenneld).field(
+            "argv",
+            Value::Array(
+                (0..4000)
+                    .map(|i| Value::untrusted(format!("a{i}")))
+                    .collect(),
+            ),
+        );
+        for event in [long, many] {
+            assert!(w.emit(&event));
+            let line = cap.lines().pop().unwrap_or_default();
+            assert!(
+                line.len() < MAX_EVENT_BYTES,
+                "fits one atomic line: {} bytes",
+                line.len()
+            );
+            assert!(line.contains(r#""truncated":true"#), "marked: {line}");
+            // The envelope survives whole: what happened, to which kennel, with what outcome.
+            assert!(line.contains(r#""event":"spawn.exec""#));
+            assert!(line.contains(r#""kennel":"ai-coding""#));
+            assert!(line.contains(r#""outcome":"deny""#));
+        }
+        // An ordinary event is untouched.
+        let small = Event::new("spawn.exec", Resource::Priv, Outcome::Deny, Source::Kenneld)
+            .field("command", Value::untrusted("ls"));
+        assert!(w.emit(&small));
+        let line = cap.lines().pop().unwrap_or_default();
+        assert!(!line.contains("truncated"), "{line}");
     }
 
     #[test]

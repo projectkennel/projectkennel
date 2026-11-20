@@ -117,6 +117,10 @@ fn render_sshd_config(template: &str, p: &SshdParams<'_>) -> String {
         .replace("@AUTHORIZED_KEYS@", &auth)
 }
 
+/// Options the host-side `ssh` always runs with, ahead of the operator's (see
+/// [`authorized_keys_line`]). Plain `key=value` words: no quoting needed.
+const HOST_SSH_LOCKDOWN: &[&str] = &["EscapeChar=none", "ClearAllForwardings=yes"];
+
 /// Build one `authorized_keys` line binding `synthetic_pubkey` to a forced command that
 /// runs `ssh <options…> -- <dest> "$SSH_ORIGINAL_COMMAND"` **as the operator** (§7.10.3).
 ///
@@ -135,6 +139,16 @@ fn render_sshd_config(template: &str, p: &SshdParams<'_>) -> String {
 #[must_use]
 pub fn authorized_keys_line(dest: &str, options: &[String], synthetic_pubkey: &str) -> String {
     let mut cmd = String::from("ssh");
+    // The workload's bytes are the host-side client's terminal input. With a pty the client reads
+    // `~` escapes from it (`~C` opens a command line that adds forwardings on OpenSSH before 9.2),
+    // so the escape character is off, and any forwarding the operator's own `ssh_config` sets for
+    // this destination is cleared: this hop carries one session and nothing else. `ssh` takes the
+    // first value it is given for an option, so these lead and win over `options` and the
+    // operator's configuration.
+    for fixed in HOST_SSH_LOCKDOWN {
+        cmd.push_str(" -o ");
+        cmd.push_str(fixed);
+    }
     for opt in options {
         cmd.push(' ');
         cmd.push_str(&shell_quote(opt));
@@ -344,7 +358,7 @@ mod tests {
         // options and dest shell-quoted; the inner double quotes escaped for the
         // authorized_keys `command="…"` field). No agent, no fingerprint.
         assert!(
-            line.contains("command=\"ssh '-i' '~/.ssh/id_gh' -- 'git@github.com' \\\"$SSH_ORIGINAL_COMMAND\\\"\""),
+            line.contains("command=\"ssh -o EscapeChar=none -o ClearAllForwardings=yes '-i' '~/.ssh/id_gh' -- 'git@github.com' \\\"$SSH_ORIGINAL_COMMAND\\\"\""),
             "got {line}"
         );
         assert!(

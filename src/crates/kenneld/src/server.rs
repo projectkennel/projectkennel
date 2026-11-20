@@ -1088,10 +1088,27 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 }
 
+/// How long the accept loop waits after a failed `accept` before trying again.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// How many `accept` calls may fail in a row before the listener is taken to be unusable. At
+/// [`ACCEPT_BACKOFF`] apart this is about half a minute of uninterrupted failure.
+const ACCEPT_FAILURE_LIMIT: u32 = 300;
+
+/// Whether the accept loop gives up after `consecutive` failed `accept` calls in a row.
+///
+/// A failure that passes (no free descriptor or memory, a connection the peer aborted, an
+/// interrupted call) must not end the daemon and every kennel it supervises; one that never
+/// passes means the listening socket itself is gone.
+const fn accept_failures_are_fatal(consecutive: u32) -> bool {
+    consecutive >= ACCEPT_FAILURE_LIMIT
+}
+
 /// Accept connections on `listener` forever, handling each on its own thread.
 ///
 /// # Errors
-/// An OS error if accepting a connection fails.
+/// The last OS error once `accept` has failed [`ACCEPT_FAILURE_LIMIT`] times in a row. A failure
+/// that passes (descriptor exhaustion, an aborted connection) is logged and retried.
 pub fn serve<P, L>(
     shared: &Arc<Shared<P, L>>,
     listener: &std::os::unix::net::UnixListener,
@@ -1109,8 +1126,25 @@ where
         std::sync::Arc::clone(shared),
     )));
     crate::supervisor::autostart(shared);
+    let mut failures: u32 = 0;
     for conn in listener.incoming() {
-        let mut conn = conn?;
+        // One failed `accept` must not end the daemon and every kennel it supervises. Back off
+        // briefly so a persistent condition does not spin, and keep serving.
+        let mut conn = match conn {
+            Ok(conn) => {
+                failures = 0;
+                conn
+            }
+            Err(e) => {
+                failures = failures.saturating_add(1);
+                if accept_failures_are_fatal(failures) {
+                    return Err(e);
+                }
+                eprintln!("kenneld: accept on the control socket failed ({e}); retrying");
+                std::thread::sleep(ACCEPT_BACKOFF);
+                continue;
+            }
+        };
         // Boundary 7 (04-trust-boundaries.md): only the user this daemon serves
         // may drive the control socket. The kernel stamps SO_PEERCRED at connect,
         // so this cannot be spoofed; it is defence-in-depth behind the socket's
@@ -1583,15 +1617,16 @@ pub fn run_kennel<P, L>(
     // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
     // decision made here, on the host, before the kennel is built: kennel-bin-init is a
     // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
-    // are running the policy's own workload (an unpinned `--` override is a different
-    // command the pin does not cover). On success it returns the OPEN fd of the verified
+    // are running the policy's own program — with or without arguments appended under
+    // `allowed_args` (an unpinned `--` override is a different command the pin does not
+    // cover). On success it returns the OPEN fd of the verified
     // binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
     // `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
     // construction, so it stays in scope until the end of bring-up.
     // Held only to keep the fd open (its raw value is what's used, via the plan); never read.
     #[allow(clippy::collection_is_never_read)]
     let _workload_fd;
-    if !loaded.workload.sha256.is_empty() && req.argv.is_empty() {
+    if !loaded.workload.sha256.is_empty() && runs_policy_program(req, &loaded.workload) {
         match verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256) {
             Ok(fd) => {
                 loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
@@ -2578,6 +2613,16 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
     Ok(resolved)
 }
 
+/// Whether the command about to run is the policy's own program: no `--` command was given, or the
+/// one given is appended to a pinned workload's argv under `allowed_args`. The sha256 pin binds the
+/// program, so it applies in both cases; appended arguments do not change which binary runs.
+const fn runs_policy_program(
+    req: &StartRequest,
+    workload: &kennel_lib_policy::WorkloadRuntime,
+) -> bool {
+    req.argv.is_empty() || (workload.pinned && workload.allowed_args)
+}
+
 fn effective_workload(
     req: &StartRequest,
     workload: &kennel_lib_policy::WorkloadRuntime,
@@ -2873,6 +2918,28 @@ mod tests {
         let (argv, _) = effective_workload(&start_req(&["--extra", "x"], false), &w)
             .expect("allowed_args appends");
         assert_eq!(argv, vec!["/launcher", "--base", "--extra", "x"]);
+    }
+
+    #[test]
+    fn only_a_persistent_accept_failure_ends_the_loop() {
+        assert!(!accept_failures_are_fatal(1), "one failure is retried");
+        assert!(!accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT - 1));
+        assert!(accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT));
+    }
+
+    #[test]
+    fn the_digest_pin_covers_a_pinned_program_with_appended_arguments() {
+        let mut w = workload(&["tool"], None, true);
+        // No `--` command: the policy's program.
+        assert!(runs_policy_program(&start_req(&[], false), &w));
+        // A forced override of a pinned workload is a different program.
+        assert!(!runs_policy_program(&start_req(&["other"], true), &w));
+        // Arguments appended under `allowed_args` leave the program the policy's.
+        w.allowed_args = true;
+        assert!(runs_policy_program(&start_req(&["--extra"], false), &w));
+        // Unpinned: a `--` command replaces the program, so the pin does not describe it.
+        w.pinned = false;
+        assert!(!runs_policy_program(&start_req(&["other"], false), &w));
     }
 
     #[test]

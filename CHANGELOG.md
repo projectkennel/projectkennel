@@ -8,6 +8,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **The workload digest pin is checked when arguments are appended.** With `allowed_args = true`
+  the policy's own program runs with the caller's arguments, and the `sha256` pin was skipped on
+  that path.
+- **The SSH bastion's host-side `ssh` no longer reads escapes or carries forwardings.** It runs
+  with `EscapeChar=none` and `ClearAllForwardings=yes`, ahead of the operator's options.
+- **An oversized audit event is truncated and marked, not lost.** An event over 4096 bytes (a
+  long spawned command line) was refused by the sink and the refusal discarded: no record and no
+  drop record. The event is now cut down and carries `"truncated": true`.
+- **A read-only grant is read-only all the way down.** The bind was recursive but the read-only
+  seal was not, so a filesystem mounted inside a granted tree stayed writable at the mount layer;
+  in an OCI root nothing else denied the write.
+- **A failed `accept` no longer ends kenneld**, and the queue of inbound connections waiting for
+  a facade is bounded at 64 per mirrored port.
 - **A policy can no longer carry content its signature does not cover.** `[workload]` without
   `argv`, `[rootfs]` without `path` and `[dbus]` without an enabled bus are left out of the signed
   bytes, but their other fields (`pinned`, `sha256`, `writable`, `audit_level`, …) were still read
