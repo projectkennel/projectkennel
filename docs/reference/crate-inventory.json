@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 44420,
+  "total_sloc": 44683,
   "tcb_crate_count": 17,
-  "tcb_sloc": 27145,
+  "tcb_sloc": 27380,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 7999,
+      "sloc": 8038,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5624,
+      "sloc": 5652,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -35,24 +35,24 @@
       "external_deps": ["lexopt", "serde", "serde_json"]
     },
     {
-      "name": "kennel-lib-spawn",
-      "sloc": 2714,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["bin-init", "kenneld", "privhelper"],
-      "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-policy", "kennel-lib-syscall"],
-      "external_deps": []
-    },
-    {
       "name": "kennel-lib-policy",
-      "sloc": 2711,
+      "sloc": 2767,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
       "consumers": ["cli", "compile", "compose", "kenneld", "spawn", "tun-broker"],
       "first_party_deps": ["kennel-lib-toml"],
       "external_deps": ["ed25519-compact", "object", "serde"]
+    },
+    {
+      "name": "kennel-lib-spawn",
+      "sloc": 2716,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["bin-init", "kenneld", "privhelper"],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-policy", "kennel-lib-syscall"],
+      "external_deps": []
     },
     {
       "name": "kennel-lib-toml",
@@ -66,7 +66,7 @@
     },
     {
       "name": "kennel-lib-binder",
-      "sloc": 2225,
+      "sloc": 2286,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -86,7 +86,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1800,
+      "sloc": 1806,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -106,7 +106,7 @@
     },
     {
       "name": "kennel-lib-audit",
-      "sloc": 1289,
+      "sloc": 1360,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
