@@ -107,11 +107,26 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         } else {
             // #!/usr/bin/python3, #!/bin/sh, etc.
             exec_allow.push(shebang_binary.to_owned());
-            note_if_non_system(
-                shebang_binary,
-                &mut extra_fs_read,
-                &format!("shebang interpreter {shebang_binary}"),
-            );
+            // The shebang is text from the script being probed, not a path the operator chose.
+            // An interpreter outside the system directories gets a read grant on that one file
+            // only: granting its parent directory would let a script's first line decide that
+            // `/home/<user>/**` (or any other directory) is readable in the generated policy.
+            if !SYSTEM_PREFIXES
+                .iter()
+                .any(|pfx| shebang_binary.starts_with(pfx))
+            {
+                extra_fs_read.push(FsGrant {
+                    path: shebang_binary.to_owned(),
+                    reason: format!(
+                        "shebang interpreter {shebang_binary} (named by the script itself) — \
+                         review it; its libraries are not granted"
+                    ),
+                });
+                warnings.push(format!(
+                    "the script's shebang names `{shebang_binary}`, outside the system \
+                     directories; only that file is granted — add what it needs by hand"
+                ));
+            }
         }
     } else if data.starts_with(b"\x7fELF") {
         // --- ELF binary ---
@@ -241,6 +256,27 @@ mod tests {
             result.exec_allow
         );
         let _ = std::fs::remove_file(&script);
+    }
+
+    #[test]
+    fn a_shebang_outside_the_system_dirs_grants_one_file_not_its_directory() {
+        let dir = std::env::temp_dir().join(format!("kennel-probe-shebang-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let script = dir.join("run");
+        std::fs::write(&script, b"#!/home/someone/tool --flag\necho hi\n").expect("write");
+        let probed = probe(&script).expect("probe");
+        assert!(probed
+            .extra_fs_read
+            .iter()
+            .any(|g| g.path == "/home/someone/tool"));
+        assert!(
+            !probed
+                .extra_fs_read
+                .iter()
+                .any(|g| g.path == "/home/someone/**"),
+            "the script's first line must not grant a directory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

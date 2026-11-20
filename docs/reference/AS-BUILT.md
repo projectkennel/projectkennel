@@ -26,6 +26,46 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — low-severity hardening, second group
+
+- **Bears-on:** Kennel book Vol 2: the view construction chapter (scaffolding, the OCI closure
+  lock §7.11.4c), ch.2 (init and its hand-off descriptors), §7.9 (the PTY broker), §7.5 (the INet
+  conduit, the loopback mirror), §7.7 (the D-Bus broker), the audit chapter, the lockfile, and
+  the installer.
+- **Change:**
+  - *View modes.* The view's root tmpfs is mounted `mode=0755` (it was the tmpfs default,
+    1777), the construction sets umask 022, and a staged file is copied without group/other
+    write. On the VM `/` and `/etc` are 755 and `/etc/passwd` 644.
+  - *Init's descriptors.* `kennel-bin-init` marks the boot-sync socket, the pty return socket
+    and the injected-stdio originals close-on-exec before it forks anything, and the tun
+    descriptor in the workload's seal. The workload and facades used to inherit them.
+  - *Orphans.* Only a pid init forked as a facade is reported as `NOTIFY_FACADE_CRASH`; every
+    orphan init reaped as PID 1 used to be.
+  - *PTY broker.* Writes to an attached client have a 2 s send timeout; a client that stops
+    reading is detached instead of holding the broker's lock (which `kennel list` takes).
+  - *INet conduit.* `CONNECT_INET` refuses a UDP request: the conduit is a TCP stream, and a
+    `protocol = "udp"` allow used to be answered with a TCP connection.
+  - *Limits.* The D-Bus broker holds at most 1024 sessions and 1024 queued frames per consumer
+    (it stops reading for a consumer whose queue is full) and no longer panics when a thread
+    cannot be created; the egress delegate carries at most 1024 conduits; the net sub-helper
+    refuses to put more than 1024 of one user's reserved addresses on the loopback.
+  - *Closure lock.* A `[rootfs].readonly` path absent from the image is created empty and
+    locked; it used to be skipped, leaving the name free for the workload to create.
+  - *Audit directories.* Spawned kennels of one requester share `spawn-<ctx>`; each spawn used
+    to leave its own directory for good.
+  - *CLI output.* Text from a workspace or a policy is sanitised before it reaches the terminal
+    in `review`, `risks`, `show` and `oci revert --list`; `review` shows a diff only for a
+    regular file and pipes the pinned content to `diff` instead of staging it in `/tmp`.
+  - *Lockfile.* A changed signer is a mismatch, not only a changed signature.
+  - *`kennel-compose`.* A script's shebang outside the system directories grants that one file,
+    not its parent directory.
+  - *Installer.* GUI config is installed root-owned file by file (not `cp -a`), and a
+    relocated `--prefix` directory is never swept.
+  - *`sock_create`.* The header now says which families the hook can see (inet only).
+- **Not changed:** the lockfile still cannot pin an unsigned artefact (it pins by signature and
+  the tree has no content hash); the documented egress rate limit and volume audit (L-05) still
+  do not exist.
+
 ## 2026-11-20 — low-severity hardening, first group
 
 - **Bears-on:** Kennel book Vol 2 ch.10 (the bastion's `authorized_keys`), §2.7 (exclusive

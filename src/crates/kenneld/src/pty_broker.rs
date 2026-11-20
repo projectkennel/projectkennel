@@ -134,6 +134,15 @@ impl PtyBroker {
     /// it to [`Self::wait_for_outcome`]), or `None` if the workload has already exited.
     #[must_use]
     pub fn attach(&self, sock: OwnedFd) -> Option<u64> {
+        // Output is written to the client while the broker's lock is held, and `kennel list`
+        // takes that lock. A client that stops reading (a suspended terminal) would otherwise
+        // hold it for as long as it liked. Bound every write: one that cannot make progress in
+        // this time fails, and the pump then detaches the client. The workload keeps running,
+        // the ring keeps its recent output, and the terminal can attach again.
+        if let Ok(dup) = sock.try_clone() {
+            let stream = std::os::unix::net::UnixStream::from(dup);
+            let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
+        }
         let generation = {
             let Ok(mut inner) = self.inner.lock() else {
                 return None;
@@ -314,6 +323,9 @@ impl PtyBroker {
     }
 }
 
+/// How long one write to an attached client may stall before the client is detached.
+const CLIENT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Append `data` to `ring`, keeping at most [`RING_CAPACITY`] trailing bytes.
 fn append_ring(ring: &mut Vec<u8>, data: &[u8]) {
     ring.extend_from_slice(data);
@@ -418,6 +430,30 @@ mod tests {
         // The filter decision is carried for the client, not applied here.
         assert!(broker.filter_escapes());
         broker.shutdown();
+    }
+
+    #[test]
+    fn a_client_that_stops_reading_is_detached_not_waited_on() {
+        // The client never reads; the workload writes more than a socket buffer holds. The pump
+        // must give up on the client within the write timeout instead of holding the lock.
+        let (broker, mut master_peer) = broker_with_socketpair_master(false);
+        let (client, _stalled_peer) = UnixStream::pair().expect("pair");
+        assert!(broker.attach(client.into()).is_some());
+        let chunk = [b'x'; 4096];
+        let writer = std::thread::spawn(move || {
+            for _ in 0..256 {
+                if std::io::Write::write_all(&mut master_peer, &chunk).is_err() {
+                    break;
+                }
+            }
+            master_peer
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while broker.is_attached() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!broker.is_attached(), "the stalled client is detached");
+        drop(writer.join());
     }
 
     #[test]

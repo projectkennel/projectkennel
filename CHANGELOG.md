@@ -8,6 +8,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **More low-severity hardening.** The constructed view's `/` and `/etc` are no longer group- or
+  world-writable; the workload and facades no longer inherit init's internal descriptors; a
+  terminal that stops reading is detached instead of stalling `kennel list`; a `protocol = "udp"`
+  proxy allow is no longer answered with a TCP connection; the D-Bus broker, the egress delegate
+  and the loopback helper have caps on sessions, queued frames, conduits and addresses; a
+  `[rootfs].readonly` path missing from the image is created and locked; spawned kennels share
+  one audit directory per requester; `review`, `risks`, `show` and `oci revert --list` sanitise
+  what they print; the lockfile pins the signer; `kennel-compose` grants a script-named
+  interpreter as one file; and the installer installs GUI config root-owned and never sweeps a
+  `--prefix` directory.
 - **Low-severity hardening.** A `"` in an `[ssh]` destination or option can no longer end the
   bastion's forced command; descriptors received with a truncated control message are closed;
   audit files and the control socket get their documented 0700/0600 modes whatever the umask;

@@ -845,6 +845,14 @@ fn inet_connect(
         Destination::Name(name) => name.clone(),
         Destination::Addr(addr) => addr.to_string(),
     };
+    // The conduit this verb mints is a TCP stream. A request for UDP that a `protocol = "udp"`
+    // rule admits would be answered with a TCP connection to the same host and port: a
+    // different service from the one the rule allows. UDP leaves through the tun path
+    // (`[net.udp]`), never through here.
+    if transport == crate::inet::allow::Transport::Udp {
+        writer.emit(&inet_event(incoming, ctx, &label, port, Outcome::Deny));
+        return Reply::Data(one(status::DENIED));
+    }
     let (outcome, reply) = match crate::inet::decide(net, &SystemResolver, &dest, port, transport) {
         crate::inet::InetDecision::Denied => (Outcome::Deny, Reply::Data(one(status::DENIED))),
         crate::inet::InetDecision::Unreachable => {

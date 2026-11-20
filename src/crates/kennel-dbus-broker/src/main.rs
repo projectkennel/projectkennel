@@ -61,6 +61,15 @@ const CONTROL_NODE_PTR: u64 = 1;
 const CONTROL_NODE_COOKIE: u64 = 1;
 const FIRST_SESSION_COOKIE: u64 = 2;
 
+/// The most sessions the broker holds at once.
+const MAX_SESSIONS: usize = 1024;
+
+/// The most mediated frames queued for one consumer before the broker stops reading for it.
+const MAX_QUEUED_FRAMES: usize = 1024;
+
+/// How long the inbound reader waits before re-checking a full queue.
+const QUEUE_FULL_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
+
 /// Inbound frames a session has mediated from the bus (replies and allowlisted signals),
 /// queued for the consumer's next `DBUS_RECV`.
 #[derive(Default)]
@@ -137,6 +146,13 @@ impl Broker {
             let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
             return;
         };
+        // A session costs the broker a node, two threads and a bus connection once used. kenneld
+        // mints one per consumer connect, and a consumer decides how often it connects.
+        if self.sessions.len() >= MAX_SESSIONS {
+            eprintln!("dbus-broker: refusing a new session ({MAX_SESSIONS} are live)");
+            let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
+            return;
+        }
         let cookie = self.next_cookie;
         self.next_cookie = self.next_cookie.saturating_add(1);
         self.sessions.insert(
@@ -219,12 +235,25 @@ impl Broker {
             return false;
         };
 
-        std::thread::spawn(move || {
-            let _ = crate::mediate::mediate(mediate_end, bus, &bus_addr, filter);
-        });
+        // `thread::spawn` panics when the OS refuses a thread, which would take the broker — and
+        // every other kennel's session — down with it. A session that cannot get its threads
+        // simply fails to start.
+        let mediation = std::thread::Builder::new()
+            .name("dbus-mediate".to_owned())
+            .spawn(move || {
+                let _ = crate::mediate::mediate(mediate_end, bus, &bus_addr, filter);
+            });
+        if mediation.is_err() {
+            return false;
+        }
         let inbound = Arc::new(Inbound::default());
         let inbound_reader = Arc::clone(&inbound);
-        std::thread::spawn(move || drain_inbound(reader_end, &inbound_reader));
+        let reader = std::thread::Builder::new()
+            .name("dbus-inbound".to_owned())
+            .spawn(move || drain_inbound(reader_end, &inbound_reader));
+        if reader.is_err() {
+            return false; // `broker_end` drops here, which ends the mediation thread
+        }
 
         if let Some(session) = self.sessions.get_mut(&cookie) {
             session.conduit = Some(Conduit {
@@ -327,11 +356,22 @@ fn drain_inbound(mut conduit: UnixStream, inbound: &Inbound) {
         let mut unit = Vec::with_capacity(len.saturating_add(4));
         unit.extend_from_slice(&len_buf);
         unit.extend_from_slice(&body);
-        inbound
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(unit);
+        // A consumer that subscribes to busy signals and never calls `DBUS_RECV` would otherwise
+        // have the broker hold everything the bus sends it. Stop reading while its queue is
+        // full: the mediation's write then blocks, and the pressure reaches the bus connection
+        // of that one session.
+        loop {
+            let mut queue = inbound
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if queue.len() < MAX_QUEUED_FRAMES {
+                queue.push_back(unit);
+                break;
+            }
+            drop(queue);
+            std::thread::sleep(QUEUE_FULL_BACKOFF);
+        }
     }
 }
 

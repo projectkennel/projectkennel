@@ -506,7 +506,8 @@ fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, String
     changes.sort();
     eprintln!("kennel: persisted changes in `{name}` (the diff against the image pin):");
     for (path, marker) in &changes {
-        eprintln!("  {marker} {path}");
+        // A name in the upper is whatever the workload called the file.
+        eprintln!("  {marker} {}", kennel_lib_text::sanitise_for_log(path));
     }
     eprintln!(
         "  restore some: kennel oci revert {name} -- <path>…    all: kennel oci revert {name}"

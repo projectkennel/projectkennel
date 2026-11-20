@@ -417,7 +417,10 @@ impl RootDir {
         use std::os::unix::fs::PermissionsExt as _;
         let (parent, name) = self.parent_of(path)?;
         let mut src = std::fs::File::open(source)?;
-        let mode = src.metadata()?.permissions().mode() & 0o777;
+        // The copy is scaffolding the kennel's root owns and the workload only reads: carry the
+        // source's read and execute bits, never group or other write (a source staged under a
+        // 002 umask would otherwise arrive group-writable).
+        let mode = src.metadata()?.permissions().mode() & 0o755;
         let how = OpenHow::new()
             .flags(
                 OFlag::O_WRONLY
@@ -899,6 +902,33 @@ pub fn dup_onto(src: BorrowedFd<'_>, dst: RawFd) -> io::Result<()> {
     let rc = unsafe { libc::dup2(src.as_raw_fd(), dst) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Mark descriptor number `fd` close-on-exec, if it is open (`fcntl(F_SETFD, FD_CLOEXEC)`).
+///
+/// `kennel-bin-init` receives several descriptors at fixed numbers for its own use (the
+/// boot-sync socket, the pty return socket, the injected stdio). It marks them so that the
+/// programs it later execs — the workload and the facades — do not inherit a descriptor that was
+/// only ever meant for init. A number with nothing open at it is not an error.
+///
+/// # Errors
+/// The OS error if `fcntl(2)` fails for a reason other than the descriptor not being open.
+pub fn set_cloexec_at(fd: RawFd) -> io::Result<()> {
+    // SAFETY: `fcntl(F_SETFD)` on a descriptor number takes no pointer and changes only that
+    // descriptor's close-on-exec flag in this process's own table.
+    //
+    // INVARIANTS UPHELD: no memory is read or written; a number that is not open yields EBADF.
+    //
+    // FAILURE MODE: -1 + errno; EBADF is treated as "nothing to mark".
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EBADF) {
+            return Ok(());
+        }
+        return Err(err);
     }
     Ok(())
 }

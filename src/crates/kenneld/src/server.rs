@@ -1839,7 +1839,7 @@ pub fn run_kennel<P, L>(
         .identity
         .audit_base
         .as_ref()
-        .map(|base| base.join(&req.kennel));
+        .map(|base| base.join(audit_dir_name(&req.kennel)));
     // Hand the seal the interactive return socket's raw fd (it sends the pty master
     // back over it during pre-exec). `return_sock` keeps the fd open until after the
     // spawn returns, so the forked child still has it.
@@ -2621,6 +2621,32 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
     Ok(resolved)
 }
 
+/// The audit directory a kennel's events are written under.
+///
+/// A named kennel has its own. A dynamically spawned kennel is named `spawn-<requester ctx>-<n>`
+/// with a fresh `<n>` every time, and giving each its own directory left one behind per spawn,
+/// for ever: a requester that spawns in a loop grew the audit tree without bound. Spawned kennels
+/// of one requester share `spawn-<requester ctx>`; every event still carries the kennel's full
+/// name and uuid, so nothing is merged that cannot be told apart.
+fn audit_dir_name(kennel: &str) -> &str {
+    let Some(rest) = kennel.strip_prefix("spawn-") else {
+        return kennel;
+    };
+    match rest.split_once('-') {
+        Some((ctx, id))
+            if !ctx.is_empty()
+                && ctx.bytes().all(|b| b.is_ascii_digit())
+                && !id.is_empty()
+                && id.bytes().all(|b| b.is_ascii_hexdigit()) =>
+        {
+            kennel
+                .get(..kennel.len().saturating_sub(id.len().saturating_add(1)))
+                .unwrap_or(kennel)
+        }
+        _ => kennel,
+    }
+}
+
 /// The Landlock ABI that introduced scoping (abstract `AF_UNIX` sockets and signals; Linux 6.12).
 const LANDLOCK_SCOPE_ABI: u32 = 6;
 
@@ -2973,6 +2999,23 @@ mod tests {
         assert!(!accept_failures_are_fatal(1), "one failure is retried");
         assert!(!accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT - 1));
         assert!(accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT));
+    }
+
+    #[test]
+    fn spawned_kennels_of_one_requester_share_an_audit_directory() {
+        assert_eq!(audit_dir_name("spawn-7-00000000002a"), "spawn-7");
+        assert_eq!(audit_dir_name("spawn-7-00000000002b"), "spawn-7");
+        // Anything else keeps its own name, including a user kennel that merely starts alike.
+        for own in [
+            "build",
+            "spawn",
+            "spawn-",
+            "spawn-x-1",
+            "spawn-7",
+            "spawn-7-zz",
+        ] {
+            assert_eq!(audit_dir_name(own), own);
+        }
     }
 
     #[test]

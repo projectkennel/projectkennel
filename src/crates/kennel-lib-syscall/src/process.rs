@@ -5,6 +5,15 @@
 
 use std::io;
 
+/// Set the calling process's file-mode creation mask (`umask(2)`).
+///
+/// The construction child sets `0o022` before it builds a view, so the directories and files it
+/// creates as scaffolding are never group- or world-writable whatever mask it inherited.
+pub fn set_umask(mask: u32) {
+    use nix::sys::stat::{umask, Mode};
+    let _previous = umask(Mode::from_bits_truncate(mask));
+}
+
 /// Set `PR_SET_NO_NEW_PRIVS`: from now on no `execve` can grant this process (or
 /// its descendants) new privileges via setuid/setgid/file capabilities.
 ///

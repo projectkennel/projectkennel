@@ -126,6 +126,22 @@ fn run() -> io::Result<u8> {
     // binderfs clone into its in-view target and grant the workload Landlock access to the device,
     // before we fork the workload (which opens it by path). A count-0 datagram is the no-mesh case.
     place_mesh_mounts(&mut sup, &tr)?;
+    // The descriptors the factory handed init at fixed numbers are init's: the boot-sync socket
+    // to kenneld, the pty return socket, the injected stdio (which is `dup`ed onto 0/1/2 for the
+    // workload, leaving these copies behind). Mark them close-on-exec now, before anything is
+    // forked, so neither the workload nor a facade inherits one across its `execve`. They stay
+    // usable in init and in the pre-exec seal. The tun descriptor is marked in the workload's
+    // seal only, since a facade is its intended recipient; the pinned workload descriptor is
+    // left as it is, because the kernel needs it open to exec a script.
+    for fd in [
+        kennel_lib_syscall::boot::BOOT_SYNC_FD,
+        kennel_lib_syscall::pty::PTY_RETURN_FD,
+        kennel_lib_syscall::boot::INJECT_STDIN_FD,
+        kennel_lib_syscall::boot::INJECT_STDOUT_FD,
+        kennel_lib_syscall::boot::INJECT_STDERR_FD,
+    ] {
+        kennel_lib_syscall::fd::set_cloexec_at(fd)?;
+    }
     // One synthesised environment, shared by the facades, the workload, and any facade the
     // supervisor re-forks (execve replaces env, so a borrow is enough). Built once here.
     let envp = env_cstrings(&sup.env)?;
@@ -365,6 +381,8 @@ fn spawn_all(
         if sup.stdio_injected {
             kennel_lib_syscall::boot::place_injected_stdio()?;
         }
+        // The tun descriptor is for the tun facade, not for the workload.
+        kennel_lib_syscall::fd::set_cloexec_at(kennel_lib_syscall::boot::TUN_FD)?;
         Ok(())
     };
     let workload_pid = fork_drop_exec_confined(
@@ -575,10 +593,14 @@ fn supervise(
                 return Ok(u8::try_from(code & 0xff).unwrap_or(1));
             }
             Reaped::Exited { pid, .. } => {
-                notify(conn, lifecycle::NOTIFY_FACADE_CRASH, &pid.to_le_bytes());
+                // Init is PID 1, so it also reaps every orphan the workload leaves behind (a
+                // daemonised child, a shell's background job). Those are not facades: only a
+                // pid init itself forked as one is reported as a facade crash, or the audit
+                // trail would record a helper failing every time a workload process exits.
                 let Some(mut state) = facades.remove(&pid) else {
-                    continue; // not a tracked facade (already given up, or a stray)
+                    continue;
                 };
+                notify(conn, lifecycle::NOTIFY_FACADE_CRASH, &pid.to_le_bytes());
                 // `state.aux` was set from an enumerate over `sup.aux`, so this always hits;
                 // `.get` keeps it panic-free regardless.
                 let Some(facade) = sup.aux.get(state.aux) else {
