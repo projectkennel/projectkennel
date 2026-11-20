@@ -77,6 +77,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     if !ep.exec.deny_setcap {
         v.push(InvariantViolation::new("exec.deny_setcap", "must be true"));
     }
+    address_rule_violations(&ep.net, &mut v);
     if !ep.exec.deny_writable {
         v.push(InvariantViolation::new(
             "exec.deny_writable",
@@ -146,6 +147,43 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     } else {
         Err(v)
     }
+}
+
+/// Report every address rule the enforcement side could not match on.
+///
+/// The proxy and the BPF loader parse these literals; one that does not parse would be skipped
+/// there, and a deny that is skipped is a deny the author believes in and does not have. The
+/// compiler refuses such a rule; this re-asserts it for an artefact signed without passing
+/// through it.
+fn address_rule_violations(net: &crate::settled::NetPolicy, v: &mut Vec<InvariantViolation>) {
+    for (list, rules) in [
+        ("net.allow", &net.allow),
+        ("net.proxy.deny.invariant", &net.deny_invariant),
+        ("net.proxy.deny.policy", &net.deny_author),
+        ("net.bpf.connect.allow", &net.bpf_connect_allow),
+        ("net.bpf.connect.deny", &net.bpf_connect_deny),
+        ("net.bpf.bind.allow", &net.bpf_bind_allow),
+        ("net.bpf.bind.deny", &net.bpf_bind_deny),
+    ] {
+        for rule in rules {
+            if let Some(problem) = address_rule_problem(&rule.cidr, rule.prefix_len) {
+                v.push(InvariantViolation::new(
+                    list,
+                    format!("`{}/{}` {problem}", rule.cidr, rule.prefix_len),
+                ));
+            }
+        }
+    }
+}
+
+/// Why an address rule cannot be enforced, or `None` if it can: the address must be an IP literal
+/// and the prefix must fit its family.
+fn address_rule_problem(addr: &str, prefix_len: u8) -> Option<&'static str> {
+    let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
+        return Some("is not an IP address, so no rule can match on it");
+    };
+    let width: u8 = if ip.is_ipv4() { 32 } else { 128 };
+    (prefix_len > width).then_some("has a prefix longer than its address")
 }
 
 /// A grant path with any trailing `/**` / `/*` glob stripped — the real tree root the
@@ -230,6 +268,31 @@ mod tests {
             source: source.to_owned(),
         });
         p
+    }
+
+    /// A deny whose address does not parse would be skipped by the proxy, so it is refused at
+    /// load instead of being honoured as a deny that matches nothing.
+    #[test]
+    fn an_address_rule_that_cannot_be_matched_is_refused() {
+        assert!(validate(&sample_settled()).is_ok(), "the fixture is valid");
+        for (cidr, prefix_len) in [("10.0.0/8", 8), ("metadata.internal", 32), ("10.0.0.0", 33)] {
+            let mut p = sample_settled();
+            let mut rule = p
+                .effective_policy
+                .net
+                .deny_invariant
+                .first()
+                .cloned()
+                .expect("the fixture carries the metadata deny");
+            cidr.clone_into(&mut rule.cidr);
+            rule.prefix_len = prefix_len;
+            p.effective_policy.net.deny_author.push(rule);
+            let violations = validate(&p).expect_err("refused");
+            assert!(
+                violations.iter().any(|x| x.id == "net.proxy.deny.policy"),
+                "`{cidr}/{prefix_len}` must be refused"
+            );
+        }
     }
 
     /// The floor (W15): a `source` covered by — or covering — any workload-writable path is

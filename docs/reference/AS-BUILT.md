@@ -26,6 +26,34 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — the signed bytes are the policy; a rule that cannot be matched does not sign
+
+- **Bears-on:** Kennel book Vol 2, the policy pipeline chapters (canonical form and signing;
+  template chains and the `{ add, remove }` increment; `[net]` address rules).
+- **Change:** three places where what was signed and what was enforced could differ.
+  - *Canonical form.* The canonical form omits `[workload]` when `argv` is empty, `[rootfs]` when
+    `path` is empty and `[dbus]` when no bus is enabled, but the loader parsed and honoured the
+    other fields of those sections (`pinned`, `sha256`, `allowed_args`, `cwd`; `writable`,
+    `readonly`, `persistence`; `audit_level`). Such a field could be added to a settled file
+    without invalidating its signature. As-built now, `canonical::canonical_bytes` reads the body
+    back from its own canonical form and requires it to equal the body; signer and verifier both
+    go through it, so a policy with content its signature would not cover neither signs nor loads.
+  - *Chain fold.* `fold_listfield`, `fold_pathfield` and `fold_groupfield` treated an inherited
+    `{ add, remove }` as an empty list. That happens when a root template uses the increment form
+    itself, or when the first artefact in a chain to declare a section is not the root (its raw
+    increment becomes the accumulator). The next increment then replaced it: a template's
+    `[[net.proxy.deny.policy.add]]`, `[[net.bpf.connect.deny.add]]` or `[[fs.deny.add]]` vanished
+    from every leaf that added one of its own. An inherited increment is now resolved (its `add`
+    minus its `remove`) before the child's is applied.
+  - *Address rules.* `parse_cidr` checked only that the prefix was a `u8`. `10.0.0/8`, a
+    hostname, or `/33` on an IPv4 address compiled and signed; `kenneld` then dropped the rule
+    when it failed to parse (`inet.rs`, `filter_map`). For a deny that is a rule the author
+    believes in and does not have. The compiler now requires an IP literal and a prefix that fits
+    its family, and `invariant::validate` re-asserts it at load for all seven address-rule lists.
+- **Why:** the signature is the statement of what a kennel is allowed; anything honoured outside
+  it, or signed and then not enforced, makes that statement false.
+- **Not changed:** `fold_redirects` (the `source` axis of a path increment) was not revisited.
+
 ## 2026-11-19 — the D-Bus driver is mediated by method; `own` is enforced
 
 - **Bears-on:** Kennel book Vol 2, the D-Bus mediation chapter (§7.7.4 name ownership, §7.7.6

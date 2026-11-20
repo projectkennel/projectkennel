@@ -543,7 +543,13 @@ fn fold_pathfield(
         Some(PathField::Delta(d)) => {
             let mut base: Vec<String> = match parent {
                 Some(PathField::Set(v)) => v.clone(),
-                _ => Vec::new(),
+                Some(PathField::Delta(pd)) => pd
+                    .add
+                    .iter()
+                    .flat_map(|e| e.path.iter().cloned())
+                    .filter(|p| !pd.remove.iter().any(|e| e.path.contains(p)))
+                    .collect(),
+                None => Vec::new(),
             };
             for e in &d.add {
                 for path in &e.path {
@@ -579,9 +585,16 @@ fn fold_listfield<T: Clone>(
             ListField::Set(v.clone())
         }
         ListField::Delta(d) => {
+            // An inherited increment (a root template's own `add`, or a section the parent chain
+            // never declared, so the child's raw increment became the accumulator) is an
+            // increment over nothing: its entries are the inherited list.
             let mut base: Vec<T> = match parent {
                 ListField::Set(v) => v.clone(),
-                ListField::Delta(_) => Vec::new(),
+                ListField::Delta(pd) => {
+                    let mut own = pd.add.clone();
+                    own.retain(|x| !pd.remove.iter().any(|r| key(r) == key(x)));
+                    own
+                }
             };
             for e in &d.add {
                 if !base.iter().any(|x| key(x) == key(e)) {
@@ -611,7 +624,12 @@ fn fold_groupfield(child: &GroupField, parent: &GroupField, warn: &mut Vec<Strin
         GroupField::Delta(d) => {
             let mut base: Vec<String> = match parent {
                 GroupField::Set(v) => v.clone(),
-                GroupField::Delta(_) => Vec::new(),
+                GroupField::Delta(pd) => pd
+                    .add
+                    .iter()
+                    .map(|e| e.group.clone())
+                    .filter(|g| !pd.remove.iter().any(|e| e.group == *g))
+                    .collect(),
             };
             for e in &d.add {
                 if !base.contains(&e.group) {
@@ -1037,6 +1055,45 @@ fn fold_lifecycle(p: &LifecycleSection, c: &LifecycleSection) -> LifecycleSectio
 mod tests {
     use super::*;
     use crate::source::parse;
+
+    /// The cidrs of a folded `[net.proxy.deny].policy` list (empty if the fold left an increment,
+    /// which a fold step never should).
+    fn deny_cidrs(folded: &NetProxyDeny) -> Vec<String> {
+        match &folded.policy {
+            ListField::Set(v) => v.iter().map(|d| d.cidr.clone()).collect(),
+            ListField::Delta(_) => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_deny_increment_over_an_inherited_increment_keeps_both() {
+        // A root template that itself uses the increment form, and a child that adds to it: the
+        // root's deny used to be dropped, because an inherited increment was treated as empty.
+        let parent = parse(
+            b"template_name = \"p\"\n[[net.proxy.deny.policy.add]]\ncidr = \"10.0.0.0/8\"\nreason = \"internal\"\n",
+        )
+        .expect("parent");
+        let child = parse(
+            b"name = \"k\"\ntemplate_base = \"p\"\n[[net.proxy.deny.policy.add]]\ncidr = \"192.168.0.0/16\"\nreason = \"lan\"\n",
+        )
+        .expect("child");
+        let deny = |p: &SourcePolicy| {
+            p.net
+                .as_ref()
+                .and_then(|n| n.proxy.as_ref())
+                .and_then(|x| x.deny.clone())
+                .expect("deny section")
+        };
+        let folded = fold_net_proxy_deny(&deny(&parent), &deny(&child), &mut Vec::new());
+        assert_eq!(deny_cidrs(&folded), ["10.0.0.0/8", "192.168.0.0/16"]);
+
+        // The same through the whole-policy fold when the middle of the chain is the first to
+        // declare the section: its raw increment becomes the accumulator for the next step.
+        let root = parse(b"template_name = \"r\"\n").expect("root");
+        let mid = fold(&root, &parent, &mut Vec::new());
+        let leaf = fold(&mid, &child, &mut Vec::new());
+        assert_eq!(deny_cidrs(&deny(&leaf)), ["10.0.0.0/8", "192.168.0.0/16"]);
+    }
 
     #[test]
     fn dbus_folds_additively_with_scalar_enabled_winning() {

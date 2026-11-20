@@ -8,6 +8,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A policy can no longer carry content its signature does not cover.** `[workload]` without
+  `argv`, `[rootfs]` without `path` and `[dbus]` without an enabled bus are left out of the signed
+  bytes, but their other fields (`pinned`, `sha256`, `writable`, `audit_level`, …) were still read
+  and honoured, so they could be added to a settled file without breaking its signature. Such a
+  policy now neither signs nor loads.
+- **A template's deny increments are no longer lost down the chain.** When a template used the
+  `{ add, remove }` form and a policy based on it added entries of its own, the template's
+  entries were dropped. This affected every increment list, including
+  `[[net.proxy.deny.policy.add]]`, `[[net.bpf.connect.deny.add]]` and `[[fs.deny.add]]`.
+- **A malformed address rule no longer compiles.** `10.0.0/8`, a hostname, or a prefix longer
+  than the address used to compile and sign, and the rule was then silently dropped at run time;
+  for a deny, the author believed in a rule that was not in force. The compiler now refuses it
+  and the daemon refuses to load a signed policy that contains one.
 - **Granting the D-Bus driver no longer opens the bus.** Every D-Bus client needs
   `org.freedesktop.DBus` in `talk`, and with it the broker forwarded every driver method: a
   kennel could own any free name, start any activatable service, and call

@@ -621,6 +621,32 @@ mod tests {
     }
 
     #[test]
+    fn content_the_canonical_form_omits_cannot_be_signed_or_loaded() {
+        // Each of these sections is left out of the signed bytes when its defining field is
+        // unset, so any other field set on it would be honoured without being signed.
+        let mut pinned_without_argv = sample_policy();
+        pinned_without_argv.workload.pinned = true;
+        let mut digest_without_argv = sample_policy();
+        digest_without_argv.workload.sha256 = vec!["0".repeat(64)];
+        let mut rootfs_without_path = sample_policy();
+        rootfs_without_path.rootfs.writable = vec!["/etc".to_owned()];
+        let mut dbus_without_a_bus = sample_policy();
+        dbus_without_a_bus.dbus.audit_level = Some("off".to_owned());
+        for (what, policy) in [
+            ("[workload] pinned", pinned_without_argv),
+            ("[workload] sha256", digest_without_argv),
+            ("[rootfs] writable", rootfs_without_path),
+            ("[dbus] audit_level", dbus_without_a_bus),
+        ] {
+            let err = canonical::canonical_bytes(&policy).expect_err(what);
+            assert!(
+                matches!(err, PolicyError::Canonical(_)),
+                "{what}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
     fn canonical_form_is_signature_excluded_and_stable() {
         // The canonical bytes are derived from the body only; re-deriving them on
         // the verify side must reproduce exactly what was signed.

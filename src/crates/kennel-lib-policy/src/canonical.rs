@@ -16,12 +16,50 @@ use crate::settled::SettledPolicy;
 
 /// The canonical bytes for `policy` — the input to signing and verification.
 ///
+/// The bytes must describe **exactly** the policy that will be honoured. The canonical form omits
+/// a section it considers empty (a `[workload]` with no `argv`, a `[rootfs]` with no `path`, a
+/// `[dbus]` with no bus), so a section that is empty by that test yet carries other fields would
+/// be parsed and acted on without being covered by the signature. The body is therefore read back
+/// from its own canonical form and must compare equal; signer and verifier both pass through here,
+/// so such a policy can neither be signed nor loaded.
+///
 /// # Errors
 ///
-/// Returns [`PolicyError::Canonical`] if the body cannot be serialised (which
-/// would indicate a struct shape the TOML serialiser rejects, caught in tests).
+/// Returns [`PolicyError::Canonical`] if the body cannot be serialised, or if it carries content
+/// its canonical form leaves out.
 pub fn canonical_bytes(policy: &SettledPolicy) -> Result<Vec<u8>, PolicyError> {
-    kennel_lib_toml::to_string(policy)
+    let bytes = kennel_lib_toml::to_string(policy)
         .map(String::into_bytes)
-        .map_err(|e| PolicyError::Canonical(e.to_string()))
+        .map_err(|e| PolicyError::Canonical(e.to_string()))?;
+    let covered: SettledPolicy = kennel_lib_toml::from_slice(&bytes)
+        .map_err(|e| PolicyError::Canonical(format!("canonical form does not read back: {e}")))?;
+    if &covered != policy {
+        return Err(PolicyError::Canonical(format!(
+            "the policy carries content its signature would not cover{}; a section is honoured \
+             only when its defining field is set (`[workload].argv`, `[rootfs].path`, an enabled \
+             `[dbus]` bus)",
+            uncovered_sections(policy, &covered)
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Name the sections that differ between `policy` and what its canonical form `covered`, for the
+/// error text. Empty when the difference is somewhere this list does not know about.
+fn uncovered_sections(policy: &SettledPolicy, covered: &SettledPolicy) -> String {
+    let mut names = Vec::new();
+    if policy.workload != covered.workload {
+        names.push("[workload]");
+    }
+    if policy.rootfs != covered.rootfs {
+        names.push("[rootfs]");
+    }
+    if policy.dbus != covered.dbus {
+        names.push("[dbus]");
+    }
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" (in {})", names.join(", "))
+    }
 }
