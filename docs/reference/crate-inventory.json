@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 44683,
+  "total_sloc": 44841,
   "tcb_crate_count": 17,
-  "tcb_sloc": 27380,
+  "tcb_sloc": 27538,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 8038,
+      "sloc": 8066,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -76,7 +76,7 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1873,
+      "sloc": 1869,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
@@ -125,6 +125,16 @@
       "external_deps": ["nix", "simple-dns"]
     },
     {
+      "name": "kennel-lib-bpf",
+      "sloc": 963,
+      "uses_unsafe": true,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["kenneld", "spawn"],
+      "first_party_deps": ["kennel-lib-syscall"],
+      "external_deps": ["libc", "object"]
+    },
+    {
       "name": "kennel-lib-dbus",
       "sloc": 866,
       "uses_unsafe": false,
@@ -133,16 +143,6 @@
       "consumers": ["dbus-broker", "facade"],
       "first_party_deps": ["kennel-lib-binder"],
       "external_deps": ["mini-sansio-dbus"]
-    },
-    {
-      "name": "kennel-lib-bpf",
-      "sloc": 829,
-      "uses_unsafe": true,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["kenneld", "spawn"],
-      "first_party_deps": ["kennel-lib-syscall"],
-      "external_deps": ["libc", "object"]
     },
     {
       "name": "kennel-lib-control",
