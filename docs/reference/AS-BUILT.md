@@ -26,6 +26,33 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — low-severity hardening, first group
+
+- **Bears-on:** Kennel book Vol 2 ch.10 (the bastion's `authorized_keys`), §2.7 (exclusive
+  binds, T2.8), the audit chapter (file modes; BPF audit), §7.12.7 (`max_instances`), the BPF
+  ABI (`02-7-bpf-abi.md`: maps), and the framework invariants.
+- **Change:**
+  - `authorized_keys_line` writes a `"` in a destination or option as `\"` and drops line
+    breaks, so neither can end the forced command or start a second key line.
+  - `recv_with_fds` takes ownership of the descriptors that arrived before it rejects a message
+    whose control data was truncated; before, each such message left them open in the receiver.
+  - A failed exclusive over-mount is fatal to the construction (the shadows already placed are
+    released). It used to be logged and the kennel ran with the path shared.
+  - The audit directory is created 0700 and its files 0600; the control socket's directory is
+    0700 and the socket 0600, independent of the umask.
+  - `SPAWN` claims its `max_instances` slot before it reads and verifies the template, so a
+    requester at its ceiling cannot make the daemon do that work by asking again.
+  - A new map, `audit_lost`, counts audit events the programs could not reserve; the drain
+    reports growth as `net.audit-lost`. `net.bind-allow` (kind 8) is now decoded instead of
+    dropped.
+  - `kennel-privhelper-bpf` freezes every map but the ringbuf after populating it. The pins are
+    owned by the caller's uid, which is the workload's.
+  - The metadata-deny invariant requires the deny to cover the whole address (`/32`, every
+    port, every protocol), not merely to name it.
+- **Behaviour change:** a kennel whose `exclusive` path cannot be shadowed does not start.
+- **Not verified:** the exclusive failure path and the lost-event counter have no end-to-end
+  case; an audit file that already existed keeps its old mode.
+
 ## 2026-11-20 — authoring pipeline: parser limits, key precedence, fragments, the diff
 
 - **Bears-on:** Kennel book Vol 2, the policy pipeline chapters (TOML subset; trust tiers,

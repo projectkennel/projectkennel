@@ -151,10 +151,10 @@ pub fn authorized_keys_line(dest: &str, options: &[String], synthetic_pubkey: &s
     }
     for opt in options {
         cmd.push(' ');
-        cmd.push_str(&shell_quote(opt));
+        cmd.push_str(&key_option_escape(&shell_quote(opt)));
     }
     cmd.push_str(" -- ");
-    cmd.push_str(&shell_quote(dest));
+    cmd.push_str(&key_option_escape(&shell_quote(dest)));
     // The remote command the workload sent, forwarded as a single argument. sshd sets
     // $SSH_ORIGINAL_COMMAND in the forced command's environment (it is never concatenated
     // into the command line), and the double quotes keep it one argv token. Those inner
@@ -166,6 +166,24 @@ pub fn authorized_keys_line(dest: &str, options: &[String], synthetic_pubkey: &s
         cmd = cmd,
         pubkey = synthetic_pubkey.trim(),
     )
+}
+
+/// Make shell text safe inside an `authorized_keys` `command="…"` value.
+///
+/// The value ends at the first unescaped `"`, and `sshd` reads `\"` as a literal quote, so a
+/// `"` in a destination or option would end the forced command early and turn the rest into
+/// further key options. Each is written `\"`. A line break cannot be written in the file at
+/// all — it would start a new key line — so line breaks and NULs are dropped.
+fn key_option_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\n' | '\r' | '\0' => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Single-quote a token for safe inclusion in the forced command's shell string. A
@@ -367,6 +385,28 @@ mod tests {
             "the synthetic pubkey"
         );
         assert!(line.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_double_quote_or_line_break_cannot_end_the_forced_command() {
+        let line = authorized_keys_line(
+            "host\" ,no-pty,command=\"x",
+            &["-o".to_owned(), "User=a\nssh-ed25519 AAAAEVIL".to_owned()],
+            "ssh-ed25519 AAAASYN k",
+        );
+        // One line, one key; every quote inside the command is escaped.
+        assert_eq!(line.matches('\n').count(), 1, "{line}");
+        assert!(line.ends_with("ssh-ed25519 AAAASYN k\n"));
+        let command = line
+            .strip_prefix("restrict,pty,command=\"")
+            .and_then(|rest| rest.rsplit_once("\" ssh-ed25519 AAAASYN"))
+            .map(|(command, _)| command)
+            .expect("one command value");
+        let mut previous = ' ';
+        for c in command.chars() {
+            assert!(c != '"' || previous == '\\', "unescaped quote in {command}");
+            previous = c;
+        }
     }
 
     #[test]

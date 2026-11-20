@@ -189,6 +189,15 @@ struct {
 	__type(value, struct bind_subnet);
 } bind_subnet_map SEC(".maps");
 
+/* Audit events lost because the ringbuf was full (index 0). The programs add to it; kenneld
+ * reads it and records the loss, so a burst that outruns the reader is itself on the record. */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, __u32);
+	__type(value, __u64);
+} audit_lost SEC(".maps");
+
 /* Shared audit ringbuf (drained by kenneld). 1 MiB default. */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);

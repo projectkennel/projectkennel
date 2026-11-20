@@ -143,13 +143,10 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
         Some(&mut cmsg_buf),
         MsgFlags::MSG_CMSG_CLOEXEC,
     )?;
-    if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "control data truncated (too many fds)",
-        ));
-    }
-
+    // Take ownership of whatever arrived before judging the message. When the control data is
+    // truncated the kernel has still installed the descriptors that fit; returning without
+    // owning them would leave each open in this process for good, and a peer could repeat it.
+    let truncated = msg.flags.contains(MsgFlags::MSG_CTRUNC);
     let mut fds = Vec::new();
     for cmsg in msg.cmsgs()? {
         if let ControlMessageOwned::ScmRights(raw_fds) = cmsg {
@@ -162,6 +159,13 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
         }
     }
 
+    if truncated {
+        // `fds` drops here, closing the descriptors that did arrive.
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "control data truncated (too many fds)",
+        ));
+    }
     Ok((msg.bytes, fds))
 }
 

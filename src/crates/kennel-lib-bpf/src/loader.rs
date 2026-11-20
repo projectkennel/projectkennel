@@ -139,6 +139,14 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         map_flags: 0,
     },
     MapSpec {
+        name: "audit_lost",
+        map_type: MAP_TYPE_ARRAY,
+        key_size: 4,
+        value_size: 8,
+        max_entries: 1,
+        map_flags: 0,
+    },
+    MapSpec {
         name: "audit_ringbuf",
         map_type: MAP_TYPE_RINGBUF,
         key_size: 0,
@@ -431,6 +439,26 @@ pub fn create_maps(map_specs: &[MapSpec]) -> io::Result<BTreeMap<String, OwnedFd
         maps.insert(spec.name.to_owned(), fd);
     }
     Ok(maps)
+}
+
+/// The number of audit events the programs could not record because the ringbuf was full: the
+/// single element of the `audit_lost` map behind `map`.
+///
+/// # Errors
+///
+/// The OS error if the lookup fails (for instance `map` is not that map).
+pub fn audit_lost_count(map: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut value = [0u8; 8];
+    // SAFETY: `audit_lost` is declared in `KENNEL_MAPS` with a 4-byte key and an 8-byte value;
+    // the key and value buffers here are exactly those sizes and live for the call.
+    //
+    // INVARIANTS UPHELD: the buffers match the map geometry the kernel reads and writes by.
+    //
+    // FAILURE MODE: an error is returned; a wrong map type cannot overrun, since a map with a
+    // larger value would need a larger buffer only if it were this fd, which the caller obtained
+    // from the `audit_lost` pin.
+    unsafe { sys::map_lookup(map, &0u32.to_ne_bytes(), &mut value) }?;
+    Ok(u64::from_ne_bytes(value))
 }
 
 /// Freeze the named maps so neither userspace nor BPF programs can update them.

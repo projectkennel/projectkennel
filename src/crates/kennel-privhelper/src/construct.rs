@@ -474,12 +474,26 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // a snapshot independent of this shadow, so only the operator side is shadowed. Delegated to the
     // `{sys_admin}` kennel-privhelper-mounts sub-helper — the common factory holds no
     // `CAP_SYS_ADMIN` — and run *after* the drop to the operator, so the helper inherits the
-    // operator's real uid for its allocation gate and its owner check. Best-effort per path: a
-    // failure degrades that path to a plain writable bind (always permitted), logged, never fatal.
+    // operator's real uid for its allocation gate and its owner check. A path that cannot be
+    // shadowed is fatal: `exclusive` is the policy saying the operator and the workload must not
+    // use the path at once (T2.8), and a kennel that started with the path quietly shared would
+    // be running without the control it was signed with. The shadows already placed are
+    // released, and the construction fails; the child, never given its go, exits with us.
     if !exclusive_sources.is_empty() {
         let _ = recv_ack(built_r.as_fd()); // proceed even if the child died (the mount then refuses)
+        let mut shadowed: Vec<&std::path::PathBuf> = Vec::new();
         for src in &exclusive_sources {
-            over_mount_exclusive_via_helper(src);
+            if over_mount_exclusive_via_helper("mount", src) {
+                shadowed.push(src);
+                continue;
+            }
+            for done in shadowed {
+                let _ = over_mount_exclusive_via_helper("unmount", done);
+            }
+            return Err(io::Error::other(format!(
+                "exclusive bind could not be enforced for {}; refusing to start the kennel",
+                src.display()
+            )));
         }
     }
     drop(built_r);
@@ -729,29 +743,30 @@ fn ensure_bpf_pin_bpffs() {
     let _ = kennel_lib_syscall::mount::mount_bpffs(&at);
 }
 
-/// Over-mount the exclusive-bind sentinel on `src` by exec'ing the `{sys_admin}`
-/// `kennel-privhelper-mounts` sub-helper — the common factory holds **no** `CAP_SYS_ADMIN` of
-/// its own. Best-effort: a failure (including an unresolvable helper) leaves the path a plain
-/// writable bind, logged, never fatal — so the construction never fails on the over-mount.
-fn over_mount_exclusive_via_helper(src: &std::path::Path) {
+/// Run the `{sys_admin}` `kennel-privhelper-mounts` sub-helper's `verb` (`mount` to place the
+/// exclusive-bind sentinel on `src`, `unmount` to release it) — the common factory holds **no**
+/// `CAP_SYS_ADMIN` of its own. Returns whether the helper succeeded; a helper that cannot be
+/// resolved or run counts as a failure.
+fn over_mount_exclusive_via_helper(verb: &str, src: &std::path::Path) -> bool {
     let helper = match kennel_lib_config::Deployment::load() {
         Ok(d) => d.privhelper_mounts(),
         Err(e) => {
             eprintln!("kennel-privhelper: resolve kennel-privhelper-mounts: {e}");
-            return;
+            return false;
         }
     };
     let ok = std::process::Command::new(&helper)
-        .arg("mount")
+        .arg(verb)
         .arg(src)
         .status()
         .is_ok_and(|s| s.success());
     if !ok {
         eprintln!(
-            "kennel-privhelper: exclusive bind not enforced for {}",
+            "kennel-privhelper: exclusive {verb} failed for {}",
             src.display()
         );
     }
+    ok
 }
 
 /// The privileged construction the factory child runs (as the kennel's uid 0, but with the

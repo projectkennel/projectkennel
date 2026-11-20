@@ -46,6 +46,15 @@ static __always_inline struct kennel_meta *kennel_meta_get(void)
 	return bpf_map_lookup_elem(&kennel_meta_map, &zero);
 }
 
+/* Count an audit event that could not be reserved (the ringbuf is full). */
+static __always_inline void kennel_audit_lost(void)
+{
+	__u32 zero = 0;
+	__u64 *lost = bpf_map_lookup_elem(&audit_lost, &zero);
+	if (lost)
+		__sync_fetch_and_add(lost, 1);
+}
+
 /*
  * Copy the 16-byte IPv6 daddr out of a bpf_sock_addr. The fields user_ip6[0..3]
  * are read individually: each is a direct context access the verifier rewrites,
@@ -105,8 +114,10 @@ kennel_audit_connect(__u16 kind, __u8 family, __u8 protocol, __u16 port_be, cons
 {
 	struct audit_event_connect *ev =
 		bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
-		return; /* ringbuf full: event dropped (counted by the reader). */
+	if (!ev) {
+		kennel_audit_lost(); /* ringbuf full: the event is dropped, and counted */
+		return;
+	}
 	kennel_audit_hdr(&ev->hdr, kind, (__u16)sizeof(*ev), meta);
 	ev->body.family = family;
 	ev->body.protocol = protocol;
@@ -238,8 +249,10 @@ kennel_audit_bind(__u16 kind, __u8 family, __u16 port_be, const __u8 requested[1
 		  const __u8 rewritten[16], const struct kennel_meta *meta)
 {
 	struct audit_event_bind *ev = bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		kennel_audit_lost();
 		return;
+	}
 	kennel_audit_hdr(&ev->hdr, kind, (__u16)sizeof(*ev), meta);
 	ev->body.family = family;
 	ev->body._pad = 0;
@@ -378,8 +391,10 @@ static __always_inline void
 kennel_audit_sock(__u16 family, __u16 type, const struct kennel_meta *meta)
 {
 	struct audit_event_sock *ev = bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		kennel_audit_lost();
 		return;
+	}
 	kennel_audit_hdr(&ev->hdr, AUDIT_NET_SOCK_DENY, (__u16)sizeof(*ev), meta);
 	ev->body.family = family;
 	ev->body.type = type;
@@ -391,8 +406,10 @@ static __always_inline void
 kennel_audit_sockopt(__s32 level, __s32 optname, const struct kennel_meta *meta)
 {
 	struct audit_event_sockopt *ev = bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		kennel_audit_lost();
 		return;
+	}
 	kennel_audit_hdr(&ev->hdr, AUDIT_NET_SETSOCKOPT_FORCED, (__u16)sizeof(*ev), meta);
 	ev->body.level = level;
 	ev->body.optname = optname;

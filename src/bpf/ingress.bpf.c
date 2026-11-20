@@ -24,7 +24,7 @@
  *          listener check on the handshake, already judged the flow.
  * Verifier complexity budget: ~600 instructions.
  * Maps used: kennel_meta_map, bind_subnet_map, bind_{deny,allow}_v{4,6},
- *          {deny,allow}_v{4,6}, audit_ringbuf.
+ *          {deny,allow}_v{4,6}, audit_ringbuf, audit_lost.
  * Failure mode: returns 0, which drops the packet; a deny audit event is
  *          emitted (no pid/comm: there is no task in this context). A datagram
  *          whose headers cannot be read is dropped.
@@ -48,8 +48,10 @@ static __always_inline void ingress_audit_local(__u8 family, __u16 port_be, cons
 						const struct kennel_meta *meta)
 {
 	struct audit_event_bind *ev = bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		kennel_audit_lost();
 		return;
+	}
 	kennel_audit_hdr_packet(&ev->hdr, AUDIT_NET_LISTEN_DENY, (__u16)sizeof(*ev), meta);
 	ev->body.family = family;
 	ev->body._pad = 0;
@@ -64,8 +66,10 @@ static __always_inline void ingress_audit_peer(__u8 family, __u16 port_be, const
 					       const struct kennel_meta *meta)
 {
 	struct audit_event_connect *ev = bpf_ringbuf_reserve(&audit_ringbuf, sizeof(*ev), 0);
-	if (!ev)
+	if (!ev) {
+		kennel_audit_lost();
 		return;
+	}
 	kennel_audit_hdr_packet(&ev->hdr, AUDIT_NET_INGRESS_DENY, (__u16)sizeof(*ev), meta);
 	ev->body.family = family;
 	ev->body.protocol = IPPROTO_UDP;

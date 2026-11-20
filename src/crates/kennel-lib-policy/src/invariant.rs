@@ -102,11 +102,16 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     // mandated here: making private space permanently unreachable is self-defeating
     // (local dev servers, LAN/corp services, private registries), so the floor leaves
     // them reachable via `host` mode or an explicit `[[net.proxy.allow]]`.
-    let metadata_denied = ep
-        .net
-        .deny_invariant
-        .iter()
-        .any(|r| r.cidr == "169.254.169.254");
+    // The deny must be the whole address: every port, every protocol. An entry that names the
+    // address but only one port would satisfy a check on the address alone and deny nothing
+    // that matters.
+    let metadata_denied = ep.net.deny_invariant.iter().any(|r| {
+        r.cidr == "169.254.169.254"
+            && r.prefix_len == 32
+            && r.port_min == 0
+            && r.port_max == u16::MAX
+            && r.protocol == crate::settled::Protocol::Any
+    });
     if !metadata_denied {
         v.push(InvariantViolation::new(
             "net.proxy.deny.invariant",
@@ -291,6 +296,22 @@ mod tests {
             source: source.to_owned(),
         });
         p
+    }
+
+    /// The metadata deny is only the invariant if it covers the whole address.
+    #[test]
+    fn a_metadata_deny_limited_to_one_port_does_not_satisfy_the_floor() {
+        let mut p = sample_settled();
+        for rule in &mut p.effective_policy.net.deny_invariant {
+            if rule.cidr == "169.254.169.254" {
+                rule.port_min = 81;
+                rule.port_max = 81;
+            }
+        }
+        let violations = validate(&p).expect_err("refused");
+        assert!(violations
+            .iter()
+            .any(|x| x.id == "net.proxy.deny.invariant"));
     }
 
     /// A deny whose address does not parse would be skipped by the proxy, so it is refused at

@@ -8,6 +8,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **Low-severity hardening.** A `"` in an `[ssh]` destination or option can no longer end the
+  bastion's forced command; descriptors received with a truncated control message are closed;
+  audit files and the control socket get their documented 0700/0600 modes whatever the umask;
+  `SPAWN` checks `max_instances` before doing its expensive work; BPF audit events lost to a full
+  buffer are reported (`net.audit-lost`) and allowed binds are recorded (`net.bind-allow`); the
+  host-mode ACL maps are frozen once written; and the metadata-deny invariant must cover every
+  port and protocol. **Behaviour change:** a kennel whose `exclusive` path cannot be shadowed no
+  longer starts; it used to run with the path shared.
 - **The policy parser has limits.** It runs before a signature is checked and had no size cap or
   nesting bound; it now refuses documents over 1 MiB, nesting deeper than 64 and more than 4096
   tables.
