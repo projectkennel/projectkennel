@@ -6,7 +6,39 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
-### Security
+## [0.8.1] — 2026-11-20
+
+**A security release: the fixes from a review of the reference monitor.** The review covered
+namespace and view construction, the privileged helpers, the host-mode network ACL, the binder
+mesh, the D-Bus broker and the policy toolchain, and this release carries a fix for every finding
+it recorded. The most serious: a kennel's user namespace was owned by the operator, so any process
+at the operator's uid could enter it; the helper built views as host root on caller-supplied
+paths; binder registration verbs did not check their sender; and a respelled address got past the
+network policy. Several fixes tighten behaviour, so read the upgrade notes. No schema change
+(settled schema stays v6, threat catalogue stays 0.6). Every 0.8.0 install should upgrade.
+
+### Upgrade notes
+
+- **`net.mode = "host"` needs Linux 6.12** (Landlock ABI 6); on an older kernel such a kennel is
+  refused at start. The other network modes keep the 6.10 floor.
+- **`host` mode is narrower.** Only TCP and UDP sockets can be created (`ping` no longer works),
+  a listener or UDP socket receives only what the bind and connect rules cover, an IPv4-mapped
+  bind is refused, and nothing reaches host loopback without a rule. A deny with `ports` now
+  denies only those ports; a deny with no `protocol` covers every protocol. A policy with more
+  than eight port rules on one prefix is refused at start.
+- **Some policies that compiled no longer do.** A malformed CIDR, a real device in
+  `fs.dev.allow` (move it to `[[fs.dev.passthrough]]`), a half-declared `[workload]`, `[rootfs]`
+  or `[dbus]` section, and a fragment that sets `[fs.cwd]`, `fs.dev.allow` or `[net.udp]` are
+  refused. Recompile leaf policies after upgrading to find these.
+- **A kennel whose `exclusive` path cannot be shadowed does not start**; it used to run with the
+  path shared.
+- **An operator can no longer `nsenter` into their own kennel.**
+- **The SSH bastion clears the operator's forwardings** on its host-side hop.
+- **x32 binaries do not run in a kennel** on `x86_64`.
+- **Upgrade every component together.** The helper, daemon and in-kennel init changed their
+  hand-off (see *IPC protocol changes* and *BPF ABI changes*); the packages do this for you.
+
+### Security fixes
 
 - **More low-severity hardening.** The constructed view's `/` and `/etc` are no longer group- or
   world-writable; the workload and facades no longer inherit init's internal descriptors; a
@@ -199,6 +231,30 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   so `kennel policy compile policy.toml` still works. `kennel run` no longer refuses a policy
   name because a same-named file is in the current directory. `kennel policy validate` and
   `kennel policy risks` now accept a policy name, not only a path.
+
+### IPC protocol changes
+
+- **The factory hands `kenneld` descriptors, not paths.** `kenneld` receives a handle to the
+  kennel's binder device and the boot-sync socket, which now also carries the mesh mounts; the
+  mode-0666 rendezvous socket in the view is gone.
+- **Node-0 registration verbs carry their node as a binder object**, and are honoured only from
+  the kennel the registry names as that capability's provider.
+- **`CONNECT_INET` denies a UDP request** instead of answering it with a TCP connection.
+
+### BPF ABI changes
+
+- **Map ABI version 2** (`KENNEL_ABI_VERSION`). ACL entries carry up to eight port rules per prefix (`struct
+  allow_entry`, 52 bytes), denies match on port and protocol, and every map but the ring buffer
+  is frozen once written. A new `cgroup_skb/ingress` program judges inbound traffic, and a new
+  `audit_lost` map counts events dropped on a full ring buffer.
+
+### Audit schema changes
+
+- **New events:** `net.listen-deny`, `net.ingress-deny`, `net.bind-allow` and `net.audit-lost`.
+- **An event over 4096 bytes is truncated and carries `"truncated": true`** instead of being
+  dropped.
+- **Spawned kennels of one requester share one audit directory**, `spawn-<ctx>`. Audit
+  directories are created 0700 and files 0600.
 
 ### Docs & tooling
 
