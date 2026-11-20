@@ -140,44 +140,170 @@ pub fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &st
 
 // ─── Policy resolution ───────────────────────────────────────────────────────
 
-/// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
+/// A resolved `<policy>` or `<template>` argument: the file, the default name, and an
+/// optional note for the operator when the argument was ambiguous.
+#[derive(Debug)]
+pub struct Resolved {
+    /// The policy or template file.
+    pub path: PathBuf,
+    /// The default kennel/policy name.
+    pub name: String,
+    /// Set when a bare word named a policy AND a file in the base directory: the name won,
+    /// and this says how to pick the file instead (`./<word>`).
+    pub note: Option<String>,
+}
+
+/// Resolve a `<policy>` argument against explicit `policy_dirs`, with relative paths taken
+/// from `base` (the current directory in production).
+///
+/// An argument containing `/` is a path, and only a path. A bare word is a policy **name**
+/// first: it resolves in `policy_dirs` even when a file of that name sits in `base` (the
+/// note then says to pass `./<word>` for the file). Only a bare word that names no policy
+/// falls back to a file in `base`, so `kennel policy compile policy.toml` still works from
+/// inside a policy directory.
 ///
 /// # Errors
 ///
-/// Returns a message if `arg` is neither an existing file nor a valid policy
-/// name, or if no matching policy file is found under any policy directory.
-pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
-    let literal = Path::new(arg);
-    if literal.exists() {
-        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
-    }
-    if !is_valid_policy_name(arg) {
-        return Err(format!(
-            "`{arg}` is not an existing file, and not a valid policy name (no `/`, `..`, or whitespace)"
-        ));
-    }
-    for dir in kennel_lib_config::User::load()
-        .unwrap_or_default()
-        .policy_dirs()
-    {
-        let base = dir.join(arg);
-        let settled = base.join(format!("{arg}.settled.toml"));
-        let source = base.join("policy.toml");
-        let ordered = if prefer_settled {
+/// Returns a message if a path argument does not exist, or a bare word is neither a policy
+/// name nor a file in `base`.
+pub fn resolve_policy_in(
+    arg: &str,
+    prefer_settled: bool,
+    policy_dirs: &[PathBuf],
+    base: &Path,
+) -> Result<Resolved, String> {
+    let candidates = policy_dirs.iter().flat_map(|dir| {
+        let named = dir.join(arg);
+        let settled = named.join(format!("{arg}.settled.toml"));
+        let source = named.join("policy.toml");
+        if prefer_settled {
             [settled, source]
         } else {
             [source, settled]
+        }
+    });
+    resolve_name_then_file(
+        arg,
+        base,
+        candidates,
+        "policy",
+        "searched `policies/` under ~/.config/kennel, /etc/kennel, /usr/lib/kennel); pass a \
+         path, or compile one with `kennel policy compile`",
+    )
+}
+
+/// The shared rule behind [`resolve_policy_in`] and [`resolve_template_in`]: a `/` makes
+/// `arg` a path; a bare word is the first existing file among `candidates` (its name lookup),
+/// then a file in `base`. `kind` and `searched` word the errors.
+fn resolve_name_then_file(
+    arg: &str,
+    base: &Path,
+    candidates: impl Iterator<Item = PathBuf>,
+    kind: &str,
+    searched: &str,
+) -> Result<Resolved, String> {
+    let literal = base.join(arg);
+    let as_path = |path: PathBuf| Resolved {
+        name: policy_name_from_path(&path),
+        path,
+        note: None,
+    };
+    if arg.contains('/') {
+        return if literal.exists() {
+            Ok(as_path(literal))
+        } else {
+            Err(format!("`{arg}`: no such file"))
         };
-        for candidate in ordered {
-            if candidate.is_file() {
-                return Ok((candidate, arg.to_owned()));
-            }
+    }
+    let valid = is_valid_policy_name(arg);
+    if valid {
+        let mut candidates = candidates;
+        if let Some(found) = candidates.find(|c| c.is_file()) {
+            let note = literal.exists().then(|| shadowed_file_note(arg, &found));
+            return Ok(Resolved {
+                path: found,
+                name: arg.to_owned(),
+                note,
+            });
         }
     }
-    Err(format!(
-        "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel); pass a path, or compile one with `kennel policy compile`"
-    ))
+    if literal.exists() {
+        return Ok(as_path(literal));
+    }
+    if !valid {
+        return Err(format!(
+            "`{arg}` is not an existing file, and not a valid {kind} name (no `/`, `..`, or whitespace)"
+        ));
+    }
+    Err(format!("no {kind} named `{arg}` ({searched}"))
+}
+
+/// The note for a bare word that named both a policy (or template) and a file in the current
+/// directory: the name won, and `./<word>` picks the file.
+fn shadowed_file_note(arg: &str, chosen: &Path) -> String {
+    format!(
+        "`{arg}` resolved to {}; a file `{arg}` in this directory was not used \
+         (pass `./{arg}` to use it)",
+        chosen.display()
+    )
+}
+
+/// Print a resolution note, if any, to stderr.
+fn print_note(resolved: &Resolved) {
+    if let Some(note) = &resolved.note {
+        eprintln!("kennel: note: {note}");
+    }
+}
+
+/// Resolve a `<template>` argument against explicit `template_dirs`.
+///
+/// The template counterpart of [`resolve_policy_in`], with relative paths taken from `base`
+/// and the same rule: a `/` makes it a path; a bare word is a name first, then a file in
+/// `base`.
+///
+/// # Errors
+///
+/// Returns a message if a path argument does not exist, or a bare word is neither a template
+/// name nor a file in `base`.
+pub fn resolve_template_in(
+    arg: &str,
+    template_dirs: &[PathBuf],
+    base: &Path,
+) -> Result<Resolved, String> {
+    // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
+    let candidates = template_dirs.iter().flat_map(|dir| {
+        [
+            dir.join(format!("{arg}.toml")),
+            dir.join(arg).join("policy.toml"),
+        ]
+    });
+    resolve_name_then_file(
+        arg,
+        base,
+        candidates,
+        "template",
+        "searched `templates/` under ~/.config/kennel, /etc/kennel, /usr/lib/kennel); pass a \
+         path to a template file",
+    )
+}
+
+/// Resolve a `<policy>` argument to a file path plus a default kennel/policy name.
+///
+/// The [`resolve_policy_in`] rule, against the user's policy dirs and the current directory:
+/// a `/` makes it a path; a bare word is a policy name first (noting on stderr a same-named
+/// file it did not use), then a file in the current directory.
+///
+/// # Errors
+///
+/// Returns a message if a path argument does not exist, or a bare word is neither a policy
+/// name nor an existing file.
+pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
+    let dirs = kennel_lib_config::User::load()
+        .unwrap_or_default()
+        .policy_dirs();
+    let resolved = resolve_policy_in(arg, prefer_settled, &dirs, Path::new(""))?;
+    print_note(&resolved);
+    Ok((resolved.path, resolved.name))
 }
 
 /// The trust tier a cascade path belongs to, by its root.
@@ -264,8 +390,10 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
     ))
 }
 
-/// Resolve a template/fragment argument: a **name** in the template cascade (user
-/// `~/.config/kennel/templates/<name>` first), else a filesystem path.
+/// Resolve a template/fragment argument: a **name** in the template cascade, else a path.
+///
+/// The user `~/.config/kennel/templates/<name>` is searched first. A `/` makes the argument a
+/// path only; a bare word that names a template wins over a same-named file here.
 ///
 /// The template counterpart of [`resolve_policy`], so `sign-template base-mine` finds
 /// `~/.config/kennel/templates/base-mine/policy.toml` (or `base-mine.toml`) without the caller
@@ -277,32 +405,11 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
 /// Returns a message if the argument is neither an existing file nor a valid name resolving in the
 /// template dirs.
 pub fn resolve_template(arg: &str) -> Result<(PathBuf, String), String> {
-    let literal = Path::new(arg);
-    if literal.exists() {
-        return Ok((literal.to_path_buf(), policy_name_from_path(literal)));
-    }
-    if !is_valid_policy_name(arg) {
-        return Err(format!(
-            "`{arg}` is not an existing file, and not a valid template name (no `/`, `..`, or whitespace)"
-        ));
-    }
     let mut dirs = Vec::new();
     add_default_template_dirs(&mut dirs);
-    for dir in dirs {
-        // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
-        for candidate in [
-            dir.join(format!("{arg}.toml")),
-            dir.join(arg).join("policy.toml"),
-        ] {
-            if candidate.is_file() {
-                return Ok((candidate, arg.to_owned()));
-            }
-        }
-    }
-    Err(format!(
-        "no template named `{arg}` (searched `templates/` under ~/.config/kennel, /etc/kennel, \
-         /usr/lib/kennel); pass a path to a template file"
-    ))
+    let resolved = resolve_template_in(arg, &dirs, Path::new(""))?;
+    print_note(&resolved);
+    Ok((resolved.path, resolved.name))
 }
 
 /// Derive a kennel name from a policy file path.
@@ -998,5 +1105,123 @@ mod signer_tests {
             resolve_key_id(std::slice::from_ref(&scratch.0), &pubkey).as_deref(),
             Some("release-key")
         );
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    use super::*;
+
+    /// A scratch tree under the system temp dir, removed on drop: a policy repo, a template
+    /// dir, and a "current directory".
+    struct Tree(PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("kennel-resolve-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            for sub in ["policies", "templates", "cwd"] {
+                std::fs::create_dir_all(dir.join(sub)).expect("create scratch dir");
+            }
+            Self(dir)
+        }
+        fn policies(&self) -> Vec<PathBuf> {
+            vec![self.0.join("policies")]
+        }
+        fn templates(&self) -> Vec<PathBuf> {
+            vec![self.0.join("templates")]
+        }
+        fn cwd(&self) -> PathBuf {
+            self.0.join("cwd")
+        }
+        fn put(&self, rel: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, b"x").expect("write");
+            path
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_bare_name_beats_a_same_named_file_in_the_current_directory() {
+        // The quirk: `kennel policy compile opencode` from ~ read the 250 MB `~/opencode`
+        // binary instead of the `opencode` policy.
+        let t = Tree::new("name-wins");
+        let policy = t.put("policies/opencode/policy.toml");
+        t.put("cwd/opencode");
+
+        let r = resolve_policy_in("opencode", false, &t.policies(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, policy);
+        assert_eq!(r.name, "opencode");
+        let note = r.note.expect("the ambiguity is reported");
+        assert!(
+            note.contains("./opencode"),
+            "note says how to pick the file: {note}"
+        );
+    }
+
+    #[test]
+    fn a_bare_word_naming_no_policy_falls_back_to_a_file() {
+        // `kennel policy compile policy.toml` from inside a policy directory.
+        let t = Tree::new("file-fallback");
+        let file = t.put("cwd/policy.toml");
+
+        let r = resolve_policy_in("policy.toml", false, &t.policies(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, file);
+        assert!(r.note.is_none(), "nothing ambiguous: {:?}", r.note);
+    }
+
+    #[test]
+    fn an_argument_with_a_slash_is_only_a_path() {
+        let t = Tree::new("slash");
+        t.put("policies/opencode/policy.toml");
+        let file = t.put("cwd/opencode");
+
+        let r = resolve_policy_in("./opencode", false, &t.policies(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, file, "./opencode is the file, never the policy");
+        assert!(r.note.is_none());
+
+        let err = resolve_policy_in("./missing", false, &t.policies(), &t.cwd())
+            .expect_err("a missing path does not fall back to a name");
+        assert!(err.contains("no such file"), "got {err}");
+    }
+
+    #[test]
+    fn a_settled_artefact_is_preferred_when_asked() {
+        let t = Tree::new("settled");
+        t.put("policies/agent/policy.toml");
+        let settled = t.put("policies/agent/agent.settled.toml");
+
+        let r = resolve_policy_in("agent", true, &t.policies(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, settled);
+    }
+
+    #[test]
+    fn an_unknown_bare_word_with_no_file_is_refused() {
+        let t = Tree::new("unknown");
+        let err = resolve_policy_in("nope", false, &t.policies(), &t.cwd()).expect_err("refused");
+        assert!(err.contains("no policy named `nope`"), "got {err}");
+    }
+
+    #[test]
+    fn a_template_name_beats_a_same_named_file_too() {
+        let t = Tree::new("template");
+        let template = t.put("templates/base-mine/policy.toml");
+        t.put("cwd/base-mine");
+
+        let r = resolve_template_in("base-mine", &t.templates(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, template);
+        assert!(r.note.expect("reported").contains("./base-mine"));
+
+        let file = t.put("cwd/loose.toml");
+        let r = resolve_template_in("loose.toml", &t.templates(), &t.cwd()).expect("resolve");
+        assert_eq!(r.path, file, "no template of that name: the file");
     }
 }
