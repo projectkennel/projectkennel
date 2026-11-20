@@ -1,0 +1,61 @@
+# ============================================================================
+# net-host-socket-types — a host-mode kennel creates TCP and UDP sockets, and no others.
+#
+# The address ACL lives in the connect, sendmsg and bind hooks, and those exist for TCP and UDP.
+# Any other socket in the inet families carries data to an address nothing judged: an ICMP
+# "ping" datagram socket needs no capability, and with it a workload under a deny of an address
+# got an echo reply from that address, with no audit event. SCTP, UDP-Lite and MPTCP are the
+# same hole. They are now refused when the socket is created.
+#
+# The workload exits 0 iff TCP and UDP sockets are created and every other kind is refused.
+# ============================================================================
+
+template_name = "net-host-socket-types"
+template_base = "base-confined"
+
+[net]
+mode = "host"
+reason = "e2e: only TCP and UDP sockets exist in a host-mode kennel"
+
+[net.bpf.connect]
+allow = [{ cidr = "*", ports = [47121], reason = "an allow, so the kennel is not simply closed" }]
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash", "/usr/bin/python3", "/usr/bin/python3.*"]
+
+[workload]
+argv = [
+    "/usr/bin/python3", "-u", "-c",
+    """
+import errno, socket, sys
+S, D = socket.SOCK_STREAM, socket.SOCK_DGRAM
+def make(family, kind, proto):
+    try:
+        socket.socket(family, kind, proto).close(); return 0
+    except OSError as e:
+        return e.errno
+checks = [
+    # (what, errno observed, must it be created?)
+    ('TCP over IPv4', make(socket.AF_INET, S, 0), True),
+    ('TCP over IPv6', make(socket.AF_INET6, S, socket.IPPROTO_TCP), True),
+    ('UDP over IPv4', make(socket.AF_INET, D, 0), True),
+    ('UDP over IPv6', make(socket.AF_INET6, D, socket.IPPROTO_UDP), True),
+    ('ICMP ping socket (IPv4)', make(socket.AF_INET, D, socket.IPPROTO_ICMP), False),
+    ('ICMPv6 ping socket', make(socket.AF_INET6, D, socket.IPPROTO_ICMPV6), False),
+    ('UDP-Lite', make(socket.AF_INET, D, 136), False),
+    ('SCTP', make(socket.AF_INET, S, 132), False),
+    ('MPTCP', make(socket.AF_INET, S, 262), False),
+    ('raw ICMP', make(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP), False),
+]
+bad = 0
+for what, got, want_created in checks:
+    ok = (got == 0) == want_created
+    bad += not ok
+    print('%-28s -> %s%s' % (what, 'created' if got == 0 else errno.errorcode.get(got, got), '' if ok else '   <-- WRONG'))
+sys.exit(1 if bad else 0)
+""",
+]
