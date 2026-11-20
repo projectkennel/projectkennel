@@ -33,7 +33,7 @@ const HOST_LIBEXEC_DIR: &str = "/usr/libexec/kennel";
 /// `KENNEL_META_MAGIC` ("KNEL") from `bpf/maps.h`.
 const KENNEL_META_MAGIC: u32 = 0x4B4E_454C;
 /// `KENNEL_ABI_VERSION` from `bpf/maps.h`.
-const KENNEL_ABI_VERSION: u16 = 1;
+const KENNEL_ABI_VERSION: u16 = 2;
 /// `IPPROTO_TCP` / `IPPROTO_UDP` as the BPF `allow_entry.protocol` byte
 /// (`KENNEL_PROTO_ANY` is 0).
 const IPPROTO_TCP: u8 = 6;

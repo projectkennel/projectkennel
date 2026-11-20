@@ -50,7 +50,7 @@ One verifier fix was needed versus the blind draft: the IPv6 programs
 | `connect4.bpf.c`, `connect6.bpf.c` | Egress allowlist enforcement (the central programs). |
 | `bind4.bpf.c`, `bind6.bpf.c` | `INADDR_ANY` rewrite to the kennel's loopback; deny others. |
 | `setsockopt.bpf.c` | Force `IPV6_V6ONLY=1` to close the dual-stack escape. |
-| `sock_create.bpf.c` | Socket-family allowlist. |
+| `sock_create.bpf.c` | Socket allowlist: TCP and UDP in `AF_INET`/`AF_INET6`, nothing else. |
 | `sendmsg4.bpf.c`, `sendmsg6.bpf.c` | Connectionless (UDP) destination check; DNS only via the proxy. |
 | `HELPERS.md` | The whitelist of permitted BPF helper functions (§4.1). |
 

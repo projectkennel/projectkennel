@@ -293,29 +293,27 @@ fn populate_maps(
     if let Some(value) = bind_subnet_value(&payload.meta, &payload.bind_allowed_ports) {
         update("bind_subnet_map", &0u32.to_ne_bytes(), &value)?;
     }
-    for (key, value) in &payload.allow_v4 {
-        update("allow_v4", key, value)?;
+    // Each trie gets one entry per prefix, carrying every rule that applies to it (the rules of
+    // its own prefix and of every wider one): a lookup returns only the most specific entry.
+    for (name, rules) in [
+        ("allow_v4", &payload.allow_v4),
+        ("deny_v4", &payload.deny_v4),
+        ("bind_allow_v4", &payload.bind_allow_v4),
+        ("bind_deny_v4", &payload.bind_deny_v4),
+    ] {
+        for (key, value) in kennel_lib_bpf::acl::build_entries(rules)? {
+            update(name, &key, &value)?;
+        }
     }
-    for (key, value) in &payload.deny_v4 {
-        update("deny_v4", key, value)?;
-    }
-    for (key, value) in &payload.allow_v6 {
-        update("allow_v6", key, value)?;
-    }
-    for (key, value) in &payload.deny_v6 {
-        update("deny_v6", key, value)?;
-    }
-    for (key, value) in &payload.bind_allow_v4 {
-        update("bind_allow_v4", key, value)?;
-    }
-    for (key, value) in &payload.bind_deny_v4 {
-        update("bind_deny_v4", key, value)?;
-    }
-    for (key, value) in &payload.bind_allow_v6 {
-        update("bind_allow_v6", key, value)?;
-    }
-    for (key, value) in &payload.bind_deny_v6 {
-        update("bind_deny_v6", key, value)?;
+    for (name, rules) in [
+        ("allow_v6", &payload.allow_v6),
+        ("deny_v6", &payload.deny_v6),
+        ("bind_allow_v6", &payload.bind_allow_v6),
+        ("bind_deny_v6", &payload.bind_deny_v6),
+    ] {
+        for (key, value) in kennel_lib_bpf::acl::build_entries(rules)? {
+            update(name, &key, &value)?;
+        }
     }
     Ok(())
 }

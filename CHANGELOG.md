@@ -8,6 +8,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Security
 
+- **A `host`-mode kennel can create TCP and UDP sockets and no others.** The network ACL judges TCP and
+  UDP; an ICMP "ping" socket, which needs no privilege, carried data to a denied address with no
+  audit event, and SCTP, UDP-Lite and MPTCP sockets could be created too. All are now refused at
+  `socket()`. **Behaviour change:** `ping` no longer works inside a `host`-mode kennel.
+- **Every `[net.bpf]` rule written for an address now applies.** Several ports or protocols on
+  one CIDR used to collapse to the last rule, and a deny with `ports` denied every port. Rules
+  on the same or a wider CIDR are now combined, and denies match on port and protocol. A policy
+  needing more than eight port rules on one prefix is refused at start.
+- **`net.mode = "host"` is refused on a kernel without Landlock scoping** (ABI 6, Linux 6.12).
+  On an older kernel such a kennel used to start with nothing keeping it off the host's abstract
+  unix sockets.
 - **A mesh peer that stops answering no longer pins a kenneld thread.** kenneld waited for a
   broker's reply in a busy loop with no deadline: a broker that went silent cost one daemon thread
   at full CPU per waiting consumer, for as long as it stayed silent. The wait now sleeps, and

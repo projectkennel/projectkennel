@@ -25,6 +25,7 @@
 
 #![allow(unsafe_code)]
 
+pub mod acl;
 pub mod loader;
 pub mod ringbuf;
 pub mod sys;

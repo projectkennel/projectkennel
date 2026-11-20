@@ -49,6 +49,11 @@ pub struct MapSpec {
     pub map_flags: u32,
 }
 
+/// `sizeof(struct allow_entry)`: the value of every allow/deny LPM trie.
+// The entry is 52 bytes; the cast cannot truncate.
+#[allow(clippy::cast_possible_truncation)]
+const ENTRY_VALUE_SIZE: u32 = crate::acl::ENTRY_SIZE as u32;
+
 /// The maps of `bpf/maps.h`. Value sizes match the structs there.
 pub const KENNEL_MAPS: &[MapSpec] = &[
     MapSpec {
@@ -63,7 +68,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "deny_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -71,7 +76,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "deny_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -79,7 +84,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "allow_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -87,7 +92,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "allow_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -95,7 +100,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_deny_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -103,7 +108,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_deny_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 256,
         map_flags: F_NO_PREALLOC,
     },
@@ -111,7 +116,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_allow_v4",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 8,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -119,7 +124,7 @@ pub const KENNEL_MAPS: &[MapSpec] = &[
         name: "bind_allow_v6",
         map_type: MAP_TYPE_LPM_TRIE,
         key_size: 20,
-        value_size: 8,
+        value_size: ENTRY_VALUE_SIZE,
         max_entries: 1024,
         map_flags: F_NO_PREALLOC,
     },
@@ -647,15 +652,21 @@ mod root_tests {
     /// Build the `(key, value)` byte pair for an `allow_v4` entry: a /32 LPM key
     /// for `addr` (network-order bytes) and an `allow_entry` permitting any
     /// protocol on `[port_min, port_max]`. Layouts match `bpf/maps.h`.
-    fn allow_v4_entry(addr: [u8; 4], port_min: u16, port_max: u16) -> ([u8; 8], [u8; 8]) {
+    fn allow_v4_entry(
+        addr: [u8; 4],
+        port_min: u16,
+        port_max: u16,
+    ) -> ([u8; 8], [u8; crate::acl::ENTRY_SIZE]) {
         let mut key = [0u8; 8];
         key[0..4].copy_from_slice(&32u32.to_ne_bytes()); // prefixlen
         key[4..8].copy_from_slice(&addr); // addr, already network order
-        let mut val = [0u8; 8]; // allow_entry: port_min, port_max, protocol, flags, _pad[2]
-        val[0..2].copy_from_slice(&port_min.to_ne_bytes());
-        val[2..4].copy_from_slice(&port_max.to_ne_bytes());
-        // val[4] protocol = 0 (KENNEL_PROTO_ANY); val[5] flags = 0; val[6..8] pad.
-        (key, val)
+        let mut rule = [0u8; 8]; // port_min, port_max, protocol (0 = any), flags, pad
+        rule[0..2].copy_from_slice(&port_min.to_ne_bytes());
+        rule[2..4].copy_from_slice(&port_max.to_ne_bytes());
+        crate::acl::build_entries(&[(key, rule)])
+            .expect("one rule builds")
+            .pop()
+            .expect("one entry")
     }
 
     /// Fork a child that joins `cg`, attempts one connect to 127.0.0.1:9, and

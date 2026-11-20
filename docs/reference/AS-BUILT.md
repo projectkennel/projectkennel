@@ -26,6 +26,43 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-20 — host mode: only TCP and UDP sockets, every port rule applies, and a scope floor
+
+- **Bears-on:** Kennel book Vol 2, the network chapter (§7.5.4 the host-mode connect ACL, §7.5.7
+  the bind ACL), the BPF ABI (`02-7-bpf-abi.md`: `struct allow_entry`, `KENNEL_ABI_VERSION`), and
+  ch.9 (Local Services, `unix.abstract`).
+- **Change:**
+  - *Socket creation.* `sock_create` admitted any type and protocol in `AF_INET`/`AF_INET6`. The
+    address ACL is the connect, sendmsg and bind hooks, which exist for TCP and UDP; an ICMP
+    datagram ("ping") socket needs no capability and reached a denied address with no audit
+    event, and SCTP, UDP-Lite and MPTCP sockets were likewise created. The program now admits
+    `SOCK_STREAM` with `IPPROTO_TCP` and `SOCK_DGRAM` with `IPPROTO_UDP` (the resolved protocol,
+    so a `0` protocol reads as TCP or UDP) and refuses the rest with a `net.sock-deny` event.
+  - *Map value format.* `struct allow_entry` was one `(port_min, port_max, protocol)`. An LPM
+    lookup returns one entry per address, and each policy rule was written as its own entry, so
+    several ports or protocols on one CIDR overwrote each other (the last one won), and the deny
+    tries were consulted for presence only, so a deny with `ports` denied every port. The value
+    is now a set of up to eight rules (`KENNEL_ENTRY_RULES`, 52 bytes; `KENNEL_ABI_VERSION` 2).
+    `kennel_lib_bpf::acl::build_entries` builds one entry per prefix carrying the rules of that
+    prefix and of every wider prefix that contains it, drops rules another rule covers, and
+    refuses an ACL that needs more than eight on one prefix. Deny entries are matched on port
+    and protocol exactly like allow entries. The plan and the privhelper wire format are
+    unchanged (one rule per line); the merge happens in `kennel-privhelper-bpf` as it writes the
+    maps.
+  - *Landlock floor.* The seal enables the scopes the kernel's Landlock supports, so on ABI 5
+    (kernel 6.10–6.11) a kennel started unscoped with no error. A `host`-mode kennel shares the
+    host's abstract-socket namespace, and the scope is the only thing that keeps it off those
+    sockets. `kenneld` now refuses to start a `host`-mode policy when the kernel's Landlock ABI
+    is below 6. Other modes have their own network namespace and are not affected; the README's
+    blanket "ABI ≥ 6" is corrected to say this.
+- **Behaviour change:** in a `host`-mode kennel (the only mode these programs are attached in;
+  the others have a private network namespace), `ping` (ICMP sockets), SCTP, UDP-Lite and MPTCP sockets
+  fail at `socket()` with `EPERM`. A deny with `ports` now denies only those ports.
+- **Why:** an ACL on addresses has to see every socket that can carry data to an address, and has
+  to apply every rule that was written for it.
+- **Not changed:** `listen()` on an unbound socket and UDP port-0 binds still bypass the bind
+  ACL (R-26). The floor was tested only as a decision function; no ABI 5 kernel was available.
+
 ## 2026-11-20 — a daemon-initiated binder transaction sleeps, and gives up at a deadline
 
 - **Bears-on:** Kennel book Vol 2, the binder chapter (`02-4-binder.md` §Threading model) and the

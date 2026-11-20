@@ -1900,7 +1900,7 @@ mod tests {
         );
         // deny_invariant 169.254.169.254/32 any-proto is enforced in EVERY mode (deny-first).
         assert_eq!(plan.bpf_deny_v4.len(), 1);
-        // meta: magic "KNEL", abi 1, ctx 7.
+        // meta: magic "KNEL", abi 2, ctx 7.
         let magic = {
             let [m0, m1, m2, m3] = 0x4B4E_454Cu32.to_ne_bytes();
             [m0, m1, m2, m3]

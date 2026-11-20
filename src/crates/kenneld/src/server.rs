@@ -1470,6 +1470,13 @@ pub fn run_kennel<P, L>(
             loaded.unix.sockets.len()
         ));
     }
+    // A policy that depends on Landlock scoping is refused on a kernel that cannot scope, before
+    // anything is built: the kennel would otherwise start with that control silently absent.
+    if let Err(reason) =
+        check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
+    {
+        return fail(shared, &req.kennel, ctx, conn, "landlock", reason);
+    }
     // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
     // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
     // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
@@ -2613,6 +2620,46 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
     Ok(resolved)
 }
 
+/// The Landlock ABI that introduced scoping (abstract `AF_UNIX` sockets and signals; Linux 6.12).
+const LANDLOCK_SCOPE_ABI: u32 = 6;
+
+/// Whether a policy with this network mode depends on Landlock scoping.
+///
+/// A kennel with its own network namespace has an abstract-socket namespace of its own, empty by
+/// construction, so scoping there is defence in depth. A `host`-mode kennel shares the host's
+/// network namespace: every abstract socket a host daemon binds is reachable by name, the policy
+/// cannot grant that (`abstract = "allow"` with `host` does not compile), and the Landlock scope
+/// is the only thing that refuses the connect.
+const fn needs_landlock_scope(mode: kennel_lib_policy::NetMode) -> bool {
+    matches!(mode, kennel_lib_policy::NetMode::Host)
+}
+
+/// Refuse a policy that needs Landlock scoping on a kernel whose Landlock cannot scope.
+///
+/// `abi` is the running kernel's Landlock ABI (the daemon and the kennel share the kernel). The
+/// seal enables every scope the kernel supports and none it lacks, so below ABI 6 a kennel
+/// starts unscoped without any error; for a policy that relies on the scope that must be a
+/// refusal. A policy that does not rely on it is unaffected by the kernel's ABI here.
+fn check_landlock_floor(
+    mode: kennel_lib_policy::NetMode,
+    abi: io::Result<u32>,
+) -> Result<(), String> {
+    if !needs_landlock_scope(mode) {
+        return Ok(());
+    }
+    match abi {
+        Ok(abi) if abi >= LANDLOCK_SCOPE_ABI => Ok(()),
+        Ok(abi) => Err(format!(
+            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI} (Linux 6.12) to keep the \
+             workload off the host's abstract unix sockets; this kernel provides ABI {abi}"
+        )),
+        Err(e) => Err(format!(
+            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI}, and the kernel's \
+             Landlock ABI could not be read: {e}"
+        )),
+    }
+}
+
 /// Whether the command about to run is the policy's own program: no `--` command was given, or the
 /// one given is appended to a pinned workload's argv under `allowed_args`. The sha256 pin binds the
 /// program, so it applies in both cases; appended arguments do not change which binary runs.
@@ -2925,6 +2972,25 @@ mod tests {
         assert!(!accept_failures_are_fatal(1), "one failure is retried");
         assert!(!accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT - 1));
         assert!(accept_failures_are_fatal(ACCEPT_FAILURE_LIMIT));
+    }
+
+    #[test]
+    fn host_mode_needs_a_kernel_that_can_scope() {
+        use kennel_lib_policy::NetMode;
+        // Host mode shares the host's abstract-socket namespace: ABI 6 or refuse.
+        assert!(check_landlock_floor(NetMode::Host, Ok(6)).is_ok());
+        assert!(check_landlock_floor(NetMode::Host, Ok(7)).is_ok());
+        let err = check_landlock_floor(NetMode::Host, Ok(5)).expect_err("ABI 5 cannot scope");
+        assert!(err.contains("ABI 5"), "{err}");
+        assert!(check_landlock_floor(
+            NetMode::Host,
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        )
+        .is_err());
+        // A kennel with its own network namespace does not depend on the scope.
+        for mode in [NetMode::None, NetMode::Constrained, NetMode::Unconstrained] {
+            assert!(check_landlock_floor(mode, Ok(5)).is_ok(), "{mode:?}");
+        }
     }
 
     #[test]

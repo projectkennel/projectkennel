@@ -119,13 +119,23 @@ kennel_audit_connect(__u16 kind, __u8 family, __u8 protocol, __u16 port_be, cons
 	bpf_ringbuf_submit(ev, 0);
 }
 
-/* True if `entry` permits `protocol` on `port_host`. */
+/*
+ * True if any rule in `entry` covers `protocol` on `port_host`. Used for both
+ * directions: on an allow entry it means "permitted", on a deny entry "denied".
+ */
 static __always_inline int
-kennel_entry_permits(const struct allow_entry *entry, __u8 protocol, __u16 port_host)
+kennel_entry_matches(const struct allow_entry *entry, __u8 protocol, __u16 port_host)
 {
-	if (entry->protocol != KENNEL_PROTO_ANY && entry->protocol != protocol)
-		return 0;
-	return port_host >= entry->port_min && port_host <= entry->port_max;
+	for (int i = 0; i < KENNEL_ENTRY_RULES; i++) {
+		if (i >= entry->n_rules)
+			break;
+		const struct port_rule *r = &entry->rules[i];
+		if (r->protocol != KENNEL_PROTO_ANY && r->protocol != protocol)
+			continue;
+		if (port_host >= r->port_min && port_host <= r->port_max)
+			return 1;
+	}
+	return 0;
 }
 
 /* True if the 16-byte address is the unspecified address (::). */
@@ -164,12 +174,13 @@ kennel_decide_v4(__u32 daddr_be, __u16 port_be, __u8 protocol, __u16 deny_kind, 
 	struct lpm_v4_key key = { .prefixlen = 32, .addr = daddr_be };
 	__u16 port_host = bpf_ntohs(port_be);
 
-	if (bpf_map_lookup_elem(&deny_v4, &key)) {
+	struct allow_entry *denied = bpf_map_lookup_elem(&deny_v4, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host)) {
 		kennel_audit_connect(deny_kind, AF_INET, protocol, port_be, &daddr_be, meta);
 		return KENNEL_DENY;
 	}
 	struct allow_entry *entry = bpf_map_lookup_elem(&allow_v4, &key);
-	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+	if (entry && kennel_entry_matches(entry, protocol, port_host)) {
 		kennel_audit_connect(allow_kind, AF_INET, protocol, port_be, &daddr_be, meta);
 		return KENNEL_ALLOW;
 	}
@@ -206,12 +217,13 @@ kennel_decide_v6(const __u8 daddr_in[16], __u16 port_be, __u8 protocol, __u16 de
 
 	__builtin_memcpy(key.addr, daddr, 16);
 
-	if (bpf_map_lookup_elem(&deny_v6, &key)) {
+	struct allow_entry *denied = bpf_map_lookup_elem(&deny_v6, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host)) {
 		kennel_audit_connect(deny_kind, AF_INET6, protocol, port_be, daddr, meta);
 		return KENNEL_DENY;
 	}
 	struct allow_entry *entry = bpf_map_lookup_elem(&allow_v6, &key);
-	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+	if (entry && kennel_entry_matches(entry, protocol, port_host)) {
 		kennel_audit_connect(allow_kind, AF_INET6, protocol, port_be, daddr, meta);
 		return KENNEL_ALLOW;
 	}
@@ -251,12 +263,13 @@ kennel_bind_decide_v4(__u32 addr_be, __u16 port_be, __u8 protocol, const __u8 re
 	struct lpm_v4_key key = { .prefixlen = 32, .addr = addr_be };
 	__u16 port_host = bpf_ntohs(port_be);
 
-	if (bpf_map_lookup_elem(&bind_deny_v4, &key)) {
+	struct allow_entry *denied = bpf_map_lookup_elem(&bind_deny_v4, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host)) {
 		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET, port_be, requested, rewritten, meta);
 		return KENNEL_DENY;
 	}
 	struct allow_entry *entry = bpf_map_lookup_elem(&bind_allow_v4, &key);
-	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+	if (entry && kennel_entry_matches(entry, protocol, port_host)) {
 		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET, port_be, requested, rewritten, meta);
 		return KENNEL_ALLOW;
 	}
@@ -275,18 +288,26 @@ kennel_bind_decide_v6(const __u8 addr[16], __u16 port_be, __u8 protocol, const _
 
 	__builtin_memcpy(key.addr, addr, 16);
 
-	if (bpf_map_lookup_elem(&bind_deny_v6, &key)) {
+	struct allow_entry *denied = bpf_map_lookup_elem(&bind_deny_v6, &key);
+	if (denied && kennel_entry_matches(denied, protocol, port_host)) {
 		kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, requested, rewritten, meta);
 		return KENNEL_DENY;
 	}
 	struct allow_entry *entry = bpf_map_lookup_elem(&bind_allow_v6, &key);
-	if (entry && kennel_entry_permits(entry, protocol, port_host)) {
+	if (entry && kennel_entry_matches(entry, protocol, port_host)) {
 		kennel_audit_bind(AUDIT_NET_BIND_ALLOW, AF_INET6, port_be, requested, rewritten, meta);
 		return KENNEL_ALLOW;
 	}
 	kennel_audit_bind(AUDIT_NET_BIND_DENY, AF_INET6, port_be, requested, rewritten, meta);
 	return KENNEL_DENY;
 }
+
+#ifndef SOCK_STREAM
+#define SOCK_STREAM 1
+#endif
+#ifndef SOCK_DGRAM
+#define SOCK_DGRAM 2
+#endif
 
 /* Emit a socket-creation deny audit event. */
 static __always_inline void
