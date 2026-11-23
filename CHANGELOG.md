@@ -6,6 +6,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Docs & tooling
+
+- **`stage-tree.sh` no longer stages `dist/repo` into the release payload.** It copied all of
+  `dist/` except `release/`, so on a host that had published an earlier release the signed
+  APT/DNF tree went into both tarballs (18 MB instead of 3 MB at the 0.8.1 cut, caught before
+  tagging). It now skips both build outputs, and the payload layout test checks it.
+
 ## [0.8.1] — 2026-11-20
 
 **A security release: the fixes from a review of the reference monitor.** The review covered
