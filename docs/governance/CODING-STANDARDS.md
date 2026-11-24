@@ -66,7 +66,7 @@ The repository is one Cargo workspace with one crate per architectural module. C
 
 Crate names are prefixed `kennel-`. Module boundaries match architectural boundaries; if a module wants to depend on internals of another crate, that is a design smell — make the API public or merge the crates.
 
-A crate that requires `unsafe` is annotated as such in its top-level `lib.rs` documentation and listed in `UNSAFE-CRATES.md` at the workspace root. By default, every crate carries `#![forbid(unsafe_code)]`. Removing this attribute requires §4.
+A crate that requires `unsafe` is annotated as such in its top-level `lib.rs` documentation and listed in [`supply-chain/UNSAFE-CRATES.md`](../../supply-chain/UNSAFE-CRATES.md). By default, every crate carries `#![forbid(unsafe_code)]`. Removing this attribute requires §4.
 
 Each crate carries, at minimum:
 
@@ -89,7 +89,7 @@ The `Apache-2.0` / `GPL-2.0-only` combination is legitimate here precisely becau
 
 **Default:** every crate has `#![forbid(unsafe_code)]` at the top of `lib.rs` or `main.rs`. This is not negotiable for the policy crate, the CLI, the netproxy, or any test code.
 
-**Where allowed:** the `kennel-lib-syscall` crate (or equivalent, name TBD) is the *only* crate permitted to contain `unsafe` blocks. All raw syscalls, Landlock/seccomp/BPF library calls that require `unsafe`, and FFI live there. The crate is sized to be reviewable in one sitting.
+**Where allowed:** only the crates listed in [`supply-chain/UNSAFE-CRATES.md`](../../supply-chain/UNSAFE-CRATES.md) may contain `unsafe` blocks. There are five, split by concern so each owns one small surface: `kennel-lib-syscall` (namespaces, mounts, process creation, descriptors), `kennel-lib-landlock`, `kennel-lib-bpf`, `kennel-lib-binder` and `kennel-lib-scm`. All raw syscalls and FFI live in one of them, and the default home for new `unsafe` is `kennel-lib-syscall`. Every other crate root — libraries, binaries and build tools alike — carries `#![forbid(unsafe_code)]`; a binary is its own crate root and needs the attribute itself.
 
 **Required for every `unsafe` block:**
 
@@ -512,7 +512,7 @@ Every public function has tests covering, at minimum:
 - **Unit tests.** Live in `#[cfg(test)] mod tests` blocks beside the code. Test one function or one tight cluster of functions. Fast: every unit test in the workspace should run in well under a second total.
 - **Integration tests.** Live in `tests/` directories. Test the public API of a crate end-to-end. May take seconds. Required for any crate with a non-trivial public API.
 - **Property tests.** Use `proptest` (one of our sanctioned deps) for any function whose input space is large enough that examples cannot cover it. The policy resolver and the parser are the obvious cases.
-- **Fuzz tests.** `cargo-fuzz` corpora live in `fuzz/`. The TOML parser, the policy validator, and any code consuming untrusted bytes carry fuzz targets. CI runs each fuzz target for one minute on every PR; long-running fuzz runs happen out-of-band.
+- **Fuzz tests.** The harness is `src/fuzz/` (`kennel-fuzz`, a separate workspace): the `arbitrary` crate and a hand-rolled deterministic runner, not `cargo-fuzz`, which would bring a C++ runtime and a build script into the vendored tree (the reasoning is in `src/fuzz/README.md`). The TOML parser, the policy reader, and any code consuming untrusted bytes are fed by it. It runs two kinds of input on every PR: random byte strings from a fixed seed, and, for each decoder, a valid input with every truncation and single-byte change of it. Coverage-guided fuzzing is not run.
 - **Doc tests.** Doc examples are tests. They run in CI. If a doc test does not actually exercise the behaviour, it is decorative and should be removed.
 
 ### 7.4 Test discipline
@@ -704,7 +704,7 @@ This carve-out is rare. The default is still: parse to a typed struct.
 
 ### 10.6 Fuzzing
 
-Every parser of untrusted input carries a fuzz target under `fuzz/`. The TOML parser, the policy resolver, the signature-bearing file reader, the SOCKS5 message decoder, and the IPC frame parser are the obvious cases. The fuzz cadence and corpora discipline are governed by §7.5.
+Every parser of untrusted input is fed by the harness under `src/fuzz/` (§7.3), with a seed built from a valid input wherever random bytes would not get past its first check. The TOML parser, the policy resolver, the signature-bearing file reader, the SOCKS5 message decoder, and the IPC frame parser are the obvious cases. The fuzz cadence and corpora discipline are governed by §7.5.
 
 A new untrusted-input parser landing without a fuzz target is a missing piece, not a stylistic preference. Reviewers refuse the PR.
 
@@ -1110,6 +1110,24 @@ Where this document is overridden in a specific PR, the PR description records:
 - Whether the deviation is permanent (and if so, a follow-up PR updating this document) or scoped to the change.
 
 Permanent deviations that are not folded back into this document are bugs in the document.
+
+### A.1 Rules the code does not yet meet
+
+Recorded 2026-11-24 from the quality assessment in `docs/governance/audits/`. Each is a rule above that the tree does not satisfy today. They are listed here so the document does not claim more than is enforced; whether to change the code or the rule is a maintainer decision for each.
+
+| Rule | State of the code |
+|---|---|
+| §3 Licensing: every Rust file carries an `SPDX-License-Identifier` header | No Rust source file has one. Each crate declares `license` in its manifest; the BPF C sources do carry the header. |
+| §4: every `unsafe` block has the three-part `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment | The three-part form is on a minority of the blocks (about 16 of 93 in the privileged path when counted); most have a one-line `SAFETY:` comment. |
+| §7.3: property tests with `proptest` | `proptest` is not a dependency. The properties that exist are hand-written tests in `src/fuzz/` (the terminal filter, the signed policy). |
+| §7.3: each fuzz target runs for one minute per PR | The harness is deterministic and runs for seconds. |
+| §8.1: each crate defines its own error type, typically with `thiserror` | `thiserror` is not a dependency. The wire and policy crates define error enums by hand; much of the privileged path returns `io::Error` or `String` with formatted text. |
+| §11.1: security-relevant values are newtypes | Kennel names, granted paths, ports and addresses are `String`, `PathBuf`, `u16` and the std address types, with public fields. Validation is by function, not by type. |
+| §11.3: path validation goes through the canonicalisation helper | `kennel_lib_os::path::canonicalise_path` exists and is tested but has no caller. Privileged path handling resolves by descriptor instead (`kennel_lib_syscall::fd`: `RootDir`, `open_no_symlinks`, `dir_no_symlinks`). |
+| §12.2: `clippy::expect_used` denied in `kennel-privhelper` | Not enabled in any crate. |
+| §12.2: `clippy::print_stdout` / `print_stderr` denied in libraries | Not enabled. |
+| §12.2: `missing_docs` is `deny` | It is `warn` in the workspace lint table. |
+| §12.2: `clippy::pedantic` is `deny` only in the pinned-toolchain CI job | It is `deny` for the whole workspace, in `Cargo.toml`. |
 
 ---
 

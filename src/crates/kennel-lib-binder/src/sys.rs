@@ -1,4 +1,7 @@
-//! The binder ioctl / `mmap` / binderfs-mount surface — the crate's only `unsafe`.
+//! The binder ioctl / `mmap` / binderfs-mount surface — every raw syscall the crate makes.
+//!
+//! Some functions here are `unsafe fn`; their callers in `client` are the crate's other
+//! `unsafe` blocks.
 //!
 //! Thin wrappers over `ioctl(2)`, `mmap(2)`/`munmap(2)`, and `mount(2)` for the
 //! binder driver and its binderfs control device (`<linux/android/binder.h>`,

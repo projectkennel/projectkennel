@@ -20,21 +20,19 @@
 //! and `seccompiler` for the seccomp-BPF filter (hand-rolling BPF bytecode is
 //! the dangerous case).
 //!
-//! Two sites carry our own `unsafe`, each with the §4 `SAFETY:` /
-//! `INVARIANTS UPHELD:` / `FAILURE MODE:` comment:
+//! Our own `unsafe` is where no vetted wrapper fits, each site with a `SAFETY:` comment (the
+//! full §4 `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` form is not yet on every one):
 //!
-//! - [`landlock`]'s three raw syscall wrappers. The `landlock` crate would pull
-//!   `syn` and the first proc-macros into the privileged dependency tree,
-//!   whereas the Landlock ABI is three syscalls and a few packed structs from
-//!   the kernel UAPI — small enough to own.
-//! - [`spawn`]'s one `CommandExt::pre_exec` call, which registers the
-//!   post-`fork`/pre-`execve` seal hook the spawn sequence installs confinement
-//!   in. Wrapping it here keeps `kennel-lib-spawn` `#![forbid(unsafe_code)]`.
-//! - [`netlink`]'s three socket syscalls (`socket`/`sendto`/`recv`) for
-//!   interface-address management. The `rtnetlink` crate is a large async tree
-//!   (MIT-only) and `ioctl` cannot add a secondary/IPv6 address; the message is
-//!   built as a plain byte buffer (no `transmute`), so only the syscalls are
-//!   `unsafe`.
+//! - [`namespace`]: raw `clone`/`clone3`/`fork` for the kennel's PID 1 and the mesh mount
+//!   holder, and what their children do before `exec`. The largest share by far.
+//! - [`spawn`]: the post-`fork` drop, seal and `execve` of a facade or the workload. Wrapping it
+//!   here keeps `kennel-lib-spawn` `#![forbid(unsafe_code)]`.
+//! - [`pty`], [`boot`], [`fd`]: adopting or borrowing descriptors that arrive as bare numbers
+//!   (inherited at a fixed fd, or named in a message), and the controlling-terminal ioctls.
+//! - [`wake`], [`signal`], [`process`], [`random`], [`tun`], [`listenfd`] and (behind its
+//!   feature) `journal`: one to four sites each around a single syscall or fd adoption.
+//!
+//! The Landlock bindings are in `kennel-lib-landlock`, not here.
 //!
 //! So this crate carries `#![allow(unsafe_code)]`. Dependencies are vendored
 //! under §5.5.

@@ -451,8 +451,8 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     write_identity_maps(init_pid, op_uid, op_gid, &granted)?;
 
     // "build": maps are written, so the child may become uid 0, construct the binderfs, build its
-    // view, and `fexecve` `kennel-bin-init`. We still hold root — the exclusive over-mount below
-    // needs it — so the drop to the operator happens *after*, not here.
+    // view, and `fexecve` `kennel-bin-init`. The parent's own drop to the operator follows
+    // immediately below; nothing after this point needs root in this process.
     tracer.step("construct: identity maps written; releasing child to build + fexecve");
     send_ack(ready_w.as_fd(), ACK_PROCEED)?;
     drop(ready_w);
@@ -471,9 +471,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
     // Over-mount the opaque sentinel on each exclusive bind's host source (§2.7), AFTER the child
     // signals its view is built and `pivot_root`ed away from the source: the kennel's bind is then
     // a snapshot independent of this shadow, so only the operator side is shadowed. Delegated to the
-    // `{sys_admin}` kennel-privhelper-mounts sub-helper — the common factory holds no
-    // `CAP_SYS_ADMIN` — and run *after* the drop to the operator, so the helper inherits the
-    // operator's real uid for its allocation gate and its owner check. A path that cannot be
+    // `{sys_admin}` kennel-privhelper-mounts sub-helper and run *after* the drop to the operator:
+    // the drop cleared this process's capabilities (its `CAP_SYS_ADMIN` included), and the helper
+    // inherits the operator's real uid for its allocation gate and its owner check. A path that cannot be
     // shadowed is fatal: `exclusive` is the policy saying the operator and the workload must not
     // use the path at once (T2.8), and a kennel that started with the path quietly shared would
     // be running without the control it was signed with. The shadows already placed are
@@ -743,8 +743,9 @@ fn ensure_bpf_pin_bpffs() {
 }
 
 /// Run the `{sys_admin}` `kennel-privhelper-mounts` sub-helper's `verb` (`mount` to place the
-/// exclusive-bind sentinel on `src`, `unmount` to release it) — the common factory holds **no**
-/// `CAP_SYS_ADMIN` of its own. Returns whether the helper succeeded; a helper that cannot be
+/// exclusive-bind sentinel on `src`, `unmount` to release it). The factory calls it after its
+/// drop to the operator, when it holds no capability at all; the sub-helper has its own
+/// `CAP_SYS_ADMIN` and its own ownership check. Returns whether the helper succeeded; a helper that cannot be
 /// resolved or run counts as a failure.
 fn over_mount_exclusive_via_helper(verb: &str, src: &std::path::Path) -> bool {
     let helper = match kennel_lib_config::Deployment::load() {

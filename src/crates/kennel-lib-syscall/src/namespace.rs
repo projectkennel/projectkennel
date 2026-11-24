@@ -3,7 +3,11 @@
 //! Safe wrappers (over nix) for `unshare(2)`, the first step of the spawn
 //! sequence (Kennel book Vol 2 ch.2 (Process and Privilege Model)). The flag set is our own [`Namespaces`] type
 //! rather than a re-export, so the rest of the workspace depends on this curated
-//! API and not on nix's `CloneFlags` directly. No `unsafe` of ours.
+//! API and not on nix's `CloneFlags` directly.
+//!
+//! `unshare`, `setns` and the mount calls go through nix. The process-creating primitives here
+//! (`clone_pid1`, `clone_pid1_in_cgroup`, the mount-holder fork) are ours and carry this crate's
+//! largest share of `unsafe`: raw `clone`/`clone3`/`fork` and the post-fork child paths.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -137,84 +141,6 @@ where
         // A clone-returned pid is a real, small process id and always fits in pid_t.
         pid => libc::pid_t::try_from(pid)
             .map_err(|_| io::Error::other("clone returned an out-of-range pid")),
-    }
-}
-
-/// `fork(2)` a child that runs `setup`, then **holds** — blocking forever to keep it alive.
-///
-/// Whatever `setup` established (a namespace, a mount) lives as long as the child. Returns the
-/// child's host pid once `setup` reports success.
-///
-/// This is the unprivileged mesh-bus mount holder primitive (§7.13.4a): the caller's `setup` (in a
-/// `#![forbid(unsafe_code)]` crate) creates a user namespace, self-maps, and mounts a binderfs — all
-/// unprivileged inside the new userns — and this wrapper owns the `fork`/pipe/`close_range`/`pause`.
-///
-/// **`fork`, not `clone`:** glibc's `fork` runs the `pthread_atfork` handlers that quiesce the
-/// `malloc` arenas, so `setup` may allocate even though the caller is multi-threaded; a raw `clone`
-/// would not. **`setup` discipline:** it runs in the forked child, so it must keep to atfork-safe
-/// `malloc` and plain syscalls and take **no** std lock (no `println!`/`eprintln!`).
-///
-/// On success the child writes a ready byte up a pipe, drops every inherited fd (`close_range` from
-/// fd 3 — kenneld's sockets and loopers must not leak into the resident holder), and `pause`s; the
-/// parent returns its pid. On `setup` failure (or fork/pipe error) the child exits and the parent's
-/// ready read sees EOF — reported as an error, the child reaped.
-///
-/// # Errors
-///
-/// The OS error if `pipe`/`fork` fails, or [`io::ErrorKind::Other`] if `setup` failed in the child.
-pub fn fork_hold<F>(setup: F) -> io::Result<libc::pid_t>
-where
-    F: FnOnce() -> io::Result<()>,
-{
-    const READY: u8 = 1;
-    let mut fds = [0i32; 2];
-    // SAFETY: `pipe2` writes exactly two fds into a 2-element array; `O_CLOEXEC` is harmless here.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let [ready_r, ready_w] = fds;
-
-    // SAFETY: `fork`. The child runs only atfork-safe `malloc` + syscalls (the `setup` contract) and
-    // never returns to the caller — it `pause`s on success or `_exit`s on failure.
-    let pid = unsafe { libc::fork() };
-    if pid == 0 {
-        // SAFETY (whole child branch): post-fork, single-threaded, async-signal-disciplined.
-        unsafe { libc::close(ready_r) };
-        let ok = setup().is_ok();
-        let byte = [u8::from(ok) * READY];
-        // SAFETY: write the 1-byte verdict up the pipe.
-        unsafe { libc::write(ready_w, byte.as_ptr().cast(), 1) };
-        if ok {
-            // SAFETY: drop every inherited fd (incl. the ready pipe), then block forever.
-            unsafe {
-                libc::close_range(3, libc::c_uint::MAX, 0);
-                loop {
-                    libc::pause();
-                }
-            }
-        }
-        // SAFETY: `setup` failed — exit without unwinding the (forked) caller's state.
-        unsafe { libc::_exit(1) };
-    }
-
-    // PARENT.
-    // SAFETY: close our write end so a child death is EOF on `ready_r`.
-    unsafe { libc::close(ready_w) };
-    if pid < 0 {
-        // SAFETY: clean up the unused read end.
-        unsafe { libc::close(ready_r) };
-        return Err(io::Error::last_os_error());
-    }
-    let mut byte = [0u8; 1];
-    // SAFETY: read up to one verdict byte; then close the read end.
-    let n = unsafe { libc::read(ready_r, byte.as_mut_ptr().cast(), 1) };
-    unsafe { libc::close(ready_r) };
-    if n == 1 && byte[0] == READY {
-        Ok(pid)
-    } else {
-        let _ = crate::process::kill_pid(pid);
-        let _ = crate::process::wait_pid(pid);
-        Err(io::Error::other("forked holder setup failed"))
     }
 }
 
@@ -380,8 +306,8 @@ pub fn move_mount_fd(
 /// clone) and SCM-send back the detached mount fd — one per mesh participant. EOF on the socket ends
 /// the holder, dropping its mount namespace.
 ///
-/// `setup` runs once in the forked child under the same atfork-safe contract as [`fork_hold`]
-/// (atfork-safe `malloc` + syscalls, no std lock): it creates the userns, self-maps, and mounts the
+/// `setup` runs once in the forked child under an atfork-safe contract (glibc's `fork` quiesces
+/// the `malloc` arenas, so it may allocate; it must take no std lock and make only plain syscalls): it creates the userns, self-maps, and mounts the
 /// binderfs the serve loop clones. The child drops every other inherited fd before serving, so
 /// `kenneld`'s sockets and loopers never leak into the long-lived holder.
 ///
