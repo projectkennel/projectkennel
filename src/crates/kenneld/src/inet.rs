@@ -218,6 +218,33 @@ pub fn decide(
     port: u16,
     transport: Transport,
 ) -> InetDecision {
+    decide_with(
+        rt,
+        resolver,
+        &kennel_lib_syscall::net::is_host_address,
+        dest,
+        port,
+        transport,
+    )
+}
+
+/// [`decide`], with the "is this one of the host's own addresses" question as a parameter.
+///
+/// The delegate dials from the host's network stack, so a connection to one of the host's own
+/// addresses arrives at the host's own listeners: anything bound to that address or to the
+/// wildcard (an `sshd`, a database, an admin port). The special-use gate does not cover this:
+/// the host's address may be a public one, and a rule may admit private space. So a destination
+/// that `host_local` recognises is refused whatever the mode and the rules say, as a literal and
+/// as a resolved address. It is gated exactly as special-use space is: the sanctioned host
+/// services are excepted, and `accept_private_resolved` (which no policy sets today) lifts it.
+fn decide_with(
+    rt: &NetRuntime,
+    resolver: &dyn Resolver,
+    host_local: &dyn Fn(IpAddr) -> bool,
+    dest: &Destination,
+    port: u16,
+    transport: Transport,
+) -> InetDecision {
     // Judge — and pin — the address the kernel will actually dial: an IPv4-mapped literal is
     // the IPv4 address it names (see `netaddr::canonical`).
     let dest = &match dest {
@@ -239,7 +266,7 @@ pub fn decide(
         // mirror port back into egress, and reaching a *sibling* kennel's alias is cross-kennel
         // lateral movement across the net-ns boundary the mirror is meant to respect. The SSH
         // bastion is the one sanctioned host-loopback literal and was already returned above.
-        if !rt.accept_private_resolved && is_special_use(*addr) {
+        if !rt.accept_private_resolved && (is_special_use(*addr) || host_local(*addr)) {
             return InetDecision::Denied;
         }
     }
@@ -261,7 +288,8 @@ pub fn decide(
                     .map(kennel_lib_policy::netaddr::canonical)
                     .filter(|addr| {
                         rt.ruleset.decide_resolved(*addr, port, transport) == Decision::Allow
-                            && (rt.accept_private_resolved || !is_special_use(*addr))
+                            && (rt.accept_private_resolved
+                                || !(is_special_use(*addr) || host_local(*addr)))
                     })
                     .collect();
                 if pinned.is_empty() {
@@ -331,6 +359,71 @@ mod tests {
             host_services: Vec::new(),
             command_socket: None,
         }
+    }
+
+    /// The host's own (public) address in these tests.
+    fn host_is(own: &'static str) -> impl Fn(IpAddr) -> bool {
+        move |addr| addr == v4(own)
+    }
+
+    #[test]
+    fn the_hosts_own_address_is_refused_as_a_literal() {
+        // The delegate dials from the host stack: this would reach the host's own listeners.
+        let rt = unconstrained();
+        let resolver = FakeResolver(Err(()));
+        let own = host_is("93.184.216.34");
+        let decide_addr = |addr: &str| {
+            decide_with(
+                &rt,
+                &resolver,
+                &own,
+                &Destination::Addr(v4(addr)),
+                22,
+                Transport::Tcp,
+            )
+        };
+        assert_eq!(decide_addr("93.184.216.34"), InetDecision::Denied);
+        assert_eq!(
+            decide_addr("93.184.216.35"),
+            InetDecision::Pinned(vec![v4("93.184.216.35")]),
+            "another host at a neighbouring address is not the host"
+        );
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_the_hosts_own_address_does_not_pin_it() {
+        let rt = constrained("build.example");
+        let own = host_is("93.184.216.34");
+        let dest = Destination::Name("build.example".to_owned());
+        let both = FakeResolver(Ok(vec![v4("93.184.216.34"), v4("93.184.216.35")]));
+        assert_eq!(
+            decide_with(&rt, &both, &own, &dest, 443, Transport::Tcp),
+            InetDecision::Pinned(vec![v4("93.184.216.35")])
+        );
+        let only_host = FakeResolver(Ok(vec![v4("93.184.216.34")]));
+        assert_eq!(
+            decide_with(&rt, &only_host, &own, &dest, 443, Transport::Tcp),
+            InetDecision::Unreachable
+        );
+    }
+
+    #[test]
+    fn a_sanctioned_host_service_is_still_reachable_at_a_host_address() {
+        let mut rt = unconstrained();
+        rt.host_services = vec![SocketAddr::new(v4("127.0.0.1"), 2222)];
+        let resolver = FakeResolver(Err(()));
+        let own = |addr: IpAddr| addr == v4("127.0.0.1");
+        assert_eq!(
+            decide_with(
+                &rt,
+                &resolver,
+                &own,
+                &Destination::Addr(v4("127.0.0.1")),
+                2222,
+                Transport::Tcp
+            ),
+            InetDecision::Pinned(vec![v4("127.0.0.1")])
+        );
     }
 
     #[test]

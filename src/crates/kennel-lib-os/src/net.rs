@@ -1,7 +1,7 @@
 //! Safe socket helpers (no `unsafe`; std + nix).
 
 use std::io;
-use std::net::{SocketAddr, TcpListener};
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -85,6 +85,38 @@ impl PinnedSocket {
     fn proc_path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.fd.as_raw_fd()))
     }
+}
+
+/// Every address assigned to an interface of this host, in the calling network namespace.
+///
+/// # Errors
+///
+/// The OS error if the interfaces cannot be listed.
+pub fn host_addresses() -> io::Result<Vec<IpAddr>> {
+    let mut out = Vec::new();
+    for interface in nix::ifaddrs::getifaddrs()? {
+        let Some(address) = interface.address else {
+            continue;
+        };
+        if let Some(v4) = address.as_sockaddr_in() {
+            out.push(IpAddr::V4(v4.ip()));
+        } else if let Some(v6) = address.as_sockaddr_in6() {
+            out.push(IpAddr::V6(v6.ip()));
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `addr` is one of this host's own addresses ([`host_addresses`]).
+///
+/// A connection the host makes to one of its own addresses never leaves it: it arrives at
+/// whatever the host has listening on that address or on the wildcard. An egress path that
+/// dials from the host stack asks this before it dials. An IPv4-mapped IPv6 address is judged
+/// as the IPv4 address it names. If the interfaces cannot be listed the answer is `true`: the
+/// caller is deciding whether to refuse, and an unknown must not pass.
+#[must_use]
+pub fn is_host_address(addr: IpAddr) -> bool {
+    host_addresses().map_or(true, |own| own.contains(&addr.to_canonical()))
 }
 
 /// The loopback interface's name. Linux creates it as `lo` in every network namespace.
@@ -234,6 +266,20 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         std::net::TcpStream::connect(addr).expect("a local connection still arrives");
         listener.accept().expect("accept");
+    }
+
+    #[test]
+    fn the_hosts_own_addresses_are_recognised() {
+        let own = host_addresses().expect("interfaces");
+        assert!(own.contains(&IpAddr::from(std::net::Ipv4Addr::LOCALHOST)));
+        for addr in own {
+            assert!(is_host_address(addr), "{addr}");
+        }
+        // The IPv4-mapped spelling of a local address is the same address.
+        assert!(is_host_address("::ffff:127.0.0.1".parse().expect("addr")));
+        // TEST-NET-1 and the documentation prefix are assigned to no interface.
+        assert!(!is_host_address("192.0.2.1".parse().expect("addr")));
+        assert!(!is_host_address("2001:db8::1".parse().expect("addr")));
     }
 
     #[test]

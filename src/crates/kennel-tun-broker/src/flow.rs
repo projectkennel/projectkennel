@@ -5,7 +5,7 @@
 //! [`connect_udp`](kennel_host_delegate::netproxy::udp::connect_udp) — the operator-context
 //! resolve-and-dial, reused exactly as `dbus-broker` reuses `host-dbus::mediate`.
 //!
-//! Two things gate the dial, both in the dialer (the cgroup BPF floor still kernel-enforces the
+//! Three things gate the dial, both in the dialer (the cgroup BPF floor still kernel-enforces the
 //! cloud-metadata invariant separately):
 //!
 //! - **Non-routable rebinding gate.** A resolved address a name should never point at for egress —
@@ -16,6 +16,9 @@
 //!   dropped here — constrained UDP legitimately reaches private/internal endpoints (enterprise
 //!   data-sync, QUIC to a private host); a deployment that wants them refused adds them to
 //!   `[net.bpf].connect.deny`.
+//! - **The host's own addresses.** A resolved address assigned to one of this host's interfaces is
+//!   dropped with the non-routable ones: dialled from the host stack it reaches the host's own
+//!   listeners, whatever range it is in.
 //! - **DNS/mDNS port deny.** Destination ports **53** and **5353** are refused regardless of grant —
 //!   a UDP flow to a resolver on *any* address (public included, which the address gate above leaves
 //!   reachable) is the DNS-exfil axis, and name resolution is the shim's job, never a `[net.udp]`
@@ -82,6 +85,11 @@ pub fn dial(allow: &Allowlist, name: &str, port: u16) -> Result<UdpSocket, FlowE
     if matches!(port, 53 | 5353) {
         return Err(FlowError::NotAllowed);
     }
+    // A grant names a host. A name that is an address would resolve to itself and be dialled, so
+    // it is refused here as it is by the compiler and the loader.
+    if !kennel_lib_policy::settled::host_pattern_ok(name) {
+        return Err(FlowError::NotAllowed);
+    }
     let addrs = udp::resolve(name).map_err(|e| {
         if e.kind() == io::ErrorKind::NotFound {
             FlowError::Unresolved
@@ -99,6 +107,10 @@ pub fn dial(allow: &Allowlist, name: &str, port: u16) -> Result<UdpSocket, FlowE
     let addrs: Vec<_> = addrs
         .into_iter()
         .filter(|a| !kennel_lib_policy::netaddr::is_nonroutable_egress(*a))
+        // Nor one of this host's own addresses: the mediator dials from the host stack, so that
+        // flow would arrive at the host's own listeners. The address may be a public one, which
+        // the gate above does not see.
+        .filter(|a| !kennel_lib_syscall::net::is_host_address(*a))
         .collect();
     if addrs.is_empty() {
         return Err(FlowError::Rebound);
@@ -160,6 +172,13 @@ mod tests {
         let allow = Allowlist::new([grant("localhost", &[9])]);
         let err = dial(&allow, "localhost", 9).expect_err("loopback is rebound");
         assert!(matches!(err, FlowError::Rebound), "got {err:?}");
+    }
+
+    #[test]
+    fn a_granted_name_that_is_an_address_is_not_dialled() {
+        let allow = Allowlist::new([grant("192.0.2.7", &[9])]);
+        let err = dial(&allow, "192.0.2.7", 9).expect_err("an address is not a name");
+        assert!(matches!(err, FlowError::NotAllowed), "got {err:?}");
     }
 
     #[test]

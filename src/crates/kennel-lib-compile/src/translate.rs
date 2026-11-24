@@ -1137,6 +1137,14 @@ fn collect_net_allow(
                 }
             }
         } else if let Some(name) = &entry.name {
+            // A name-only endpoint must not take an address spelled as a name: the resolver
+            // returns a literal as itself, so the grant would be a grant of that address.
+            if !cidr_allowed && !kennel_lib_policy::settled::host_pattern_ok(name) {
+                return Err(translation(format!(
+                    "[[{endpoint}]] name `{name}` is not a host name; this endpoint is \
+                     hostname-only (a DNS name, optionally with a leading `.` for subdomains)"
+                )));
+            }
             allow_names.push(NameRule {
                 name: name.clone(),
                 ports: entry.ports.clone(),
@@ -2389,6 +2397,18 @@ mod tests {
                 ..NetSection::default()
             }),
             ..SourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn a_udp_destination_spelled_as_an_address_is_refused() {
+        for name in ["10.0.0.5", "::1", "169.254.169.254"] {
+            let src = udp_src("constrained", vec![udp_allow(Some(name), None)]);
+            let mut deferred = BTreeSet::new();
+            assert!(
+                translate_net(&src, &mut deferred).is_err(),
+                "`{name}` must not translate"
+            );
         }
     }
 

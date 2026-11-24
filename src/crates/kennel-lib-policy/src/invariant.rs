@@ -78,6 +78,16 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         v.push(InvariantViolation::new("exec.deny_setcap", "must be true"));
     }
     address_rule_violations(&ep.net, &mut v);
+    // A UDP grant is name-only by design; a "name" that is an address would resolve to itself
+    // and be dialled. The compiler refuses one; so does the loader.
+    for rule in &ep.net.udp_allow_names {
+        if !crate::settled::host_pattern_ok(&rule.name) {
+            v.push(InvariantViolation::new(
+                "net.udp.allow.name",
+                format!("`{}` is not a host name", rule.name),
+            ));
+        }
+    }
     if !ep.exec.deny_writable {
         v.push(InvariantViolation::new(
             "exec.deny_writable",
@@ -438,6 +448,26 @@ mod tests {
             );
         }
         assert!(unix_violations("/run/host.sock", "~/x.sock", &[]).is_empty());
+    }
+
+    /// A UDP grant names a host. An address in that field would be dialled as itself.
+    #[test]
+    fn a_udp_grant_whose_name_is_an_address_is_refused() {
+        for (name, refused) in [("10.0.0.5", true), ("::1", true), (".example.com", false)] {
+            let mut p = sample_settled();
+            p.effective_policy
+                .net
+                .udp_allow_names
+                .push(crate::settled::NameRule {
+                    name: name.to_owned(),
+                    ports: Vec::new(),
+                    protocol: crate::settled::Protocol::Udp,
+                });
+            let hit = validate(&p)
+                .err()
+                .is_some_and(|v| v.iter().any(|x| x.id == "net.udp.allow.name"));
+            assert_eq!(hit, refused, "`{name}`");
+        }
     }
 
     /// The metadata deny is only the invariant if it covers the whole address.

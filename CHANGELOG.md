@@ -13,6 +13,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `fs.exclusive` or a persisted home path, or if `shim` is not rooted at `/`, `~/`, `$HOME/`
   or `$XDG_RUNTIME_DIR/`, has a `.`, `..` or `=`, or sits directly under `/`. The shipped
   templates are unaffected.
+- **`[[net.udp.allow]]` `name` must be a DNS name** (letters, digits, `-`, `_`; an optional
+  leading `.`; a last label that is not all digits). An IP literal in that field is refused.
 
 ### Audit schema changes
 
@@ -62,6 +64,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   of spinning, and survives a refused thread. A repeated `REGISTER_MIRROR` no longer leaves a
   binder reference in the daemon per call. Connections held before a facade registered are
   delivered with the next arrival, in order, and a mirror reader that stops says why.
+- **Egress refuses the host's own addresses.** The proxy delegate and the UDP mediator dial
+  from the host's network stack, so a connection to one of the host's own non-loopback
+  addresses arrived at the host's own listeners (anything bound to that address or to the
+  wildcard). The special-use gate did not cover it: the address may be public, and a rule may
+  admit private space. Both paths now ask the kernel for the host's addresses at decision time
+  and refuse a literal or resolved destination that is one of them.
+- **A `[net.udp]` grant must name a host.** The endpoint is name-only, but a name was not
+  checked, so `name = "10.0.0.5"` resolved to itself and was a grant of that address. The
+  compiler, the policy loader and the mediator now refuse a name that is not a DNS name.
 
 ### Threat catalogue
 
@@ -69,6 +80,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the three exists. The entry now states what does: a per-connect audit record (destination,
   port, process, outcome) and a cap on concurrent connections. A correction to the mitigation
   text; no threat is added or renumbered, and the catalogue version stays 0.6.
+- **T1.15 no longer says DNS rebinding is "closed structurally".** The UDP path refuses
+  cloud-metadata, link-local, loopback, multicast, broadcast and the host's own addresses, and
+  deliberately dials RFC1918, CGNAT and ULA. The entry now says so and lists rebinding into
+  private space as a residual.
 - **T3.3 states who can reach a kennel's loopback address.** It said "the LAN cannot" without a
   control behind it, and did not say that other local users can. The mitigation text now names
   the loopback-device bind and the per-connection audit record, says any local user can
