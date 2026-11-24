@@ -142,6 +142,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **More of the privileged path returns typed errors.** No behaviour change.
+  - `kennel-lib-spawn`: the view build returns a `ViewError`. An OCI image the factory
+    declines is an `ImageRefusal` value (cannot read, cannot search, foreign owner, root-owned
+    with a persistent upper, root-owned and writable, not a system location); any other
+    failure names the phase of the build it happened in. The helper's `ConstructError`
+    carries it, and counts an image refusal as a refusal.
+  - `kennel-privhelper-mounts`: the exclusive over-mount returns an `OverMountError` in place
+    of a `String`. Its "not owned" message says "by you" and no longer prints the
+    caller's uid.
+  - `kenneld`: the `stage` of a `lifecycle.kennel-start-refused` record is a `StartStage`
+    enum. The values written are the strings already in use.
 - **A kennel name is a type in the daemon.** `KennelName` (in `kennel-lib-control`) can only
   be built by parsing against the grammar `[a-z0-9][a-z0-9-]{0,63}`. The daemon's start,
   stop, attach and resize paths, its name registry and `run_kennel` take it, so they cannot

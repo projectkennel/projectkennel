@@ -32,6 +32,8 @@ use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
 use kennel_lib_control::name::KennelName;
 
+use crate::audit::StartStage;
+
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
 /// The kernel-enforcement [`Plan`] (seal + BPF) and the [`NetPolicy`] the
@@ -1344,7 +1346,7 @@ pub fn dispatch_request<P, L>(
                 // The name failed its grammar, so it is recorded as untrusted text.
                 crate::audit::daemon_audit().emit(&crate::audit::start_refused(
                     &req.kennel,
-                    "name",
+                    StartStage::Name,
                     &e,
                 ));
                 Response::Error(e)
@@ -1467,7 +1469,11 @@ pub fn run_kennel<P, L>(
              kennels it spawns"
         );
         eprintln!("kenneld: rejected start of `{kname}`: {msg}");
-        crate::audit::daemon_audit().emit(&crate::audit::start_refused(kname, "name", &msg));
+        crate::audit::daemon_audit().emit(&crate::audit::start_refused(
+            kname,
+            StartStage::Name,
+            &msg,
+        ));
         let _ = control::send_response(conn, &Response::Error(msg));
         return;
     }
@@ -1477,8 +1483,11 @@ pub fn run_kennel<P, L>(
         Err(resp) => {
             if let Response::Error(msg) = &resp {
                 eprintln!("kenneld: kennel `{kname}` failed to start [reserve]: {msg}");
-                crate::audit::daemon_audit()
-                    .emit(&crate::audit::start_refused(kname, "reserve", msg));
+                crate::audit::daemon_audit().emit(&crate::audit::start_refused(
+                    kname,
+                    StartStage::Reserve,
+                    msg,
+                ));
             }
             let _ = control::send_response(conn, &resp);
             return;
@@ -1499,7 +1508,9 @@ pub fn run_kennel<P, L>(
     let mut loaded = if let Some(instance) = preloaded {
         match crate::policy::loaded_from_settled(&instance, &subst) {
             Ok(loaded) => loaded,
-            Err(reason) => return fail(shared, kname, ctx, conn, "spawn instance", reason),
+            Err(reason) => {
+                return fail(shared, kname, ctx, conn, StartStage::SpawnInstance, reason)
+            }
         }
     } else {
         tr.step(&format!(
@@ -1508,7 +1519,7 @@ pub fn run_kennel<P, L>(
         ));
         match shared.loader.load(&req.policy, &subst) {
             Ok(loaded) => loaded,
-            Err(reason) => return fail(shared, kname, ctx, conn, "load policy", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::LoadPolicy, reason),
         }
     };
     if tr.on() {
@@ -1525,7 +1536,7 @@ pub fn run_kennel<P, L>(
     if let Err(reason) =
         check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
     {
-        return fail(shared, kname, ctx, conn, "landlock", reason);
+        return fail(shared, kname, ctx, conn, StartStage::Landlock, reason);
     }
     // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
     // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
@@ -1544,7 +1555,7 @@ pub fn run_kennel<P, L>(
                 kname,
                 ctx,
                 conn,
-                "oci launcher",
+                StartStage::OciLauncher,
                 "policy declares [rootfs] but no OCI launcher (kennel-bin-oci-entry) is configured"
                     .to_owned(),
             );
@@ -1555,7 +1566,7 @@ pub fn run_kennel<P, L>(
                 kname,
                 ctx,
                 conn,
-                "oci launcher",
+                StartStage::OciLauncher,
                 "OCI run reached the daemon without a config.json path (use `kennel oci run`)"
                     .to_owned(),
             );
@@ -1576,7 +1587,7 @@ pub fn run_kennel<P, L>(
     } else {
         match effective_workload(req, &loaded.workload) {
             Ok(pair) => pair,
-            Err(reason) => return fail(shared, kname, ctx, conn, "workload", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::Workload, reason),
         }
     };
     // `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
@@ -1603,7 +1614,7 @@ pub fn run_kennel<P, L>(
                             kname,
                             ctx,
                             conn,
-                            "fs.cwd",
+                            StartStage::FsCwd,
                             format!(
                                 "invocation cwd {} intersects the fs.redirect source {} — a \
                                  cwd-writable redirect source is a confused-deputy hole; run \
@@ -1622,7 +1633,7 @@ pub fn run_kennel<P, L>(
                 let mask_manifest = loaded.settled.effective_policy.trust.manifest;
                 loaded.plan.grant_cwd(resolved, writable, mask_manifest);
             }
-            Err(reason) => return fail(shared, kname, ctx, conn, "fs.cwd", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::FsCwd, reason),
         }
     }
     tr.detail(&format!(
@@ -1648,7 +1659,7 @@ pub fn run_kennel<P, L>(
                     kname,
                     ctx,
                     conn,
-                    "oci persist",
+                    StartStage::OciPersist,
                     "persistence = persist needs the store entry path (config.json)".to_owned(),
                 );
             };
@@ -1662,7 +1673,7 @@ pub fn run_kennel<P, L>(
                     kname,
                     ctx,
                     conn,
-                    "oci persist",
+                    StartStage::OciPersist,
                     format!(
                         "creating the managed overlay upper under {}: {e}",
                         entry.display()
@@ -1690,7 +1701,9 @@ pub fn run_kennel<P, L>(
                 loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
                 _workload_fd = Some(fd);
             }
-            Err(reason) => return fail(shared, kname, ctx, conn, "workload sha256", reason),
+            Err(reason) => {
+                return fail(shared, kname, ctx, conn, StartStage::WorkloadSha256, reason)
+            }
         }
     } else {
         _workload_fd = None;
@@ -1724,14 +1737,16 @@ pub fn run_kennel<P, L>(
                     kname,
                     ctx,
                     conn,
-                    "pty master socketpair",
+                    StartStage::PtyMasterSocketpair,
                     e.to_string(),
                 )
             }
         }
         match command_for_interactive(&argv, &cwd) {
             Ok(command) => command,
-            Err(reason) => return fail(shared, kname, ctx, conn, "prepare command", reason),
+            Err(reason) => {
+                return fail(shared, kname, ctx, conn, StartStage::PrepareCommand, reason)
+            }
         }
     } else {
         if let [stdin, stdout, stderr, ..] = fds.as_slice() {
@@ -1739,7 +1754,9 @@ pub fn run_kennel<P, L>(
         }
         match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
-            Err(reason) => return fail(shared, kname, ctx, conn, "prepare command", reason),
+            Err(reason) => {
+                return fail(shared, kname, ctx, conn, StartStage::PrepareCommand, reason)
+            }
         }
     };
     loaded.plan.stdio_fds = stdio_raw;
@@ -1766,7 +1783,16 @@ pub fn run_kennel<P, L>(
     let ssh = match shared.register_ssh(kname, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
-        Err(reason) => return fail(shared, kname, ctx, conn, "register ssh egress", reason),
+        Err(reason) => {
+            return fail(
+                shared,
+                kname,
+                ctx,
+                conn,
+                StartStage::RegisterSshEgress,
+                reason,
+            )
+        }
     };
     // A mediated section IS the brokered path: each enabled section implies its capability
     // consume, synthesized when the policy does not spell it out — so a section-only policy
@@ -2261,7 +2287,14 @@ pub fn run_kennel<P, L>(
             // (the teardown removes the cgroup, which detaches the programs, but the
             // pins outlive the helper). Clean them up best-effort.
             crate::bpf_audit::cleanup_pins(kname);
-            return fail(shared, kname, ctx, conn, "spawn workload", e.to_string());
+            return fail(
+                shared,
+                kname,
+                ctx,
+                conn,
+                StartStage::SpawnWorkload,
+                e.to_string(),
+            );
         }
     };
     let pid = kennel.id();
@@ -2493,7 +2526,7 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
     name: &KennelName,
     ctx: u16,
     conn: &mut UnixStream,
-    stage: &str,
+    stage: StartStage,
     reason: String,
 ) {
     eprintln!("kenneld: kennel `{name}` failed to start [{stage}]: {reason}");
@@ -3185,10 +3218,14 @@ mod tests {
 
     #[test]
     fn the_refusal_and_control_records_carry_what_happened() {
-        let refused = crate::audit::start_refused("k", "verify", "signature does not verify");
+        let refused =
+            crate::audit::start_refused("k", StartStage::LoadPolicy, "signature does not verify");
         let line = format!("{refused:?}");
         assert!(line.contains("lifecycle.kennel-start-refused"), "{line}");
-        assert!(line.contains("verify") && line.contains("Deny"), "{line}");
+        assert!(
+            line.contains("load policy") && line.contains("Deny"),
+            "{line}"
+        );
         let foreign = format!("{:?}", crate::audit::control_refused(Some(1001)));
         assert!(
             foreign.contains("1001") && foreign.contains("Deny"),

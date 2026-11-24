@@ -33,6 +33,7 @@ mod image;
 pub mod mesh_rendezvous;
 pub mod plan;
 pub mod procfs;
+pub mod view_error;
 pub mod wire;
 
 use std::io;
@@ -41,6 +42,8 @@ use std::path::{Path, PathBuf};
 
 use kennel_lib_policy::{KeySet, PolicyError, SettledPolicy};
 use kennel_lib_syscall::fd::{proc_path, NodeKind, RootDir};
+
+use crate::view_error::{InPhase as _, Phase, ViewError};
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 
 pub use plan::{
@@ -338,13 +341,13 @@ pub fn build_view_and_pivot(
     new_root: &Path,
     file_binds: &[(PathBuf, PathBuf)],
     operator: Option<FsIdentity>,
-) -> io::Result<()> {
+) -> Result<(), ViewError> {
     use kennel_lib_syscall::mount;
 
     // From here to the pivot, every path this function touches is resolved with the OPERATOR's
     // filesystem identity (see [`FsIdentity`]). The caller is the kennel's uid 0 = host root, and
     // the host filesystem is still mounted.
-    fs_as_operator(operator)?;
+    fs_as_operator(operator).phase(Phase::Identity)?;
     // Scaffolding is created 0755 / 0644 regardless of the mask this process inherited: nothing
     // in the view's own skeleton should be writable by group or other. Landlock is what stops
     // the workload writing there, but the modes should not depend on it.
@@ -359,17 +362,19 @@ pub fn build_view_and_pivot(
 
     // 1. The new root: a fresh tmpfs (scaffolding only; bound content is host-backed).
     // Mode 0755: a tmpfs defaults to 1777, which would make the view's `/` world-writable.
-    mount::mount_tmpfs(new_root, None, Some("0755"), false, false).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("mount tmpfs new_root {}: {e}", new_root.display()),
-        )
-    })?;
+    mount::mount_tmpfs(new_root, None, Some("0755"), false, false)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("mount tmpfs new_root {}: {e}", new_root.display()),
+            )
+        })
+        .phase(Phase::Root)?;
     // Every destination below is resolved INSIDE the new root, by descriptor (see `RootDir`).
-    let stage = RootDir::open(new_root)?;
+    let stage = RootDir::open(new_root).phase(Phase::Root)?;
 
     // 2. Bind the granted system + home paths in.
-    materialize_binds(&view.binds, &stage, None)?;
+    materialize_binds(&view.binds, &stage, None).phase(Phase::Binds)?;
 
     // 2b. Merged-usr compat symlinks (`/bin -> usr/bin`, `/lib64 -> usr/lib`, …).
     //    On modern systems these top-level dirs are symlinks into `/usr`; the view's
@@ -383,26 +388,29 @@ pub fn build_view_and_pivot(
         let Ok(target) = std::fs::read_link(&host) else {
             continue; // not a symlink on this host (non-merged-usr) — nothing to mirror
         };
-        if stage.lookup(&host)?.is_some() {
+        if stage.lookup(&host).phase(Phase::Root)?.is_some() {
             continue; // already present (e.g. bound in by a grant)
         }
-        stage.symlink(&target, &host)?;
+        stage.symlink(&target, &host).phase(Phase::Root)?;
     }
 
     // 3. The synthetic /etc: a fresh dir in the root tmpfs populated with the
     //    staged vanilla files. The host /etc is never bound in (it carries host
     //    specifics). Writes are denied by the Landlock read grant on /etc.
-    stage.ensure(Path::new("/etc"), NodeKind::Directory)?;
+    stage
+        .ensure(Path::new("/etc"), NodeKind::Directory)
+        .phase(Phase::Etc)?;
     for (source, target) in file_binds {
         stage
             .copy_into(source, target)
-            .map_err(|e| io::Error::new(e.kind(), format!("stage {}: {e}", target.display())))?;
+            .map_err(|e| io::Error::new(e.kind(), format!("stage {}: {e}", target.display())))
+            .phase(Phase::Etc)?;
     }
 
     // 3b. `/etc` overlays: bind the granted real host `/etc` files read-only ON TOP of the
     //     synthetic floor just built (the resolver/hosts a `net.mode = host` service needs). The
     //     synthetic `/etc` is the floor; an explicit `fs.read` grant layers the real file over it.
-    materialize_etc_overlays(&view.etc_overlays, &stage)?;
+    materialize_etc_overlays(&view.etc_overlays, &stage).phase(Phase::Etc)?;
 
     // 4–7. The seal tail (constructed /dev, binderfs, /proc, /tmp, home, masks, pivot).
     seal_view_tail(view, new_root, &stage, operator, true)
@@ -553,32 +561,36 @@ fn build_image_view_and_pivot(
     img: &crate::plan::ImageRoot,
     file_binds: &[(PathBuf, PathBuf)],
     operator: Option<FsIdentity>,
-) -> io::Result<()> {
+) -> Result<(), ViewError> {
     use crate::plan::Persistence;
     use kennel_lib_syscall::mount;
 
     // 1. A tmpfs backing under the kenneld staging dir holds the two Kennel-built lowers
     //    (`kennel-etc`, `scaffold`), the ephemeral upper+work (discard), and the `merged`
     //    mountpoint we build into and pivot to.
-    mount::mount_tmpfs(staging, None, Some("0755"), false, false).map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("mount tmpfs overlay backing {}: {e}", staging.display()),
-        )
-    })?;
+    mount::mount_tmpfs(staging, None, Some("0755"), false, false)
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("mount tmpfs overlay backing {}: {e}", staging.display()),
+            )
+        })
+        .phase(Phase::Image)?;
     let kennel_etc = staging.join("kennel-etc");
     let scaffold = staging.join("scaffold");
     let root = staging.join("merged");
-    std::fs::create_dir_all(&root)?;
+    std::fs::create_dir_all(&root).phase(Phase::Image)?;
 
     // 2. Build the `kennel-etc` top lower from the synthetic /etc (`file_binds`): each
     //    invariant file copied verbatim under `kennel-etc/<target>`. Highest precedence.
-    std::fs::create_dir_all(&kennel_etc)?;
-    let ketc = RootDir::open(&kennel_etc)?;
-    ketc.ensure(Path::new("/etc"), NodeKind::Directory)?;
+    std::fs::create_dir_all(&kennel_etc).phase(Phase::Etc)?;
+    let ketc = RootDir::open(&kennel_etc).phase(Phase::Etc)?;
+    ketc.ensure(Path::new("/etc"), NodeKind::Directory)
+        .phase(Phase::Etc)?;
     for (source, target) in file_binds {
         ketc.copy_into(source, target)
-            .map_err(|e| io::Error::new(e.kind(), format!("stage {}: {e}", target.display())))?;
+            .map_err(|e| io::Error::new(e.kind(), format!("stage {}: {e}", target.display())))
+            .phase(Phase::Etc)?;
     }
     // `/etc` overlays (W2): copy the granted REAL host `/etc` path (the W15 redirect `source`, or
     // the view path itself) over the synthetic one in the top `kennel-etc` lower, so the real
@@ -590,19 +602,22 @@ fn build_image_view_and_pivot(
             continue;
         }
         if overlay.source.is_dir() {
-            let dest = ketc.ensure(&overlay.view_path, NodeKind::Directory)?;
-            copy_dir_recursive(&overlay.source, &proc_path(&dest))?;
+            let dest = ketc
+                .ensure(&overlay.view_path, NodeKind::Directory)
+                .phase(Phase::Etc)?;
+            copy_dir_recursive(&overlay.source, &proc_path(&dest)).phase(Phase::Etc)?;
         } else {
-            ketc.copy_into(&overlay.source, &overlay.view_path)?;
+            ketc.copy_into(&overlay.source, &overlay.view_path)
+                .phase(Phase::Etc)?;
         }
     }
 
     // 3. Build the `scaffold` bottom lower: empty mountpoint dirs + empty /etc placeholders.
     for d in SCAFFOLD_DIRS {
-        std::fs::create_dir_all(scaffold.join(d))?;
+        std::fs::create_dir_all(scaffold.join(d)).phase(Phase::Image)?;
     }
     for f in KENNEL_ETC_FILES {
-        let _ = std::fs::File::create(scaffold.join("etc").join(f))?;
+        let _ = std::fs::File::create(scaffold.join("etc").join(f)).phase(Phase::Image)?;
     }
 
     // 4. The overlay: kennel-etc : image : scaffold (read-only lowers, leftmost wins). There is
@@ -614,28 +629,31 @@ fn build_image_view_and_pivot(
     // them to the kennel's uid 0 now, so the workload cannot alter them through the overlay. Both
     // sit on the staging tmpfs mounted above, with nothing mounted inside them, and the walk
     // neither follows a symlink nor crosses a mount — so no host inode is in reach.
-    fs_as_root(operator)?;
-    kennel_lib_syscall::fd::chown_tree_same_mount(&kennel_etc, 0, 0, None)?;
-    kennel_lib_syscall::fd::chown_tree_same_mount(&scaffold, 0, 0, None)?;
-    fs_as_operator(operator)?;
+    fs_as_root(operator).phase(Phase::Identity)?;
+    kennel_lib_syscall::fd::chown_tree_same_mount(&kennel_etc, 0, 0, None).phase(Phase::Image)?;
+    kennel_lib_syscall::fd::chown_tree_same_mount(&scaffold, 0, 0, None).phase(Phase::Image)?;
+    fs_as_operator(operator).phase(Phase::Identity)?;
 
     let (upper, work) = match img.persistence {
         Persistence::Discard => {
             let upper = staging.join("upper");
             let work = staging.join("work");
-            std::fs::create_dir_all(&upper)?;
-            std::fs::create_dir_all(&work)?;
+            std::fs::create_dir_all(&upper).phase(Phase::Image)?;
+            std::fs::create_dir_all(&work).phase(Phase::Image)?;
             (upper, work)
         }
         Persistence::Persist => {
             // kenneld validated/created these under the store entry; overlay requires `work`
             // empty and on the same fs as `upper`.
-            img.store_upper.clone().ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "persistence = persist but no store upper/work was provided",
-                )
-            })?
+            img.store_upper
+                .clone()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "persistence = persist but no store upper/work was provided",
+                    )
+                })
+                .phase(Phase::Image)?
         }
     };
     mount_image_overlay(
@@ -649,18 +667,20 @@ fn build_image_view_and_pivot(
     // Every destination below is resolved INSIDE the merged root, by descriptor. The tree is
     // image content (and, with `persist`, whatever an earlier workload left in the upper), so a
     // name here can be a symlink pointing anywhere.
-    let stage = RootDir::open(&root)?;
-    let home = stage.ensure(Path::new("/home"), NodeKind::Directory)?;
-    mount::mount_tmpfs(&proc_path(&home), None, Some("0755"), false, true)?;
+    let stage = RootDir::open(&root).phase(Phase::Image)?;
+    let home = stage
+        .ensure(Path::new("/home"), NodeKind::Directory)
+        .phase(Phase::Image)?;
+    mount::mount_tmpfs(&proc_path(&home), None, Some("0755"), false, true).phase(Phase::Image)?;
 
     // 6. Assembly (§7.11.4a): bind the granted ~/ + launcher + config + additive binds. `/etc` is
     //    writable-through (§7.11.4c) — the `kennel-etc` lower sets the defaults and a workload may
     //    copy-up-shadow them in its own upper, harming only its own view; enforcement is the
     //    netns/BPF/uid-map/Landlock/seccomp, never file content, so nothing is ro-bound here.
-    materialize_binds(&view.binds, &stage, Some((&root, operator)))?;
+    materialize_binds(&view.binds, &stage, Some((&root, operator))).phase(Phase::Binds)?;
 
     // 7. Closure-lock (§7.11.4c): see `lock_closure`.
-    lock_closure(&stage, img)?;
+    lock_closure(&stage, img).phase(Phase::Image)?;
 
     // 8. The seal tail (constructed /dev, binderfs, /proc, /tmp, home dir, masks, pivot). The
     //    root here is the overlay — image content, not scaffolding — so it is not re-owned.
@@ -740,22 +760,26 @@ fn seal_view_tail(
     stage: &RootDir,
     operator: Option<FsIdentity>,
     root_is_scaffold: bool,
-) -> io::Result<()> {
+) -> Result<(), ViewError> {
     use kennel_lib_syscall::mount;
     // Name the failing step: the construction child's only failure signal upstream is its exit.
     let step = |what: &str, e: &io::Error| io::Error::new(e.kind(), format!("{what}: {e}"));
 
     // 4. The constructed /dev, with the per-kennel binderfs.
-    seal_dev(view, stage, operator)?;
+    seal_dev(view, stage, operator).phase(Phase::Dev)?;
 
     // 5. Fresh /proc for the new PID namespace, and the private /tmp.
     let proc = stage
         .ensure(Path::new("/proc"), NodeKind::Directory)
-        .map_err(|e| step("/proc", &e))?;
-    mount::mount_proc(&proc_path(&proc), view.proc_hidepid).map_err(|e| step("mount /proc", &e))?;
+        .map_err(|e| step("/proc", &e))
+        .phase(Phase::Proc)?;
+    mount::mount_proc(&proc_path(&proc), view.proc_hidepid)
+        .map_err(|e| step("mount /proc", &e))
+        .phase(Phase::Proc)?;
     let tmp = stage
         .ensure(Path::new("/tmp"), NodeKind::Directory)
-        .map_err(|e| step("/tmp", &e))?;
+        .map_err(|e| step("/tmp", &e))
+        .phase(Phase::Tmp)?;
     // `/tmp` is the workload's private scratch: a fresh tmpfs, owner-only (0700 — the workload
     // is the sole uid in the kennel), sized by `[fs.tmp].size_mib`. noexec unless the policy
     // opted into executable mappings there (`[fs.tmp].mmap_exec`).
@@ -766,14 +790,15 @@ fn seal_view_tail(
         false,
         !view.tmp_mmap_exec,
     )
-    .map_err(|e| step("mount /tmp tmpfs", &e))?;
+    .map_err(|e| step("mount /tmp tmpfs", &e))
+    .phase(Phase::Tmp)?;
     if let ProcView::Curated {
         synthesize,
         passthrough,
     } = &view.proc
     {
-        let facts = procfs::ProcFacts::gather()?;
-        let proc_mounted = mounted_at(stage, Path::new("/proc"))?;
+        let facts = procfs::ProcFacts::gather().phase(Phase::Proc)?;
+        let proc_mounted = mounted_at(stage, Path::new("/proc")).phase(Phase::Proc)?;
         // The scratch dir is created and then REMOVED by name, which a descriptor path cannot
         // do. Naming it is safe here: `/tmp` was just checked to be a real directory directly
         // under the root and a fresh tmpfs was mounted on it, so `<root>/tmp/…` is that tmpfs.
@@ -785,12 +810,14 @@ fn seal_view_tail(
             passthrough,
             &facts,
         )
-        .map_err(|e| step("curate /proc", &e))?;
+        .map_err(|e| step("curate /proc", &e))
+        .phase(Phase::Proc)?;
     }
     // POSIX shared memory (`shm_open`) needs a tmpfs at /dev/shm.
     let dev_shm = stage
         .ensure(Path::new("/dev/shm"), NodeKind::Directory)
-        .map_err(|e| step("/dev/shm", &e))?;
+        .map_err(|e| step("/dev/shm", &e))
+        .phase(Phase::Dev)?;
     mount::mount_tmpfs(
         &proc_path(&dev_shm),
         Some(view.tmp_size_mib),
@@ -798,34 +825,42 @@ fn seal_view_tail(
         false,
         true,
     )
-    .map_err(|e| step("mount /dev/shm tmpfs", &e))?;
+    .map_err(|e| step("mount /dev/shm tmpfs", &e))
+    .phase(Phase::Dev)?;
 
     // 6. The home dir (the workload's `$HOME`; `fs.home.persist` sub-paths are already bound).
     stage
         .ensure(&view.shim_root, NodeKind::Directory)
-        .map_err(|e| step("home directory", &e))?;
+        .map_err(|e| step("home directory", &e))
+        .phase(Phase::Home)?;
 
     // 6b. Trust-manifest masks (§7.4 / T2.8), over the manifest paths inside writable binds.
-    materialize_masks(&view.mask_paths, stage)?;
-    materialize_dir_masks(&view.mask_dir_paths, stage)?;
+    materialize_masks(&view.mask_paths, stage).phase(Phase::Masks)?;
+    materialize_dir_masks(&view.mask_dir_paths, stage).phase(Phase::Masks)?;
 
     // 7. pivot_root into the new root, then detach the old one. `put_old` was just checked to be
     //    a real directory directly under the root, so naming it is safe.
     stage
         .ensure(Path::new("/.kennel-oldroot"), NodeKind::Directory)
-        .map_err(|e| step("/.kennel-oldroot", &e))?;
+        .map_err(|e| step("/.kennel-oldroot", &e))
+        .phase(Phase::Pivot)?;
     let put_old = root.join(".kennel-oldroot");
-    mount::pivot_root(root, &put_old).map_err(|e| step("pivot_root", &e))?;
-    std::env::set_current_dir("/").map_err(|e| step("chdir /", &e))?;
+    mount::pivot_root(root, &put_old)
+        .map_err(|e| step("pivot_root", &e))
+        .phase(Phase::Pivot)?;
+    std::env::set_current_dir("/")
+        .map_err(|e| step("chdir /", &e))
+        .phase(Phase::Pivot)?;
     mount::unmount_detach(Path::new("/.kennel-oldroot"))
-        .map_err(|e| step("detach old root", &e))?;
+        .map_err(|e| step("detach old root", &e))
+        .phase(Phase::Pivot)?;
 
     // The host root is detached. Take root's filesystem identity back and hand the scaffolding
     // built above — as the operator — to the kennel's uid 0, so the workload (the operator's uid)
     // cannot alter it. Each walk stays on one mount we created and never follows a symlink or
     // crosses a mount point, so no bound host inode is touched. The workload's constructed home is
     // left the operator's, as is /tmp (its own mount, not walked).
-    fs_as_root(operator)?;
+    fs_as_root(operator).phase(Phase::Identity)?;
     let _ = std::fs::remove_dir(Path::new("/.kennel-oldroot"));
     let mut scaffolds: Vec<&Path> = vec![Path::new("/dev"), Path::new("/dev/shm")];
     if root_is_scaffold {
@@ -836,12 +871,14 @@ fn seal_view_tail(
     }
     for base in scaffolds {
         let skip = view.shim_root.strip_prefix(base).ok();
-        kennel_lib_syscall::fd::chown_tree_same_mount(base, 0, 0, skip).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("re-own scaffolding {}: {e}", base.display()),
-            )
-        })?;
+        kennel_lib_syscall::fd::chown_tree_same_mount(base, 0, 0, skip)
+            .map_err(|e| {
+                io::Error::new(
+                    e.kind(),
+                    format!("re-own scaffolding {}: {e}", base.display()),
+                )
+            })
+            .phase(Phase::Scaffolding)?;
     }
     Ok(())
 }
@@ -878,7 +915,7 @@ fn mount_image_overlay(
     upper_work: (&Path, &Path),
     root: &Path,
     operator: Option<FsIdentity>,
-) -> io::Result<()> {
+) -> Result<(), ViewError> {
     use crate::plan::Persistence;
     let (upper, work) = upper_work;
     // overlayfs keeps the MOUNTER's credentials and uses them for every later access to the real
@@ -906,8 +943,8 @@ fn mount_image_overlay(
     let (upper_dir, work_dir) = match img.persistence {
         Persistence::Discard => (None, None),
         Persistence::Persist => (
-            Some(overlay_dir(upper, owner)?),
-            Some(overlay_dir(work, owner)?),
+            Some(overlay_dir(upper, owner).phase(Phase::Image)?),
+            Some(overlay_dir(work, owner).phase(Phase::Image)?),
         ),
     };
     let upper_path = upper_dir
@@ -916,16 +953,18 @@ fn mount_image_overlay(
     let work_path = work_dir
         .as_ref()
         .map_or_else(|| work.to_path_buf(), fd_path);
-    fs_as_root(operator)?;
+    fs_as_root(operator).phase(Phase::Identity)?;
     let mounted =
         kennel_lib_syscall::mount::mount_overlay(&lowers, Some((&upper_path, &work_path)), root);
-    fs_as_operator(operator)?;
-    mounted.map_err(|e| {
-        io::Error::new(
-            e.kind(),
-            format!("mount overlay (image {}): {e}", img.image.display()),
-        )
-    })?;
+    fs_as_operator(operator).phase(Phase::Identity)?;
+    mounted
+        .map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("mount overlay (image {}): {e}", img.image.display()),
+            )
+        })
+        .phase(Phase::Image)?;
     drop((image, upper_dir, work_dir)); // the mount holds its own references now
     Ok(())
 }

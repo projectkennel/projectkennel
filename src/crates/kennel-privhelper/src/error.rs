@@ -39,6 +39,8 @@ pub enum ConstructError {
     },
     /// The binder filesystem is not registered with the kernel.
     BinderfsMissing,
+    /// The view could not be built: an image the factory refuses, or a failed step of the build.
+    View(kennel_lib_spawn::view_error::ViewError),
     /// A capability sub-helper ran and reported failure.
     Helper(String),
     /// An exclusive bind's host source could not be shadowed, so the kennel is not started.
@@ -112,8 +114,6 @@ pub enum Step {
     Tun,
     /// Making the mount tree private.
     RootPrivate,
-    /// Building the view and pivoting into it.
-    BuildView,
     /// Handing `/tmp` or the binder device to the operator.
     HandOver,
     /// Mounting `/proc` and `/tmp` for a kennel without a constructed view.
@@ -138,7 +138,7 @@ impl ConstructError {
                 | Self::GrantedGid(_)
                 | Self::UntrustedInit { .. }
                 | Self::ExclusiveBind(_)
-        )
+        ) || matches!(self, Self::View(e) if e.is_refusal())
     }
 }
 
@@ -184,7 +184,6 @@ impl fmt::Display for Step {
             Self::Hostname => f.write_str("set the kennel's hostname"),
             Self::Tun => f.write_str("create the kennel's tun device"),
             Self::RootPrivate => f.write_str("make_root_private"),
-            Self::BuildView => f.write_str("build_view_and_pivot"),
             Self::HandOver => f.write_str("hand /tmp and the binder device to the operator"),
             Self::FallbackMounts => f.write_str("mount /proc and /tmp"),
         }
@@ -223,6 +222,7 @@ impl fmt::Display for ConstructError {
                 "exclusive bind could not be enforced for {}; refusing to start the kennel",
                 path.display()
             ),
+            Self::View(e) => write!(f, "build_view_and_pivot: {e}"),
             Self::Step { step, source } => write!(f, "{step}: {source}"),
         }
     }
@@ -232,6 +232,7 @@ impl std::error::Error for ConstructError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Step { source, .. } => Some(source),
+            Self::View(e) => Some(e),
             _ => None,
         }
     }

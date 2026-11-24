@@ -854,7 +854,8 @@ fn build_kennel(
             uid: op_uid,
             gid: op_gid,
         });
-        build_view_and_pivot(view, new_root, &half.file_binds, operator).at(Step::BuildView)?;
+        build_view_and_pivot(view, new_root, &half.file_binds, operator)
+            .map_err(ConstructError::View)?;
         // The constructed /tmp is the workload's private scratch, and the workload runs as the
         // OPERATOR. The tmpfs was mounted with the operator's filesystem identity, so its root is
         // already the operator's; this is a no-op kept as a guard on that property (mode 0700
