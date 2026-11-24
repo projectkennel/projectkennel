@@ -130,18 +130,32 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
                 "[[unix.allow]] `{who}` is missing `shim` (the in-view path to bind it at)"
             ));
         }
-        // The host control socket is ungrantable by rule (W10): it is the CLI→daemon trust boundary,
-        // and a kennel that could connect to it could drive the daemon — a privilege escalation, not
-        // a footgun. Unlike the agent shims below (warned, not forbidden), this is a hard refusal,
-        // and it keys on the *target endpoint* (lexically normalised, so a `..` disguise is caught),
-        // never a literal string. It joins the structurally-refused-regardless-of-policy set; the
-        // spawn factory backstops it at construction against the real, symlink-resolved endpoint.
+        // The daemon's own sockets are ungrantable by rule (W10). The control socket is the
+        // CLI→daemon trust boundary: a kennel that could connect to it could drive the daemon. The
+        // delegates' command sockets dial or listen as they are told, with no policy of their own.
+        // Unlike the agent shims below (warned, not forbidden) this is a hard refusal, and it keys
+        // on the *target endpoint* (lexically normalised, placeholders filled, so a `..` or
+        // `$XDG_RUNTIME_DIR` spelling is caught). The daemon repeats it at connect time against the
+        // socket it actually opened.
         if let Some(real) = a.real.as_deref() {
-            if kennel_lib_control::socket::is_control_socket(std::path::Path::new(real)) {
+            if kennel_lib_control::socket::is_daemon_socket(std::path::Path::new(
+                &fill_placeholders(real),
+            )) {
                 errs.push(format!(
-                    "[[unix.allow]] `{who}` targets the kenneld control socket (`{real}`) — the \
-                     CLI→daemon trust boundary. Reaching it from inside a kennel is privilege \
-                     escalation; it is refused by rule, grantable by no policy"
+                    "[[unix.allow]] `{who}` targets a kenneld socket (`{real}`): the control socket \
+                     (the CLI→daemon trust boundary) or a delegate's command socket. Reaching one \
+                     from inside a kennel is privilege escalation; it is refused by rule, grantable \
+                     by no policy"
+                ));
+            }
+        }
+        if let Some(shim) = a.shim.as_deref().filter(|s| !s.is_empty()) {
+            if !kennel_lib_policy::invariant::shim_path_ok(shim) {
+                errs.push(format!(
+                    "[[unix.allow]] `{who}`: shim `{shim}` must be a plain path below a directory \
+                     of its own (rooted at `/`, `~/`, `$HOME/` or `$XDG_RUNTIME_DIR/`; no `.`, `..` \
+                     or `=`; not directly under `/`): the in-kennel facade is granted the shim's \
+                     parent directory"
                 ));
             }
         }
@@ -190,6 +204,16 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
     } else {
         Err(PolicyError::SourceValidation(errs))
     }
+}
+
+/// `real` with the per-instance placeholders filled by stand-ins, so the daemon-socket rule sees
+/// the shape the daemon will resolve it to. The stand-in uid is any number: the rule matches the
+/// runtime directory of every uid.
+fn fill_placeholders(real: &str) -> String {
+    real.replace("$XDG_RUNTIME_DIR", "/run/user/0")
+        .replace("<uid>", "0")
+        .replace("$UID", "0")
+        .replace("<ctx>", "0")
 }
 
 #[cfg(test)]
@@ -335,12 +359,13 @@ mod tests {
 
     #[test]
     fn an_ordinary_agent_socket_grant_is_not_caught_by_the_control_socket_rule() {
-        // The rule must not overcatch: a normal agent shim under the same runtime tree is allowed
-        // (it draws the footgun warning, not the hard refusal).
+        // The rule must not overcatch: an agent socket in the user's runtime directory, beside
+        // the daemon's own directory and not in it, is allowed (it draws the footgun warning, not
+        // the hard refusal). Everything inside `…/kennel/` is the daemon's and is refused.
         let unix = UnixSection {
             allow: vec![allow(
                 "ssh-agent",
-                "/run/user/1000/kennel/agent.sock",
+                "/run/user/1000/kennel-agent/agent.sock",
                 "~/.ssh/agent.sock",
             )]
             .into(),

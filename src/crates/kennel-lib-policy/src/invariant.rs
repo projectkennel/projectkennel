@@ -119,6 +119,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         ));
     }
     redirect_violations_into(ep, &mut v);
+    unix_violations_into(policy, &mut v);
     if v.is_empty() {
         Ok(())
     } else {
@@ -134,34 +135,11 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
 /// writable home grant carries across runs); `[fs.cwd]` — the one writable surface settle
 /// cannot see — is floor-checked at spawn against the resolved cwd.
 fn redirect_violations_into(ep: &crate::settled::EffectivePolicy, v: &mut Vec<InvariantViolation>) {
-    // A redirect whose view path is itself a write grant makes its *source* workload-writable:
-    // that host path belongs to the writable surface too, under its own name.
-    let is_write_redirect = |r: &crate::settled::FsRedirect| {
-        ep.fs
-            .write
-            .iter()
-            .chain(&ep.fs.exclusive)
-            .any(|w| normalize_grant(w) == normalize_grant(&r.path))
-    };
     for r in &ep.fs.redirect {
-        if is_write_redirect(r) {
+        if is_write_redirect(ep, r) {
             continue; // its source is meant to be written; it is checked as a writable path
         }
-        let writable = ep
-            .fs
-            .write
-            .iter()
-            .chain(&ep.fs.exclusive)
-            .map(|w| normalize_grant(w))
-            .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)))
-            .chain(
-                ep.fs
-                    .redirect
-                    .iter()
-                    .filter(|w| is_write_redirect(w))
-                    .map(|w| normalize_grant(&w.source)),
-            );
-        for w in writable {
+        for w in writable_surface(ep) {
             if paths_intersect(&r.source, &w) {
                 v.push(InvariantViolation::new(
                     "fs.redirect.write-set",
@@ -175,6 +153,118 @@ fn redirect_violations_into(ep: &crate::settled::EffectivePolicy, v: &mut Vec<In
             }
         }
     }
+}
+
+/// Whether a redirect's view path is itself a write grant, which makes its *source*
+/// workload-writable: that host path belongs to the writable surface too, under its own name.
+fn is_write_redirect(ep: &crate::settled::EffectivePolicy, r: &crate::settled::FsRedirect) -> bool {
+    ep.fs
+        .write
+        .iter()
+        .chain(&ep.fs.exclusive)
+        .any(|w| normalize_grant(w) == normalize_grant(&r.path))
+}
+
+/// The host paths the workload can write, as the policy states them: `write` ∪ `exclusive` ∪
+/// `home_persist` ∪ the sources of write redirects. `[fs.cwd]` is not here; it is known only at
+/// spawn.
+fn writable_surface(ep: &crate::settled::EffectivePolicy) -> Vec<String> {
+    ep.fs
+        .write
+        .iter()
+        .chain(&ep.fs.exclusive)
+        .map(|w| normalize_grant(w))
+        .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)))
+        .chain(
+            ep.fs
+                .redirect
+                .iter()
+                .filter(|r| is_write_redirect(ep, r))
+                .map(|r| normalize_grant(&r.source)),
+        )
+        .collect()
+}
+
+/// The `[unix]` floor: what a granted socket's two paths may be.
+///
+/// - `real` must not lie in the workload-writable surface. The daemon connects to whatever is at
+///   that path when the workload asks, so a path the workload can replace is a grant of any socket
+///   the operator can reach.
+/// - `shim` (and the `at` of an af-unix `[[consumes]]`) must be a plain path below a directory of
+///   its own ([`shim_path_ok`]): the in-kennel facade is given Landlock rights over the parent
+///   directory to create the socket there.
+fn unix_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>) {
+    let writable = writable_surface(&policy.effective_policy);
+    for sock in &policy.unix.sockets {
+        if !shim_path_ok(&sock.shim) {
+            v.push(InvariantViolation::new(
+                "unix.shim",
+                format!(
+                    "[[unix.allow]] `{}`: shim `{}` is not a plain path below a directory of \
+                     its own",
+                    sock.name, sock.shim
+                ),
+            ));
+        }
+        if let Some(w) = writable.iter().find(|w| paths_intersect(&sock.real, w)) {
+            v.push(InvariantViolation::new(
+                "unix.real.write-set",
+                format!(
+                    "[[unix.allow]] `{}`: real path `{}` intersects the workload-writable path \
+                     `{w}`; the workload could put another socket there",
+                    sock.name, sock.real
+                ),
+            ));
+        }
+    }
+    for consume in &policy.mesh.consumes {
+        if consume.shape != crate::settled::Shape::AfUnix {
+            continue;
+        }
+        if consume.at.as_deref().is_some_and(|at| !shim_path_ok(at)) {
+            v.push(InvariantViolation::new(
+                "mesh.at",
+                format!(
+                    "[[consumes]] `{}`: `at` is not a plain path below a directory of its own",
+                    consume.name
+                ),
+            ));
+        }
+    }
+}
+
+/// Whether `shim` is an acceptable in-view socket path.
+///
+/// It must be rooted (`/`, `~/`, `$HOME/`, `$XDG_RUNTIME_DIR/` or `<home>/`), have no empty, `.`
+/// or `..` component, and carry no `=` or NUL (the facade takes its sockets as `path=name`
+/// arguments). An absolute path needs a directory between it and `/`: the facade is granted the
+/// parent directory, and that must never be the root.
+#[must_use]
+pub fn shim_path_ok(shim: &str) -> bool {
+    const ROOTS: [&str; 4] = ["~/", "$HOME/", "$XDG_RUNTIME_DIR/", "<home>/"];
+    if shim.contains(['=', '\0']) {
+        return false;
+    }
+    let (rest, least) = shim
+        .strip_prefix('/')
+        .map_or_else(
+            || {
+                ROOTS
+                    .iter()
+                    .find_map(|root| shim.strip_prefix(root))
+                    .map(|rest| (rest, 1))
+            },
+            |rest| Some((rest, 2)),
+        )
+        .unwrap_or(("", usize::MAX));
+    let mut count: usize = 0;
+    for component in rest.split('/') {
+        if matches!(component, "" | "." | "..") {
+            return false;
+        }
+        count = count.saturating_add(1);
+    }
+    count >= least
 }
 
 /// Report every address rule the enforcement side could not match on.

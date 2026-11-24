@@ -777,6 +777,41 @@ fn emit_svc_connect(
     Reply::Data(one(status))
 }
 
+/// Why a granted host socket was not connected.
+enum GrantedConnect {
+    /// The path leads to one of the daemon's own sockets.
+    DaemonSocket,
+    /// Nothing connectable is there.
+    Unreachable,
+}
+
+/// Connect to the host socket a `[[unix.allow]]` grants at `real`.
+///
+/// The socket is opened once and held by descriptor; the daemon-socket rule is applied to the
+/// path of that open file, and the connect goes to that same file. Checking the name and then
+/// connecting to the name would leave a moment in which it can be made to point elsewhere.
+///
+/// The rule backstops the compiler's: never broker a connect to a kenneld socket (the control
+/// socket, a delegate's command socket), even if a signed settled policy carries the grant.
+fn connect_granted_socket(
+    real: &std::path::Path,
+) -> Result<std::os::unix::net::UnixStream, GrantedConnect> {
+    use kennel_lib_control::socket::is_daemon_socket;
+    if is_daemon_socket(real) {
+        return Err(GrantedConnect::DaemonSocket);
+    }
+    let pinned = kennel_lib_syscall::net::PinnedSocket::open(real)
+        .map_err(|_| GrantedConnect::Unreachable)?;
+    // Fail closed: a socket whose resolved path cannot be read is not shown to be someone else's.
+    let resolved = pinned.path().map_err(|_| GrantedConnect::Unreachable)?;
+    if is_daemon_socket(&resolved) {
+        return Err(GrantedConnect::DaemonSocket);
+    }
+    pinned
+        .connect(AFUNIX_CONNECT_DEADLINE)
+        .map_err(|_| GrantedConnect::Unreachable)
+}
+
 fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested
@@ -785,26 +820,16 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     let (outcome, reply) = target.map_or_else(
         || (Outcome::Deny, Reply::Data(one(status::DENIED))),
         |socket| {
-            let real = std::path::Path::new(&socket.real);
-            // Backstop the compiler's control-socket ungrantability rule at the daemon, against the
-            // REAL endpoint (symlink-resolved): never broker a connect to the kenneld control socket,
-            // even if a signed settled policy somehow carries the grant. The compiler refuses it at
-            // install (the loud primary guard); this is the construction-time belt to those braces.
-            let resolved = std::fs::canonicalize(real);
-            if kennel_lib_control::socket::is_control_socket(real)
-                || resolved
-                    .as_deref()
-                    .is_ok_and(kennel_lib_control::socket::is_control_socket)
-            {
-                (Outcome::Deny, Reply::Data(one(status::DENIED)))
-            } else {
-                kennel_lib_syscall::net::connect_unix_timeout(real, AFUNIX_CONNECT_DEADLINE)
-                    .map_or_else(
-                        // Granted but unreachable (absent / refused / timed out): never tie up the
-                        // looper on a wedged target.
-                        |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
-                        |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
-                    )
+            match connect_granted_socket(std::path::Path::new(&socket.real)) {
+                Ok(stream) => (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+                Err(GrantedConnect::DaemonSocket) => {
+                    (Outcome::Deny, Reply::Data(one(status::DENIED)))
+                }
+                // Granted but unreachable (absent / not a socket / refused / timed out): never
+                // tie up the looper on a wedged target.
+                Err(GrantedConnect::Unreachable) => {
+                    (Outcome::Error, Reply::Data(one(status::NOT_FOUND)))
+                }
             }
         },
     );

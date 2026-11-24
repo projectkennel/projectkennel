@@ -87,6 +87,34 @@ pub fn is_control_socket(candidate: &Path) -> bool {
     false
 }
 
+/// Whether `candidate` names a socket **of the daemon**: anything in its runtime directory.
+///
+/// The control socket is one. The others are the command sockets of the host delegates
+/// (`proxy/netproxy-cmd-<ctx>.sock`, `proxy/inetd-cmd-<ctx>.sock`), which do what they are told
+/// with no policy of their own: a kennel that could connect to one would dial any address,
+/// past the proxy rules and the invariant denies. No `[[unix.allow]]` may name any of them.
+///
+/// Matches a path at or below this user's [`runtime_dir`], and the structural
+/// `/run/user/<digits>/kennel/…` form for any uid. Lexical, like [`is_control_socket`]; the daemon
+/// repeats it on the path of the socket it actually opened.
+#[must_use]
+pub fn is_daemon_socket(candidate: &Path) -> bool {
+    let norm = lexical_normalize(candidate);
+    if norm.starts_with(runtime_dir()) {
+        return true;
+    }
+    let mut comps = norm.components();
+    comps.next() == Some(Component::RootDir)
+        && comps.next().is_some_and(|c| c.as_os_str() == "run")
+        && comps.next().is_some_and(|c| c.as_os_str() == "user")
+        && comps.next().is_some_and(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        })
+        && comps.next().is_some_and(|c| c.as_os_str() == "kennel")
+}
+
 /// Whether granting `candidate` as a filesystem bind would **expose** a control socket — i.e.
 /// `candidate` is the socket itself or any ancestor directory that contains it.
 ///
@@ -200,6 +228,29 @@ mod tests {
         assert!(is_control_socket(Path::new(
             "/run/user/1000/./kennel/control.sock"
         )));
+    }
+
+    #[test]
+    fn is_daemon_socket_covers_the_whole_runtime_directory() {
+        for p in [
+            "/run/user/1000/kennel/control.sock",
+            "/run/user/1000/kennel/proxy/netproxy-cmd-3.sock",
+            "/run/user/0/kennel/proxy/inetd-cmd-3.sock",
+            "/run/user/1000/kennel",
+            "/run/user/1000/x/../kennel/proxy/a.sock",
+        ] {
+            assert!(is_daemon_socket(Path::new(p)), "{p}");
+        }
+        assert!(is_daemon_socket(&runtime_dir().join("proxy/x.sock")));
+        for p in [
+            "/run/user/1000/bus",
+            "/run/user/1000/kennel-other/x.sock",
+            "/run/user/abc/kennel/x.sock",
+            "/run/kennel/x.sock",
+            "run/user/1000/kennel/x.sock",
+        ] {
+            assert!(!is_daemon_socket(Path::new(p)), "{p}");
+        }
     }
 
     #[test]

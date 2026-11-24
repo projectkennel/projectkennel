@@ -6,6 +6,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Policy schema changes
+
+- **`[[unix.allow]]` is stricter.** A policy is now refused if a grant's `real` is anywhere in
+  `$XDG_RUNTIME_DIR/kennel/` (it was only `control.sock`), if `real` lies in `fs.write`,
+  `fs.exclusive` or a persisted home path, or if `shim` is not rooted at `/`, `~/`, `$HOME/`
+  or `$XDG_RUNTIME_DIR/`, has a `.`, `..` or `=`, or sits directly under `/`. The shipped
+  templates are unaffected.
+
 ### Security
 
 - **The OCI overlay mount refuses a layer path that would alter its options.** overlayfs takes
@@ -23,6 +31,20 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   broker kennel with its own flow and rate ceilings. The channel is now `SOCK_SEQPACKET`, the
   mediator exits on a hang-up or a failed send, the broker admits at most two live sessions for
   one kennel (256 overall), and `facade-tun` exits when its mediator is gone.
+- **A `[[unix.allow]]` grant cannot reach the daemon's own sockets, and is connected by
+  descriptor.** Only `control.sock` was refused. The host delegates' command sockets sit in
+  the same runtime directory and dial whatever they are told, so a grant naming one skipped
+  the proxy rules and the invariant denies. Everything in `$XDG_RUNTIME_DIR/kennel/` is now
+  refused, at compile (with `$XDG_RUNTIME_DIR`, `<uid>` and `$UID` spellings resolved) and
+  again in the daemon. The daemon opens the granted socket once, applies the rule to the path
+  of that open file, and connects to that same file; it used to resolve the name, check it,
+  and then connect to the name.
+- **A unix grant's `real` path may not lie in the workload's write set, and its `shim` must be
+  a plain path.** The daemon connects to whatever is at `real`, so a path the workload can
+  replace was a grant of any socket the operator can reach. The in-kennel facade is granted
+  Landlock rights over the shim's parent directory, and `shim = "/x.sock"` made that `/`. Both
+  are refused when a policy is loaded, so a signed artefact that never passed the compiler is
+  covered; the same shim rule applies to the `at` of an af-unix `[[consumes]]`.
 
 ### Threat catalogue
 
