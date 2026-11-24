@@ -277,10 +277,18 @@ mod tests {
     #[test]
     fn a_root_owned_image_needs_a_system_location() {
         let Some(uid) = me() else { return };
-        // Root-owned, world-readable, beneath /usr.
-        let system = Path::new("/usr/share");
-        if system.metadata().is_ok_and(|m| m.uid() == 0) {
-            assert!(image_dir(system, Some(uid), false).is_ok());
+        // Root-owned, closed to group and other for writing, beneath a system root. Which
+        // directory qualifies depends on the host (a CI image may open `/usr/share` to all), so
+        // take the first that does rather than assume one.
+        let system = ["/usr/share", "/usr/lib", "/usr/bin", "/etc/ssl"]
+            .into_iter()
+            .map(Path::new)
+            .find(|p| {
+                p.metadata()
+                    .is_ok_and(|m| m.is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0)
+            });
+        if let Some(system) = system {
+            image_dir(system, Some(uid), false).expect("a system image is accepted");
             // ...but never under a persistent, caller-owned upper.
             assert!(image_dir(system, Some(uid), true).is_err());
         }
