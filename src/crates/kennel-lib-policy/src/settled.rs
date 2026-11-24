@@ -1239,6 +1239,59 @@ pub struct IdentityRuntime {
     pub hostname: Option<String>,
 }
 
+/// Whether `name` is a portable, non-system Unix user or group name.
+///
+/// 1 to 32 characters; a lowercase letter or `_` first; then lowercase letters, digits, `_` or
+/// `-` (the `useradd(8)` default). The identity names become the synthetic `/etc/passwd` and
+/// `/etc/group` entries, `$USER`, and a component of `$HOME`: a `/`, `:`, newline or NUL in one
+/// would corrupt those files or leave the home path. The compiler and the loader both ask this.
+#[must_use]
+pub fn account_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    (1..=32).contains(&name.len())
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Whether `name` can be written as a group's name in the synthetic `/etc/group`.
+///
+/// A supplementary group is a *host* group, looked up by name at spawn, so its name is whatever
+/// the host calls it and the portable-name rule would be too strict. What it must not do is
+/// break the file it is written into: no `:` or `,` (the field and member separators), no `/`,
+/// no control character, and 1 to 255 bytes.
+#[must_use]
+pub fn group_ref_ok(name: &str) -> bool {
+    (1..=255).contains(&name.len())
+        && !name
+            .chars()
+            .any(|c| matches!(c, ':' | ',' | '/') || c.is_control())
+}
+
+/// Whether `label` is a portable hostname label (RFC 952/1123 shape).
+///
+/// 1 to 63 ASCII letters, digits or hyphens, not starting or ending with a hyphen. The name is
+/// set with `sethostname(2)` and written into the synthetic `/etc/hostname` and `/etc/hosts`.
+#[must_use]
+pub fn hostname_label_ok(label: &str) -> bool {
+    (1..=63).contains(&label.len())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+}
+
+/// Whether `digest` is a SHA-256 digest as a policy carries one: 64 lowercase hex characters.
+#[must_use]
+pub fn sha256_hex_ok(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// The default masked user name: a non-system, non-privileged account.
 pub const DEFAULT_USER: &str = "kennel";
 /// The default masked primary-group name.

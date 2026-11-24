@@ -21,6 +21,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **`[[spawn.allow]]` `mutable = []` is refused.** Omit `mutable` for the template's full
   manifest, or list the fields. A `[[spawn.allow.add]]` entry for an inherited template now
   replaces the inherited entry instead of being ignored.
+- **Supplementary group names are checked.** A name in `[identity].groups` or a device
+  passthrough's `group` may not contain `:`, `,`, `/` or a control character.
 - **`[[net.udp.allow]]` `name` must be a DNS name** (letters, digits, `-`, `_`; an optional
   leading `.`; a last label that is not all digits). An IP literal in that field is refused.
 
@@ -118,6 +120,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **A provider that ran healthily starts a fresh restart budget.** The supervisor's restart
   count never reset, so a provider that crashed `max_attempts` times over any span was failed
   for good. A run of a minute or more after reporting ready resets the count.
+- **Rules the compiler enforced alone are enforced when a policy is loaded.** A settled
+  artefact can be signed without passing through the compiler, and the identity names in it
+  reach the synthetic `/etc/passwd`, `/etc/group`, `/etc/hostname`, `$USER` and the home path.
+  The loader now applies the compiler's own rules to `identity.user`, `identity.group` and
+  `identity.hostname`, a new rule to supplementary group names (nothing that breaks
+  `/etc/group`), the `[net.bind]` port cap and the `workload.sha256` form. A spawn patch's
+  result is checked against the framework invariants before it is used; it was not checked at
+  all. Ulimit tokens and BPF map capacity already fail the spawn when wrong, and the proxy
+  listen values are bounded by their types.
 
 ### Threat catalogue
 

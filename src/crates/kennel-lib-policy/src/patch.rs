@@ -171,6 +171,18 @@ pub fn instantiate(
 
     // The manifest is consumed: the instance is the concrete policy, never itself signed.
     instance.manifest = Vec::new();
+    // The template passed the framework invariants when it was loaded; the instance is a new
+    // policy that nothing has checked. A constraint bounds each value by itself, and the
+    // invariants are what say a set of values is sound together (a write path that takes in a
+    // granted socket, a redirect source that becomes writable).
+    crate::invariant::validate(&instance).map_err(|violations| {
+        let first = violations
+            .first()
+            .map_or_else(String::new, |v| format!("{}: {}", v.id, v.detail));
+        PolicyError::Patch(format!(
+            "the patched policy breaks a framework invariant ({first})"
+        ))
+    })?;
     Ok(instance)
 }
 

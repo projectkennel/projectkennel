@@ -130,6 +130,7 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     }
     redirect_violations_into(ep, &mut v);
     unix_violations_into(policy, &mut v);
+    compiled_rule_violations_into(policy, &mut v);
     if v.is_empty() {
         Ok(())
     } else {
@@ -240,6 +241,59 @@ fn unix_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>)
                 ),
             ));
         }
+    }
+}
+
+/// Rules the compiler enforces on values that reach files, paths and fixed-size kernel maps.
+///
+/// A settled artefact can be signed without passing through the compiler, and a spawn patch
+/// produces a policy the compiler never saw, so each rule is asserted again here with the same
+/// predicate the compiler uses.
+fn compiled_rule_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>) {
+    use crate::settled::{
+        account_name_ok, group_ref_ok, hostname_label_ok, sha256_hex_ok, MAX_BIND_PORTS,
+    };
+    let identity = &policy.identity;
+    for (id, name) in [
+        ("identity.user", &identity.user),
+        ("identity.group", &identity.group),
+    ] {
+        if !account_name_ok(name) {
+            v.push(InvariantViolation::new(
+                id,
+                "not a portable account name (`[a-z_][a-z0-9_-]*`, at most 32 characters)",
+            ));
+        }
+    }
+    // A supplementary group is looked up by name at spawn and written into `/etc/group`.
+    if identity.groups.iter().any(|g| !group_ref_ok(g)) {
+        v.push(InvariantViolation::new(
+            "identity.groups",
+            "a supplementary group's name cannot be written into /etc/group",
+        ));
+    }
+    if identity
+        .hostname
+        .as_deref()
+        .is_some_and(|h| !hostname_label_ok(h))
+    {
+        v.push(InvariantViolation::new(
+            "identity.hostname",
+            "not a hostname label (1 to 63 letters, digits or hyphens)",
+        ));
+    }
+    let ports = policy.effective_policy.net.bind_allowed_ports.len();
+    if ports > MAX_BIND_PORTS {
+        v.push(InvariantViolation::new(
+            "net.bind.allowed_ports",
+            format!("{ports} ports; the bind map holds {MAX_BIND_PORTS}"),
+        ));
+    }
+    if policy.workload.sha256.iter().any(|d| !sha256_hex_ok(d)) {
+        v.push(InvariantViolation::new(
+            "workload.sha256",
+            "a digest is not 64 lowercase hex characters",
+        ));
     }
 }
 
@@ -468,6 +522,40 @@ mod tests {
                 .is_some_and(|v| v.iter().any(|x| x.id == "net.udp.allow.name"));
             assert_eq!(hit, refused, "`{name}`");
         }
+    }
+
+    fn violation_ids(policy: &SettledPolicy) -> Vec<&'static str> {
+        validate(policy).map_or_else(|v| v.into_iter().map(|x| x.id).collect(), |()| Vec::new())
+    }
+
+    /// The identity names reach `/etc/passwd`, `$HOME` and the hostname; the loader checks
+    /// them with the compiler's own rule.
+    #[test]
+    fn identity_names_are_checked_at_load() {
+        let mut p = sample_settled();
+        p.identity.user = "x:0:0::/:/bin/sh\nroot".to_owned();
+        p.identity.group = "../wheel".to_owned();
+        p.identity.groups = vec!["Domain Users".to_owned(), "x:0:root".to_owned()];
+        p.identity.hostname = Some("host\n127.0.0.1 evil".to_owned());
+        let ids = violation_ids(&p);
+        for id in [
+            "identity.user",
+            "identity.group",
+            "identity.groups",
+            "identity.hostname",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from {ids:?}");
+        }
+    }
+
+    #[test]
+    fn the_bind_port_cap_and_digest_form_are_checked_at_load() {
+        let mut p = sample_settled();
+        p.effective_policy.net.bind_allowed_ports = (1..=9).map(|n| 8000 + n).collect();
+        p.workload.sha256 = vec!["ABC".to_owned()];
+        let ids = violation_ids(&p);
+        assert!(ids.contains(&"net.bind.allowed_ports"), "{ids:?}");
+        assert!(ids.contains(&"workload.sha256"), "{ids:?}");
     }
 
     /// The metadata deny is only the invariant if it covers the whole address.
