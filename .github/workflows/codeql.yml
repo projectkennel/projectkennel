@@ -1,0 +1,101 @@
+# CodeQL code scanning, advanced setup.
+#
+# This replaces GitHub's "default setup", which analysed all three languages on every
+# pull request whatever it touched: about four minutes of Rust analysis for a change to the
+# changelog. Default setup has no path filters, so the only way to scope it is this file.
+#
+# What is different from default setup:
+#   - A language is analysed on a pull request only when the pull request touches files of
+#     that language (the `scope` job). A docs-only change runs nothing but `scope`.
+#   - A newer push to the same pull request cancels the analysis still running for the
+#     older one.
+#   - `main` is still analysed in full on every push, and weekly, so the baseline that pull
+#     requests are compared against is always complete.
+#
+# The analysis itself is unchanged: the same three languages, the default query suite, and
+# build mode `none` (no compilation), as default setup used.
+#
+# Before this workflow can upload results, default setup must be switched off
+# (Settings → Code security → Code scanning → CodeQL analysis → Switch to advanced).
+# GitHub rejects uploads from a workflow while default setup is on.
+#
+# github/codeql-action is GitHub's own action, in the `github` org rather than `actions`;
+# it is the one default setup was already running.
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Which languages does this change touch? On anything but a pull request: all of them.
+  scope:
+    name: scope
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.pick.outputs.languages }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -eu
+          all='["actions","c-cpp","rust"]'
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "languages=$all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "origin/$BASE...HEAD")
+          picked=""
+          add() { picked="${picked:+$picked,}\"$1\""; }
+          # The workflow or its config changed: analyse everything, so the change is tested.
+          if echo "$files" | grep -Eq '^\.github/(workflows/codeql\.yml|codeql/)'; then
+            echo "languages=$all" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if echo "$files" | grep -Eq '^\.github/'; then add actions; fi
+          if echo "$files" | grep -Eq '\.(c|h)$'; then add c-cpp; fi
+          if echo "$files" | grep -Eq '\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^src/vendor/'; then add rust; fi
+          echo "languages=[$picked]" >> "$GITHUB_OUTPUT"
+          echo "analysing: [$picked]"
+
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    needs: scope
+    if: needs.scope.outputs.languages != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # The job is skipped when nothing is picked; the fallback only keeps the matrix
+        # expression valid in that case.
+        language: ${{ fromJSON(needs.scope.outputs.languages == '[]' && '["rust"]' || needs.scope.outputs.languages) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
