@@ -33,6 +33,9 @@ kennel-host-delegate = { path = "../kennel-host-delegate" }
 # Safe fd adoption (`fd::adopt`) for the `tun-flow` mediator, which receives its broker-end socket as
 # an inherited stdin slot — the `facade-tun` pattern, so the mediator stays `#![forbid(unsafe_code)]`.
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }
+# The `SOCK_SEQPACKET` pair a session's frames ride: framed like a datagram socket, and each end
+# learns when the other closed.
+kennel-lib-scm = { path = "../kennel-lib-scm" }
 
 [lints]
 workspace = true

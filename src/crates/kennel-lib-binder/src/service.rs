@@ -138,7 +138,7 @@ pub mod verb {
     /// The `DELIVER_INET` move: kenneld resolves the consumer's grants + tun `/64` in its own
     /// namespace and pushes them here (the [`tun_broker::encode_accept`](super::tun_broker::encode_accept)
     /// payload). The broker mints a
-    /// fresh connected `SOCK_DGRAM` socketpair (frame boundaries preserved — no length prefix), spawns
+    /// fresh `SOCK_SEQPACKET` socketpair (frame boundaries preserved — no length prefix), spawns
     /// a per-session flow-mediator process on one end with those grants, and replies with the **other
     /// end's fd** — which kenneld hands to the consumer's `facade-tun` as its af-unix `[[consumes]]`
     /// connection. One socketpair + one mediator per consumer: separation, never a shared listener.

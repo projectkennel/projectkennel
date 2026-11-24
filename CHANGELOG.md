@@ -16,6 +16,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   signature is checked. Its nesting limit covered arrays, inline tables and table headers but
   not dotted keys, so `a.a.a…` with 100,000 parts (200 KB) aborted the CLI. The parts of a
   dotted key now count toward the same limit of 64.
+- **A UDP-egress session ends when its consumer does, and a kennel is held to two.** The channel
+  between `facade-tun` and its mediator was a connected datagram pair, which tells neither end
+  that the other closed, so a mediator outlived its consumer with its flows; and any process in
+  a `[net.udp]` kennel could open sessions without limit, each a new process in the shared
+  broker kennel with its own flow and rate ceilings. The channel is now `SOCK_SEQPACKET`, the
+  mediator exits on a hang-up or a failed send, the broker admits at most two live sessions for
+  one kennel (256 overall), and `facade-tun` exits when its mediator is gone.
 
 ### Threat catalogue
 

@@ -1082,9 +1082,16 @@ fn tun_connect(
         return Reply::Data(one(status::DENIED));
     };
     // Fast path: a warm sink (the standing/already-activated broker) delivers now.
-    if let Ok(fd) = tun.sink.deliver(payload) {
-        writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-        return Reply::Fd(fd);
+    match tun_deliver(tun, payload) {
+        Delivery::Session(fd) => {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+            return Reply::Fd(fd);
+        }
+        Delivery::Refused => {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
+            return Reply::Data(one(status::UNAVAILABLE));
+        }
+        Delivery::NoBroker => {}
     }
     // Cold: socket-activate the tun-broker generically, then consume-with-wait until its sink is
     // deliverable (the delivery's readiness) or the broker deadline fires.
@@ -1096,14 +1103,42 @@ fn tun_connect(
     let start = std::time::Instant::now();
     loop {
         std::thread::sleep(CONSUME_WAIT_POLL);
-        if let Ok(fd) = tun.sink.deliver(payload) {
-            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-            return Reply::Fd(fd);
+        match tun_deliver(tun, payload) {
+            Delivery::Session(fd) => {
+                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+                return Reply::Fd(fd);
+            }
+            Delivery::Refused => {
+                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
+                return Reply::Data(one(status::UNAVAILABLE));
+            }
+            Delivery::NoBroker => {}
         }
         if start.elapsed() >= CONSUME_WAIT_DEADLINE {
             writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
             return Reply::Data(one(status::UNAVAILABLE));
         }
+    }
+}
+
+/// What one attempt to deliver a tun session came to.
+enum Delivery {
+    /// The broker minted a session and replied with the consumer end.
+    Session(OwnedFd),
+    /// The broker answered without a session (a kennel at its session ceiling, a payload it would
+    /// not read). Asking again will not change the answer, so the consume is not retried.
+    Refused,
+    /// No broker is registered, or it did not answer: worth waiting for.
+    NoBroker,
+}
+
+/// Deliver the session `payload` to the tun sink once, and say which of the three outcomes it was.
+fn tun_deliver(tun: &TunCtx<'_>, payload: &[u8]) -> Delivery {
+    match tun.sink.deliver(payload) {
+        Ok(fd) => Delivery::Session(fd),
+        // A reply that carries no descriptor is the broker's answer, not its absence.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Delivery::Refused,
+        Err(_) => Delivery::NoBroker,
     }
 }
 
