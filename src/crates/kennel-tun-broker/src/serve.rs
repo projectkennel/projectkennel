@@ -449,6 +449,22 @@ mod tests {
     }
 
     #[test]
+    fn the_loop_ends_when_the_consumer_end_closes() {
+        let (mediator, consumer) = crate::session::channel().expect("pair");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let poller = Poller::new(4).expect("poller");
+            let _ = done_tx.send(run(broker(Vec::new()), &mediator, poller).is_ok());
+        });
+        drop(consumer);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(true),
+            "the mediator loop must return once its consumer is gone"
+        );
+    }
+
+    #[test]
     fn an_allowed_aaaa_query_gets_a_synthetic_reply_from_the_resolver() {
         let mut b = broker(vec![grant("example.com")]);
         let frame = dns_frame(40000, &dns_query("example.com"));

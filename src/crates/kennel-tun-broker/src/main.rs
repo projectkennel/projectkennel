@@ -28,7 +28,6 @@
 
 use std::fs::OpenOptions;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::net::UnixDatagram;
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 
@@ -90,7 +89,7 @@ fn deliver(conn: &Connection, incoming: &Incoming, mediator: &str) {
         let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
         return;
     }
-    let Ok((broker_end, consumer_end)) = UnixDatagram::pair() else {
+    let Ok((broker_end, consumer_end)) = kennel_tun_broker::session::channel() else {
         let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
         return;
     };
