@@ -1,8 +1,8 @@
 {
   "crate_count": 32,
-  "total_sloc": 46273,
+  "total_sloc": 46282,
   "tcb_crate_count": 18,
-  "tcb_sloc": 28357,
+  "tcb_sloc": 28361,
   "crates": [
     {
       "name": "kenneld",
@@ -86,7 +86,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1785,
+      "sloc": 1787,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -96,7 +96,7 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1614,
+      "sloc": 1617,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["compositor-broker", "facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh", "facade-tun", "kennel-spawn"],
@@ -156,7 +156,7 @@
     },
     {
       "name": "kennel-compose",
-      "sloc": 761,
+      "sloc": 762,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-compose"],
@@ -216,7 +216,7 @@
     },
     {
       "name": "kennel-host-delegate",
-      "sloc": 320,
+      "sloc": 322,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["host-inetd", "host-netproxy"],
@@ -236,7 +236,7 @@
     },
     {
       "name": "kennel-schema-derive",
-      "sloc": 272,
+      "sloc": 273,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],

@@ -11,6 +11,8 @@
 //! second capability, but can ask `kenneld` to instantiate a scoped sibling and talk to it over the
 //! returned fds. No host privilege, no JSON — `kenneld` brokers the fds and steps out of the byte path.
 
+#![forbid(unsafe_code)]
+
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;

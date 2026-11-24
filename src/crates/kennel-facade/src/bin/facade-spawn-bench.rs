@@ -24,6 +24,8 @@
 //!   e.g. `facade-spawn-bench 20 true-tool /bin/true`
 //!        `facade-spawn-bench 20 pyhello-tool /usr/bin/python3 -c "print('hello')"`
 
+#![forbid(unsafe_code)]
+
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;

@@ -154,6 +154,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
     bounds-checked byte reader six wire decoders each had a copy of. It joins the TCB closure.
   - New unit tests: eleven for the `fd.rs` walkers and eight for the node-0 handlers, none
     needing root or a binder device.
+- **Every crate root that holds no `unsafe` now forbids it.** A binary is its own crate root,
+  so a library's `#![forbid(unsafe_code)]` does not cover it. The attribute is added to
+  `host-inetd` and `host-netproxy` (in the TCB), to `kennel-compose`, `kennel-spawn`,
+  `facade-spawn-probe` and `facade-spawn-bench`, to the `kennel-schema-derive` proc macro, and
+  to the three generator tools. None contained any `unsafe`.
+- **The path handles from `fd::open_no_symlinks` and `fd::open_no_magiclinks` are
+  close-on-exec.** The factory's construction child held one (the binder device it hands back)
+  when it executed `kennel-bin-init`, which therefore inherited a descriptor it has no use for.
 
 ### Threat catalogue
 

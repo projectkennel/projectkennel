@@ -8,6 +8,8 @@
 //! Because every field delegates to its type, the schema is exactly the parser's shape —
 //! the derive cannot describe a field the struct does not have.
 
+#![forbid(unsafe_code)]
+
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, Fields, Lit, Meta, Type};
