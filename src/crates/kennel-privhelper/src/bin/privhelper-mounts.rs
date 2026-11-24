@@ -86,8 +86,8 @@ fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
     // this helper holds CAP_SYS_ADMIN in the host mount namespace: checking a name and then
     // mounting on the name would let the caller swap what it leads to in between. No symlink is
     // followed in any component (the same rule a writable bind's source already obeys).
-    let dir = fd::open_no_symlinks(fd::AT_FDCWD, host)
-        .map_err(|e| format!("cannot open {}: {e}", host.display()))?;
+    let dir =
+        fd::open_no_symlinks(host).map_err(|e| format!("cannot open {}: {e}", host.display()))?;
     check_owned_dir(&dir, host, owner_uid)?;
     let under = std::fs::metadata(fd::proc_path(&dir))
         .map_err(|e| format!("cannot stat {}: {e}", host.display()))?
@@ -97,8 +97,8 @@ fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
         .map_err(|e| format!("exclusive over-mount of {} failed: {e}", host.display()))?;
     // Resolve the path again to reach the mount just made, and make sure that is what we got: a
     // fresh, empty tmpfs of the caller's, on a different device from the directory it covers.
-    let top = fd::open_no_symlinks(fd::AT_FDCWD, host)
-        .map_err(|e| format!("cannot reopen {}: {e}", host.display()))?;
+    let top =
+        fd::open_no_symlinks(host).map_err(|e| format!("cannot reopen {}: {e}", host.display()))?;
     let top_path = fd::proc_path(&top);
     let fresh = check_owned_dir(&top, host, owner_uid).is_ok()
         && mount::is_tmpfs(&top_path).unwrap_or(false)
@@ -139,7 +139,7 @@ fn unmount_exclusive(host: &Path, owner_uid: u32) -> ExitCode {
     // Pin what the path leads to, then test and unmount THAT. An exclusive over-mount is a tmpfs
     // mount root, owned by the caller (this helper mounted it as them), carrying the sentinel. A
     // sentinel file alone proves nothing — anyone can create one in a directory they can write.
-    let Ok(dir) = fd::open_no_symlinks(fd::AT_FDCWD, host) else {
+    let Ok(dir) = fd::open_no_symlinks(host) else {
         return refuse("cannot open it without following a symlink");
     };
     let at = fd::proc_path(&dir);
@@ -196,9 +196,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kennel-excl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let me = kennel_lib_syscall::unistd::real_uid();
-        let open = |p: &Path| {
-            kennel_lib_syscall::fd::open_no_symlinks(kennel_lib_syscall::fd::AT_FDCWD, p)
-        };
+        let open = |p: &Path| kennel_lib_syscall::fd::open_no_symlinks(p);
         // A directory the caller owns is accepted; the same inode under a foreign uid is refused.
         let fd = open(&dir).expect("open dir");
         assert!(check_owned_dir(&fd, &dir, me).is_ok(), "owned dir accepted");

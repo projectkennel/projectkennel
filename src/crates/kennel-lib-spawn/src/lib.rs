@@ -933,7 +933,7 @@ fn mount_image_overlay(
 /// call site) cannot be pointed anywhere else. Magic links are refused in the path.
 fn overlay_dir(path: &Path, owner: Option<u32>) -> io::Result<std::fs::File> {
     use std::os::unix::fs::MetadataExt as _;
-    let fd = kennel_lib_syscall::fd::open_no_magiclinks(kennel_lib_syscall::fd::AT_FDCWD, path)
+    let fd = kennel_lib_syscall::fd::open_no_magiclinks(path)
         .map_err(|e| io::Error::new(e.kind(), format!("overlay dir {}: {e}", path.display())))?;
     let dir = std::fs::File::from(fd);
     let meta = dir.metadata()?;
@@ -1063,14 +1063,8 @@ fn materialize_binds(
         // component is a symlink the bind is refused, so a writable grant
         // cannot be used to write the control socket or any other protected path.
         if b.writable {
-            // AT_FDCWD (-100) — resolve relative to cwd. For absolute paths the
-            // kernel ignores it; all bind sources in the plan are absolute. We
-            // use the raw value to avoid pulling libc into this crate.
-            let fd = kennel_lib_syscall::fd::open_no_symlinks(
-                -100, // AT_FDCWD
-                &b.source,
-            )
-            .map_err(|e| {
+            // All bind sources in the plan are absolute.
+            let fd = kennel_lib_syscall::fd::open_no_symlinks(&b.source).map_err(|e| {
                 io::Error::new(
                     e.kind(),
                     format!(
@@ -1105,11 +1099,7 @@ fn materialize_binds(
             // symmetric read-only bind stays unguarded as before — its source IS the
             // granted path, and read-only aliasing cannot reach a protected write.
             let magic_guard = if b.redirected {
-                let fd = kennel_lib_syscall::fd::open_no_magiclinks(
-                    -100, // AT_FDCWD; ignored for the absolute paths a plan carries
-                    &b.source,
-                )
-                .map_err(|e| {
+                let fd = kennel_lib_syscall::fd::open_no_magiclinks(&b.source).map_err(|e| {
                     io::Error::new(
                         e.kind(),
                         format!(
