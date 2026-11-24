@@ -83,8 +83,8 @@ fn main() -> ExitCode {
 enum OverMountError {
     /// The path is not a directory.
     NotADirectory,
-    /// The directory is not owned by the caller (whose uid is given): shadowing it is overreach.
-    NotOwned(u32),
+    /// The directory is not owned by the caller: shadowing it is overreach.
+    NotOwned,
     /// What the path led to changed between the mount and the check of the result.
     Changed,
     /// The path could not be opened without following a symlink.
@@ -103,9 +103,9 @@ impl OverMountError {
         let host = host.display();
         match self {
             Self::NotADirectory => format!("{host} is not a directory"),
-            Self::NotOwned(uid) => format!(
-                "{host} is not owned by uid {uid} (an exclusive blind-mount over a path you do \
-                 not own would be overreach)"
+            Self::NotOwned => format!(
+                "{host} is not owned by you (an exclusive blind-mount over a path you do not \
+                 own would be overreach)"
             ),
             Self::Changed => {
                 format!("{host} changed while it was being over-mounted; the lock was not sealed")
@@ -219,7 +219,7 @@ fn unmount_exclusive(host: &Path, owner_uid: u32) -> ExitCode {
 fn check_owned_dir(dir: &std::os::fd::OwnedFd, uid: u32) -> Result<(), OverMountError> {
     match kennel_lib_syscall::fd::owner_and_kind(dir) {
         Ok((_, false)) => Err(OverMountError::NotADirectory),
-        Ok((owner, true)) if owner != uid => Err(OverMountError::NotOwned(uid)),
+        Ok((owner, true)) if owner != uid => Err(OverMountError::NotOwned),
         Ok(_) => Ok(()),
         Err(e) => Err(OverMountError::Stat(e)),
     }
@@ -240,7 +240,7 @@ mod tests {
         assert!(check_owned_dir(&fd, me).is_ok(), "owned dir accepted");
         let other = me.wrapping_add(1);
         assert!(
-            matches!(check_owned_dir(&fd, other), Err(OverMountError::NotOwned(uid)) if uid == other),
+            matches!(check_owned_dir(&fd, other), Err(OverMountError::NotOwned)),
             "a path not owned by the (pretend) caller is overreach"
         );
         // A regular file is not a valid exclusive target.

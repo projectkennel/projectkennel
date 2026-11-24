@@ -149,7 +149,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
     failure names the phase of the build it happened in. The helper's `ConstructError`
     carries it, and counts an image refusal as a refusal.
   - `kennel-privhelper-mounts`: the exclusive over-mount returns an `OverMountError` in place
-    of a `String`.
+    of a `String`. Its "not owned" message says "by you" and no longer prints the
+    caller's uid.
   - `kenneld`: the `stage` of a `lifecycle.kennel-start-refused` record is a `StartStage`
     enum. The values written are the strings already in use.
 - **A kennel name is a type in the daemon.** `KennelName` (in `kennel-lib-control`) can only
