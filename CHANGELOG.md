@@ -142,6 +142,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The factory's construction failures are a typed error.** `kennel-privhelper`'s
+  `construct` returned `io::Error`s carrying formatted text. `ConstructError` now separates a
+  refusal (a malformed request, a granted gid that is not the caller's, an untrusted init
+  binary, an exclusive bind that cannot be enforced) from a failed system call, and a failed
+  call names its step. Messages that already named their step read as before; a failed call
+  that used to print only the OS error (the clone, the handshake pipes, the in-kennel
+  loopback and tun setup) now says which step it was.
 - **The code now meets nine CODING-STANDARDS rules it did not.** No behaviour change.
   - Every Rust source file carries an `SPDX-License-Identifier` header.
   - Every `unsafe` block has the three-part `SAFETY` / `INVARIANTS UPHELD` / `FAILURE MODE`
