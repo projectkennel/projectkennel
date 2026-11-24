@@ -171,6 +171,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   connect (as to any loopback service), and separates the framework's mirror from a listener
   the operator binds by hand.
 
+### Internal / supply chain
+
+- **`host-inetd` and `host-netproxy` forbid `unsafe` at their own crate roots.** The library
+  already did; a binary is a separate crate root, so nothing stopped `unsafe` being added to
+  either `main`. Neither contained any.
+
 ### Docs & tooling
 
 - **`stage-tree.sh` no longer stages `dist/repo` into the release payload.** It copied all of

@@ -9,6 +9,8 @@
 //!
 //! All the logic is in the library (`kennel_host_delegate::netproxy::conduit`); `main` binds the socket and serves.
 
+#![forbid(unsafe_code)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
