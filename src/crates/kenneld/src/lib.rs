@@ -1086,80 +1086,38 @@ fn bring_up<P: Privileged + Sync>(
                 // DIRECTLY — always, never inferring it from the image. They are static-pie, so
                 // no host libc rides in; the dir over-mounts any image `/usr/libexec`, intended.
                 if let Some(dir) = oci.launcher_bin.as_deref().and_then(Path::parent) {
-                    view.binds.push(kennel_lib_spawn::BindMount {
-                        source: dir.to_path_buf(),
-                        target: dir.to_path_buf(),
-                        writable: false,
-                        exclusive: false,
-                        redirected: false,
-                        mmap_exec: false,
-                    });
+                    view.binds
+                        .push(read_only_bind(dir.to_path_buf(), dir.to_path_buf()));
                 }
             } else {
                 for sub in crate::etc::essential_etc_subtrees() {
-                    view.binds.push(kennel_lib_spawn::BindMount {
-                        source: sub.clone(),
-                        target: sub,
-                        writable: false,
-                        exclusive: false,
-                        redirected: false,
-                        mmap_exec: false,
-                    });
+                    view.binds.push(read_only_bind(sub.clone(), sub));
                 }
             }
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
             if let Some(bin) = &ssh.ssh_bin {
-                view.binds.push(kennel_lib_spawn::BindMount {
-                    source: bin.clone(),
-                    target: bin.clone(),
-                    writable: false,
-                    exclusive: false,
-                    redirected: false,
-                    mmap_exec: false,
-                });
+                view.binds.push(read_only_bind(bin.clone(), bin.clone()));
             }
             // OCI launcher (§7.11): when the image's own entrypoint is run, bind the trusted
             // launcher in at its own path (= argv[0]) and the image's config.json read-only at
             // the launcher's known in-view path. Both read-only — the workload runs them, never
             // rewrites them.
             if let Some(bin) = &oci.launcher_bin {
-                view.binds.push(kennel_lib_spawn::BindMount {
-                    source: bin.clone(),
-                    target: bin.clone(),
-                    writable: false,
-                    exclusive: false,
-                    redirected: false,
-                    mmap_exec: false,
-                });
+                view.binds.push(read_only_bind(bin.clone(), bin.clone()));
             }
             if let Some(cfg) = &oci.config_src {
-                view.binds.push(kennel_lib_spawn::BindMount {
-                    source: cfg.clone(),
-                    target: PathBuf::from(OCI_CONFIG_VIEW_PATH),
-                    writable: false,
-                    exclusive: false,
-                    redirected: false,
-                    mmap_exec: false,
-                });
+                view.binds.push(read_only_bind(
+                    cfg.clone(),
+                    PathBuf::from(OCI_CONFIG_VIEW_PATH),
+                ));
             }
             command.env("HOME", &view.shim_root);
         }
         // Grant Landlock execute on the dialer + its loaders (outside the `view` borrow of plan).
         if let Some(bin) = &ssh.ssh_bin {
             if plan.view.is_some() {
-                use kennel_lib_syscall::landlock::AccessFs;
-                plan.landlock_fs
-                    .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-                let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[bin
-                    .to_string_lossy()
-                    .into_owned()]);
-                for loader in resolution.loaders {
-                    plan.landlock_fs.push((
-                        PathBuf::from(loader),
-                        AccessFs::READ_FILE | AccessFs::EXECUTE,
-                    ));
-                }
+                grant_exec(plan, bin);
             }
         }
         // Grant Landlock execute on the OCI launcher + its loaders, and read on the bound
@@ -1167,17 +1125,7 @@ fn bring_up<P: Privileged + Sync>(
         // is gated separately by the policy's own `[exec]` grants.
         if let (Some(bin), true) = (&oci.launcher_bin, plan.view.is_some()) {
             use kennel_lib_syscall::landlock::AccessFs;
-            plan.landlock_fs
-                .push((bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-            let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[bin
-                .to_string_lossy()
-                .into_owned()]);
-            for loader in resolution.loaders {
-                plan.landlock_fs.push((
-                    PathBuf::from(loader),
-                    AccessFs::READ_FILE | AccessFs::EXECUTE,
-                ));
-            }
+            grant_exec(plan, bin);
             plan.landlock_fs
                 .push((PathBuf::from(OCI_CONFIG_VIEW_PATH), AccessFs::READ_FILE));
         }
@@ -1591,6 +1539,45 @@ fn acquire_binder_node0(
 /// mounts the per-kennel binderfs here; §7.1).
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
+/// A read-only bind of the host path `source` at `target` in the view.
+const fn read_only_bind(source: PathBuf, target: PathBuf) -> kennel_lib_spawn::BindMount {
+    kennel_lib_spawn::BindMount {
+        source,
+        target,
+        writable: false,
+        exclusive: false,
+        redirected: false,
+        mmap_exec: false,
+    }
+}
+
+/// Grant Landlock execute on the binary `bin` and on its dynamic loaders.
+///
+/// A binary the seal `execv`s directly needs `FS_EXECUTE` on its own dynamic loader too (the
+/// kernel opens `PT_INTERP` with `FMODE_EXEC`). Its shared libraries load via read from the
+/// view's lib dirs and are not execute-gated. A loader the view omits is dropped downstream.
+fn grant_exec(plan: &mut Plan, bin: &Path) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    let exec = AccessFs::READ_FILE | AccessFs::EXECUTE;
+    plan.landlock_fs.push((bin.to_path_buf(), exec));
+    let resolution =
+        kennel_lib_policy::libresolve::resolve_loaders(&[bin.to_string_lossy().into_owned()]);
+    for loader in resolution.loaders {
+        plan.landlock_fs.push((PathBuf::from(loader), exec));
+    }
+}
+
+/// Make a framework binary runnable inside the view: bind it read-only at its own path and
+/// grant execute on it and its loaders ([`grant_exec`]). The one way every in-kennel facade
+/// (`facade-afunix`, `-tun`, `-socks5`, `-client`, `-dbus`) is put in place.
+fn install_facade_binary(plan: &mut Plan, bin: &Path) {
+    if let Some(view) = plan.view.as_mut() {
+        view.binds
+            .push(read_only_bind(bin.to_path_buf(), bin.to_path_buf()));
+    }
+    grant_exec(plan, bin);
+}
+
 /// Wire the `AF_UNIX` socket facade (§7.6 / `07-1` §7.1.5): launch the in-kennel
 /// `facade-afunix` proxy so each granted socket is presented at its in-view path
 /// and brokered, on connect, to the `org.projectkennel.IAfUnix` binder facade — which
@@ -1637,30 +1624,7 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
         }
     }
     // Bind the proxy binary into the view at its own path (read-only) and grant execute.
-    if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_lib_spawn::BindMount {
-            source: shim_bin.clone(),
-            target: shim_bin.clone(),
-            writable: false,
-            exclusive: false,
-            redirected: false,
-            mmap_exec: false,
-        });
-    }
-    plan.landlock_fs
-        .push((shim_bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-    // The proxy is `execv`'d directly by the seal, so it needs FS_EXECUTE on its own dynamic
-    // loader too (the kernel opens PT_INTERP `FMODE_EXEC`); the binary itself is granted
-    // above. Its shared libraries load via READ from the view's lib dirs and are not
-    // execute-gated (07-3-exec). `skip_missing` drops a loader the view omits.
-    let resolution =
-        kennel_lib_policy::libresolve::resolve_loaders(&[shim_bin.to_string_lossy().into_owned()]);
-    for loader in resolution.loaders {
-        plan.landlock_fs.push((
-            PathBuf::from(loader),
-            AccessFs::READ_FILE | AccessFs::EXECUTE,
-        ));
-    }
+    install_facade_binary(plan, &shim_bin);
     // Register the proxy as a seal-launched aux: `facade-afunix <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
     // (which the facade resolves), and dies with the kennel's PID namespace.
@@ -1688,7 +1652,6 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
 /// A no-op unless `pivoting` (the facade needs the constructed view); when the deployment provides no
 /// binary it warns and serves nothing — fail-closed, never a silent unserved tun.
 fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, pivoting: bool) {
-    use kennel_lib_syscall::landlock::AccessFs;
     if !pivoting {
         return;
     }
@@ -1700,26 +1663,7 @@ fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, piv
         return;
     };
     // Bind the facade binary into the view (read-only) and grant execute + its loaders.
-    if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_lib_spawn::BindMount {
-            source: bin.to_path_buf(),
-            target: bin.to_path_buf(),
-            writable: false,
-            exclusive: false,
-            redirected: false,
-            mmap_exec: false,
-        });
-    }
-    plan.landlock_fs
-        .push((bin.to_path_buf(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-    let resolution =
-        kennel_lib_policy::libresolve::resolve_loaders(&[bin.to_string_lossy().into_owned()]);
-    for loader in resolution.loaders {
-        plan.landlock_fs.push((
-            PathBuf::from(loader),
-            AccessFs::READ_FILE | AccessFs::EXECUTE,
-        ));
-    }
+    install_facade_binary(plan, bin);
     // `facade-tun <binder-device> <kennel-tun-addr>`, run inside the sealed view. The tun fd is
     // inherited (TUN_FD); the broker channel comes from a CONNECT_AFUNIX on the per-kennel bus (the
     // seal-mounted binderfs), which kenneld answers with the broker's minted per-session fd.
@@ -1769,31 +1713,8 @@ fn encode_tun_session(
 /// `CONNECT_INET` transaction, which kenneld decides and dials via the host-side delegate. The
 /// `socks5h` scheme keeps name resolution on the proxy side (the kennel holds names, not addresses).
 fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command: &mut Command) {
-    use kennel_lib_syscall::landlock::AccessFs;
     // Bind the binary into the view at its own path (read-only) and grant execute + its loaders.
-    if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_lib_spawn::BindMount {
-            source: socks5_bin.to_path_buf(),
-            target: socks5_bin.to_path_buf(),
-            writable: false,
-            exclusive: false,
-            redirected: false,
-            mmap_exec: false,
-        });
-    }
-    plan.landlock_fs.push((
-        socks5_bin.to_path_buf(),
-        AccessFs::READ_FILE | AccessFs::EXECUTE,
-    ));
-    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[socks5_bin
-        .to_string_lossy()
-        .into_owned()]);
-    for loader in resolution.loaders {
-        plan.landlock_fs.push((
-            PathBuf::from(loader),
-            AccessFs::READ_FILE | AccessFs::EXECUTE,
-        ));
-    }
+    install_facade_binary(plan, socks5_bin);
     // `facade-socks5 <binder-device> <listen-addr>`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: socks5_bin.to_path_buf(),
@@ -1824,30 +1745,7 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
 /// and splices. Sets no env (unlike the egress proxy) — the workload's own `bind()` is the trigger,
 /// not a client-side proxy setting. Mirrors `apply_socks5`'s view-bind + Landlock + loader grants.
 fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, ports: &[u16]) {
-    use kennel_lib_syscall::landlock::AccessFs;
-    if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_lib_spawn::BindMount {
-            source: client_bin.to_path_buf(),
-            target: client_bin.to_path_buf(),
-            writable: false,
-            exclusive: false,
-            redirected: false,
-            mmap_exec: false,
-        });
-    }
-    plan.landlock_fs.push((
-        client_bin.to_path_buf(),
-        AccessFs::READ_FILE | AccessFs::EXECUTE,
-    ));
-    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[client_bin
-        .to_string_lossy()
-        .into_owned()]);
-    for loader in resolution.loaders {
-        plan.landlock_fs.push((
-            PathBuf::from(loader),
-            AccessFs::READ_FILE | AccessFs::EXECUTE,
-        ));
-    }
+    install_facade_binary(plan, client_bin);
     // facade-client connects the workload's listener at <kennel-ip>:<port>; Landlock gates connect
     // per port, so each mirrored port needs a CONNECT_TCP grant (the BPF connect ACL is seeded with
     // the loopback /28 separately in stamp_proxy). Without this Landlock denies the in-kennel
@@ -1919,27 +1817,7 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
         ));
     }
     // Bind the facade binary into the view (read-only) and grant execute + its loaders.
-    if let Some(view) = plan.view.as_mut() {
-        view.binds.push(kennel_lib_spawn::BindMount {
-            source: facade_bin.clone(),
-            target: facade_bin.clone(),
-            writable: false,
-            exclusive: false,
-            redirected: false,
-            mmap_exec: false,
-        });
-    }
-    plan.landlock_fs
-        .push((facade_bin.clone(), AccessFs::READ_FILE | AccessFs::EXECUTE));
-    let resolution = kennel_lib_policy::libresolve::resolve_loaders(&[facade_bin
-        .to_string_lossy()
-        .into_owned()]);
-    for loader in resolution.loaders {
-        plan.landlock_fs.push((
-            PathBuf::from(loader),
-            AccessFs::READ_FILE | AccessFs::EXECUTE,
-        ));
-    }
+    install_facade_binary(plan, &facade_bin);
     // `facade-dbus <device> <listen-path>=<bus> ...`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: facade_bin,
