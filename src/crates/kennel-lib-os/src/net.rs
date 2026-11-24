@@ -2,6 +2,7 @@
 
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, OwnedFd};
+use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -83,6 +84,25 @@ impl PinnedSocket {
     fn proc_path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.fd.as_raw_fd()))
     }
+}
+
+/// Listen for TCP on `addr`, an address assigned to the loopback interface.
+///
+/// # Errors
+///
+/// The OS error if the bind fails.
+pub fn loopback_listener(addr: SocketAddr) -> io::Result<TcpListener> {
+    TcpListener::bind(addr)
+}
+
+/// The interface `listener` is bound to (`SO_BINDTODEVICE`), or the empty string for none.
+///
+/// # Errors
+///
+/// The OS error if the option cannot be read.
+pub fn bound_device(listener: &TcpListener) -> io::Result<String> {
+    let name = getsockopt(listener, sockopt::BindToDevice)?;
+    Ok(name.to_string_lossy().into_owned())
 }
 
 fn connect_addr_timeout(addr: &UnixAddr, timeout: Duration) -> io::Result<UnixStream> {
@@ -175,6 +195,17 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).expect("symlink");
         let pinned = PinnedSocket::open(&link).expect("open");
         assert_eq!(pinned.path().expect("path"), target);
+    }
+
+    #[test]
+    fn a_loopback_listener_takes_connections_only_from_the_loopback_interface() {
+        // An address on `lo` is not loopback-scoped: the kernel accepts a packet for it on any
+        // interface. Only binding the socket to the device keeps other interfaces out.
+        let listener = loopback_listener("[::1]:0".parse().expect("addr")).expect("listen");
+        assert_eq!(bound_device(&listener).expect("device"), "lo");
+        let addr = listener.local_addr().expect("addr");
+        std::net::TcpStream::connect(addr).expect("a local connection still arrives");
+        listener.accept().expect("accept");
     }
 
     #[test]
