@@ -1,12 +1,12 @@
 {
-  "crate_count": 31,
-  "total_sloc": 46614,
-  "tcb_crate_count": 17,
-  "tcb_sloc": 28695,
+  "crate_count": 32,
+  "total_sloc": 46273,
+  "tcb_crate_count": 18,
+  "tcb_sloc": 28357,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 8443,
+      "sloc": 8305,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5932,
+      "sloc": 5929,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -36,22 +36,22 @@
     },
     {
       "name": "kennel-lib-policy",
-      "sloc": 2976,
+      "sloc": 2983,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
       "consumers": ["cli", "compile", "compose", "kenneld", "spawn", "tun-broker"],
-      "first_party_deps": ["kennel-lib-toml"],
+      "first_party_deps": ["kennel-lib-bytes", "kennel-lib-toml"],
       "external_deps": ["ed25519-compact", "object", "serde"]
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 2869,
+      "sloc": 2838,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
       "consumers": ["bin-init", "kenneld", "privhelper"],
-      "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-policy", "kennel-lib-syscall"],
+      "first_party_deps": ["kennel-lib-binder", "kennel-lib-bpf", "kennel-lib-bytes", "kennel-lib-policy", "kennel-lib-syscall"],
       "external_deps": []
     },
     {
@@ -66,17 +66,17 @@
     },
     {
       "name": "kennel-lib-binder",
-      "sloc": 2314,
+      "sloc": 2185,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
       "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn", "tun-broker"],
-      "first_party_deps": ["kennel-lib-syscall"],
+      "first_party_deps": ["kennel-lib-bytes", "kennel-lib-syscall"],
       "external_deps": ["libc"]
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1925,
+      "sloc": 1924,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
@@ -86,7 +86,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1871,
+      "sloc": 1785,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -146,12 +146,12 @@
     },
     {
       "name": "kennel-lib-control",
-      "sloc": 824,
+      "sloc": 821,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
       "consumers": ["cli", "compile", "kenneld"],
-      "first_party_deps": ["kennel-lib-syscall"],
+      "first_party_deps": ["kennel-lib-bytes", "kennel-lib-syscall"],
       "external_deps": []
     },
     {
@@ -301,6 +301,16 @@
       "in_tcb": true,
       "bins": [],
       "consumers": ["audit", "cli"],
+      "first_party_deps": [],
+      "external_deps": []
+    },
+    {
+      "name": "kennel-lib-bytes",
+      "sloc": 43,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["binder", "control", "policy", "spawn"],
       "first_party_deps": [],
       "external_deps": []
     },
