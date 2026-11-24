@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel binder IPC — a hand-rolled `binder(7)`/binderfs loader.
 //!
 //! # Purpose

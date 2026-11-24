@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A bounds-checked reader over a byte slice.
 //!
 //! # Purpose

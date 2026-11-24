@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reader for a `BPF_MAP_TYPE_RINGBUF`, draining the shared audit ringbuf.
 //!
 //! The kernel exposes the ringbuf through two `mmap` regions and a lock-free

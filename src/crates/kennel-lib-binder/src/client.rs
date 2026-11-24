@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A binder connection: one `open` of the device, its `mmap`ped buffer, and the
 //! `BINDER_WRITE_READ` cycle both endpoints ride.
 //!

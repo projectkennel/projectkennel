@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fixed-discipline codec for the [`Plan`] crossing process boundaries.
 //!
 //! The kennel is constructed by the privhelper (real root), which `execve`s the

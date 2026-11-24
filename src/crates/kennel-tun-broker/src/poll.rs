@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Level-triggered readiness multiplexing (`epoll`) for the broker's per-session loop.
 //!
 //! A small [`Poller`] over `epoll(7)`: register a file descriptor with a caller `token`, wait for any

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Spawning a child with a post-`fork`, pre-`execve` *seal* hook.
 //!
 //! The confinement that must be irreversible and inherited across `execve` —

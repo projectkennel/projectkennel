@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `bpf(2)` syscall surface — the crate's only `unsafe`.
 //!
 //! `bpf_attr` is a UNION; the kernel reads `size` bytes of it and zero-fills the

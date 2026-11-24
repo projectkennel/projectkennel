@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated fd-passing e2e: a manager replies to a transaction with a connected
 //! socket fd (`reply_with_fd`), the client receives it (`transact_fd`) and reads a
 //! byte the manager wrote through it. Proves `BINDER_TYPE_FD` passing end to end —

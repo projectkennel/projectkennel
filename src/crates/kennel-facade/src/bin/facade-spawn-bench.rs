@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `facade-spawn-bench` — the in-kennel **spinup bench** driver (`02-10` §7.12, the "one layer down" spinup profile).
 //!
 //! Run as the workload of a single, long-lived **control kennel**, this times two ways of running the
@@ -25,6 +27,7 @@
 //!        `facade-spawn-bench 20 pyhello-tool /usr/bin/python3 -c "print('hello')"`
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};

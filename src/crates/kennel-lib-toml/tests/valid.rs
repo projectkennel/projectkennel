@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Upstream basic-toml 0.1.10 test, kept unchanged as the behavioural reference for the in-tree
 // parser (#228); the workspace's test-code lints are relaxed for these upstream files alone.
 #![allow(
@@ -11,6 +13,7 @@
     clippy::needless_pass_by_value,
     clippy::uninlined_format_args
 )]
+#![allow(clippy::print_stdout)] // allow: a test's stdout is captured by the harness
 
 use serde_json::{json, Value};
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reconstruction: a vetted typed frame ([`crate::wire`]) → a fresh, well-formed D-Bus
 //! message (§7.7.3).
 //!

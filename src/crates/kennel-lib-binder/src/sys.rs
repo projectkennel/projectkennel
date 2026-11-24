@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The binder ioctl / `mmap` / binderfs-mount surface — every raw syscall the crate makes.
 //!
 //! Some functions here are `unsafe fn`; their callers in `client` are the crate's other

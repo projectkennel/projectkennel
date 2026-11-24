@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-cli` — the library crate backing the host-side `kennel` CLI.
 //!
 //! Provides the shared helpers (daemon connection, key loading, policy resolution, trust
@@ -5,6 +7,7 @@
 //! `kennel-host` execution unit dispatches them; the `kennel` shim execs it host-side.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: the command implementations of the `kennel` binary; stdout is its output
 
 // The verb modules — the `kennel-host` unit dispatches into these.
 pub mod key;

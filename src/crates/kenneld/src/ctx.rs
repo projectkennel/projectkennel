@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-user context (`ctx`) allocation.
 //!
 //! Each running kennel gets a small `ctx` number that selects its loopback

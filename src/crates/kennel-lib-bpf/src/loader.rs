@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! ELF parsing (via `object`), map creation, relocation patching, and program
 //! load. The map/program ABI mirrors `bpf/maps.h` and the `SEC()` names of
 //! `bpf/*.bpf.c`.

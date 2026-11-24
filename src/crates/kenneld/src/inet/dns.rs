@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! DNS resolution seam and policy.
 //!
 //! The kennel never resolves names itself — the proxy resolves on its behalf

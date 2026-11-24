@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The broker's flow table and ceilings (W2 Part D): observed flows, capped and idle-expired.
 //!
 //! UDP is many cheap flows, not few long conduits, so each flow is just a key and its connected

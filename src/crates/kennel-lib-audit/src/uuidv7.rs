@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `UUIDv7` rendering for the per-instance `kennel_uuid` envelope field.
 //!
 //! `UUIDv7` (RFC 9562) is a 48-bit Unix-millisecond timestamp followed by random

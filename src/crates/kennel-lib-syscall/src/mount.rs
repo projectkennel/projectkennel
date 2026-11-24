@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Mount-namespace construction primitives.
 //!
 //! Safe wrappers (over nix) for the mount operations the spawn sequence uses to

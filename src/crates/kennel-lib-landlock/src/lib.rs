@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Landlock filesystem/network sandboxing — hand-rolled bindings.
 //!
 //! # Purpose

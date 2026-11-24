@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The control socket: its location and how the daemon obtains the listener.
 //!
 //! kenneld is socket-activated (systemd passes the bound listener as fd 3), which

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The broker's flow gate (W2 Part D): allow-check, then dial via host-netproxy's UDP mode.
 //!
 //! The broker **never resolves**. It checks a flow's `(name, port)` against the grant, then hands the

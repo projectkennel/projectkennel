@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Special-use IP classification — the rebinding / SSRF-to-internal predicate.
 //!
 //! Shared by every egress decision point so the classification cannot drift between them: the TCP

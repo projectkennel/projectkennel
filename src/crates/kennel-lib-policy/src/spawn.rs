@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Verify-half spawn gates (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! At `SPAWN`, `kenneld` re-runs spawn-eligibility on the **resolved** template — the authoritative

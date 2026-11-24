@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The PTY broker: kenneld owns the workload's controlling-terminal master and
 //! brokers a **detachable / reattachable** client to it (`05-state-and-supervision`).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The masked workspace manifest (`.trust-manifest.json`) — host-side types and logic.
 //!
 //! A confined workload with `fs.write` to a project can edit a host-side **execution

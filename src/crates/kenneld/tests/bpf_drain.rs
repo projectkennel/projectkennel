@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end proof of the BPF audit ring-buffer drain (`02-7-bpf-abi.md`,
 //! `08-as-built-notes.md` §8.1, item 11).
 //!

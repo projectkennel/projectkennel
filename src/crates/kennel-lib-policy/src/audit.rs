@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `[audit]` schema and its translation into the settled [`AuditRuntime`].
 //!
 //! This is the **single source of truth** for audit configuration: the source

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Passing open file descriptors over a `AF_UNIX` socket (`SCM_RIGHTS`).
 //!
 //! The `kennel` CLI hands its terminal fds (stdin/stdout/stderr) to the kenneld

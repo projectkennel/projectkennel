@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `host-inetd`: the per-kennel inbound **BIND delegate** (the reverse of `host-netproxy`).
 //!
 //! `kenneld` owns the bind decision (Kennel book Vol 2 ch.8 (The Network)): the `[net.bpf].bind`

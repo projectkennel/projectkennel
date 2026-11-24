@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The service catalogue: a derived projection of the enabled providers' `[[provides]]`
 //! (`07-13-service-catalog.md` §7.13.4).
 //!

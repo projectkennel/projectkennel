@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel facade library: the pure, untrusted-input parsers the facade
 //! binaries share.
 //!

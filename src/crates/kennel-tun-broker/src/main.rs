@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `tun-broker`: the standing UDP-egress mediation service kennel (§8 / W2 Part D).
 //!
 //! A long-running service that `[[provides]]` the af-unix capability `org.projectkennel.tun-udp`. It

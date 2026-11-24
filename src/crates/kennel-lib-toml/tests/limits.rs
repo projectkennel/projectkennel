@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The parser's resource limits: it runs on files before their signature is checked, so its cost
 //! must not be set by the file.
 

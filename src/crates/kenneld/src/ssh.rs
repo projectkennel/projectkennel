@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A kennel's synthetic `~/.ssh`: the re-origination bastion's client view.
 //!
 //! Per-kennel SSH leaves the kennel only through the re-origination bastion

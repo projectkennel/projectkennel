@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The binder context manager: node 0 of an instance, and its serve loop.
 //!
 //! `kenneld` becomes the context manager of each kennel's binderfs instance

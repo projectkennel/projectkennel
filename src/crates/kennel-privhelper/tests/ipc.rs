@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Integration tests that drive the privhelper binary over stdin/stdout, the
 //! way the spawner invokes it. The reserved scope is per-user, derived from the
 //! caller's kernel-trusted real UID (no allocation file).

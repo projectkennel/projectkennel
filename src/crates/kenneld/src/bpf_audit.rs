@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Draining the per-kennel BPF audit ring buffer into the unified writer.
 //!
 //! The cgroup BPF programs (`bpf/*.bpf.c`) reserve-and-commit packed audit events

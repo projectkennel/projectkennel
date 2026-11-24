@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Adopting a socket-activated listener fd (systemd `sd_listen_fds`).
 //!
 //! When kenneld is started by socket activation, systemd has already created and

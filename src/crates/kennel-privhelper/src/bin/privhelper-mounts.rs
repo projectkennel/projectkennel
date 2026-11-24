@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-privhelper-mounts` — the exclusive-bind over-mount sub-helper.
 //!
 //! While a kennel runs, an `fs.exclusive` path is shadowed on the **host** side by an
@@ -22,6 +24,8 @@
 //! Usage: `kennel-privhelper-mounts {mount|unmount} <host-path>`.
 
 #![forbid(unsafe_code)]
+// The helper never panics on a failed assumption in shipped code (CODING-STANDARDS.md §8.3, §12.2).
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;

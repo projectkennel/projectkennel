@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! What Landlock `FS_EXECUTE` actually gates, verified against the kernel.
 //!
 //! The kennel's execution model rests on a precise claim: `execve(2)` of a binary needs

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The control-socket protocol between the `kennel` CLI and the kenneld daemon.
 //!
 //! Like the privhelper IPC, this is *hand-rolled structured messages* — not a

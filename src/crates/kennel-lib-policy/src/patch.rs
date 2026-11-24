@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Instantiation-time patch application (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! At `SPAWN`, `kenneld` takes a verified spawn-target template and an agent-supplied patch — a list

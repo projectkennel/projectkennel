@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime verbs that talk to the daemon: `stop`, `list`, `daemon-reload`.
 //!
 //! The daemon-facing runtime verbs, alongside `run`, `attach`, `review`, and `release`.

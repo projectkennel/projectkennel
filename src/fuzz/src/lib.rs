@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fuzz / property harnesses for Project Kennel's untrusted-input parsers.
 //!
 //! # Purpose

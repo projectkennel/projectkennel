@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The lockfile (`kennel.lock`) — byte-pinning resolved references.
 //!
 //! # Purpose

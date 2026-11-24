@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Process-wide privilege settings.
 //!
 //! Thin safe wrappers (over nix) for the `prctl` flags the spawn sequence sets.

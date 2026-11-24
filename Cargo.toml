@@ -108,7 +108,7 @@ publish = false
 # kennel-lib-bpf exception crates can omit it without fighting a workspace forbid.
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }
-missing_docs = "warn"
+missing_docs = "deny"
 
 # Lint groups carry priority -1 so the individual lints below (priority 0)
 # take precedence when they overlap (Cargo requires this ordering).
@@ -121,6 +121,10 @@ panic = "deny"
 todo = "deny"
 unimplemented = "deny"
 dbg_macro = "deny"
+# A library does not write to the process's stdout: that is the binary's data channel
+# (CODING-STANDARDS.md §12.2). A binary root allows it explicitly. Diagnostics on stderr are
+# the developer-logging channel of §9.1 and are not restricted.
+print_stdout = "deny"
 indexing_slicing = "deny"
 arithmetic_side_effects = "deny"
 

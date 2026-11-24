@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The typed `IDBus` transaction wire spoken across the facade↔delegate conduit (§7.7.2).
 //!
 //! `facade-dbus` parses the workload's adversarial D-Bus bytes into typed fields and

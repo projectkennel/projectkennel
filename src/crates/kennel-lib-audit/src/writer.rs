@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The unified writer: the seam between event sources and sinks.
 //!
 //! A source builds an [`Event`]; [`Writer::emit`] stamps the envelope fields the

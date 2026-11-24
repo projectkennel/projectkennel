@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wall-clock time for the envelope `ts` field, and its RFC 3339 rendering.
 //!
 //! The writer reads the time through a [`Clock`] so tests can pin it. Formatting

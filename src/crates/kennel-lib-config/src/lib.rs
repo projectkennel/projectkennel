@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel's layered configuration.
 //!
 //! No install-specific path is baked into a binary. Deployment paths (the

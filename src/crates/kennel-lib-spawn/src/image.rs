@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Which directory an OCI overlay may take as its read-only image lower.
 //!
 //! The overlay is mounted with root's identity (see `mount_image_overlay`), and overlayfs keeps

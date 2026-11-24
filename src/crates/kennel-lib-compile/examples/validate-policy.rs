@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Validation oracle for policy TOML: parse a file as a leaf or a template/source policy and
 //! report success or the exact error. Used to prove the worked examples + templates in the docs
 //! actually parse against the real schema (not eyeballed).
@@ -12,6 +14,8 @@
 //!          `SourcePolicy` type now — list fields replace (bare sequence) or increment
 //!          (`[[….add]]`) at the same key — so both kinds share the parser.
 //! Exit 0 on success, 1 on any parse/validate error (printed to stderr).
+
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::process::ExitCode;
 

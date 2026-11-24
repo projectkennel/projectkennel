@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! System facts a confined workload can already learn by syscall: memory (`sysinfo(2)`),
 //! the kernel identity (`uname(2)`), and the usable CPU count.
 //!

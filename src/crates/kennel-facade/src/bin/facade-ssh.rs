@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 #![forbid(unsafe_code)]
 
 //! `facade-ssh`: the in-kennel ssh `ProxyCommand`, dialing through binder.

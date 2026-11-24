@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compile-time **local** validation of the `[[provides]]` / `[[consumes]]` mesh surface.
 //!
 //! Only what is checkable from the one policy in hand plus its signature provenance:

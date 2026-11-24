@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compile-time resolution of the dynamic **loaders** the allowlisted binaries need
 //! (`07-3-exec`).
 //!

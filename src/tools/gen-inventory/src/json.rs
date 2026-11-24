@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A tiny hand-rolled JSON writer for the inventory artifact (std-only, no `serde_json`).
 //!
 //! Emits `crate-inventory.json` — the committed source of truth other tooling can read. Stable key

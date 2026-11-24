@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! PTY allocation and terminal control for interactive kennels.
 //!
 //! An interactive `kennel run` needs the workload on its **own** pseudo-terminal so

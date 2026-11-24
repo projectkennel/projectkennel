@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The privhelper **factory**: build a kennel and `fexecve` `kennel-bin-init` into it.
 //!
 //! The construction inversion (Kennel book Vol 2 ch.2 (Process and Privilege Model)): rather than

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The delegate's mediation core (§7.7.2b), I/O-free so it is unit-testable like the facade
 //! engine: `host-dbus` wraps it with the real bus connection and the conduit poll loop.
 //!

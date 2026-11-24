@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel privileged-operation helper — binary entry point.
 //!
 //! Reads one fixed-layout [`Request`](kennel_privhelper::wire::Request) from
@@ -13,6 +15,8 @@
 //! binary.
 
 #![forbid(unsafe_code)]
+// The helper never panics on a failed assumption in shipped code (CODING-STANDARDS.md §8.3, §12.2).
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 use std::io::{Read as _, Write as _};
 use std::os::fd::AsFd as _;

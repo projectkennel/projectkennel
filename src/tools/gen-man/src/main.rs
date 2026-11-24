@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `gen-man` — Project Kennel's build-time manpage generator (not shipped).
 //!
 //! A thin CLI over the `gen_man` library: emits groff `man(7)` source for the
@@ -12,6 +14,7 @@
 //! `--out` and asserts `git diff` is empty, so the pages cannot drift from the data.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::io::Write as _;
 use std::path::Path;

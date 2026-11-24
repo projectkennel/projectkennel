@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The binder `BC_*`/`BR_*` command-stream codec (`<linux/android/binder.h>`).
 //!
 //! A `BINDER_WRITE_READ` ioctl carries two byte buffers: a *write* buffer of

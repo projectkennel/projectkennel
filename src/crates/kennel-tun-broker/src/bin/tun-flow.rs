@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-session UDP-egress flow mediator (§8 / W2 Part D): one process per consumer.
 //!
 //! `tun-broker` spawns this for each egress session. The broker-end `SOCK_SEQPACKET` socket arrives on

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel policy-schema generator (library half).
 //!
 //! Emits the JSON Schema (draft-07) for the authored policy TOML by walking

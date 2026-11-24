@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compile-time checks on `fs.read` grants under `/proc` (#218).
 //!
 //! # Purpose

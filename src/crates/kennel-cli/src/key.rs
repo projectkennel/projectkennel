@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `kennel key` house: tier-bound signing-key management.
 //!
 //! A key's tier is where it lives, and that is the only level it signs at: user keys

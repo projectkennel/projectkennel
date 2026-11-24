@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The egress front-door parsers: protocol classification and the HTTP-proxy head.
 //!
 //! `facade-socks5` serves SOCKS5 and HTTP-proxy clients on one listener. Two pieces

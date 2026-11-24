@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Effective-policy diff: the interpreted `+`/`~`/`-` grant delta between two
 //! resolved (folded) source policies, annotated with threat impact.
 //!

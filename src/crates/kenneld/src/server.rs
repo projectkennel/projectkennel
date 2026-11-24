@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The daemon: the control-socket serve loop and per-connection request handling.
 //!
 //! `kennel run` is **blocking and foreground** — the workload's stdio is the

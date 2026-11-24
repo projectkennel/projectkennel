@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The unprivileged connector mesh-bus mount holder (§7.13.4a): a **forked, not exec'd** child of
 //! kenneld that mounts a shared binderfs in its own user namespace and serves movable clones of it.
 //!

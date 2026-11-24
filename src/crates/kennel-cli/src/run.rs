@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel run` (foreground confined run of a settled artefact) and `kennel attach`, plus the
 //! interactive PTY proxy machinery they share. Split out of `main.rs`.
 //!

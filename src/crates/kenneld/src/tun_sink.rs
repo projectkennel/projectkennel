@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The cross-kennel egress sink: kenneld's handle to the standing tun-broker (§8 / W2).
 //!
 //! One tun-broker serves every `[net.udp]` consumer. It registers a single **sink node** with

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AT_SECURE`-equivalent environment filtering for the OCI launcher (§7.11.6).
 //!
 //! `execve` of the image entrypoint does not cross a privilege boundary: the workload already

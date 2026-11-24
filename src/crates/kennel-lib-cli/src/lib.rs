@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Shared CLI surface grammar for the unified `kennel` command (W10).
 //!
 //! One definition of the verb grammar the two execution units link — the host unit

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Seccomp-BPF syscall filtering.
 //!
 //! A thin, curated wrapper over `seccompiler` (rust-vmm): it compiles a simple

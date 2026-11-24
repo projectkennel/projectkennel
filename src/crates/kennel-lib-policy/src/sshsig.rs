@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! SSHSIG: the OpenSSH detached-signature format (`PROTOCOL.sshsig`).
 //!
 //! A kennel signature is an SSHSIG produced by `ssh-keygen -Y sign` and verified

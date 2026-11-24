@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Ed25519 signing and verification of **source** artefacts (templates, fragments).
 //!
 //! # Purpose

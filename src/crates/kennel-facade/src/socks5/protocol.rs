@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Front-door protocol detection: which handshake a fresh connection speaks.
 //!
 //! One listener serves SOCKS5 and HTTP-proxy clients alike. The first byte of the stream

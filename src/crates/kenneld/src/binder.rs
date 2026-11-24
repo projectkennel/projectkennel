@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! kenneld as the per-kennel binder context manager.
 //!
 //! kenneld owns node 0 of each kennel's binderfs instance and serves it on a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A wake eventfd polled alongside a primary fd.
 //!
 //! A poll loop that waits on a primary fd with a timeout (a binder looper on the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `kennel policy <verb>` command group.
 //!
 //! Author, inspect, sign, diff, lint, and check policies — plus the compile machinery

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Safe socket helpers (no `unsafe`; std + nix).
 
 use std::io;

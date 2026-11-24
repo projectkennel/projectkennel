@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The service-connector broker decision (`07-13-service-catalog.md` §7.13.4): resolve a consume
 //! against the catalogue and pick the single provider to connect.
 //!

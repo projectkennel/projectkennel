@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `#[derive(SchemaType)]` — reflect a policy struct/enum into a `kennel-schema` node.
 //!
 //! A struct becomes a named object definition: each field's value schema is delegated to

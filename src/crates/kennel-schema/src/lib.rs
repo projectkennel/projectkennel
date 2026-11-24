@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Policy-schema IR and the [`SchemaType`] reflection trait.
 //!
 //! This is the *target* of the single-source schema: the `kennel-lib-compile` /

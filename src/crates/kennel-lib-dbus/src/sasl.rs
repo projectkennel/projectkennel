@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The server side of the D-Bus SASL authentication handshake (§7.7.2).
 //!
 //! Before any D-Bus message flows, a client opens with a single NUL byte and then a

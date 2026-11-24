@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The W2 UDP-egress fenced flow broker: a per-kennel, host-mode leaf.
 //!
 //! # Purpose

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Template-chain resolution and folding — the first compiler stage proper.
 //!
 //! # Purpose

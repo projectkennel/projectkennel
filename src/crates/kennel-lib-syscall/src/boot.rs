@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The kennel **boot-sync** socket: a one-byte handshake that makes the binder bus startup
 //! deterministic, with no retry loops.
 //!

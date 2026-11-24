@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Request dispatch: validate, then perform the one privileged operation.
 //!
 //! This is the privileged side of the trust boundary

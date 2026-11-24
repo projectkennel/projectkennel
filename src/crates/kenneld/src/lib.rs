@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel orchestration core.
 //!
 //! [`start`] brings a kennel up and [`Kennel::stop`] tears it down. The bring-up

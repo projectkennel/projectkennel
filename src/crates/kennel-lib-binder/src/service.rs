@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The node-0 service protocol: transaction verb codes and reply status bytes.
 //!
 //! Shared by `kenneld`'s context manager and the in-kennel clients (the af-unix

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sending signals to a process by pid.
 //!
 //! kenneld stops a kennel from a *different* thread than the one that owns the

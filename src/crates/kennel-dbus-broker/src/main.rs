@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `dbus-broker`: the standing D-Bus mediation service kennel (§7.7).
 //!
 //! A long-running service — the replacement for the per-consumer `host-dbus` delegate —

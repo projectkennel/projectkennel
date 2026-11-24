@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! TUN-device creation for the UDP-egress L3 facade (W2).
 //!
 //! The construction child creates the kennel's `tun` interface inside its own network

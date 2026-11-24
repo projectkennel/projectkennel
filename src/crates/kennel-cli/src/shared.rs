@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Shared helpers for all host-side CLI binaries.
 //!
 //! Daemon connection, key loading, policy/template/trust-store resolution,

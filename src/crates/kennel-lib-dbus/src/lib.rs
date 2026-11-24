@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel D-Bus mediation library (§7.7).
 //!
 //! D-Bus is mediated through the binder gateway, never granted as a direct socket: an

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! File-descriptor helpers: flag manipulation and `openat2` path resolution.
 //!
 //! Path resolution goes through `nix::fcntl::openat2` throughout; this module makes no raw

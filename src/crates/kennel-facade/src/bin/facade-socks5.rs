@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-kennel egress shim: present a SOCKS5 **and** HTTP-proxy endpoint on the kennel's loopback and
 //! broker each `CONNECT` to the `org.projectkennel.INet/default` binder facade.
 //!

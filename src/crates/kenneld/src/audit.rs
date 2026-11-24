@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-kennel audit writer kenneld builds, and the events it emits.
 //!
 //! kenneld constructs the `kennel-lib-audit` writer from the settled

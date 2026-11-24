@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `gen-schema --out <path>` — write the policy JSON Schema.
 //!
 //! A tiny generator run from CI. CI emits to the in-tree `schema/policy.toml.schema` and
@@ -6,6 +8,7 @@
 //! cannot drift. Usage: `gen-schema --out schema/policy.toml.schema`.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::process::ExitCode;
 

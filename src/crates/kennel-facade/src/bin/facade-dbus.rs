@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-kennel D-Bus facade: present a D-Bus server endpoint on the kennel's bus address and
 //! mediate each connection through the binder gateway (§7.7.2).
 //!

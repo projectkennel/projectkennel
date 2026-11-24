@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `facade-mesh-probe` — the in-kennel mesh provide/consume round-trip probe (`07-13` §7.13.4).
 //!
 //! The test workload for the `mesh-roundtrip` and `gui-mesh` policy-suite cases, in three modes:
@@ -16,6 +18,7 @@
 //! proves the brokered connector actually reaches a *running provider across the kennel boundary*.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};

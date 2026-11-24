@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated e2e for the `kennel-bin-init` lifecycle pull over binder node 0.
 //!
 //! A child holds node 0 with a populated [`binder::Lifecycle`] (init pid = the client's

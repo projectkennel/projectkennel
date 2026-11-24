@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A kennel's synthetic `/etc`: the standard libc / NSS files.
 //!
 //! A confined workload still calls into libc — `getaddrinfo`, `getservbyname`,

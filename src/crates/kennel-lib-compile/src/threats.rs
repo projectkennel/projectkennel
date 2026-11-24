@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The machine-readable threat catalogue (`dist/threats/catalogue.toml`).
 //!
 //! The canonical catalogue is `docs/reference/THREATS.md` (prose). This module loads

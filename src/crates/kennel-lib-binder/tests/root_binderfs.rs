@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated binderfs e2e: mount an instance, allocate the standard `binder`
 //! device, open it, check the protocol version, and become its context manager
 //! (a second attempt must fail `EBUSY`, confirming the per-instance singleton).

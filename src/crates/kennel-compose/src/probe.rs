@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Workload probe — classify a binary or script and seed exec.allow + fs.read.
 //
 // The common case is a SCRIPT (`#!/bin/sh`, `#!/usr/bin/python3`,

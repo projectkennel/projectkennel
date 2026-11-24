@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Assembling a [`Writer`] with the standard sink set and the per-sink timeout.
 //!
 //! Sink construction lives here so the two writer-building call sites — kenneld

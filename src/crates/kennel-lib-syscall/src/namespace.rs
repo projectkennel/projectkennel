@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linux namespace operations.
 //!
 //! Safe wrappers (over nix) for `unshare(2)`, the first step of the spawn
