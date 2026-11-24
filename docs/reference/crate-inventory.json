@@ -1,8 +1,8 @@
 {
   "crate_count": 32,
-  "total_sloc": 46175,
+  "total_sloc": 46186,
   "tcb_crate_count": 18,
-  "tcb_sloc": 28254,
+  "tcb_sloc": 28259,
   "crates": [
     {
       "name": "kenneld",
@@ -26,7 +26,7 @@
     },
     {
       "name": "kennel-cli",
-      "sloc": 5500,
+      "sloc": 5502,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-host"],
@@ -76,7 +76,7 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1924,
+      "sloc": 1929,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
@@ -96,7 +96,7 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1617,
+      "sloc": 1621,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["compositor-broker", "facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh", "facade-tun", "kennel-spawn"],
