@@ -1,0 +1,8 @@
+# CodeQL configuration for the advanced setup in .github/workflows/codeql.yml.
+name: kennel
+
+# Not ours to analyse: the vendored registry (crate archives) and build output.
+paths-ignore:
+  - src/vendor
+  - target
+  - "**/target"
