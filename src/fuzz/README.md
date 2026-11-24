@@ -23,35 +23,36 @@ not a member of the main workspace, so it does not enter the shipped crates'
 `Cargo.lock` or `CHECKSUMS.toml`, and the offline `cargo build --frozen --locked`
 gate is unaffected.
 
-## Status: staged — needs `arbitrary` vendored (§5.5) before it builds
+## Status
 
-The harness does not compile until `arbitrary` is vendored. The shipped build
-does not reference it, so this is inert until a reviewer crosses the dep gate:
+`arbitrary` 1.4.1 is vendored (`src/vendor/`), so the harness builds offline like every other
+crate. CI runs it in the `fuzz (smoke)` job: clippy with `-D warnings`, then `cargo test`.
 
-1. `cd` to the repo root (the `.cargo/config.toml` local-registry source applies
-   to this crate too).
-2. `tools/audit-helper.sh fetch arbitrary 1.4.1` (confirm the latest pin first),
-   then `tools/audit-helper.sh confirm arbitrary 1.4.1`.
-3. Read the source, add the `CHECKSUMS.toml` entry (reviewer name, ISO date,
-   `verified-against`) and the `DEPENDENCIES.md` entry (draft below), per §5.5.
-4. Two maintainer approvals on the checksum addition.
-
-### DEPENDENCIES.md draft entry (fill in after verifying)
-
-> **`arbitrary` =1.4.1** — turns a flat fuzzer seed into typed/byte inputs for
-> the fuzz harnesses (`fuzz/`). Used with `default-features = false` (no `derive`
-> feature), so it pulls **no transitive dependencies**. License: MIT OR
-> Apache-2.0. Used only by `kennel-fuzz`, which is a non-shipped, separate-
-> workspace test crate (not in any release artefact). Reviewer: TBD.
-
-## Running (after vendoring)
+## What runs
 
 ```sh
-cd fuzz && cargo test            # the deterministic-corpus runner (20k iterations)
+cd src/fuzz && cargo test --offline --locked
 ```
+
+- **Random bytes.** 20,000 pseudo-random byte strings from a fixed seed, fed to every parser
+  (`parsers_never_panic_on_adversarial_bytes`). These mostly exercise each parser's first
+  length or tag check.
+- **Seeded corpora.** For the decoders random bytes rarely get into, a valid input is built
+  with the decoder's own encoder and then every truncation and every single-byte change of it
+  is fed back ([`mutations`]): the binder service requests, the D-Bus conduit frame, the
+  control protocol, the helper's request, response and egress payload, the mesh rendezvous
+  datagram, the SSHSIG armor and the OpenSSH public-key line. The same is done for raw D-Bus
+  messages. The plan wire's three decoders have the equivalent test in `kennel-lib-spawn`,
+  where the fully populated fixtures live.
+- **Properties.** Two tests assert more than "no panic": no OSC-52 introducer survives the
+  terminal filter, and a signed policy with any one byte changed either fails verification or
+  verifies as exactly the policy that was signed.
+
+When a decoder gains a field, add it to the seed for that decoder.
 
 To add coverage-guided fuzzing later, install `cargo-fuzz`, add `libfuzzer-sys`
 (its own §5.5 pass), and wrap [`run`] in `fuzz_targets/*.rs` — the parser-feeding
 logic does not change.
 
 [`run`]: ./src/lib.rs
+[`mutations`]: ./src/lib.rs

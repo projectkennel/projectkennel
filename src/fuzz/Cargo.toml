@@ -29,7 +29,9 @@ description = "Fuzz/property harnesses for Project Kennel's untrusted-input pars
 arbitrary = { version = "=1.4.1", default-features = false }
 kenneld = { path = "../crates/kenneld" }
 kennel-privhelper = { path = "../crates/kennel-privhelper" }
-kennel-lib-policy = { path = "../crates/kennel-lib-policy" }
+# `test-support` exposes the one settled-policy fixture (no dependency of its own), which the
+# signed-policy corpus signs and then mutates.
+kennel-lib-policy = { path = "../crates/kennel-lib-policy", features = ["test-support"] }
 # The TOML parser on the TCB path, fuzzed directly (#228).
 kennel-lib-toml = { path = "../crates/kennel-lib-toml" }
 serde = { version = "=1.0.228", default-features = false, features = ["std"] }

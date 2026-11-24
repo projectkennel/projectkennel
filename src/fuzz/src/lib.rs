@@ -281,6 +281,28 @@ pub fn run(seed: &[u8]) {
     }
 }
 
+/// Feed `f` a valid input and everything one step away from it: `seed` itself, every
+/// truncation, and every single-byte change against a spread of bit patterns.
+///
+/// Random bytes almost never get past a decoder's first length or tag check, so they exercise
+/// its first branch and little else. Starting from a frame the decoder accepts puts each
+/// mutation deep inside it: a count that is now too large, a length that runs past the end, a
+/// tag that no longer exists, a string that is no longer UTF-8.
+pub fn mutations(seed: &[u8], mut f: impl FnMut(&[u8])) {
+    f(seed);
+    for cut in 0..seed.len() {
+        f(&seed[..cut]);
+    }
+    let mut m = seed.to_vec();
+    for i in 0..seed.len() {
+        for pat in [0x01u8, 0x08, 0x40, 0x7f, 0x80, 0xff] {
+            m[i] = seed[i] ^ pat;
+            f(&m);
+        }
+        m[i] = seed[i];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +348,328 @@ mod tests {
             }
             run(&buf);
         }
+    }
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// The binder service decoders, from frames their own encoders produce. Each is read by a
+    /// privileged or trusted process from a payload its sender controls.
+    #[test]
+    fn binder_service_decoders_never_panic_on_mutated_frames() {
+        use kennel_lib_binder::service::{
+            broker, inet, mesh, session, spawn, svc_connect, tun_broker,
+        };
+
+        let seed = inet::encode_request(1, 443, "example.com");
+        assert!(inet::decode_request(&seed, 255).is_some());
+        mutations(&seed, |d| {
+            let _ = inet::decode_request(d, 255);
+        });
+
+        let seed = inet::encode_bind_request(1, 8080);
+        assert!(inet::decode_bind_request(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = inet::decode_bind_request(d);
+            let _ = inet::decode_port_prefix(d);
+        });
+
+        let seed = spawn::encode_request("compute", &[("workload.argv", "a b"), ("ttl", "60")]);
+        assert!(spawn::decode_request(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = spawn::decode_request(d);
+        });
+
+        let seed = svc_connect::encode_request("git-ssh");
+        assert!(svc_connect::decode_request(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = svc_connect::decode_request(d);
+        });
+
+        // As `transact_node` lays it out: the name, zero padding to 8 bytes, then the handle
+        // object the driver translated.
+        let mut seed = mesh::encode_add_service("org.example.Service");
+        seed.resize(seed.len().next_multiple_of(8), 0);
+        seed.extend_from_slice(&kennel_lib_binder::proto::flat_binder_object_handle(3));
+        assert!(mesh::decode_add_service(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = mesh::decode_add_service(d);
+        });
+
+        let seed = session::encode_ref(7, "consumer");
+        assert!(session::decode_ref(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = session::decode_ref(d);
+        });
+
+        let seed = broker::encode_accept(
+            0,
+            &strings(&["org.example.A"]),
+            &strings(&["org.example.A.Iface=Method"]),
+            &strings(&["org.example.B"]),
+            &strings(&["org.example.C"]),
+            &strings(&["org.example.D"]),
+        );
+        assert!(broker::decode_accept(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = broker::decode_accept(d);
+        });
+
+        let grants = [tun_broker::Grant {
+            name: "example.com".to_owned(),
+            ports: vec![53, 443],
+            protocol: 2,
+        }];
+        let seed = tun_broker::encode_accept([0xfd; 16], &grants);
+        assert!(tun_broker::decode_accept(&seed).is_some());
+        mutations(&seed, |d| {
+            let _ = tun_broker::decode_accept(d);
+        });
+    }
+
+    /// The typed D-Bus conduit frame: the broker decodes what the in-kennel facade produced.
+    #[test]
+    fn dbus_conduit_frames_never_panic_when_mutated() {
+        use kennel_lib_dbus::wire::{Bus, Call, ErrorReply, Frame, Reply, Signal};
+        let frames = [
+            Frame::Call(Call {
+                bus: Bus::Session,
+                serial: 9,
+                no_reply: false,
+                destination: "org.example.Service".to_owned(),
+                path: "/org/example/Object".to_owned(),
+                interface: "org.example.Interface".to_owned(),
+                member: "Method".to_owned(),
+                signature: "su".to_owned(),
+                body_endian: b'l',
+                body: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            }),
+            Frame::Reply(Reply {
+                reply_serial: 9,
+                signature: "s".to_owned(),
+                body_endian: b'l',
+                body: vec![0; 12],
+            }),
+            Frame::Error(ErrorReply {
+                reply_serial: 9,
+                name: "org.example.Error.Failed".to_owned(),
+                message: "no".to_owned(),
+            }),
+            Frame::Signal(Signal {
+                bus: Bus::System,
+                path: "/org/example/Object".to_owned(),
+                interface: "org.example.Interface".to_owned(),
+                member: "Changed".to_owned(),
+                signature: "u".to_owned(),
+                body_endian: b'l',
+                body: vec![7, 0, 0, 0],
+            }),
+        ];
+        for frame in frames {
+            let wire = frame.encode();
+            // `encode` includes the conduit's length prefix; `decode` takes what follows it.
+            let payload = &wire[4..];
+            assert_eq!(Frame::decode(payload).as_ref(), Ok(&frame));
+            mutations(payload, |d| {
+                let _ = Frame::decode(d);
+            });
+            mutations(&wire, |d| {
+                let _ = kennel_lib_dbus::wire::frame_len(d);
+            });
+        }
+    }
+
+    /// The control protocol (CLI to daemon, any local process can connect) and the helper's
+    /// request, response and egress payload (anyone can run the helper).
+    #[test]
+    fn control_and_helper_messages_never_panic_when_mutated() {
+        use kenneld::control::{Request, Response, StartRequest};
+        let requests = [
+            Request::Start(StartRequest {
+                policy: "/home/u/.config/kennel/policies/a.toml".into(),
+                kennel: "a".to_owned(),
+                argv: strings(&["/bin/sh", "-c", "true"]),
+                cwd: "/home/u".into(),
+                term: "xterm-256color".to_owned(),
+                interactive: true,
+                force: false,
+                watch_paths: vec!["/home/u/src".into()],
+                oci_config: Some("/home/u/.local/share/kennel/oci/a/config.json".into()),
+            }),
+            Request::Stop {
+                kennel: "a".to_owned(),
+            },
+            Request::List,
+            Request::AuthorizedKeys {
+                key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA".to_owned(),
+            },
+            Request::Attach {
+                kennel: "a".to_owned(),
+            },
+            Request::Resize {
+                kennel: "a".to_owned(),
+                rows: 50,
+                cols: 132,
+            },
+        ];
+        for request in requests {
+            let seed = request.encode();
+            assert_eq!(Request::decode(&seed).as_ref(), Ok(&request));
+            mutations(&seed, |d| {
+                let _ = Request::decode(d);
+            });
+        }
+        let responses = [
+            Response::Started {
+                ctx: 7,
+                pid: 4242,
+                filter_escapes: true,
+            },
+            Response::Stopped,
+            Response::Exited { code: 137 },
+        ];
+        for response in responses {
+            let seed = response.encode();
+            assert_eq!(Response::decode(&seed).as_ref(), Ok(&response));
+            mutations(&seed, |d| {
+                let _ = Response::decode(d);
+            });
+        }
+
+        use kennel_privhelper::wire::{self, EgressPayload, Op};
+        let request = wire::Request {
+            op: Op::DelAddr,
+            ctx: 7,
+            addr: "fd6b:6e9c:691c:8007::1".parse().expect("address"),
+            prefix: 128,
+            interface: "lo".to_owned(),
+        };
+        let seed = request.encode();
+        assert_eq!(wire::Request::decode(&seed).as_ref(), Ok(&request));
+        mutations(&seed, |d| {
+            let _ = wire::Request::decode(d);
+        });
+        mutations(&wire::Response::refused(3).encode(), |d| {
+            let _ = wire::Response::decode(d);
+        });
+        let payload = EgressPayload {
+            meta: [1u8; wire::META_LEN],
+            allow_v4: Vec::new(),
+            deny_v4: Vec::new(),
+            allow_v6: Vec::new(),
+            deny_v6: Vec::new(),
+            bind_allow_v4: Vec::new(),
+            bind_deny_v4: Vec::new(),
+            bind_allow_v6: Vec::new(),
+            bind_deny_v6: Vec::new(),
+            bind_allowed_ports: vec![443, 8443],
+            pin_id: "kennel-9f3a".to_owned(),
+        };
+        let seed = payload.encode();
+        assert_eq!(EgressPayload::decode(&seed).as_ref(), Ok(&payload));
+        mutations(&seed, |d| {
+            let _ = EgressPayload::decode(d);
+        });
+    }
+
+    /// The mesh rendezvous datagram: `kennel-bin-init`, root in the kennel, decodes it.
+    #[test]
+    fn mesh_rendezvous_never_panics_when_mutated() {
+        use kennel_lib_spawn::mesh_rendezvous::{decode, encode};
+        use std::os::fd::OwnedFd;
+        let null = || -> OwnedFd {
+            std::fs::File::open("/dev/null")
+                .expect("open /dev/null")
+                .into()
+        };
+        let mounts = vec![
+            (null(), std::path::PathBuf::from("/run/kennel/mesh/a")),
+            (null(), std::path::PathBuf::from("/run/kennel/mesh/b")),
+        ];
+        let (seed, _) = encode(&mounts);
+        assert_eq!(
+            decode(&seed, vec![null(), null()]).expect("decode").len(),
+            2
+        );
+        mutations(&seed, |d| {
+            let _ = decode(d, vec![null(), null()]);
+            let _ = decode(d, Vec::new());
+        });
+    }
+
+    /// The signed policy, end to end: TOML, schema, SSHSIG armor and blob, signature check.
+    ///
+    /// Stronger than no-panic. A changed document must either fail to verify or verify as the
+    /// very policy that was signed — a mutation in a part the signature does not cover (the
+    /// envelope's own layout) may still verify, but it must not change what the policy says.
+    #[test]
+    fn a_mutated_signed_policy_never_verifies_as_a_different_policy() {
+        use kennel_lib_policy::{settled::sample_settled, sign_settled, to_bytes, SigningKey};
+        let key = SigningKey::from_seed("fuzz", &[7u8; 32]).expect("key");
+        let mut keys = kennel_lib_policy::KeySet::new();
+        keys.insert("fuzz", &key.public_key_bytes()).expect("trust");
+        let policy = sample_settled();
+        let doc = to_bytes(&sign_settled(&policy, &key).expect("sign")).expect("serialise");
+        assert_eq!(
+            kennel_lib_policy::verify_settled(&doc, &keys).ok().as_ref(),
+            Some(&policy)
+        );
+
+        let check = |d: &[u8]| {
+            if let Ok(verified) = kennel_lib_policy::verify_settled(d, &keys) {
+                assert_eq!(
+                    verified, policy,
+                    "a changed document verified as another policy"
+                );
+            }
+        };
+        // Every byte, with two patterns: one keeps the byte ASCII (the document stays text and
+        // reaches the parser), one does not (UTF-8 validation). Truncations on a stride.
+        let mut m = doc.clone();
+        for i in 0..doc.len() {
+            for pat in [0x01u8, 0x80] {
+                m[i] = doc[i] ^ pat;
+                check(&m);
+            }
+            m[i] = doc[i];
+        }
+        for cut in (0..doc.len()).step_by(7) {
+            check(&doc[..cut]);
+        }
+    }
+
+    /// The SSHSIG armor and binary blob on their own, and the OpenSSH public-key line.
+    #[test]
+    fn sshsig_and_public_key_parsers_never_panic_when_mutated() {
+        use kennel_lib_policy::sshsig::{sign_ed25519, SshSig};
+        use kennel_lib_policy::SigningKey;
+        let key = SigningKey::from_seed("fuzz", &[9u8; 32]).expect("key");
+        let armor = sign_ed25519(&key, b"message");
+        assert!(SshSig::parse_armored(&armor).is_ok());
+        mutations(armor.as_bytes(), |d| {
+            if let Ok(text) = std::str::from_utf8(d) {
+                let _ = SshSig::parse_armored(text);
+            }
+        });
+
+        // `ssh-ed25519 <base64 of: string "ssh-ed25519", string key>` — the trusted-key file line.
+        let mut blob = Vec::new();
+        for field in [b"ssh-ed25519".as_slice(), &key.public_key_bytes()] {
+            blob.extend_from_slice(&u32::try_from(field.len()).expect("len").to_be_bytes());
+            blob.extend_from_slice(field);
+        }
+        let line = format!(
+            "ssh-ed25519 {} fuzz@example",
+            kennel_lib_policy::b64::encode(&blob)
+        );
+        assert!(kennel_lib_policy::openssh::parse_public_key(&line).is_ok());
+        mutations(line.as_bytes(), |d| {
+            if let Ok(text) = std::str::from_utf8(d) {
+                let _ = kennel_lib_policy::openssh::parse_public_key(text);
+                let _ = kennel_lib_policy::openssh::parse_private_key(text);
+            }
+        });
     }
 
     /// Mint one valid D-Bus method-call whose body carries every value kind —
