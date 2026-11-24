@@ -29,6 +29,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **New event `net.inbound-connect`** (resource `net`, source `kenneld`): one per connection
   accepted on a mirrored `[net.bind]` port, with `port`, `ctx` and `state` (`delivered`,
   `held`, or `dropped` with outcome `deny` when the port's holding queue is full).
+- **New daemon-level events**, written to the daemon's stdout (the journal under the systemd
+  unit) because they happen outside any kennel's audit stream:
+  `lifecycle.kennel-start-refused` (outcome `deny`; `kennel`, `stage`, `reason`) for every
+  start that does not produce a kennel, including signature, digest-pin and Landlock-floor
+  refusals; `lifecycle.control-refused` (`deny`; `uid`) for a control connection from another
+  user; `lifecycle.control` (`info`; `op` = `stop`, `attach` or `reload`, `kennel`).
+- **`lifecycle.kennel-exit` `reason` is no longer always `stopped`.** It is `exited` when the
+  workload ended, `stopped` after an operator's stop, and `reaped` when the kennel was killed
+  with the requester that spawned it.
 - **`fs.mutation` and the `binder.ttl-*` events can now carry outcome `error`**, when the
   freeze, kill or thaw they report did not take effect. `fs.mutation` then has an `error`
   field with the OS error.

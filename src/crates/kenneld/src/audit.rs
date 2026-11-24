@@ -271,7 +271,71 @@ pub fn fs_mutation_unenforced(path: &str, action: &'static str, error: &str) -> 
         .field("error", Value::untrusted(error))
 }
 
+/// The daemon's own audit writer, for what happens outside any kennel's audit stream.
+///
+/// A kennel's writer exists only once the kennel is being built, so a start that is refused
+/// before that, a control connection that is turned away, and an operator's `stop`, `attach` or
+/// `daemon-reload` had no record at all. They go here: to stdout ([`daemon_writer`]), which under
+/// the systemd user unit is the journal.
+pub fn daemon_audit() -> &'static Writer {
+    static WRITER: std::sync::OnceLock<Writer> = std::sync::OnceLock::new();
+    WRITER.get_or_init(|| daemon_writer("kenneld"))
+}
+
+/// `lifecycle.kennel-start-refused`: a start did not produce a running kennel.
+///
+/// `stage` is where the bring-up stopped (`name`, `reserve`, `load`, `verify`, …) and `reason`
+/// is what the operator was told. A refusal on a signature, a digest pin or a Landlock floor is
+/// a security decision and is recorded as a `deny`.
+#[must_use]
+pub fn start_refused(kennel: &str, stage: &str, reason: &str) -> Event {
+    Event::new(
+        "lifecycle.kennel-start-refused",
+        Resource::Lifecycle,
+        Outcome::Deny,
+        Source::Kenneld,
+    )
+    .field("kennel", Value::untrusted(kennel))
+    .field("stage", Value::untrusted(stage))
+    .field("reason", Value::untrusted(reason))
+}
+
+/// `lifecycle.control-refused`: a control connection from someone the daemon does not serve.
+///
+/// `uid` is the peer's, or absent when the kernel would not say.
+#[must_use]
+pub fn control_refused(uid: Option<u32>) -> Event {
+    let event = Event::new(
+        "lifecycle.control-refused",
+        Resource::Lifecycle,
+        Outcome::Deny,
+        Source::Kenneld,
+    );
+    match uid {
+        Some(uid) => event.field("uid", Value::Uint(u64::from(uid))),
+        None => event,
+    }
+}
+
+/// `lifecycle.control`: an operator request that acts on a kennel or on the daemon.
+///
+/// `op` is `stop`, `attach` or `reload`; `kennel` is empty for a request that names none.
+#[must_use]
+pub fn control_request(op: &'static str, kennel: &str) -> Event {
+    Event::new(
+        "lifecycle.control",
+        Resource::Lifecycle,
+        Outcome::Info,
+        Source::Kenneld,
+    )
+    .field("op", Value::str(op))
+    .field("kennel", Value::untrusted(kennel))
+}
+
 /// `lifecycle.kennel-exit`: the kennel was torn down.
+///
+/// `reason` is `exited` (the workload ended), `stopped` (an operator stopped it) or `reaped`
+/// (its requester went away).
 #[must_use]
 pub fn kennel_exit(reason: &'static str) -> Event {
     Event::new(
