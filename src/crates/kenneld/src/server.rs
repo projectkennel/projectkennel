@@ -2592,14 +2592,13 @@ fn recv_pty_master(sock: &OwnedFd) -> io::Result<OwnedFd> {
 /// `base_home` and `$XDG_RUNTIME_DIR`/`$UID` against the uid (§7.6). `base_home` is
 /// the real home for a `real` path, the in-view shim root for a `shim` path.
 fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> PathBuf {
-    let uid = subst.uid.to_string();
-    let s = raw
-        .replace("<kennel>", &subst.kennel)
-        .replace("<ctx>", &subst.ctx.to_string())
-        .replace("<uid>", &uid)
-        .replace("<home>", &subst.home.to_string_lossy())
-        .replace("$XDG_RUNTIME_DIR", &format!("/run/user/{uid}"))
-        .replace("$UID", &uid);
+    let s = kennel_lib_policy::settled::fill_socket_placeholders(
+        raw,
+        &subst.kennel,
+        subst.ctx,
+        subst.uid,
+        &subst.home.to_string_lossy(),
+    );
     if s == "~" || s == "$HOME" {
         return base_home.to_path_buf();
     }

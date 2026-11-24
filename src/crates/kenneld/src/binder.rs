@@ -1164,17 +1164,19 @@ fn tun_connect(
         writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
         return Reply::Data(one(status::DENIED));
     };
+    // What a settled delivery replies, audited. `None` means no broker answered: worth waiting.
+    let settle = |delivery: Delivery| -> Option<Reply> {
+        let (outcome, reply) = match delivery {
+            Delivery::Session(fd) => (Outcome::Allow, Reply::Fd(fd)),
+            Delivery::Refused => (Outcome::Deny, Reply::Data(one(status::UNAVAILABLE))),
+            Delivery::NoBroker => return None,
+        };
+        writer.emit(&tun_event(incoming, ctx, "tun-connect", outcome));
+        Some(reply)
+    };
     // Fast path: a warm sink (the standing/already-activated broker) delivers now.
-    match tun_deliver(tun, payload) {
-        Delivery::Session(fd) => {
-            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-            return Reply::Fd(fd);
-        }
-        Delivery::Refused => {
-            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
-            return Reply::Data(one(status::UNAVAILABLE));
-        }
-        Delivery::NoBroker => {}
+    if let Some(reply) = settle(tun_deliver(tun, payload)) {
+        return reply;
     }
     // Cold: socket-activate the tun-broker generically, then consume-with-wait until its sink is
     // deliverable (the delivery's readiness) or the broker deadline fires.
@@ -1186,16 +1188,8 @@ fn tun_connect(
     let start = std::time::Instant::now();
     loop {
         std::thread::sleep(CONSUME_WAIT_POLL);
-        match tun_deliver(tun, payload) {
-            Delivery::Session(fd) => {
-                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-                return Reply::Fd(fd);
-            }
-            Delivery::Refused => {
-                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
-                return Reply::Data(one(status::UNAVAILABLE));
-            }
-            Delivery::NoBroker => {}
+        if let Some(reply) = settle(tun_deliver(tun, payload)) {
+            return reply;
         }
         if start.elapsed() >= CONSUME_WAIT_DEADLINE {
             writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
@@ -1264,6 +1258,266 @@ fn decode_name(data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── node-0 handlers, without a binder device ────────────────────────
+    //
+    // Each handler below takes the decoded transaction and returns the reply; none of these
+    // needs the connection. They are what the root-only suite exercised until now.
+
+    use kennel_lib_audit::{Levels, Record, Sink, SinkError, WriterContext};
+
+    /// The `(event, outcome)` of every record a handler emitted.
+    #[derive(Default, Clone)]
+    struct Seen(Arc<Mutex<Vec<(&'static str, Outcome)>>>);
+    impl Seen {
+        fn all(&self) -> Vec<(&'static str, Outcome)> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+    impl Sink for Seen {
+        fn name(&self) -> &'static str {
+            "seen"
+        }
+        fn write(&self, record: &Record) -> Result<(), SinkError> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((record.event_type, record.outcome));
+            Ok(())
+        }
+    }
+
+    fn recording_writer() -> (Writer, Seen) {
+        let seen = Seen::default();
+        let ctx = WriterContext {
+            kennel: "k".to_owned(),
+            kennel_uuid: "u".to_owned(),
+            host: "h".to_owned(),
+        };
+        let writer = Writer::new(ctx, Levels::default(), vec![Box::new(seen.clone())]);
+        (writer, seen)
+    }
+
+    /// A transaction with `code` and `data` from the given sender.
+    fn request(code: u32, data: &[u8], pid: i32, euid: u32) -> Incoming {
+        Incoming {
+            code,
+            data: data.to_vec(),
+            fds: Vec::new(),
+            objects: Vec::new(),
+            sender_pid: pid,
+            sender_euid: euid,
+            node_cookie: 0,
+            buffer: 0,
+            one_way: false,
+        }
+    }
+
+    /// The status byte of a data reply, or `None` for a reply that carries a descriptor.
+    fn status_of(reply: &Reply) -> Option<u8> {
+        match reply {
+            Reply::Data(bytes) => bytes.first().copied(),
+            _ => None,
+        }
+    }
+
+    fn unix_grant(name: &str, real: &std::path::Path) -> UnixRuntime {
+        UnixRuntime {
+            sockets: vec![kennel_lib_policy::UnixSocket {
+                name: name.to_owned(),
+                real: real.to_string_lossy().into_owned(),
+                shim: format!("/tmp/{name}.sock"),
+                env: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn afunix_connect_denies_a_name_the_policy_does_not_grant() {
+        let (writer, seen) = recording_writer();
+        let unix = unix_grant("granted", std::path::Path::new("/nonexistent/granted.sock"));
+        let reply = af_unix_connect(
+            &unix,
+            &request(verb::CONNECT_AFUNIX, b"other", 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert_eq!(seen.all(), [("binder.afunix-connect", Outcome::Deny)]);
+        // An empty or undecodable name is denied the same way.
+        let reply = af_unix_connect(
+            &unix,
+            &request(verb::CONNECT_AFUNIX, b"", 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+    }
+
+    #[test]
+    fn afunix_connect_hands_back_a_connection_to_the_granted_socket() {
+        let dir = std::env::temp_dir().join(format!("kennel-node0-afunix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("mkdir");
+        let path = dir.join("host.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let (writer, seen) = recording_writer();
+        // Granted by name, and equally by shim path.
+        for asked in ["agent", "/tmp/agent.sock"] {
+            let reply = af_unix_connect(
+                &unix_grant("agent", &path),
+                &request(verb::CONNECT_AFUNIX, asked.as_bytes(), 9, 1000),
+                3,
+                &writer,
+            );
+            assert!(
+                matches!(reply, Reply::Fd(_)),
+                "`{asked}` yields a descriptor"
+            );
+            listener.accept().expect("the host socket was connected");
+        }
+        assert_eq!(
+            seen.all().last(),
+            Some(&("binder.afunix-connect", Outcome::Allow))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn afunix_connect_reports_a_granted_but_absent_socket_as_not_found() {
+        let (writer, seen) = recording_writer();
+        let unix = unix_grant(
+            "agent",
+            std::path::Path::new("/nonexistent/kennel/agent.sock"),
+        );
+        let reply = af_unix_connect(
+            &unix,
+            &request(verb::CONNECT_AFUNIX, b"agent", 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::NOT_FOUND));
+        assert_eq!(seen.all(), [("binder.afunix-connect", Outcome::Error)]);
+    }
+
+    #[test]
+    fn afunix_connect_never_brokers_a_daemon_socket_even_if_granted() {
+        // A signed settled policy that somehow carries the grant: the handler still refuses.
+        let (writer, seen) = recording_writer();
+        let daemon = kennel_lib_control::socket::runtime_dir().join("proxy/netproxy-cmd-3.sock");
+        let reply = af_unix_connect(
+            &unix_grant("cmd", &daemon),
+            &request(verb::CONNECT_AFUNIX, b"cmd", 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert_eq!(seen.all(), [("binder.afunix-connect", Outcome::Deny)]);
+    }
+
+    #[test]
+    fn inet_connect_refuses_malformed_udp_and_ungranted_requests() {
+        use kennel_lib_binder::service::{inet, transport};
+        let (writer, seen) = recording_writer();
+        let net = crate::inet::NetRuntime::denied();
+        // Too short to carry a transport, a port and a host.
+        let reply = inet_connect(
+            &net,
+            &request(verb::CONNECT_INET, &[0], 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::BAD_REQUEST));
+        // UDP never leaves through this verb, whatever the rules say.
+        let udp = inet::encode_request(transport::UDP, 53, "example.com");
+        let reply = inet_connect(
+            &net,
+            &request(verb::CONNECT_INET, &udp, 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        // A kennel with no network: every destination is denied.
+        let tcp = inet::encode_request(transport::TCP, 443, "example.com");
+        let reply = inet_connect(
+            &net,
+            &request(verb::CONNECT_INET, &tcp, 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert_eq!(
+            seen.all(),
+            [
+                ("binder.inet-connect", Outcome::Error),
+                ("binder.inet-connect", Outcome::Deny),
+                ("binder.inet-connect", Outcome::Deny),
+            ]
+        );
+    }
+
+    #[test]
+    fn lifecycle_verbs_are_served_to_init_alone() {
+        let (writer, seen) = recording_writer();
+        let lifecycle = Lifecycle {
+            init_host_pid: Some(4242),
+            supervision: b"plan-bytes".to_vec(),
+            ..Lifecycle::default()
+        };
+        // The workload (operator uid, another pid) asks for the plan: denied, audited.
+        let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4300, 1000);
+        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        // A process that is uid 0 in the kennel but is not init: denied.
+        let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4300, 0);
+        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        // Init itself gets the supervision half, byte for byte.
+        let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4242, 0);
+        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        assert!(matches!(&reply, Reply::Data(bytes) if bytes == b"plan-bytes"));
+        // A code in the lifecycle range that names no verb is a bad request, also for init.
+        let asked = request(0x1ff, &[], 4242, 0);
+        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        assert_eq!(status_of(&reply), Some(status::BAD_REQUEST));
+        assert_eq!(
+            seen.all(),
+            [
+                ("binder.lifecycle-denied", Outcome::Deny),
+                ("binder.lifecycle-denied", Outcome::Deny),
+                ("binder.get-sandbox-plan", Outcome::Allow),
+                ("binder.bad-request", Outcome::Error),
+            ]
+        );
+    }
+
+    #[test]
+    fn svc_connect_denies_a_capability_the_policy_does_not_consume() {
+        let (writer, seen) = recording_writer();
+        let asked = request(verb::SVC_CONNECT, b"org.example.thing", 9, 1000);
+        let reply = svc_connect(&[], None, None, &asked, 3, &writer, false);
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert_eq!(seen.all(), [("binder.svc-connect", Outcome::Deny)]);
+    }
+
+    #[test]
+    fn spawn_verbs_are_denied_to_a_kennel_with_no_spawn_grant() {
+        let (writer, seen) = recording_writer();
+        let asked = request(verb::SPAWN, b"anything", 9, 1000);
+        let reply = crate::spawn::handle_spawn(None, &asked, 3, &writer);
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        let asked = request(verb::SPAWN_QUERY, &[], 9, 1000);
+        let reply = crate::spawn::handle_spawn_query(None, &asked, 3, &writer);
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert!(seen
+            .all()
+            .iter()
+            .all(|(_, outcome)| *outcome == Outcome::Deny));
+        assert_eq!(seen.all().len(), 2);
+    }
 
     /// A TTL action that could not be applied must not be audited as applied.
     #[test]

@@ -208,12 +208,9 @@ pub fn validate(policy: &SourcePolicy) -> Result<Vec<String>, PolicyError> {
 
 /// `real` with the per-instance placeholders filled by stand-ins, so the daemon-socket rule sees
 /// the shape the daemon will resolve it to. The stand-in uid is any number: the rule matches the
-/// runtime directory of every uid.
+/// runtime directory of every uid. The filling is the daemon's own.
 fn fill_placeholders(real: &str) -> String {
-    real.replace("$XDG_RUNTIME_DIR", "/run/user/0")
-        .replace("<uid>", "0")
-        .replace("$UID", "0")
-        .replace("<ctx>", "0")
+    kennel_lib_policy::settled::fill_socket_placeholders(real, "kennel", 0, 0, "/home/kennel")
 }
 
 #[cfg(test)]
