@@ -6,12 +6,155 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### CLI changes
+
+- **`kennel run` refuses a kennel name of the form `spawn-<number>-…`.** That form is
+  reserved for kennels the daemon spawns.
+
+### Policy schema changes
+
+- **`[[unix.allow]]` is stricter.** A policy is now refused if a grant's `real` is anywhere in
+  `$XDG_RUNTIME_DIR/kennel/` (it was only `control.sock`), if `real` lies in `fs.write`,
+  `fs.exclusive` or a persisted home path, or if `shim` is not rooted at `/`, `~/`, `$HOME/`
+  or `$XDG_RUNTIME_DIR/`, has a `.`, `..` or `=`, or sits directly under `/`. The shipped
+  templates are unaffected.
+- **`[[spawn.allow]]` `mutable = []` is refused.** Omit `mutable` for the template's full
+  manifest, or list the fields. A `[[spawn.allow.add]]` entry for an inherited template now
+  replaces the inherited entry instead of being ignored.
+- **Supplementary group names are checked.** A name in `[identity].groups` or a device
+  passthrough's `group` may not contain `:`, `,`, `/` or a control character.
+- **`[[net.udp.allow]]` `name` must be a DNS name** (letters, digits, `-`, `_`; an optional
+  leading `.`; a last label that is not all digits). An IP literal in that field is refused.
+
+### Audit schema changes
+
+- **New event `net.inbound-connect`** (resource `net`, source `kenneld`): one per connection
+  accepted on a mirrored `[net.bind]` port, with `port`, `ctx` and `state` (`delivered`,
+  `held`, or `dropped` with outcome `deny` when the port's holding queue is full).
+- **New daemon-level events**, written to the daemon's stdout (the journal under the systemd
+  unit) because they happen outside any kennel's audit stream:
+  `lifecycle.kennel-start-refused` (outcome `deny`; `target`, `stage`, `reason`) for every
+  start that does not produce a kennel, including signature, digest-pin and Landlock-floor
+  refusals; `lifecycle.control-refused` (`deny`; `uid`) for a control connection from another
+  user; `lifecycle.control` (`info`; `op` = `stop`, `attach` or `reload`, `target`).
+- **`lifecycle.kennel-exit` `reason` is no longer always `stopped`.** It is `exited` when the
+  workload ended, `stopped` after an operator's stop, and `reaped` when the kennel was killed
+  with the requester that spawned it.
+- **`fs.mutation` and the `binder.ttl-*` events can now carry outcome `error`**, when the
+  freeze, kill or thaw they report did not take effect. `fs.mutation` then has an `error`
+  field with the OS error.
+
+### Security
+
+- **The OCI overlay mount refuses a layer path that would alter its options.** overlayfs takes
+  its layers as one comma-separated string, and the privileged factory built that string from a
+  staging directory named by its caller, then mounted with root's filesystem identity. A layer
+  path containing `,`, `:` or `\` (or not UTF-8) is now refused before the mount.
+- **An OCI image root must be one the caller could read themselves.** The overlay is mounted
+  with root's filesystem identity, and overlayfs then reads the image with it; a merged
+  directory is shown with the attributes of the topmost layer that has it. The image directory
+  was only required to be reachable, so a root-owned directory closed to the caller, and any
+  closed directory inside an image that a layer above also had, could be served to the workload
+  with its world-readable contents. The factory now requires, as the caller: read and search
+  access to the image directory; that it is the caller's own, or root's, not writable by group
+  or other, and beneath `/usr`, `/var`, `/etc`, `/lib`, `/lib64` or `/opt`; and that no directory
+  in the layer above covers an image directory the caller cannot enter. A root-owned image is
+  refused with `persistence = "persist"`.
+- **A dotted key can no longer exhaust the policy parser's stack.** The parser runs before a
+  signature is checked. Its nesting limit covered arrays, inline tables and table headers but
+  not dotted keys, so `a.a.a…` with 100,000 parts (200 KB) aborted the CLI. The parts of a
+  dotted key now count toward the same limit of 64.
+- **A UDP-egress session ends when its consumer does, and a kennel is held to two.** The channel
+  between `facade-tun` and its mediator was a connected datagram pair, which tells neither end
+  that the other closed, so a mediator outlived its consumer with its flows; and any process in
+  a `[net.udp]` kennel could open sessions without limit, each a new process in the shared
+  broker kennel with its own flow and rate ceilings. The channel is now `SOCK_SEQPACKET`, the
+  mediator exits on a hang-up or a failed send, the broker admits at most two live sessions for
+  one kennel (256 overall), and `facade-tun` exits when its mediator is gone.
+- **A `[[unix.allow]]` grant cannot reach the daemon's own sockets, and is connected by
+  descriptor.** Only `control.sock` was refused. The host delegates' command sockets sit in
+  the same runtime directory and dial whatever they are told, so a grant naming one skipped
+  the proxy rules and the invariant denies. Everything in `$XDG_RUNTIME_DIR/kennel/` is now
+  refused, at compile (with `$XDG_RUNTIME_DIR`, `<uid>` and `$UID` spellings resolved) and
+  again in the daemon. The daemon opens the granted socket once, applies the rule to the path
+  of that open file, and connects to that same file; it used to resolve the name, check it,
+  and then connect to the name.
+- **A unix grant's `real` path may not lie in the workload's write set, and its `shim` must be
+  a plain path.** The daemon connects to whatever is at `real`, so a path the workload can
+  replace was a grant of any socket the operator can reach. The in-kennel facade is granted
+  Landlock rights over the shim's parent directory, and `shim = "/x.sock"` made that `/`. Both
+  are refused when a policy is loaded, so a signed artefact that never passed the compiler is
+  covered; the same shim rule applies to the `at` of an af-unix `[[consumes]]`.
+- **The inbound mirror listens only on the loopback interface.** A `[net.bind]` port is
+  mirrored on an address assigned to host `lo`. That does not confine it: Linux accepts a
+  packet for a local address on any interface, so a LAN peer that routed the address to the
+  host reached the kennel's service unless a host firewall stopped it. `host-inetd` now binds
+  the listener to the `lo` device before it binds the address (checked on the test VM: a peer
+  on another interface connects to an unbound listener and is refused by a bound one).
+- **The inbound delegate and the daemon's mirror state are bounded.** `host-inetd` caps
+  conduits for the whole process (it was per listener), waits after a failed `accept` instead
+  of spinning, and survives a refused thread. A repeated `REGISTER_MIRROR` no longer leaves a
+  binder reference in the daemon per call. Connections held before a facade registered are
+  delivered with the next arrival, in order, and a mirror reader that stops says why.
+- **Egress refuses the host's own addresses.** The proxy delegate and the UDP mediator dial
+  from the host's network stack, so a connection to one of the host's own non-loopback
+  addresses arrived at the host's own listeners (anything bound to that address or to the
+  wildcard). The special-use gate did not cover it: the address may be public, and a rule may
+  admit private space. Both paths now ask the kernel for the host's addresses at decision time
+  and refuse a literal or resolved destination that is one of them.
+- **A `[net.udp]` grant must name a host.** The endpoint is name-only, but a name was not
+  checked, so `name = "10.0.0.5"` resolved to itself and was a grant of that address. The
+  compiler, the policy loader and the mediator now refuse a name that is not a DNS name.
+- **An enforcement that failed is no longer audited as done.** The trust tripwire's freeze and
+  kill, and the TTL handler's kill and thaw, discarded the result of the cgroup write and
+  recorded the action as taken. A failure now gives an `error` record and a line on the
+  daemon's stderr; the tripwire keeps watching and tries again on the next mutation. A mirror,
+  tun-sink or mesh-service registration whose death notification cannot be requested is
+  refused instead of being kept with no way to learn that its node died.
+- **A spawn grant's `mutable` narrowing can no longer be lost.** `mutable = []` settled as the
+  template's full manifest, because the settled form records "narrowed to nothing" and "not
+  narrowed" the same way; it is now a compile error. And a child policy's
+  `[[spawn.allow.add]]` entry for a template its parent already allows was discarded in
+  favour of the parent's, dropping the child's narrowing; the child's entry now replaces the
+  inherited one, with a warning.
+- **Four checks that failed open now fail closed.** A damaged mesh rendezvous message started
+  the workload with the mounts that happened to parse; it now starts with all of them or not
+  at all. The cap on loopback addresses counted zero when `/proc/net/if_inet6` was unreadable;
+  the add is now refused. A binder context manager that did not start was a warning and the
+  kennel was brought up without one; the bring-up now fails. An OpenSSH private key whose END
+  marker precedes its BEGIN marker panicked the parser; it is now an error.
+- **Kennel names of the form `spawn-<number>-…` are reserved.** The daemon names spawned kennels
+  `spawn-<requester ctx>-<n>` and reads parentage back from the name, so an operator's kennel
+  with such a name was killed with that requester and shared its audit directory. A start
+  under a reserved name is refused unless the daemon made the name.
+- **A provider that ran healthily starts a fresh restart budget.** The supervisor's restart
+  count never reset, so a provider that crashed `max_attempts` times over any span was failed
+  for good. A run of a minute or more after reporting ready resets the count.
+- **Rules the compiler enforced alone are enforced when a policy is loaded.** A settled
+  artefact can be signed without passing through the compiler, and the identity names in it
+  reach the synthetic `/etc/passwd`, `/etc/group`, `/etc/hostname`, `$USER` and the home path.
+  The loader now applies the compiler's own rules to `identity.user`, `identity.group` and
+  `identity.hostname`, a new rule to supplementary group names (nothing that breaks
+  `/etc/group`), the `[net.bind]` port cap and the `workload.sha256` form. A spawn patch's
+  result is checked against the framework invariants before it is used; it was not checked at
+  all. Ulimit tokens and BPF map capacity already fail the spawn when wrong, and the proxy
+  listen values are bounded by their types.
+
 ### Threat catalogue
 
 - **T1.8 no longer claims byte-counting, rate-limiting or volume audit at the proxy.** None of
   the three exists. The entry now states what does: a per-connect audit record (destination,
   port, process, outcome) and a cap on concurrent connections. A correction to the mitigation
   text; no threat is added or renumbered, and the catalogue version stays 0.6.
+- **T1.15 no longer says DNS rebinding is "closed structurally".** The UDP path refuses
+  cloud-metadata, link-local, loopback, multicast, broadcast and the host's own addresses, and
+  deliberately dials RFC1918, CGNAT and ULA. The entry now says so and lists rebinding into
+  private space as a residual.
+- **T3.3 states who can reach a kennel's loopback address.** It said "the LAN cannot" without a
+  control behind it, and did not say that other local users can. The mitigation text now names
+  the loopback-device bind and the per-connection audit record, says any local user can
+  connect (as to any loopback service), and separates the framework's mirror from a listener
+  the operator binds by hand.
 
 ### Docs & tooling
 

@@ -32,6 +32,26 @@ use crate::Privileged;
 /// The cap on a restart backoff, however many attempts have doubled it (§7.13.7, "to a cap").
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 
+/// How long a provider must stay up, after it reported ready, for its earlier crashes to stop
+/// counting against it. Twice the longest backoff: a provider that survives that long is not in
+/// the crash loop the budget exists to stop.
+const STABLE_RUN: Duration = Duration::from_mins(1);
+
+/// The restart count to carry into the next exit decision, given how long the run just ended
+/// lasted once ready (`None`: it never became ready).
+///
+/// Without this the count only ever grows, so a provider that crashes `max_attempts` times over
+/// months of otherwise healthy service is failed for good. A run of [`STABLE_RUN`] or more closes
+/// the crash-loop window and the count starts again.
+#[must_use]
+fn restarts_after_run(restarts: u32, ready_for: Option<Duration>) -> u32 {
+    if ready_for.is_some_and(|up| up >= STABLE_RUN) {
+        0
+    } else {
+        restarts
+    }
+}
+
 /// What the supervisor does on a provider exit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartAction {
@@ -237,10 +257,12 @@ where
         // Read the construction outcome from the sink to drive readiness: `Started` → ready, then park
         // until the provider exits (`Exited`) or construction fails.
         let mut clean = false;
+        let mut ready_at: Option<std::time::Instant> = None;
         loop {
             match recv_response(&mut client) {
                 Ok(Response::Started { .. }) => {
                     shared.note_provider_ready(&id);
+                    ready_at = Some(std::time::Instant::now());
                 }
                 Ok(Response::Exited { code }) => {
                     clean = code == 0;
@@ -262,6 +284,7 @@ where
             shared.note_provider_event(&id, Event::IdleReaped);
             return;
         }
+        restarts = restarts_after_run(restarts, ready_at.map(|at| at.elapsed()));
         match on_exit(&prov.service, clean, restarts) {
             RestartAction::RestartAfter(delay) => {
                 shared.note_provider_event(&id, Event::Restarting);
@@ -284,6 +307,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_healthy_run_closes_the_crash_loop_window() {
+        // A crash loop: never ready, or ready only briefly. The count stands.
+        assert_eq!(restarts_after_run(3, None), 3);
+        assert_eq!(restarts_after_run(3, Some(Duration::from_secs(5))), 3);
+        // A provider that served for a while and then died starts a new window.
+        assert_eq!(restarts_after_run(3, Some(STABLE_RUN)), 0);
+        assert_eq!(restarts_after_run(3, Some(Duration::from_hours(24))), 0);
+    }
 
     fn service(restart: RestartPolicy, backoff_ms: u64, max_attempts: u32) -> ServiceRuntime {
         ServiceRuntime {

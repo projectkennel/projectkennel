@@ -5,7 +5,7 @@
 //!
 //! The UDP-egress facade (Kennel book Vol 2 ch.8 (The Network)): a `[net.udp]` workload's raw UDP
 //! (QUIC/h3, DNS, …) leaves its net-ns over the `tun` the factory built. `facade-tun` holds the tun
-//! fd and one connected `SOCK_DGRAM` channel to the broker, and copies **whole L3 frames** both ways —
+//! fd and one `SOCK_SEQPACKET` channel to the broker, and copies **whole L3 frames** both ways —
 //! originating nothing, keeping no flow state. Each frame passes the direction's
 //! [`shape check`](kennel_facade::tun) first; a frame that fails is dropped (counted, never an ICMP).
 //! The egress direction parses genuinely hostile workload input, so the predicate is the crate's
@@ -20,7 +20,7 @@
 //! per-kennel bus `<binder-device>` and `CONNECT_AFUNIX`es the `org.projectkennel.tun-udp`
 //! capability its policy `[[consumes]]` — the plain af-unix mesh-connect pattern (`facade-afunix`).
 //! kenneld resolves this kennel's grants + tun `/64`, delivers them to the tun-broker, and hands back
-//! the broker end of a connected `SOCK_DGRAM` socketpair (frame boundaries preserved, no framing).
+//! the broker end of a `SOCK_SEQPACKET` socketpair (frame boundaries preserved, no framing).
 //! `<kennel-tun-addr>` is the tun's own IPv6 address (its `/64` is the synthetic pool + resolver).
 //!
 //! # Non-goals
@@ -96,7 +96,7 @@ fn main() -> ExitCode {
 /// datagram socket (this kennel's flow channel).
 ///
 /// The plain af-unix consume: kenneld resolves this kennel afresh (`sender_pid` → cgroup → ctx →
-/// grants + tun `/64`), delivers them to the tun-broker (which mints a per-session `SOCK_DGRAM`
+/// grants + tun `/64`), delivers them to the tun-broker (which mints a per-session `SOCK_SEQPACKET`
 /// socketpair + mediator), and replies with the mediator's peer-end fd. Retries briefly, since the
 /// broker is socket-activated on first consume.
 fn connect_broker(device: &str) -> io::Result<UnixDatagram> {
@@ -119,20 +119,32 @@ fn connect_broker(device: &str) -> io::Result<UnixDatagram> {
     Err(last)
 }
 
-/// Run both copy loops until either side closes: egress (tun → broker) on a worker thread, ingress
-/// (broker → tun) on this thread. The `/64` prefix the predicate matches on is the tun address's.
+/// Run both copy loops until the broker channel closes: egress (tun → broker) on a worker thread,
+/// ingress (broker → tun) on this thread. The `/64` prefix the predicate matches on is the tun
+/// address's.
+///
+/// The channel is `SOCK_SEQPACKET`, so a mediator that went away ends the ingress loop (a
+/// zero-length read) whichever direction noticed first. The egress worker is not joined: it may be
+/// blocked reading a tun that has nothing to say, and the process is about to exit, which is what
+/// tells the supervisor to decide on a restart.
 fn serve(tun: File, broker: UnixDatagram, kennel_addr: Ipv6Addr) -> io::Result<()> {
     let prefix = prefix64(kennel_addr);
     let tun_rx = tun.try_clone()?;
     let tun_tx = tun;
     let broker_tx = broker.try_clone()?;
     let broker_rx = broker;
-    let egress = thread::spawn(move || pump_egress(tun_rx, &broker_tx, kennel_addr, prefix));
+    thread::Builder::new()
+        .name("egress".to_owned())
+        .spawn(move || {
+            pump_egress(tun_rx, &broker_tx, kennel_addr, prefix);
+            // The tun closed or the mediator is gone: wake the ingress loop so the facade exits.
+            let _ = broker_tx.shutdown(std::net::Shutdown::Both);
+        })?;
     pump_ingress(&broker_rx, tun_tx, kennel_addr, prefix);
-    // A copy loop only returns when its side closed (kennel teardown / broker HUP); either ending
-    // takes the facade down, and the supervisor decides whether to re-fork.
-    let _ = egress.join();
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::ConnectionAborted,
+        "the tun or the broker channel closed",
+    ))
 }
 
 /// The `/64` prefix (first eight octets) of an address.

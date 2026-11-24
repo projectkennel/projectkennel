@@ -174,7 +174,8 @@ enum ErrorKind {
 pub const MAX_INPUT_BYTES: usize = 1 << 20;
 
 /// The deepest an array or inline table may nest, and the most parts a table header may have.
-/// Values are parsed by recursion, so without a bound a run of `[` exhausts the stack.
+/// Values are parsed by recursion, so without a bound a run of `[` exhausts the stack. A dotted
+/// key counts too: each part after the first is a level of table, charged to the same budget.
 pub const MAX_NESTING: usize = 64;
 
 /// The most `[table]` / `[[array]]` headers a document may have. Tables are indexed by comparing
@@ -1095,7 +1096,7 @@ impl<'a> Deserializer<'a> {
         self.expect(&Token::Equals)?;
         self.eat_whitespace();
 
-        let value = self.value()?;
+        let value = self.value_under(&key)?;
         self.eat_whitespace();
         if !self.eat_comment()? {
             self.eat_newline_or_eof()?;
@@ -1367,7 +1368,7 @@ impl<'a> Deserializer<'a> {
             self.eat_whitespace();
             self.expect(&Token::Equals)?;
             self.eat_whitespace();
-            let value = self.value()?;
+            let value = self.value_under(&key)?;
             self.add_dotted_key(key, value, &mut ret)?;
 
             self.eat_whitespace();
@@ -1415,16 +1416,39 @@ impl<'a> Deserializer<'a> {
         self.tokens.table_key().map_err(|e| self.token_error(e))
     }
 
+    /// A key of one or more dotted parts. Each part after the first is one more level of table,
+    /// so the parts are charged to the same [`MAX_NESTING`] budget as brackets: the key is refused
+    /// as soon as it would take the value past the limit, before the rest of it is read.
     fn dotted_key(&mut self) -> Result<Vec<(Span, Cow<'a, str>)>, Box<Error>> {
         let mut result = Vec::new();
-        result.push(self.table_key()?);
+        let first = self.table_key()?;
+        let at = first.0.start;
+        result.push(first);
         self.eat_whitespace();
         while self.eat(&Token::Period)? {
+            if self.nesting.saturating_add(result.len()) > MAX_NESTING {
+                let mut err = Error::custom(
+                    Some(at),
+                    format!("a dotted key is nested more than {MAX_NESTING} deep"),
+                );
+                err.fix_linecol(|at| self.to_linecol(at));
+                return Err(err);
+            }
             self.eat_whitespace();
             result.push(self.table_key()?);
             self.eat_whitespace();
         }
         Ok(result)
+    }
+
+    /// Parse the value of `key`, counting the tables the key's dots imply toward the nesting
+    /// limit while the value is read.
+    fn value_under(&mut self, key: &[(Span, Cow<'a, str>)]) -> Result<Value<'a>, Box<Error>> {
+        let implied = key.len().saturating_sub(1);
+        self.nesting = self.nesting.saturating_add(implied);
+        let value = self.value();
+        self.nesting = self.nesting.saturating_sub(implied);
+        value
     }
 
     /// Stores a value in the appropriate hierarchical structure positioned based on the dotted key.

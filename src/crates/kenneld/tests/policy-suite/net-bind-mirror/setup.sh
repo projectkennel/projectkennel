@@ -29,7 +29,8 @@ target = None
 while time.time() < deadline and target is None:
     out = subprocess.run(["ss", "-ltn"], capture_output=True, text=True).stdout
     # The mirror is the kennel's ULA (`fd6b:6e..`), e.g. `[fd6b:6e9c:691c:1::1]:3000`.
-    m = re.search(r"\[(fd6b:[0-9a-f:]+)\]:3000\b", out)
+    # The listener is bound to the loopback device too, which `ss` prints as `[addr]%lo:3000`.
+    m = re.search(r"\[(fd6b:[0-9a-f:]+)\](?:%lo)?:3000\b", out)
     if m:
         target = m.group(1)
     else:

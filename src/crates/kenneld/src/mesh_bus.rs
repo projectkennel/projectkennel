@@ -375,8 +375,23 @@ fn mesh_add_service(
         );
         return Reply::Data(vec![status::BAD_REQUEST]);
     }
-    // Watch for death — the cookie is the handle itself.
-    let _ = conn.request_death(handle, u64::from(handle));
+    // Watch for death — the cookie is the handle itself. A service whose death cannot be seen
+    // would stay in the registry after its provider is gone, so it is not registered.
+    if conn.request_death(handle, u64::from(handle)).is_err() {
+        let _ = conn.release_handle(handle);
+        writer.emit(
+            &Event::new(
+                "mesh.add-service",
+                Resource::Binder,
+                Outcome::Error,
+                Source::Kenneld,
+            )
+            .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
+            .field("service", Value::untrusted(name))
+            .field("reason", Value::untrusted("request_death failed")),
+        );
+        return Reply::Data(vec![status::UNAVAILABLE]);
+    }
 
     // Store the handle.
     {

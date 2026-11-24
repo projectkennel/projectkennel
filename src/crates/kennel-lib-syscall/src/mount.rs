@@ -171,15 +171,16 @@ pub fn mount_tmpfs(
 /// with no real privilege; the kernel applies `userxattr` whiteouts there, so the upper
 /// filesystem must carry `user.*` xattrs (tmpfs ≥ 6.6; ext4/btrfs/xfs always).
 ///
-/// The paths flow into overlayfs's comma-separated option string, so a path containing a
-/// literal `,` or `:` would split an option — callers pass only kennel-runtime
-/// (`$XDG_RUNTIME_DIR`), validated-name store, and shipped libexec paths, none of which
-/// carries those bytes.
+/// The paths flow into overlayfs's comma-separated option string, in which `:` separates the
+/// lowers and `\` escapes. A path carrying any of those bytes would add or replace an option, so
+/// it is refused here, before the mount: the factory builds these paths from a staging root its
+/// caller names, and performs this mount with root's filesystem identity.
 ///
 /// # Errors
 ///
-/// Returns the OS error if the mount fails (e.g. `work` non-empty, `upper`/`work` on
-/// different filesystems, `lowers` empty, or the kernel lacks unprivileged overlay).
+/// `InvalidInput` if a layer path is not UTF-8 or contains `,`, `:` or `\`. Otherwise the OS
+/// error if the mount fails (e.g. `work` non-empty, `upper`/`work` on different filesystems,
+/// `lowers` empty, or the kernel lacks unprivileged overlay).
 pub fn mount_overlay(
     lowers: &[&Path],
     upper_work: Option<(&Path, &Path)>,
@@ -187,14 +188,14 @@ pub fn mount_overlay(
 ) -> io::Result<()> {
     let lowerdir = lowers
         .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
+        .map(|p| overlay_layer(p))
+        .collect::<io::Result<Vec<_>>>()?
         .join(":");
     let data = match upper_work {
         Some((upper, work)) => format!(
             "lowerdir={lowerdir},upperdir={},workdir={}",
-            upper.display(),
-            work.display()
+            overlay_layer(upper)?,
+            overlay_layer(work)?
         ),
         None => format!("lowerdir={lowerdir}"),
     };
@@ -316,6 +317,50 @@ pub fn pivot_root(new_root: &Path, put_old: &Path) -> io::Result<()> {
 /// Returns the OS error if the unmount fails.
 pub fn unmount_detach(target: &Path) -> io::Result<()> {
     nix::mount::umount2(target, MntFlags::MNT_DETACH).map_err(map_err)
+}
+
+/// `path` as it may appear in overlayfs's option string: UTF-8, and free of the three bytes the
+/// string gives meaning to.
+fn overlay_layer(path: &Path) -> io::Result<&str> {
+    path.to_str()
+        .filter(|text| !text.contains([',', ':', '\\']))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "overlay layer {} is not UTF-8 or contains `,`, `:` or `\\`",
+                    path.display()
+                ),
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overlay_path_that_would_split_the_option_string_is_refused() {
+        // overlayfs takes its layers as one comma-separated option string with `:` between
+        // lowers, so a path carrying either byte would add or replace an option. The refusal
+        // comes before any mount is attempted, so this needs no privilege.
+        let plain = Path::new("/nonexistent/kennel/layer");
+        let target = Path::new("/nonexistent/kennel/merged");
+        for bad in ["/tmp/x,lowerdir=/etc", "/tmp/a:/etc", "/tmp/trailing\\"] {
+            let bad = Path::new(bad);
+            let as_lower = mount_overlay(&[plain, bad], None, target).expect_err("lower refused");
+            assert_eq!(as_lower.kind(), io::ErrorKind::InvalidInput, "{as_lower}");
+            let as_upper =
+                mount_overlay(&[plain], Some((bad, plain)), target).expect_err("upper refused");
+            assert_eq!(as_upper.kind(), io::ErrorKind::InvalidInput, "{as_upper}");
+            let as_work =
+                mount_overlay(&[plain], Some((plain, bad)), target).expect_err("work refused");
+            assert_eq!(as_work.kind(), io::ErrorKind::InvalidInput, "{as_work}");
+        }
+        // A plain path gets past the check and fails at the mount itself.
+        let plain_err = mount_overlay(&[plain], None, target).expect_err("no such mount");
+        assert_ne!(plain_err.kind(), io::ErrorKind::InvalidInput, "{plain_err}");
+    }
 }
 
 #[cfg(all(test, feature = "e2e"))]

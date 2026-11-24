@@ -270,6 +270,10 @@ struct KennelMeta {
     /// for an ordinary run. A kennel may register a mesh service only as a provider: this is set
     /// by the daemon when the supervisor activates it, never by anything the kennel says.
     provider_tier: Option<crate::catalogue::Tier>,
+    /// Why the daemon killed this kennel, if it did: `"stopped"` (an operator's `kennel stop`) or
+    /// `"reaped"` (its requester went away). `None` when the workload ended by itself. Read once at
+    /// teardown for the `lifecycle.kennel-exit` record.
+    killed_as: Option<&'static str>,
 }
 
 /// One entry in `KennelMeta::consumed`: the name, expected shape, and whether the
@@ -811,6 +815,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 consumed: Vec::new(),
                 settled: None,
                 provider_tier: None,
+                killed_as: None,
             },
         );
         drop(reg);
@@ -938,16 +943,33 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         reg.ctx.release(ctx);
     }
 
+    /// Why the named kennel is ending, for its `lifecycle.kennel-exit` record: the reason the daemon
+    /// killed it, or `"exited"` if its workload ended without the daemon's doing.
+    fn exit_reason(&self, name: &str) -> &'static str {
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .kennels
+            .get(name)
+            .and_then(|meta| meta.killed_as)
+            .unwrap_or("exited")
+    }
+
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
     /// reaps and tears it down). Errors if the kennel is unknown or still starting.
     fn stop(&self, name: &str) -> Response {
         let (ctx, started) = {
-            let reg = self
+            let mut reg = self
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match reg.kennels.get(name) {
-                Some(meta) => (meta.ctx, meta.pid.is_some()),
+            match reg.kennels.get_mut(name) {
+                Some(meta) => {
+                    if meta.pid.is_some() {
+                        meta.killed_as = Some("stopped");
+                    }
+                    (meta.ctx, meta.pid.is_some())
+                }
                 None => return Response::Error(format!("no kennel named `{name}`")),
             }
         };
@@ -990,14 +1012,17 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     fn reap_children(&self, parent_ctx: u16) {
         let prefix = crate::spawn::child_name_prefix(parent_ctx);
         let children: Vec<u16> = {
-            let reg = self
+            let mut reg = self
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             reg.kennels
-                .iter()
+                .iter_mut()
                 .filter(|(name, _)| name.starts_with(&prefix))
-                .map(|(_, meta)| meta.ctx)
+                .map(|(_, meta)| {
+                    meta.killed_as.get_or_insert("reaped");
+                    meta.ctx
+                })
                 .collect()
         };
         for child_ctx in children {
@@ -1154,10 +1179,12 @@ where
             Ok(uid) if uid == served => {}
             Ok(uid) => {
                 eprintln!("kenneld: rejected control connection from uid {uid} (serves {served})");
+                crate::audit::daemon_audit().emit(&crate::audit::control_refused(Some(uid)));
                 continue;
             }
             Err(e) => {
                 eprintln!("kenneld: rejecting control connection (peer-cred check failed: {e})");
+                crate::audit::daemon_audit().emit(&crate::audit::control_refused(None));
                 continue;
             }
         }
@@ -1286,11 +1313,20 @@ pub fn dispatch_request<P, L>(
             Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor, None, None),
             Err(e) => {
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
+                // The name failed its grammar, so it is recorded as untrusted text.
+                crate::audit::daemon_audit().emit(&crate::audit::start_refused(
+                    &req.kennel,
+                    "name",
+                    &e,
+                ));
                 Response::Error(e)
             }
         },
         Request::Stop { kennel } => match validate_kennel_name(&kennel) {
-            Ok(()) => shared.stop(&kennel),
+            Ok(()) => {
+                crate::audit::daemon_audit().emit(&crate::audit::control_request("stop", &kennel));
+                shared.stop(&kennel)
+            }
             Err(e) => {
                 eprintln!("kenneld: rejected stop of `{kennel}`: {e}");
                 Response::Error(e)
@@ -1314,7 +1350,11 @@ pub fn dispatch_request<P, L>(
         // workload exit), so it returns rather than falling through to the single
         // response below.
         Request::Attach { kennel } => match validate_kennel_name(&kennel) {
-            Ok(()) => return run_attach(shared, &kennel, fds, conn),
+            Ok(()) => {
+                crate::audit::daemon_audit()
+                    .emit(&crate::audit::control_request("attach", &kennel));
+                return run_attach(shared, &kennel, fds, conn);
+            }
             Err(e) => Response::Error(e),
         },
         // Resize the kennel's pty (the broker holds the master). Fire-and-forget: a
@@ -1335,11 +1375,24 @@ pub fn dispatch_request<P, L>(
         Request::PromptReply { .. } => Response::Error("unexpected PromptReply".to_owned()),
         // Re-derive the service catalogue from the enablement links on disk (§7.13.6).
         Request::DaemonReload => {
+            crate::audit::daemon_audit().emit(&crate::audit::control_request("reload", ""));
             let catalogued = u32::try_from(shared.rebuild_catalogue()).unwrap_or(u32::MAX);
             Response::Reloaded { catalogued }
         }
     };
     let _ = control::send_response(conn, &response);
+}
+
+/// Whether `name` is in the space the daemon names spawned kennels from: `spawn-<ctx>-…`
+/// ([`crate::spawn::child_name_prefix`]).
+///
+/// This is exactly what the hard reaper matches (`spawn-<ctx>-` as a prefix), so no name an
+/// operator can start is ever taken for some kennel's child. A name that merely starts with
+/// `spawn-` (`spawn-tools`, `spawn-argv`) is an ordinary name.
+fn is_reserved_kennel_name(name: &str) -> bool {
+    name.strip_prefix("spawn-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(ctx, _)| !ctx.is_empty() && ctx.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The maximum kennel-name length (`02-2-config-schema.md`: `[a-z0-9][a-z0-9-]{0,63}`).
@@ -1417,6 +1470,21 @@ pub fn run_kennel<P, L>(
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{}`", req.kennel));
+    // `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
+    // kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
+    // a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
+    // operator's kennel or a provider with such a name would be reaped as some kennel's child.
+    if preloaded.is_none() && is_reserved_kennel_name(&req.kennel) {
+        let msg = format!(
+            "kennel name `{}` is reserved: `spawn-<number>-…` is how the daemon names the \
+             kennels it spawns",
+            req.kennel
+        );
+        eprintln!("kenneld: rejected start of `{}`: {msg}", req.kennel);
+        crate::audit::daemon_audit().emit(&crate::audit::start_refused(&req.kennel, "name", &msg));
+        let _ = control::send_response(conn, &Response::Error(msg));
+        return;
+    }
     let mut mesh_bus_guard = MeshBusGuard::new(shared);
     let ctx = match shared.reserve(&req.kennel) {
         Ok(ctx) => ctx,
@@ -1426,6 +1494,11 @@ pub fn run_kennel<P, L>(
                     "kenneld: kennel `{}` failed to start [reserve]: {msg}",
                     req.kennel
                 );
+                crate::audit::daemon_audit().emit(&crate::audit::start_refused(
+                    &req.kennel,
+                    "reserve",
+                    msg,
+                ));
             }
             let _ = control::send_response(conn, &resp);
             return;
@@ -2364,7 +2437,7 @@ pub fn run_kennel<P, L>(
     }
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
-        writer.emit(&crate::audit::kennel_exit("stopped"));
+        writer.emit(&crate::audit::kennel_exit(shared.exit_reason(&req.kennel)));
     }
     // Stop the BPF drain after the lifecycle events: a final sweep captures events
     // committed just before exit, then the per-kennel pins are removed.
@@ -2463,6 +2536,7 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
     reason: String,
 ) {
     eprintln!("kenneld: kennel `{name}` failed to start [{stage}]: {reason}");
+    crate::audit::daemon_audit().emit(&crate::audit::start_refused(name, stage, &reason));
     // Drop any SSH edges registered before the failing step (a no-op otherwise), so
     // a failed bring-up leaves no synthetic key in the bastion.
     shared.deregister_ssh(name);
@@ -3142,6 +3216,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_refusal_and_control_records_carry_what_happened() {
+        let refused = crate::audit::start_refused("k", "verify", "signature does not verify");
+        let line = format!("{refused:?}");
+        assert!(line.contains("lifecycle.kennel-start-refused"), "{line}");
+        assert!(line.contains("verify") && line.contains("Deny"), "{line}");
+        let foreign = format!("{:?}", crate::audit::control_refused(Some(1001)));
+        assert!(
+            foreign.contains("1001") && foreign.contains("Deny"),
+            "{foreign}"
+        );
+        let stop = format!("{:?}", crate::audit::control_request("stop", "k"));
+        assert!(
+            stop.contains("lifecycle.control") && stop.contains("stop"),
+            "{stop}"
+        );
+    }
+
+    #[test]
+    fn names_the_daemon_gives_spawned_kennels_are_reserved() {
+        // Whatever the spawner names a child must be in the reserved space, and nothing an
+        // operator would plausibly choose should be.
+        assert!(is_reserved_kennel_name(&format!(
+            "{}00000000002a",
+            crate::spawn::child_name_prefix(7)
+        )));
+        assert!(is_reserved_kennel_name("spawn-7-1"));
+        assert!(
+            is_reserved_kennel_name("spawn-7-xyz"),
+            "the reaper's prefix match takes it"
+        );
+        // Names the suite and operators really use.
+        for free in [
+            "spawn-argv",
+            "spawn-caps",
+            "spawner",
+            "my-spawn-7-1",
+            "spawn-7",
+            "spawn-x-1",
+        ] {
+            assert!(!is_reserved_kennel_name(free), "{free}");
+        }
     }
 
     #[test]

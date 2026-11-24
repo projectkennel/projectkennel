@@ -355,11 +355,34 @@ fn fold(parent: &SourcePolicy, child: &SourcePolicy, warn: &mut Vec<String>) -> 
 /// Fold `[spawn]` down the chain: `max_instances` and `reason` are scalar-wins (child overriding);
 /// the `[[spawn.allow]]` target set replaces or increments (`[[spawn.allow.add]]`), keyed by
 /// template name — a child extends the instantiable set without restating it (W6).
+///
+/// A child `add` for a template the chain already allows **replaces** that entry. The generic
+/// increment keeps the inherited entry and discards the child's, which for this list would
+/// discard a child's `mutable` narrowing without a word and leave the template's full manifest
+/// writable. The replacement is warned, since it can widen as well as narrow.
 fn fold_spawn(p: &SpawnSection, c: &SpawnSection, warn: &mut Vec<String>) -> SpawnSection {
+    let mut allow = fold_listfield(&c.allow, &p.allow, spawn_key, "spawn.allow", warn);
+    if let (ListField::Delta(delta), ListField::Set(folded)) = (&c.allow, &mut allow) {
+        for entry in &delta.add {
+            let inherited = folded
+                .iter_mut()
+                .find(|have| spawn_key(have) == spawn_key(entry));
+            if let Some(have) = inherited {
+                if have != entry {
+                    warn.push(format!(
+                        "`spawn.allow` entry for template `{}` replaces the inherited entry \
+                         (its `mutable` narrowing differs)",
+                        spawn_key(entry)
+                    ));
+                    *have = entry.clone();
+                }
+            }
+        }
+    }
     SpawnSection {
         max_instances: or(&c.max_instances, &p.max_instances),
         reason: or(&c.reason, &p.reason),
-        allow: fold_listfield(&c.allow, &p.allow, spawn_key, "spawn.allow", warn),
+        allow,
     }
 }
 
@@ -1054,6 +1077,48 @@ fn fold_lifecycle(p: &LifecycleSection, c: &LifecycleSection) -> LifecycleSectio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child that narrows an inherited spawn target must get its narrowing.
+    #[test]
+    fn a_childs_entry_for_an_inherited_spawn_template_replaces_it() {
+        let entry = |mutable: Option<&[&str]>| crate::source::SpawnAllow {
+            template: Some("net-fetch".to_owned()),
+            mutable: mutable.map(|m| m.iter().map(|f| (*f).to_owned()).collect()),
+        };
+        let parent = SpawnSection {
+            allow: ListField::Set(vec![entry(None)]),
+            ..SpawnSection::default()
+        };
+        let child = SpawnSection {
+            allow: ListField::Delta(crate::source::Delta {
+                add: vec![entry(Some(&["fs.write"]))],
+                remove: Vec::new(),
+            }),
+            ..SpawnSection::default()
+        };
+        let mut warn = Vec::new();
+        let folded = fold_spawn(&parent, &child, &mut warn);
+        assert_eq!(
+            folded.allow,
+            ListField::Set(vec![entry(Some(&["fs.write"]))])
+        );
+        assert!(warn.iter().any(|w| w.contains("net-fetch")), "{warn:?}");
+
+        // Restating the inherited entry unchanged replaces nothing and warns of nothing.
+        let same = SpawnSection {
+            allow: ListField::Delta(crate::source::Delta {
+                add: vec![entry(None)],
+                remove: Vec::new(),
+            }),
+            ..SpawnSection::default()
+        };
+        let mut warn = Vec::new();
+        assert_eq!(
+            fold_spawn(&parent, &same, &mut warn).allow,
+            ListField::Set(vec![entry(None)])
+        );
+        assert!(warn.is_empty(), "{warn:?}");
+    }
     use crate::source::parse;
 
     /// The cidrs of a folded `[net.proxy.deny].policy` list (empty if the fold left an increment,

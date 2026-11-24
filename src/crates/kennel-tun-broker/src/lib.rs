@@ -25,6 +25,7 @@ pub mod forward;
 pub mod icmp;
 pub mod poll;
 pub mod serve;
+pub mod session;
 pub mod shim;
 pub mod table;
 

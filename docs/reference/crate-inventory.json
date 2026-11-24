@@ -1,12 +1,12 @@
 {
   "crate_count": 31,
-  "total_sloc": 45701,
+  "total_sloc": 46614,
   "tcb_crate_count": 17,
-  "tcb_sloc": 27948,
+  "tcb_sloc": 28695,
   "crates": [
     {
       "name": "kenneld",
-      "sloc": 8135,
+      "sloc": 8443,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-akc", "kenneld"],
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5896,
+      "sloc": 5932,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -36,7 +36,7 @@
     },
     {
       "name": "kennel-lib-policy",
-      "sloc": 2789,
+      "sloc": 2976,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -46,7 +46,7 @@
     },
     {
       "name": "kennel-lib-spawn",
-      "sloc": 2764,
+      "sloc": 2869,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -56,7 +56,7 @@
     },
     {
       "name": "kennel-lib-toml",
-      "sloc": 2717,
+      "sloc": 2734,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -76,7 +76,7 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 1920,
+      "sloc": 1925,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
@@ -86,7 +86,7 @@
     },
     {
       "name": "kennel-lib-syscall",
-      "sloc": 1858,
+      "sloc": 1871,
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
@@ -96,7 +96,7 @@
     },
     {
       "name": "kennel-facade",
-      "sloc": 1607,
+      "sloc": 1614,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["compositor-broker", "facade-afunix", "facade-client", "facade-dbus", "facade-mesh-probe", "facade-socks5", "facade-spawn-bench", "facade-spawn-probe", "facade-ssh", "facade-tun", "kennel-spawn"],
@@ -115,6 +115,16 @@
       "external_deps": []
     },
     {
+      "name": "kennel-tun-broker",
+      "sloc": 1091,
+      "uses_unsafe": false,
+      "in_tcb": false,
+      "bins": ["tun-broker", "tun-flow"],
+      "consumers": [],
+      "first_party_deps": ["kennel-host-delegate", "kennel-lib-binder", "kennel-lib-policy", "kennel-lib-scm", "kennel-lib-syscall"],
+      "external_deps": ["nix", "simple-dns"]
+    },
+    {
       "name": "kennel-lib-bpf",
       "sloc": 1007,
       "uses_unsafe": true,
@@ -123,16 +133,6 @@
       "consumers": ["kenneld", "spawn"],
       "first_party_deps": ["kennel-lib-syscall"],
       "external_deps": ["libc", "object"]
-    },
-    {
-      "name": "kennel-tun-broker",
-      "sloc": 968,
-      "uses_unsafe": false,
-      "in_tcb": false,
-      "bins": ["tun-broker", "tun-flow"],
-      "consumers": [],
-      "first_party_deps": ["kennel-host-delegate", "kennel-lib-binder", "kennel-lib-policy", "kennel-lib-syscall"],
-      "external_deps": ["nix", "simple-dns"]
     },
     {
       "name": "kennel-lib-dbus",
@@ -146,7 +146,7 @@
     },
     {
       "name": "kennel-lib-control",
-      "sloc": 807,
+      "sloc": 824,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -195,6 +195,16 @@
       "external_deps": ["serde"]
     },
     {
+      "name": "kennel-lib-os",
+      "sloc": 491,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": [],
+      "consumers": ["host-delegate", "syscall"],
+      "first_party_deps": [],
+      "external_deps": ["libc", "nix"]
+    },
+    {
       "name": "kennel-bin-init",
       "sloc": 457,
       "uses_unsafe": false,
@@ -205,23 +215,13 @@
       "external_deps": []
     },
     {
-      "name": "kennel-lib-os",
-      "sloc": 414,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": [],
-      "consumers": ["syscall"],
-      "first_party_deps": [],
-      "external_deps": ["libc", "nix"]
-    },
-    {
       "name": "kennel-host-delegate",
-      "sloc": 302,
+      "sloc": 320,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["host-inetd", "host-netproxy"],
       "consumers": ["kenneld", "tun-broker"],
-      "first_party_deps": ["kennel-lib-scm"],
+      "first_party_deps": ["kennel-lib-os", "kennel-lib-scm"],
       "external_deps": []
     },
     {
@@ -280,7 +280,7 @@
       "uses_unsafe": true,
       "in_tcb": true,
       "bins": [],
-      "consumers": ["facade", "host-delegate", "syscall"],
+      "consumers": ["facade", "host-delegate", "syscall", "tun-broker"],
       "first_party_deps": [],
       "external_deps": ["nix"]
     },

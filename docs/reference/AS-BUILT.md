@@ -26,6 +26,103 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-24 — which directory may be an OCI image root
+
+- **Bears-on:** Kennel book Vol 2 §7.11.4a (the OCI substrate root) (best-effort).
+- **Change:** the construction child decides, with the operator's filesystem identity, whether
+  a directory may be the overlay's image lower (`kennel-lib-spawn/src/image.rs`), before the
+  one mount it makes as root:
+  - the operator must be able to list and search the directory. The kernel is asked (the
+    directory is opened for reading and a name is looked up in it); the `O_PATH` handle the
+    mount uses is granted without any access and proves nothing;
+  - the directory is the operator's own, or it is root's, not writable by group or other, and
+    lies beneath `/usr`, `/var`, `/etc`, `/lib`, `/lib64` or `/opt` — judged on the path the
+    handle resolved to, so a symlink or `..` does not change the answer. `/` and the roots
+    themselves do not qualify;
+  - every directory in the `kennel-etc` layer that the image also has as a directory must be
+    one the operator can list and search. Where the image has no directory of that name the
+    walk stops: nothing beneath merges;
+  - a root-owned image is refused with a persistent upper. The operator can add a directory
+    to their own upper at any time, which would cover the image directory of the same name,
+    and no check made before the mount can rule that out.
+  None of this applies when the operator is root.
+- **Why:** overlayfs reads lower inodes with the mounter's credentials and shows a merged
+  directory with the top layer's attributes. The factory acts as the operator so that it
+  cannot read what its caller could not; the image lower was the one input where being
+  reachable stood in for being accessible.
+- **Not changed:** an operator-owned image may still contain directories the operator cannot
+  enter (left there by root); with a persistent upper the operator could cover one. Root's
+  credentials stay inside the operator's own tree, which is the existing rule for the upper.
+- **Source:** #244.
+
+## 2026-11-24 — the follow-up review's remaining findings
+
+- **Bears-on:** Kennel book Vol 2 ch.8 (The Network: the tun path, the INet facade, the inbound
+  mirror §7.5.7), §7.6 (`[unix]` grants), §7.12 (spawn), §7.13 (the mesh and the supervisor),
+  §9.7 (the TTL custodian), and the audit chapter.
+- **Change:**
+  - *The tun session channel is `SOCK_SEQPACKET`*, not a connected `SOCK_DGRAM` pair. Frames
+    are still one per message. A mediator exits on hang-up, on a zero-length read, or on a send
+    that reports the peer gone; `EINTR` no longer ends it. The broker admits two live sessions
+    for one kennel (keyed by the tun address kenneld writes into the session payload) and 256
+    overall, and reaps mediators from one thread. A refused session is answered at once, not
+    retried until the consume deadline. `facade-tun` exits when the channel closes.
+  - *A `[[unix.allow]]` `real`* may not be in the daemon's runtime directory
+    (`$XDG_RUNTIME_DIR/kennel/`, any part of it) nor in the workload-writable surface (`write` ∪
+    `exclusive` ∪ `home_persist` ∪ write-redirect sources). The daemon opens the socket with
+    `O_PATH`, applies the first rule to `/proc/self/fd/<n>`'s target, and connects through that
+    same path. A `shim`, and the `at` of an af-unix `[[consumes]]`, must be rooted at `/`,
+    `~/`, `$HOME/`, `$XDG_RUNTIME_DIR/` or `<home>/`, have no `.`, `..` or `=`, and not sit
+    directly under `/`.
+  - *The inbound mirror listener is bound to the `lo` device* (`SO_BINDTODEVICE`) before it is
+    bound to the kennel's address. `host-inetd` caps conduits per process. kenneld writes a
+    `net.inbound-connect` record per accepted connection, releases the binder reference a
+    repeated `REGISTER_MIRROR` replaced, and drains held conduits on each arrival.
+  - *Egress refuses the host's own addresses.* The INet decision and the UDP mediator list the
+    host's interface addresses (`getifaddrs`) at decision time and refuse a literal or resolved
+    destination that is one of them, on the same terms as special-use space. A `[net.udp]`
+    `name` must be a DNS name.
+  - *Enforcement results are reported.* The tripwire and the TTL handler audit a failed
+    freeze, kill or thaw as `error`. A registration whose death notification cannot be
+    requested is refused.
+  - *Spawn narrowing.* `mutable = []` is a compile error. A child's `[[spawn.allow.add]]` for
+    an inherited template replaces the inherited entry.
+  - *Load-time rules.* `invariant::validate` checks the identity names, the hostname, the
+    bind-port cap and the digest form with the compiler's predicates, and `patch::instantiate`
+    runs it on the policy it produces.
+  - *Smaller items.* The mesh rendezvous datagram is all or nothing; the loopback-address cap
+    refuses when it cannot count; a context manager that does not start fails the bring-up;
+    kennel names of the form `spawn-<number>-…` are reserved to the daemon; a provider's restart count
+    resets after a minute of readiness; start refusals, foreign control connections and
+    `stop`/`attach`/`reload` are audited through a daemon-level writer, and
+    `lifecycle.kennel-exit` carries `exited`, `stopped` or `reaped`.
+- **Not changed:** any local user can connect to a mirrored port (TCP has no peer identity to
+  check); the UDP path dials RFC1918, CGNAT and ULA by design; "narrowed to no fields" cannot
+  be expressed in a spawn grant (it would need a settled-schema field); `[fs.cwd]` is not part
+  of the load-time write-set check, because it is known only at spawn.
+- **Why:** each was a place where a control was stated and not enforced, enforced in one of two
+  places, or failed open on an error.
+- **Source:** the 2026-11-24 follow-up review (findings N-03 to N-23); branch
+  `fix/overlay-options-and-dotted-keys`.
+
+## 2026-11-24 — the overlay option string and dotted keys are bounded
+
+- **Bears-on:** Kennel book Vol 2: the view construction chapter (the OCI overlay, §7.11) and
+  the policy-parsing chapter (the parser's limits).
+- **Change:**
+  - *Overlay layers.* `mount_overlay` refuses a lower, upper or work path that is not UTF-8 or
+    contains `,`, `:` or `\`, before it attempts the mount. The rule was a comment on the
+    function ("callers pass only … paths, none of which carries those bytes"); the OCI staging
+    root is named by the factory's caller and was not checked.
+  - *Dotted keys.* Each part of a dotted key after the first counts toward `MAX_NESTING` (64),
+    the budget arrays, inline tables and table headers already share. A key is refused as soon
+    as it would pass the limit. A key of 100,000 parts used to overflow the stack.
+- **Why:** the factory performs the overlay mount with root's filesystem identity, so its
+  option string must not be shaped by its caller; and the parser runs on a file before the
+  file's signature is checked, so no input may cost unbounded stack.
+- **Source:** the 2026-11-24 follow-up review (findings N-01 and N-02); branch
+  `fix/overlay-options-and-dotted-keys`.
+
 ## 2026-11-20 — low-severity hardening, second group
 
 - **Bears-on:** Kennel book Vol 2: the view construction chapter (scaffolding, the OCI closure

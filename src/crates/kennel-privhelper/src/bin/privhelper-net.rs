@@ -83,9 +83,16 @@ fn run() -> Result<(), u8> {
     // handful per kennel; a caller driving this helper directly must not be able to add them
     // without bound.
     if matches!(op, Op::Add) {
-        let held = std::fs::read_to_string("/proc/net/if_inet6").map_or(0, |table| {
-            reserved_addresses(&table, kennel_privhelper::validate::reserved_prefix(&scope))
-        });
+        // An unreadable table is not an empty one: without the count there is no cap, so the
+        // add is refused.
+        let table = std::fs::read_to_string("/proc/net/if_inet6").map_err(|e| {
+            eprintln!(
+                "kennel-privhelper-net: cannot count the addresses already on {LOOPBACK} \
+                 (/proc/net/if_inet6: {e}); refusing to add more"
+            );
+            REFUSED
+        })?;
+        let held = reserved_addresses(&table, kennel_privhelper::validate::reserved_prefix(&scope));
         if held >= MAX_RESERVED_ADDRESSES {
             eprintln!(
                 "kennel-privhelper-net: {held} addresses of this user's reserved subnet are \

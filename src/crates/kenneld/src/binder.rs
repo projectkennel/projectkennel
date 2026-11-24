@@ -158,6 +158,7 @@ pub fn spawn(
     // on the open that received it — so the inbound runtime borrows the context manager. Attached
     // before the pool serves, so a REGISTER_MIRROR can never race an unattached pusher.
     inbound.attach_pusher(Arc::clone(&cm));
+    inbound.attach_audit(Arc::clone(&writer), ctx);
 
     // The handler runs concurrently on every looper, so its shared state is held by Arc.
     let unix = Arc::new(unix);
@@ -331,7 +332,14 @@ fn ttl_expired(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
 ) -> (&'static str, Outcome, Reply) {
-    let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
+    // The freeze holds the workload still while this is decided. If it fails the decision is
+    // still made, and the kill or thaw below reports its own result.
+    if let Err(e) = crate::cgroup::freeze_cgroup(&lifecycle.cgroup) {
+        eprintln!(
+            "kenneld: kennel '{}': TTL freeze failed: {e}",
+            lifecycle.name
+        );
+    }
     // W6 idle-reap (§7.13.6): an ondemand provider's TTL is its idle grace. On each fire, keep it
     // (re-arm) while a consumer kennel runs, reap it when none — riding this existing TTL custodian,
     // not a parallel reaper. "Consumer" = a running kennel whose `[[consumes]]` names a capability
@@ -345,10 +353,9 @@ fn ttl_expired(
         // No activator (a construction-only path) ⇒ cannot census ⇒ keep it: never destroy a
         // provider on a blind check (mirrors the missed-prompt `renew` fallback).
         if activator.is_none_or(|a| a.has_running_consumer(&offers)) {
-            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
             return (
                 "binder.ttl-provider-keep",
-                Outcome::Info,
+                ttl_thaw(lifecycle),
                 Reply::Data(one(ttl::RENEW)),
             );
         }
@@ -358,10 +365,9 @@ fn ttl_expired(
         if let Some(a) = activator {
             a.mark_idle_reaped(&lifecycle.name);
         }
-        let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
         return (
             "binder.ttl-provider-reap",
-            Outcome::Allow,
+            ttl_kill(lifecycle),
             Reply::Data(one(ttl::TERMINATE)),
         );
     }
@@ -369,21 +375,17 @@ fn ttl_expired(
         kennel_lib_policy::TtlAction::Exit => {
             // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
             // killed, so it never reads the reply; the reply byte is moot.
-            let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
             (
                 "binder.ttl-terminate",
-                Outcome::Allow,
+                ttl_kill(lifecycle),
                 Reply::Data(one(ttl::TERMINATE)),
             )
         }
-        kennel_lib_policy::TtlAction::Warn => {
-            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
-            (
-                "binder.ttl-warn",
-                Outcome::Info,
-                Reply::Data(one(ttl::RESUME)),
-            )
-        }
+        kennel_lib_policy::TtlAction::Warn => (
+            "binder.ttl-warn",
+            ttl_thaw(lifecycle),
+            Reply::Data(one(ttl::RESUME)),
+        ),
         kennel_lib_policy::TtlAction::Renew => {
             let question = format!(
                 "kennel '{}' reached its TTL — renew for another period? [y/N]",
@@ -392,33 +394,63 @@ fn ttl_expired(
             match lifecycle.prompt.as_ref().and_then(|p| p.ask(&question)) {
                 Some(true) => {
                     // Approved: thaw and tell kennel-bin-init to re-arm for another period.
-                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-renew",
-                        Outcome::Info,
+                        ttl_thaw(lifecycle),
                         Reply::Data(one(ttl::RENEW)),
                     )
                 }
                 Some(false) => {
                     // Declined: the deadline stands — terminate like `exit`.
-                    let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-decline",
-                        Outcome::Allow,
+                        ttl_kill(lifecycle),
                         Reply::Data(one(ttl::TERMINATE)),
                     )
                 }
                 None => {
                     // No operator could be asked (non-interactive, detached, timed out): fall
                     // back to a warn (resume, no re-arm).
-                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-warn-no-operator",
-                        Outcome::Info,
+                        ttl_thaw(lifecycle),
                         Reply::Data(one(ttl::RESUME)),
                     )
                 }
             }
+        }
+    }
+}
+
+/// Kill the kennel for its TTL; the outcome to audit (`Allow` if the kill took effect).
+fn ttl_kill(lifecycle: &Lifecycle) -> Outcome {
+    let result = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+    enforced(lifecycle, "kill", result, Outcome::Allow)
+}
+
+/// Thaw the kennel after a TTL decision; the outcome to audit (`Info` if the thaw took effect).
+fn ttl_thaw(lifecycle: &Lifecycle) -> Outcome {
+    let result = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+    enforced(lifecycle, "thaw", result, Outcome::Info)
+}
+
+/// The outcome to audit for one TTL step: `done` if the cgroup write took effect, `Error` if it
+/// did not. A kill that failed leaves the workload running past its deadline, and a thaw that
+/// failed leaves it frozen; neither may be recorded as the action having happened.
+fn enforced(
+    lifecycle: &Lifecycle,
+    step: &str,
+    result: std::io::Result<()>,
+    done: Outcome,
+) -> Outcome {
+    match result {
+        Ok(()) => done,
+        Err(e) => {
+            eprintln!(
+                "kenneld: kennel '{}': TTL {step} failed: {e}",
+                lifecycle.name
+            );
+            Outcome::Error
         }
     }
 }
@@ -777,6 +809,41 @@ fn emit_svc_connect(
     Reply::Data(one(status))
 }
 
+/// Why a granted host socket was not connected.
+enum GrantedConnect {
+    /// The path leads to one of the daemon's own sockets.
+    DaemonSocket,
+    /// Nothing connectable is there.
+    Unreachable,
+}
+
+/// Connect to the host socket a `[[unix.allow]]` grants at `real`.
+///
+/// The socket is opened once and held by descriptor; the daemon-socket rule is applied to the
+/// path of that open file, and the connect goes to that same file. Checking the name and then
+/// connecting to the name would leave a moment in which it can be made to point elsewhere.
+///
+/// The rule backstops the compiler's: never broker a connect to a kenneld socket (the control
+/// socket, a delegate's command socket), even if a signed settled policy carries the grant.
+fn connect_granted_socket(
+    real: &std::path::Path,
+) -> Result<std::os::unix::net::UnixStream, GrantedConnect> {
+    use kennel_lib_control::socket::is_daemon_socket;
+    if is_daemon_socket(real) {
+        return Err(GrantedConnect::DaemonSocket);
+    }
+    let pinned = kennel_lib_syscall::net::PinnedSocket::open(real)
+        .map_err(|_| GrantedConnect::Unreachable)?;
+    // Fail closed: a socket whose resolved path cannot be read is not shown to be someone else's.
+    let resolved = pinned.path().map_err(|_| GrantedConnect::Unreachable)?;
+    if is_daemon_socket(&resolved) {
+        return Err(GrantedConnect::DaemonSocket);
+    }
+    pinned
+        .connect(AFUNIX_CONNECT_DEADLINE)
+        .map_err(|_| GrantedConnect::Unreachable)
+}
+
 fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested
@@ -785,26 +852,16 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
     let (outcome, reply) = target.map_or_else(
         || (Outcome::Deny, Reply::Data(one(status::DENIED))),
         |socket| {
-            let real = std::path::Path::new(&socket.real);
-            // Backstop the compiler's control-socket ungrantability rule at the daemon, against the
-            // REAL endpoint (symlink-resolved): never broker a connect to the kenneld control socket,
-            // even if a signed settled policy somehow carries the grant. The compiler refuses it at
-            // install (the loud primary guard); this is the construction-time belt to those braces.
-            let resolved = std::fs::canonicalize(real);
-            if kennel_lib_control::socket::is_control_socket(real)
-                || resolved
-                    .as_deref()
-                    .is_ok_and(kennel_lib_control::socket::is_control_socket)
-            {
-                (Outcome::Deny, Reply::Data(one(status::DENIED)))
-            } else {
-                kennel_lib_syscall::net::connect_unix_timeout(real, AFUNIX_CONNECT_DEADLINE)
-                    .map_or_else(
-                        // Granted but unreachable (absent / refused / timed out): never tie up the
-                        // looper on a wedged target.
-                        |_| (Outcome::Error, Reply::Data(one(status::NOT_FOUND))),
-                        |stream| (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
-                    )
+            match connect_granted_socket(std::path::Path::new(&socket.real)) {
+                Ok(stream) => (Outcome::Allow, Reply::Fd(OwnedFd::from(stream))),
+                Err(GrantedConnect::DaemonSocket) => {
+                    (Outcome::Deny, Reply::Data(one(status::DENIED)))
+                }
+                // Granted but unreachable (absent / not a socket / refused / timed out): never
+                // tie up the looper on a wedged target.
+                Err(GrantedConnect::Unreachable) => {
+                    (Outcome::Error, Reply::Data(one(status::NOT_FOUND)))
+                }
             }
         },
     );
@@ -943,7 +1000,19 @@ fn register_mirror(
         ));
         return Reply::Data(one(status::BAD_REQUEST));
     }
-    let _ = conn.request_death(handle, u64::from(handle));
+    // Without the death notification the daemon would go on pushing conduits to a node that is
+    // gone. A registration that cannot be watched is not made.
+    if conn.request_death(handle, u64::from(handle)).is_err() {
+        let _ = conn.release_handle(handle);
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            port,
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::UNAVAILABLE));
+    }
     inbound.register(conn, port, handle);
     writer.emit(&inet_event(
         incoming,
@@ -1011,7 +1080,21 @@ fn register_tun_sink(
         ));
         return Reply::Data(one(status::BAD_REQUEST));
     }
-    let _ = conn.request_death(handle, crate::tun_sink::SINK_DEATH_COOKIE);
+    // Without the death notification a dead broker would stay registered, and every consumer
+    // would be sent to it. A sink that cannot be watched is not recorded.
+    if conn
+        .request_death(handle, crate::tun_sink::SINK_DEATH_COOKIE)
+        .is_err()
+    {
+        let _ = conn.release_handle(handle);
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::UNAVAILABLE));
+    }
     tun.sink.set(Arc::clone(tun.cm), handle);
     writer.emit(&tun_event(
         incoming,
@@ -1082,9 +1165,16 @@ fn tun_connect(
         return Reply::Data(one(status::DENIED));
     };
     // Fast path: a warm sink (the standing/already-activated broker) delivers now.
-    if let Ok(fd) = tun.sink.deliver(payload) {
-        writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-        return Reply::Fd(fd);
+    match tun_deliver(tun, payload) {
+        Delivery::Session(fd) => {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+            return Reply::Fd(fd);
+        }
+        Delivery::Refused => {
+            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
+            return Reply::Data(one(status::UNAVAILABLE));
+        }
+        Delivery::NoBroker => {}
     }
     // Cold: socket-activate the tun-broker generically, then consume-with-wait until its sink is
     // deliverable (the delivery's readiness) or the broker deadline fires.
@@ -1096,14 +1186,42 @@ fn tun_connect(
     let start = std::time::Instant::now();
     loop {
         std::thread::sleep(CONSUME_WAIT_POLL);
-        if let Ok(fd) = tun.sink.deliver(payload) {
-            writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
-            return Reply::Fd(fd);
+        match tun_deliver(tun, payload) {
+            Delivery::Session(fd) => {
+                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Allow));
+                return Reply::Fd(fd);
+            }
+            Delivery::Refused => {
+                writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
+                return Reply::Data(one(status::UNAVAILABLE));
+            }
+            Delivery::NoBroker => {}
         }
         if start.elapsed() >= CONSUME_WAIT_DEADLINE {
             writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Error));
             return Reply::Data(one(status::UNAVAILABLE));
         }
+    }
+}
+
+/// What one attempt to deliver a tun session came to.
+enum Delivery {
+    /// The broker minted a session and replied with the consumer end.
+    Session(OwnedFd),
+    /// The broker answered without a session (a kennel at its session ceiling, a payload it would
+    /// not read). Asking again will not change the answer, so the consume is not retried.
+    Refused,
+    /// No broker is registered, or it did not answer: worth waiting for.
+    NoBroker,
+}
+
+/// Deliver the session `payload` to the tun sink once, and say which of the three outcomes it was.
+fn tun_deliver(tun: &TunCtx<'_>, payload: &[u8]) -> Delivery {
+    match tun.sink.deliver(payload) {
+        Ok(fd) => Delivery::Session(fd),
+        // A reply that carries no descriptor is the broker's answer, not its absence.
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Delivery::Refused,
+        Err(_) => Delivery::NoBroker,
     }
 }
 
@@ -1146,6 +1264,26 @@ fn decode_name(data: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A TTL action that could not be applied must not be audited as applied.
+    #[test]
+    fn a_ttl_kill_or_thaw_that_fails_is_audited_as_an_error() {
+        let missing = std::env::temp_dir().join(format!("kennel-ttl-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        for action in [
+            kennel_lib_policy::TtlAction::Exit,
+            kennel_lib_policy::TtlAction::Warn,
+        ] {
+            let lifecycle = Lifecycle {
+                cgroup: missing.clone(),
+                ttl_action: action,
+                name: "k".to_owned(),
+                ..Lifecycle::default()
+            };
+            let (name, outcome, _reply) = ttl_expired(&lifecycle, None, None);
+            assert_eq!(outcome, Outcome::Error, "{name}");
+        }
+    }
 
     #[test]
     fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {

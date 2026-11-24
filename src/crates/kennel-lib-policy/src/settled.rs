@@ -159,6 +159,35 @@ pub fn name_matches(pattern: &str, name: &str) -> bool {
     )
 }
 
+/// Whether `pattern` is a host pattern a name grant may carry: a DNS name, optionally with the
+/// leading dot of the subdomain convention ([`name_matches`]).
+///
+/// At most 253 characters; labels of 1 to 63 letters, digits, `-` and `_`, not starting or ending
+/// with `-`; and a last label that is not all digits. That last rule is what keeps an address out:
+/// `10.0.0.5` has the shape of a name, the resolver returns it as itself, and a name-only grant
+/// would then be a grant of that address. An IPv6 literal fails on its `:`.
+#[must_use]
+pub fn host_pattern_ok(pattern: &str) -> bool {
+    let name = pattern.strip_prefix('.').unwrap_or(pattern);
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+    let mut last = "";
+    for label in name.split('.') {
+        let well_formed = (1..=63).contains(&label.len())
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && !label.starts_with('-')
+            && !label.ends_with('-');
+        if !well_formed {
+            return false;
+        }
+        last = label;
+    }
+    !last.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Whether `name` ends with the dotted `suffix` (e.g. `.example.com`) on a label boundary,
 /// case-insensitively. `suffix` includes its leading dot, so the match is inherently label-aligned.
 fn ends_with_label(name: &str, suffix: &str) -> bool {
@@ -171,6 +200,43 @@ fn ends_with_label(name: &str, suffix: &str) -> bool {
 #[cfg(test)]
 mod name_match_tests {
     use super::name_matches;
+
+    #[test]
+    fn a_host_pattern_is_a_name_and_never_an_address() {
+        use super::host_pattern_ok;
+        for ok in [
+            "example.com",
+            ".example.com",
+            "a-b.example",
+            "_srv.example.com",
+            "localhost",
+            "1.example",
+        ] {
+            assert!(host_pattern_ok(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            ".",
+            "10.0.0.5",
+            "0x7f.1",
+            "127.1",
+            "2130706433",
+            "::1",
+            "fe80::1",
+            "[::1]",
+            "a..b",
+            "example.com.",
+            "-a.example",
+            "a-.example",
+            "a b.example",
+            "*.example.com",
+            "exa/mple.com",
+        ] {
+            assert!(!host_pattern_ok(bad), "{bad}");
+        }
+        assert!(!host_pattern_ok(&"a".repeat(64)));
+        assert!(!host_pattern_ok(&format!("{}.com", "a.".repeat(126))));
+    }
 
     #[test]
     fn plain_pattern_matches_exactly_only() {
@@ -1171,6 +1237,59 @@ pub struct IdentityRuntime {
     /// and is omitted from the canonical form, so a policy without it signs unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+}
+
+/// Whether `name` is a portable, non-system Unix user or group name.
+///
+/// 1 to 32 characters; a lowercase letter or `_` first; then lowercase letters, digits, `_` or
+/// `-` (the `useradd(8)` default). The identity names become the synthetic `/etc/passwd` and
+/// `/etc/group` entries, `$USER`, and a component of `$HOME`: a `/`, `:`, newline or NUL in one
+/// would corrupt those files or leave the home path. The compiler and the loader both ask this.
+#[must_use]
+pub fn account_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    (1..=32).contains(&name.len())
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Whether `name` can be written as a group's name in the synthetic `/etc/group`.
+///
+/// A supplementary group is a *host* group, looked up by name at spawn, so its name is whatever
+/// the host calls it and the portable-name rule would be too strict. What it must not do is
+/// break the file it is written into: no `:` or `,` (the field and member separators), no `/`,
+/// no control character, and 1 to 255 bytes.
+#[must_use]
+pub fn group_ref_ok(name: &str) -> bool {
+    (1..=255).contains(&name.len())
+        && !name
+            .chars()
+            .any(|c| matches!(c, ':' | ',' | '/') || c.is_control())
+}
+
+/// Whether `label` is a portable hostname label (RFC 952/1123 shape).
+///
+/// 1 to 63 ASCII letters, digits or hyphens, not starting or ending with a hyphen. The name is
+/// set with `sethostname(2)` and written into the synthetic `/etc/hostname` and `/etc/hosts`.
+#[must_use]
+pub fn hostname_label_ok(label: &str) -> bool {
+    (1..=63).contains(&label.len())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+}
+
+/// Whether `digest` is a SHA-256 digest as a policy carries one: 64 lowercase hex characters.
+#[must_use]
+pub fn sha256_hex_ok(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// The default masked user name: a non-system, non-privileged account.

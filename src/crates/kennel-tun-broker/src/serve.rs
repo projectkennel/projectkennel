@@ -270,7 +270,8 @@ impl Broker {
     }
 }
 
-/// Run the broker loop over the `facade` channel until it closes (kennel teardown / broker HUP).
+/// Run the broker loop over the `facade` channel until the consumer closes its end: a hang-up, a
+/// zero-length read, or a send that reports the peer gone.
 ///
 /// Folds the facade channel and every per-flow socket into one `epoll` set; resolves and dials
 /// inline. Returns `Ok(())` on a clean shutdown.
@@ -286,7 +287,12 @@ pub fn run(mut broker: Broker, facade: &UnixDatagram, mut poller: Poller) -> io:
     let mut fbuf = [0u8; FACADE_CAP];
 
     loop {
-        let ready = poller.wait(Some(SWEEP_INTERVAL))?;
+        let ready = match poller.wait(Some(SWEEP_INTERVAL)) {
+            Ok(ready) => ready,
+            // A signal is not the end of the session.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         let now = Instant::now();
         for r in &ready {
             if r.token == FACADE_TOKEN {
@@ -300,7 +306,9 @@ pub fn run(mut broker: Broker, facade: &UnixDatagram, mut poller: Poller) -> io:
                         match broker.on_egress(frame, now) {
                             Egress::Nothing => {}
                             Egress::ToFacade(bytes) => {
-                                let _ = facade.send(&bytes);
+                                if consumer_gone(facade.send(&bytes)) {
+                                    return Ok(());
+                                }
                             }
                             Egress::NewFlow { key, socket } => {
                                 let token = next_token;
@@ -323,10 +331,14 @@ pub fn run(mut broker: Broker, facade: &UnixDatagram, mut poller: Poller) -> io:
                 match broker.on_flow_readable(key, now) {
                     Ingress::Nothing => {}
                     Ingress::ToFacade(bytes) => {
-                        let _ = facade.send(&bytes);
+                        if consumer_gone(facade.send(&bytes)) {
+                            return Ok(());
+                        }
                     }
                     Ingress::ToFacadeAndEvict(bytes) => {
-                        let _ = facade.send(&bytes);
+                        if consumer_gone(facade.send(&bytes)) {
+                            return Ok(());
+                        }
                         broker.remove(key);
                         if let Some(token) = key_token.remove(&key) {
                             token_key.remove(&token);
@@ -343,6 +355,19 @@ pub fn run(mut broker: Broker, facade: &UnixDatagram, mut poller: Poller) -> io:
             }
         }
     }
+}
+
+/// Whether a send to the facade failed because the consumer closed its end. Any other failure
+/// (a full socket buffer, say) loses one frame and the session goes on.
+fn consumer_gone(sent: io::Result<usize>) -> bool {
+    sent.is_err_and(|e| {
+        matches!(
+            e.kind(),
+            io::ErrorKind::BrokenPipe
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::NotConnected
+        )
+    })
 }
 
 /// The `/64` prefix (first eight octets) of an address.
@@ -446,6 +471,22 @@ mod tests {
             false,
         ));
         p.build_bytes_vec().expect("query")
+    }
+
+    #[test]
+    fn the_loop_ends_when_the_consumer_end_closes() {
+        let (mediator, consumer) = crate::session::channel().expect("pair");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let poller = Poller::new(4).expect("poller");
+            let _ = done_tx.send(run(broker(Vec::new()), &mediator, poller).is_ok());
+        });
+        drop(consumer);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)),
+            Ok(true),
+            "the mediator loop must return once its consumer is gone"
+        );
     }
 
     #[test]

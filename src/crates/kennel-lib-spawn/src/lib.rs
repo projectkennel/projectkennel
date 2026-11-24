@@ -25,6 +25,7 @@
 
 #![forbid(unsafe_code)]
 
+mod image;
 pub mod mesh_rendezvous;
 pub mod plan;
 pub mod procfs;
@@ -882,15 +883,22 @@ fn mount_image_overlay(
     // who names `/etc` as the upper have root write there on a workload's behalf. Close that by
     // deciding, AS THE OPERATOR, which directories the mount may use, and then mounting those
     // exact inodes by descriptor (no path is resolved again as root):
-    //   - the image (a lower, read-only) must be reachable by the operator;
+    //   - the image (a lower, read-only) must be one the operator can read and search, and either
+    //     the operator's own or a root-owned directory in a system location (see `image`);
+    //   - no directory in the layer stacked above the image may cover an image directory the
+    //     operator cannot enter — a merged directory is shown with the top layer's attributes;
     //   - a persistent upper and work dir must be reachable AND owned by the operator, so root's
     //     credentials are only ever exercised inside the operator's own directories.
     // The other layers are on the staging tmpfs built above.
-    let image = overlay_dir(&img.image, None)?;
+    let owner = operator.map(|op| op.uid);
+    let persist = matches!(img.persistence, Persistence::Persist);
+    let image = image::image_dir(&img.image, owner, persist)?;
     let image_path = fd_path(&image);
     let [kennel_etc, scaffold] = layers;
+    if owner.is_some() {
+        image::guard_merges(&image, kennel_etc)?;
+    }
     let lowers: [&Path; 3] = [kennel_etc, &image_path, scaffold];
-    let owner = operator.map(|op| op.uid);
     let (upper_dir, work_dir) = match img.persistence {
         Persistence::Discard => (None, None),
         Persistence::Persist => (

@@ -255,7 +255,7 @@ fn translate_workload(
     let allowed_args = w.allowed_args.unwrap_or(false);
     let mut sha256 = Vec::new();
     for h in w.sha256.iter().flatten() {
-        if !is_sha256_hex(h) {
+        if !kennel_lib_policy::settled::sha256_hex_ok(h) {
             return Err(translation(format!(
                 "workload.sha256 `{h}` is not 64 lowercase-hex characters"
             )));
@@ -269,13 +269,6 @@ fn translate_workload(
         allowed_args,
         sha256,
     })
-}
-
-/// Whether `s` is a 64-character lowercase-hex SHA-256 digest.
-fn is_sha256_hex(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() && b <= b'f')
 }
 
 /// Flatten the resolved `[[provides]]`/`[[consumes]]` into the settled [`MeshRuntime`]: one runtime entry each. Already compile-time-validated (`crate::mesh`), so the
@@ -488,6 +481,16 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
             }
         }
     }
+    if let Some(bad) = groups
+        .iter()
+        .find(|g| !kennel_lib_policy::settled::group_ref_ok(g))
+    {
+        return Err(PolicyError::Translation(format!(
+            "supplementary group `{}` cannot be written into /etc/group (no `:`, `,`, `/` or \
+             control characters; at most 255 bytes)",
+            bad.escape_debug()
+        )));
+    }
     let id = src.identity.as_ref();
     let user = id
         .and_then(|i| i.user.clone())
@@ -515,12 +518,7 @@ fn translate_identity(src: &SourcePolicy) -> Result<IdentityRuntime, PolicyError
 /// written by `sethostname(2)` and into the synthetic `/etc/hostname`/`/etc/hosts`; a
 /// stricter-than-necessary charset here beats sanitising downstream.
 fn validate_hostname(h: &str) -> Result<(), PolicyError> {
-    let ok = !h.is_empty()
-        && h.len() <= 63
-        && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        && !h.starts_with('-')
-        && !h.ends_with('-');
-    if ok {
+    if kennel_lib_policy::settled::hostname_label_ok(h) {
         Ok(())
     } else {
         Err(PolicyError::Translation(format!(
@@ -811,30 +809,15 @@ fn variant_worst_case(m: &crate::source::MutableField, field: &str) -> Result<us
 }
 
 fn validate_name(field: &str, name: &str) -> Result<(), PolicyError> {
-    let invalid =
-        |why: &str| PolicyError::Translation(format!("{field} `{name}` is invalid: {why}"));
-    if name.is_empty() {
-        return Err(invalid("must not be empty"));
+    // The rule is the loader's (`account_name_ok`), so the two cannot disagree.
+    if kennel_lib_policy::settled::account_name_ok(name) {
+        Ok(())
+    } else {
+        Err(PolicyError::Translation(format!(
+            "{field} `{name}` is invalid: it must be 1 to 32 characters, start with a lowercase \
+             letter or `_`, and contain only `[a-z0-9_-]`"
+        )))
     }
-    if name.len() > 32 {
-        return Err(invalid("must be at most 32 characters"));
-    }
-    // Portable name: lowercase letter or underscore first, then lowercase letters,
-    // digits, underscore, or hyphen (the `useradd(8)` NAME_REGEX default).
-    let first_ok = name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_');
-    if !first_ok {
-        return Err(invalid("must start with a lowercase letter or `_`"));
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-    {
-        return Err(invalid("may only contain `[a-z0-9_-]`"));
-    }
-    Ok(())
 }
 
 /// Flatten the source `[unix]` section into the settled [`UnixRuntime`]: one
@@ -1137,6 +1120,14 @@ fn collect_net_allow(
                 }
             }
         } else if let Some(name) = &entry.name {
+            // A name-only endpoint must not take an address spelled as a name: the resolver
+            // returns a literal as itself, so the grant would be a grant of that address.
+            if !cidr_allowed && !kennel_lib_policy::settled::host_pattern_ok(name) {
+                return Err(translation(format!(
+                    "[[{endpoint}]] name `{name}` is not a host name; this endpoint is \
+                     hostname-only (a DNS name, optionally with a leading `.` for subdomains)"
+                )));
+            }
             allow_names.push(NameRule {
                 name: name.clone(),
                 ports: entry.ports.clone(),
@@ -2389,6 +2380,18 @@ mod tests {
                 ..NetSection::default()
             }),
             ..SourcePolicy::default()
+        }
+    }
+
+    #[test]
+    fn a_udp_destination_spelled_as_an_address_is_refused() {
+        for name in ["10.0.0.5", "::1", "169.254.169.254"] {
+            let src = udp_src("constrained", vec![udp_allow(Some(name), None)]);
+            let mut deferred = BTreeSet::new();
+            assert!(
+                translate_net(&src, &mut deferred).is_err(),
+                "`{name}` must not translate"
+            );
         }
     }
 

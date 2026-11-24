@@ -1,6 +1,6 @@
 //! The per-session UDP-egress flow mediator (§8 / W2 Part D): one process per consumer.
 //!
-//! `tun-broker` spawns this for each egress session. The broker-end `SOCK_DGRAM` socket arrives on
+//! `tun-broker` spawns this for each egress session. The broker-end `SOCK_SEQPACKET` socket arrives on
 //! stdin (fd 0); the session's grants + tun `/64` arrive hex-encoded in argv (the
 //! `DELIVER_TUN_SESSION` payload). It runs the flow loop over the socket and exits when the
 //! consumer's kennel drops the peer end.

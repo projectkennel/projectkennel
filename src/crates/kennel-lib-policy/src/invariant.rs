@@ -78,6 +78,16 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         v.push(InvariantViolation::new("exec.deny_setcap", "must be true"));
     }
     address_rule_violations(&ep.net, &mut v);
+    // A UDP grant is name-only by design; a "name" that is an address would resolve to itself
+    // and be dialled. The compiler refuses one; so does the loader.
+    for rule in &ep.net.udp_allow_names {
+        if !crate::settled::host_pattern_ok(&rule.name) {
+            v.push(InvariantViolation::new(
+                "net.udp.allow.name",
+                format!("`{}` is not a host name", rule.name),
+            ));
+        }
+    }
     if !ep.exec.deny_writable {
         v.push(InvariantViolation::new(
             "exec.deny_writable",
@@ -119,6 +129,8 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
         ));
     }
     redirect_violations_into(ep, &mut v);
+    unix_violations_into(policy, &mut v);
+    compiled_rule_violations_into(policy, &mut v);
     if v.is_empty() {
         Ok(())
     } else {
@@ -134,34 +146,11 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
 /// writable home grant carries across runs); `[fs.cwd]` — the one writable surface settle
 /// cannot see — is floor-checked at spawn against the resolved cwd.
 fn redirect_violations_into(ep: &crate::settled::EffectivePolicy, v: &mut Vec<InvariantViolation>) {
-    // A redirect whose view path is itself a write grant makes its *source* workload-writable:
-    // that host path belongs to the writable surface too, under its own name.
-    let is_write_redirect = |r: &crate::settled::FsRedirect| {
-        ep.fs
-            .write
-            .iter()
-            .chain(&ep.fs.exclusive)
-            .any(|w| normalize_grant(w) == normalize_grant(&r.path))
-    };
     for r in &ep.fs.redirect {
-        if is_write_redirect(r) {
+        if is_write_redirect(ep, r) {
             continue; // its source is meant to be written; it is checked as a writable path
         }
-        let writable = ep
-            .fs
-            .write
-            .iter()
-            .chain(&ep.fs.exclusive)
-            .map(|w| normalize_grant(w))
-            .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)))
-            .chain(
-                ep.fs
-                    .redirect
-                    .iter()
-                    .filter(|w| is_write_redirect(w))
-                    .map(|w| normalize_grant(&w.source)),
-            );
-        for w in writable {
+        for w in writable_surface(ep) {
             if paths_intersect(&r.source, &w) {
                 v.push(InvariantViolation::new(
                     "fs.redirect.write-set",
@@ -175,6 +164,171 @@ fn redirect_violations_into(ep: &crate::settled::EffectivePolicy, v: &mut Vec<In
             }
         }
     }
+}
+
+/// Whether a redirect's view path is itself a write grant, which makes its *source*
+/// workload-writable: that host path belongs to the writable surface too, under its own name.
+fn is_write_redirect(ep: &crate::settled::EffectivePolicy, r: &crate::settled::FsRedirect) -> bool {
+    ep.fs
+        .write
+        .iter()
+        .chain(&ep.fs.exclusive)
+        .any(|w| normalize_grant(w) == normalize_grant(&r.path))
+}
+
+/// The host paths the workload can write, as the policy states them: `write` ∪ `exclusive` ∪
+/// `home_persist` ∪ the sources of write redirects. `[fs.cwd]` is not here; it is known only at
+/// spawn.
+fn writable_surface(ep: &crate::settled::EffectivePolicy) -> Vec<String> {
+    ep.fs
+        .write
+        .iter()
+        .chain(&ep.fs.exclusive)
+        .map(|w| normalize_grant(w))
+        .chain(ep.fs.home_persist.iter().map(|p| normalize_persist(p)))
+        .chain(
+            ep.fs
+                .redirect
+                .iter()
+                .filter(|r| is_write_redirect(ep, r))
+                .map(|r| normalize_grant(&r.source)),
+        )
+        .collect()
+}
+
+/// The `[unix]` floor: what a granted socket's two paths may be.
+///
+/// - `real` must not lie in the workload-writable surface. The daemon connects to whatever is at
+///   that path when the workload asks, so a path the workload can replace is a grant of any socket
+///   the operator can reach.
+/// - `shim` (and the `at` of an af-unix `[[consumes]]`) must be a plain path below a directory of
+///   its own ([`shim_path_ok`]): the in-kennel facade is given Landlock rights over the parent
+///   directory to create the socket there.
+fn unix_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>) {
+    let writable = writable_surface(&policy.effective_policy);
+    for sock in &policy.unix.sockets {
+        if !shim_path_ok(&sock.shim) {
+            v.push(InvariantViolation::new(
+                "unix.shim",
+                format!(
+                    "[[unix.allow]] `{}`: shim `{}` is not a plain path below a directory of \
+                     its own",
+                    sock.name, sock.shim
+                ),
+            ));
+        }
+        if let Some(w) = writable.iter().find(|w| paths_intersect(&sock.real, w)) {
+            v.push(InvariantViolation::new(
+                "unix.real.write-set",
+                format!(
+                    "[[unix.allow]] `{}`: real path `{}` intersects the workload-writable path \
+                     `{w}`; the workload could put another socket there",
+                    sock.name, sock.real
+                ),
+            ));
+        }
+    }
+    for consume in &policy.mesh.consumes {
+        if consume.shape != crate::settled::Shape::AfUnix {
+            continue;
+        }
+        if consume.at.as_deref().is_some_and(|at| !shim_path_ok(at)) {
+            v.push(InvariantViolation::new(
+                "mesh.at",
+                format!(
+                    "[[consumes]] `{}`: `at` is not a plain path below a directory of its own",
+                    consume.name
+                ),
+            ));
+        }
+    }
+}
+
+/// Rules the compiler enforces on values that reach files, paths and fixed-size kernel maps.
+///
+/// A settled artefact can be signed without passing through the compiler, and a spawn patch
+/// produces a policy the compiler never saw, so each rule is asserted again here with the same
+/// predicate the compiler uses.
+fn compiled_rule_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>) {
+    use crate::settled::{
+        account_name_ok, group_ref_ok, hostname_label_ok, sha256_hex_ok, MAX_BIND_PORTS,
+    };
+    let identity = &policy.identity;
+    for (id, name) in [
+        ("identity.user", &identity.user),
+        ("identity.group", &identity.group),
+    ] {
+        if !account_name_ok(name) {
+            v.push(InvariantViolation::new(
+                id,
+                "not a portable account name (`[a-z_][a-z0-9_-]*`, at most 32 characters)",
+            ));
+        }
+    }
+    // A supplementary group is looked up by name at spawn and written into `/etc/group`.
+    if identity.groups.iter().any(|g| !group_ref_ok(g)) {
+        v.push(InvariantViolation::new(
+            "identity.groups",
+            "a supplementary group's name cannot be written into /etc/group",
+        ));
+    }
+    if identity
+        .hostname
+        .as_deref()
+        .is_some_and(|h| !hostname_label_ok(h))
+    {
+        v.push(InvariantViolation::new(
+            "identity.hostname",
+            "not a hostname label (1 to 63 letters, digits or hyphens)",
+        ));
+    }
+    let ports = policy.effective_policy.net.bind_allowed_ports.len();
+    if ports > MAX_BIND_PORTS {
+        v.push(InvariantViolation::new(
+            "net.bind.allowed_ports",
+            format!("{ports} ports; the bind map holds {MAX_BIND_PORTS}"),
+        ));
+    }
+    if policy.workload.sha256.iter().any(|d| !sha256_hex_ok(d)) {
+        v.push(InvariantViolation::new(
+            "workload.sha256",
+            "a digest is not 64 lowercase hex characters",
+        ));
+    }
+}
+
+/// Whether `shim` is an acceptable in-view socket path.
+///
+/// It must be rooted (`/`, `~/`, `$HOME/`, `$XDG_RUNTIME_DIR/` or `<home>/`), have no empty, `.`
+/// or `..` component, and carry no `=` or NUL (the facade takes its sockets as `path=name`
+/// arguments). An absolute path needs a directory between it and `/`: the facade is granted the
+/// parent directory, and that must never be the root.
+#[must_use]
+pub fn shim_path_ok(shim: &str) -> bool {
+    const ROOTS: [&str; 4] = ["~/", "$HOME/", "$XDG_RUNTIME_DIR/", "<home>/"];
+    if shim.contains(['=', '\0']) {
+        return false;
+    }
+    let (rest, least) = shim
+        .strip_prefix('/')
+        .map_or_else(
+            || {
+                ROOTS
+                    .iter()
+                    .find_map(|root| shim.strip_prefix(root))
+                    .map(|rest| (rest, 1))
+            },
+            |rest| Some((rest, 2)),
+        )
+        .unwrap_or(("", usize::MAX));
+    let mut count: usize = 0;
+    for component in rest.split('/') {
+        if matches!(component, "" | "." | "..") {
+            return false;
+        }
+        count = count.saturating_add(1);
+    }
+    count >= least
 }
 
 /// Report every address rule the enforcement side could not match on.
@@ -296,6 +450,112 @@ mod tests {
             source: source.to_owned(),
         });
         p
+    }
+
+    fn unix_violations(real: &str, shim: &str, write: &[&str]) -> Vec<&'static str> {
+        let mut p = sample_settled();
+        p.effective_policy
+            .fs
+            .write
+            .extend(write.iter().map(|w| (*w).to_owned()));
+        p.unix.sockets.push(crate::settled::UnixSocket {
+            name: "s".to_owned(),
+            real: real.to_owned(),
+            shim: shim.to_owned(),
+            env: None,
+        });
+        match validate(&p) {
+            Ok(()) => Vec::new(),
+            Err(v) => v
+                .into_iter()
+                .map(|x| x.id)
+                .filter(|id| id.starts_with("unix."))
+                .collect(),
+        }
+    }
+
+    /// A socket the workload can replace is not the socket the operator granted.
+    #[test]
+    fn a_unix_grant_whose_real_path_is_workload_writable_is_refused() {
+        for (real, write) in [
+            ("~/proj/agent.sock", "~/proj/**"),
+            ("~/proj/run/agent.sock", "~/proj"),
+            ("/srv/data/./x/../agent.sock", "/srv/data/"),
+        ] {
+            assert_eq!(
+                unix_violations(real, "/tmp/s.sock", &[write]),
+                ["unix.real.write-set"],
+                "`{real}` under `{write}`"
+            );
+        }
+        assert!(unix_violations("~/.gnupg/S.gpg-agent", "/tmp/s.sock", &["~/proj/**"]).is_empty());
+    }
+
+    /// The facade gets Landlock rights over its shim's parent directory.
+    #[test]
+    fn a_unix_shim_that_is_not_a_plain_path_is_refused() {
+        for shim in ["/x.sock", "x.sock", "/tmp/../x.sock", "/tmp/a=b.sock", ""] {
+            assert_eq!(
+                unix_violations("/run/host.sock", shim, &[]),
+                ["unix.shim"],
+                "shim `{shim}`"
+            );
+        }
+        assert!(unix_violations("/run/host.sock", "~/x.sock", &[]).is_empty());
+    }
+
+    /// A UDP grant names a host. An address in that field would be dialled as itself.
+    #[test]
+    fn a_udp_grant_whose_name_is_an_address_is_refused() {
+        for (name, refused) in [("10.0.0.5", true), ("::1", true), (".example.com", false)] {
+            let mut p = sample_settled();
+            p.effective_policy
+                .net
+                .udp_allow_names
+                .push(crate::settled::NameRule {
+                    name: name.to_owned(),
+                    ports: Vec::new(),
+                    protocol: crate::settled::Protocol::Udp,
+                });
+            let hit = validate(&p)
+                .err()
+                .is_some_and(|v| v.iter().any(|x| x.id == "net.udp.allow.name"));
+            assert_eq!(hit, refused, "`{name}`");
+        }
+    }
+
+    fn violation_ids(policy: &SettledPolicy) -> Vec<&'static str> {
+        validate(policy).map_or_else(|v| v.into_iter().map(|x| x.id).collect(), |()| Vec::new())
+    }
+
+    /// The identity names reach `/etc/passwd`, `$HOME` and the hostname; the loader checks
+    /// them with the compiler's own rule.
+    #[test]
+    fn identity_names_are_checked_at_load() {
+        let mut p = sample_settled();
+        p.identity.user = "x:0:0::/:/bin/sh\nroot".to_owned();
+        p.identity.group = "../wheel".to_owned();
+        p.identity.groups = vec!["Domain Users".to_owned(), "x:0:root".to_owned()];
+        p.identity.hostname = Some("host\n127.0.0.1 evil".to_owned());
+        let ids = violation_ids(&p);
+        for id in [
+            "identity.user",
+            "identity.group",
+            "identity.groups",
+            "identity.hostname",
+        ] {
+            assert!(ids.contains(&id), "{id} missing from {ids:?}");
+        }
+    }
+
+    #[test]
+    fn the_bind_port_cap_and_digest_form_are_checked_at_load() {
+        let mut p = sample_settled();
+        p.effective_policy.net.bind_allowed_ports = (1..=9).map(|n| 8000 + n).collect();
+        p.workload.sha256 = vec!["ABC".to_owned()];
+        let ids = violation_ids(&p);
+        assert!(ids.contains(&"net.bind.allowed_ports"), "{ids:?}");
+        assert!(ids.contains(&"workload.sha256"), "{ids:?}");
     }
 
     /// The metadata deny is only the invariant if it covers the whole address.

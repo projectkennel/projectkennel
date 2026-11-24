@@ -8,7 +8,7 @@
 //! kenneld ([`verb::REGISTER_TUN_SINK`]) at startup. When a `[net.udp]` consumer connects its
 //! `[[consumes]]`, kenneld resolves that consumer's grants + tun `/64` *in its own namespace* and
 //! pushes them to the sink ([`verb::DELIVER_TUN_SESSION`], the [`tun_broker`] payload). The broker
-//! mints a fresh connected `SOCK_DGRAM` socketpair, spawns a [`tun-flow`](../bin/tun-flow.rs)
+//! mints a fresh `SOCK_SEQPACKET` socketpair, spawns a [`tun-flow`](../bin/tun-flow.rs)
 //! mediator process on one end with those grants, and **replies with the other end's fd** — which
 //! kenneld hands to the consumer's `facade-tun` as its af-unix connection.
 //!
@@ -28,12 +28,14 @@
 
 use std::fs::OpenOptions;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::net::UnixDatagram;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
+use std::time::Duration;
 
 use kennel_lib_binder::client::{Connection, Incoming};
 use kennel_lib_binder::service::{status, tun_broker, verb};
+use kennel_tun_broker::session::{self, Sessions, Slot, MAX_SESSIONS, MAX_SESSIONS_PER_KENNEL};
 
 /// The sink node's local pointer and cookie on the per-kennel bus.
 const SINK_NODE_PTR: u64 = 1;
@@ -45,6 +47,30 @@ const MAP_SIZE: usize = 256 * 1024;
 
 /// Poll timeout for the binder serve loop (milliseconds).
 const POLL_MS: i32 = 5000;
+
+/// How often the reaper looks for mediators that have exited.
+const REAP_INTERVAL: Duration = Duration::from_millis(250);
+
+/// A running mediator and the ledger place it holds until it is reaped.
+type Live = (Child, Slot);
+
+/// Reap mediators as they exit, giving each one's place back to the ledger.
+///
+/// One thread for every session, not one each: it takes new mediators from `spawned` and polls the
+/// ones it holds. It ends when the broker's main loop drops the sending end.
+fn reap(spawned: &Receiver<Live>) {
+    let mut live: Vec<Live> = Vec::new();
+    loop {
+        match spawned.recv_timeout(REAP_INTERVAL) {
+            Ok(entry) => live.push(entry),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+        // A mediator whose state cannot be read is kept, and so is its place: the ceiling must not
+        // loosen on an error.
+        live.retain_mut(|(child, _slot)| !matches!(child.try_wait(), Ok(Some(_))));
+    }
+}
 
 fn run(device: &str, mediator: &str) -> std::io::Result<()> {
     eprintln!("tun-broker: starting");
@@ -64,6 +90,12 @@ fn run(device: &str, mediator: &str) -> std::io::Result<()> {
     )?;
     eprintln!("tun-broker: registered egress sink on the per-kennel bus");
 
+    let sessions = Sessions::new(MAX_SESSIONS_PER_KENNEL, MAX_SESSIONS);
+    let (spawned, exited) = mpsc::channel::<Live>();
+    thread::Builder::new()
+        .name("reaper".to_owned())
+        .spawn(move || reap(&exited))?;
+
     conn.enter_looper()?;
     loop {
         if !conn.poll(POLL_MS)? {
@@ -73,7 +105,7 @@ fn run(device: &str, mediator: &str) -> std::io::Result<()> {
             // The sink node honours only DELIVER_TUN_SESSION; consumers never hold it (it is
             // kenneld-only), so reaching it is itself the authorization.
             if incoming.code == verb::DELIVER_TUN_SESSION {
-                deliver(&conn, &incoming, mediator);
+                deliver(&conn, &incoming, mediator, &sessions, &spawned);
             } else {
                 let _ = conn.reply_and_free(&incoming, &[status::BAD_REQUEST]);
             }
@@ -81,16 +113,30 @@ fn run(device: &str, mediator: &str) -> std::io::Result<()> {
     }
 }
 
-/// Mint one egress session: a `SOCK_DGRAM` socketpair, a fresh `tun-flow` mediator on the broker end
-/// with the delivered grants, and a reply carrying the consumer end's fd for kenneld to forward.
-fn deliver(conn: &Connection, incoming: &Incoming, mediator: &str) {
+/// Mint one egress session: a `SOCK_SEQPACKET` socketpair, a fresh `tun-flow` mediator on the broker
+/// end with the delivered grants, and a reply carrying the consumer end's fd for kenneld to forward.
+///
+/// A kennel at its session ceiling, or a full broker, is answered [`status::CEILING_FULL`] and gets
+/// no mediator.
+fn deliver(
+    conn: &Connection,
+    incoming: &Incoming,
+    mediator: &str,
+    sessions: &Sessions,
+    spawned: &Sender<Live>,
+) {
     // Fail closed on a payload that does not decode (kenneld built it, but the broker never trusts a
     // shape it cannot read).
-    if tun_broker::decode_accept(&incoming.data).is_none() {
+    let Some(accept) = tun_broker::decode_accept(&incoming.data) else {
         let _ = conn.reply_and_free(incoming, &[status::BAD_REQUEST]);
         return;
-    }
-    let Ok((broker_end, consumer_end)) = UnixDatagram::pair() else {
+    };
+    let Some(slot) = sessions.open(accept.tun_addr) else {
+        eprintln!("tun-broker: session refused: the kennel or the broker is at its ceiling");
+        let _ = conn.reply_and_free(incoming, &[status::CEILING_FULL]);
+        return;
+    };
+    let Ok((broker_end, consumer_end)) = session::channel() else {
         let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
         return;
     };
@@ -104,14 +150,18 @@ fn deliver(conn: &Connection, incoming: &Incoming, mediator: &str) {
         .stdin(Stdio::from(OwnedFd::from(broker_end)))
         .spawn()
     {
-        Ok(mut child) => {
-            // Reap the mediator when its session ends (the consumer drops the peer end), so a
-            // finished session leaves no zombie under the standing broker.
-            thread::spawn(move || {
+        Ok(child) => {
+            // Hand the mediator to the reaper, which holds its place until it exits. The mediator
+            // exits when the consumer end closes, wherever that end is by then.
+            if let Err(mpsc::SendError((mut child, _slot))) = spawned.send((child, slot)) {
+                // No reaper to account for it: end the session rather than run it uncounted.
+                let _ = child.kill();
                 let _ = child.wait();
-            });
+                let _ = conn.reply_and_free(incoming, &[status::UNAVAILABLE]);
+                return;
+            }
             if conn.reply_with_fd(incoming, consumer_end.as_fd()).is_err() {
-                // The consumer end never left; dropping it here HUPs the mediator, which unwinds.
+                // The consumer end never left; dropping it here hangs up the mediator, which exits.
                 eprintln!("tun-broker: failed to hand back session fd; session torn down");
             }
         }
