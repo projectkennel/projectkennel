@@ -159,6 +159,13 @@ jobs:
       - name: Fuzz smoke test
         working-directory: src/fuzz
         run: cargo test --offline --locked
+      # The time-boxed run (CODING-STANDARDS.md §7.3): one minute of fresh random inputs on
+      # every PR. The seed is printed; set KENNEL_FUZZ_SEED to replay a failure.
+      - name: Fuzz (one minute, fresh seed)
+        working-directory: src/fuzz
+        env:
+          KENNEL_FUZZ_SECONDS: "60"
+        run: cargo test --offline --locked parsers_never_panic_for_the_configured_duration -- --nocapture
 
   supply-chain:
     name: supply-chain (deny, audit, vet)

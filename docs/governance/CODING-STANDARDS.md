@@ -511,8 +511,8 @@ Every public function has tests covering, at minimum:
 
 - **Unit tests.** Live in `#[cfg(test)] mod tests` blocks beside the code. Test one function or one tight cluster of functions. Fast: every unit test in the workspace should run in well under a second total.
 - **Integration tests.** Live in `tests/` directories. Test the public API of a crate end-to-end. May take seconds. Required for any crate with a non-trivial public API.
-- **Property tests.** Use `proptest` (one of our sanctioned deps) for any function whose input space is large enough that examples cannot cover it. The policy resolver and the parser are the obvious cases.
-- **Fuzz tests.** The harness is `src/fuzz/` (`kennel-fuzz`, a separate workspace): the `arbitrary` crate and a hand-rolled deterministic runner, not `cargo-fuzz`, which would bring a C++ runtime and a build script into the vendored tree (the reasoning is in `src/fuzz/README.md`). The TOML parser, the policy reader, and any code consuming untrusted bytes are fed by it. It runs two kinds of input on every PR: random byte strings from a fixed seed, and, for each decoder, a valid input with every truncation and single-byte change of it. Coverage-guided fuzzing is not run.
+- **Property tests.** Any function whose input space is large enough that examples cannot cover it gets a property test: generated inputs, and an assertion that must hold for all of them. The parser and the signed-policy round trip are the obvious cases, and both have one in `src/fuzz/` (the TOML round trip, the signed policy read back, the mutated signed policy). They use the harness's own deterministic generator. `proptest` is not a dependency; adding it is a §5.2 decision, and these tests do not wait on it.
+- **Fuzz tests.** The harness is `src/fuzz/` (`kennel-fuzz`, a separate workspace): the `arbitrary` crate and a hand-rolled deterministic runner, not `cargo-fuzz`, which would bring a C++ runtime and a build script into the vendored tree (the reasoning is in `src/fuzz/README.md`). The TOML parser, the policy reader, and any code consuming untrusted bytes are fed by it. It runs three kinds of input on every PR: random byte strings from a fixed seed; for each decoder, a valid input with every truncation and single-byte change of it; and one minute of random inputs from a fresh seed, which CI prints so a failure can be replayed (`KENNEL_FUZZ_SECONDS`, `KENNEL_FUZZ_SEED`). Coverage-guided fuzzing is not run.
 - **Doc tests.** Doc examples are tests. They run in CI. If a doc test does not actually exercise the behaviour, it is decorative and should be removed.
 
 ### 7.4 Test discipline
@@ -743,7 +743,10 @@ Where the schema requires a bool because users may set true/false at parse time,
 
 ### 11.3 Paths
 
-We do not compare paths as strings. Path validation goes through `kennel-lib-syscall`'s canonicalisation helper, which is the only place that performs `realpath`-equivalent resolution. Comparisons happen on canonicalised values.
+We do not compare paths as strings, and privileged code does not act on a path by name where it can hold the thing itself. There are two sanctioned routes:
+
+- **By descriptor** — the route the privileged path uses. `kennel_lib_syscall::fd` opens what a path names without following symlinks (`open_no_symlinks`, `dir_no_symlinks`), or resolves inside a root (`RootDir`), and the caller then acts on that descriptor (through `/proc/self/fd/N` where a syscall needs a path). The object checked is the object used, which a resolved path string cannot promise.
+- **By canonical path** — `kennel_lib_os::path::canonicalise_path`, the only place that performs `realpath`-equivalent resolution, for code that must keep a path as a string. Comparisons happen on canonicalised values.
 
 Path inputs from untrusted sources are *never* used in `Path::join` directly. Joining is preceded by validation that the resulting path stays within an explicit allowed prefix.
 
@@ -773,16 +776,16 @@ The following lints are `deny` (compilation fails) in **every** crate, on **ever
 
 - `clippy::all`
 - `clippy::unwrap_used`
-- `clippy::expect_used` (in `kennel-privhelper` only)
+- `clippy::expect_used` (in `kennel-privhelper` only, outside tests: set at each of its crate roots)
 - `clippy::panic`, `clippy::todo`, `clippy::unimplemented`
 - `clippy::dbg_macro`
-- `clippy::print_stdout`, `clippy::print_stderr` (in libraries; binaries handle stdout/stderr explicitly)
+- `clippy::print_stdout` (in libraries: stdout is a binary's data channel. A binary root, and the CLI's command library, allow it with the reason. Diagnostics on stderr are the developer-logging channel of §9.1 and are not restricted)
 - `clippy::indexing_slicing` (force explicit `.get()` with handled `None`)
 - `clippy::arithmetic_side_effects` (formerly `clippy::integer_arithmetic`, now deprecated under that name; force explicit `checked_*` / `wrapping_*` / `saturating_*`)
 - `rust_2018_idioms`
 - `missing_docs` (on all `pub` items in libraries)
 
-**`clippy::pedantic` is `deny` only in the pinned-toolchain CI job** — the job that builds with the exact `rust-toolchain.toml` version. Everywhere else (the MSRV CI job, contributor local builds, the git hooks) it is `warn`.
+**`clippy::pedantic` is `deny` for the whole workspace**, set once in the root `Cargo.toml`. The toolchain is pinned by `rust-toolchain.toml`, so every build — CI, a contributor's machine, the git hooks — sees the same lint set.
 
 Rationale: pedantic gains and changes lints across clippy releases. Because the development toolchain moves with `rustup` (§2.1), denying pedantic on that moving toolchain would let a `rustup update` with **no code change** turn the tree red — directly against the reproducibility goal of §2.1/§2.3. Pinning the deny to one known clippy version makes pedantic deterministic: new pedantic lints arrive only when we deliberately bump `rust-toolchain.toml`, and resolving them is part of that bump's PR (and CHANGELOG line). Contributors are never blocked by a lint their pinned toolchain does not yet have.
 
@@ -1113,21 +1116,12 @@ Permanent deviations that are not folded back into this document are bugs in the
 
 ### A.1 Rules the code does not yet meet
 
-Recorded 2026-11-24 from the quality assessment in `docs/governance/audits/`. Each is a rule above that the tree does not satisfy today. They are listed here so the document does not claim more than is enforced; whether to change the code or the rule is a maintainer decision for each.
+Recorded 2026-11-24 from the quality assessment in `docs/governance/audits/`. Eleven rules were found unmet. Nine are now met in the code, or the rule was corrected where the code was the stricter of the two (§11.3 paths, §12.2 `pedantic`, and §12.2 `print_stderr`, which contradicted §9.1). Two remain, and both are work in progress, not accepted deviations:
 
 | Rule | State of the code |
 |---|---|
-| §3 Licensing: every Rust file carries an `SPDX-License-Identifier` header | No Rust source file has one. Each crate declares `license` in its manifest; the BPF C sources do carry the header. |
-| §4: every `unsafe` block has the three-part `SAFETY:` / `INVARIANTS UPHELD:` / `FAILURE MODE:` comment | The three-part form is on a minority of the blocks (about 16 of 93 in the privileged path when counted); most have a one-line `SAFETY:` comment. |
-| §7.3: property tests with `proptest` | `proptest` is not a dependency. The properties that exist are hand-written tests in `src/fuzz/` (the terminal filter, the signed policy). |
-| §7.3: each fuzz target runs for one minute per PR | The harness is deterministic and runs for seconds. |
-| §8.1: each crate defines its own error type, typically with `thiserror` | `thiserror` is not a dependency. The wire and policy crates define error enums by hand; much of the privileged path returns `io::Error` or `String` with formatted text. |
+| §8.1: each crate defines its own error type; generic string errors are discouraged | The wire and policy crates define error enums by hand. Much of the privileged path still returns `io::Error` or `String` with formatted text. `thiserror` is not a dependency (a proc macro in the TCB's build); the enums are written out. |
 | §11.1: security-relevant values are newtypes | Kennel names, granted paths, ports and addresses are `String`, `PathBuf`, `u16` and the std address types, with public fields. Validation is by function, not by type. |
-| §11.3: path validation goes through the canonicalisation helper | `kennel_lib_os::path::canonicalise_path` exists and is tested but has no caller. Privileged path handling resolves by descriptor instead (`kennel_lib_syscall::fd`: `RootDir`, `open_no_symlinks`, `dir_no_symlinks`). |
-| §12.2: `clippy::expect_used` denied in `kennel-privhelper` | Not enabled in any crate. |
-| §12.2: `clippy::print_stdout` / `print_stderr` denied in libraries | Not enabled. |
-| §12.2: `missing_docs` is `deny` | It is `warn` in the workspace lint table. |
-| §12.2: `clippy::pedantic` is `deny` only in the pinned-toolchain CI job | It is `deny` for the whole workspace, in `Cargo.toml`. |
 
 ---
 

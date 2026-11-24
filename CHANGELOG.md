@@ -142,6 +142,21 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The code now meets nine CODING-STANDARDS rules it did not.** No behaviour change.
+  - Every Rust source file carries an `SPDX-License-Identifier` header.
+  - Every `unsafe` block has the three-part `SAFETY` / `INVARIANTS UPHELD` / `FAILURE MODE`
+    comment; 68 had only the first part.
+  - `missing_docs` and `clippy::print_stdout` are `deny` for the workspace, and
+    `clippy::expect_used` for the helper's shipped code. Nothing violated them; binaries and
+    tests that print allow it at their root.
+  - Property tests: the TOML serializer and parser round-trip generated documents, and a
+    signed policy with generated field values reads back as the policy that was signed.
+  - CI runs one minute of random fuzz inputs from a fresh, printed seed on every PR.
+  - The standard itself is corrected where the code was the stricter: paths (privileged code
+    resolves by descriptor), `pedantic` (denied everywhere, not only in one CI job), and
+    `print_stderr` (which contradicted the developer-logging rule).
+  Two rules remain unmet and are listed in the standard's Appendix A.1: per-crate error
+  types in the privileged path, and newtypes for security-relevant values.
 - **Two long positional call sites in the daemon take a struct.** `bring_up` took twenty
   positional parameters unpacked from `Spec`, and `binder::spawn` fifteen, two of them
   adjacent `bool`s a swap would not have broken. `bring_up` now takes the `Spec`, and
