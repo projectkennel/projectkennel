@@ -295,7 +295,7 @@ pub fn start_refused(kennel: &str, stage: &str, reason: &str) -> Event {
         Outcome::Deny,
         Source::Kenneld,
     )
-    .field("kennel", Value::untrusted(kennel))
+    .field("target", Value::untrusted(kennel))
     .field("stage", Value::untrusted(stage))
     .field("reason", Value::untrusted(reason))
 }
@@ -319,7 +319,8 @@ pub fn control_refused(uid: Option<u32>) -> Event {
 
 /// `lifecycle.control`: an operator request that acts on a kennel or on the daemon.
 ///
-/// `op` is `stop`, `attach` or `reload`; `kennel` is empty for a request that names none.
+/// `op` is `stop`, `attach` or `reload`. The kennel acted on is the `target` field (the record's
+/// own `kennel` is the daemon's writer name); it is empty for a request that names none.
 #[must_use]
 pub fn control_request(op: &'static str, kennel: &str) -> Event {
     Event::new(
@@ -329,7 +330,7 @@ pub fn control_request(op: &'static str, kennel: &str) -> Event {
         Source::Kenneld,
     )
     .field("op", Value::str(op))
-    .field("kennel", Value::untrusted(kennel))
+    .field("target", Value::untrusted(kennel))
 }
 
 /// `lifecycle.kennel-exit`: the kennel was torn down.

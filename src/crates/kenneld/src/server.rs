@@ -1383,12 +1383,16 @@ pub fn dispatch_request<P, L>(
     let _ = control::send_response(conn, &response);
 }
 
-/// The prefix of every name the daemon gives a spawned kennel ([`crate::spawn::child_name_prefix`]).
-const SPAWNED_NAME_PREFIX: &str = "spawn-";
-
-/// Whether `name` is in the namespace reserved for spawned kennels.
+/// Whether `name` is in the space the daemon names spawned kennels from: `spawn-<ctx>-…`
+/// ([`crate::spawn::child_name_prefix`]).
+///
+/// This is exactly what the hard reaper matches (`spawn-<ctx>-` as a prefix), so no name an
+/// operator can start is ever taken for some kennel's child. A name that merely starts with
+/// `spawn-` (`spawn-tools`, `spawn-argv`) is an ordinary name.
 fn is_reserved_kennel_name(name: &str) -> bool {
-    name.starts_with(SPAWNED_NAME_PREFIX)
+    name.strip_prefix("spawn-")
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(ctx, _)| !ctx.is_empty() && ctx.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The maximum kennel-name length (`02-2-config-schema.md`: `[a-z0-9][a-z0-9-]{0,63}`).
@@ -1466,14 +1470,14 @@ pub fn run_kennel<P, L>(
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{}`", req.kennel));
-    // `spawn-…` names belong to the daemon: parentage is read back from them (the hard reaper
+    // `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
     // kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
     // a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
     // operator's kennel or a provider with such a name would be reaped as some kennel's child.
     if preloaded.is_none() && is_reserved_kennel_name(&req.kennel) {
         let msg = format!(
-            "kennel name `{}` is reserved: names starting with `{SPAWNED_NAME_PREFIX}` are given \
-             by the daemon to the kennels it spawns",
+            "kennel name `{}` is reserved: `spawn-<number>-…` is how the daemon names the \
+             kennels it spawns",
             req.kennel
         );
         eprintln!("kenneld: rejected start of `{}`: {msg}", req.kennel);
@@ -3236,11 +3240,26 @@ mod tests {
     fn names_the_daemon_gives_spawned_kennels_are_reserved() {
         // Whatever the spawner names a child must be in the reserved space, and nothing an
         // operator would plausibly choose should be.
-        assert!(is_reserved_kennel_name(&crate::spawn::child_name_prefix(7)));
-        assert!(is_reserved_kennel_name("spawn-7-00000000002a"));
-        assert!(is_reserved_kennel_name("spawn-anything"));
-        assert!(!is_reserved_kennel_name("spawner"));
-        assert!(!is_reserved_kennel_name("my-spawn-7-1"));
+        assert!(is_reserved_kennel_name(&format!(
+            "{}00000000002a",
+            crate::spawn::child_name_prefix(7)
+        )));
+        assert!(is_reserved_kennel_name("spawn-7-1"));
+        assert!(
+            is_reserved_kennel_name("spawn-7-xyz"),
+            "the reaper's prefix match takes it"
+        );
+        // Names the suite and operators really use.
+        for free in [
+            "spawn-argv",
+            "spawn-caps",
+            "spawner",
+            "my-spawn-7-1",
+            "spawn-7",
+            "spawn-x-1",
+        ] {
+            assert!(!is_reserved_kennel_name(free), "{free}");
+        }
     }
 
     #[test]

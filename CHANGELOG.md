@@ -8,8 +8,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### CLI changes
 
-- **`kennel run` refuses a kennel name that starts with `spawn-`.** The prefix is reserved for
-  kennels the daemon spawns.
+- **`kennel run` refuses a kennel name of the form `spawn-<number>-…`.** That form is
+  reserved for kennels the daemon spawns.
 
 ### Policy schema changes
 
@@ -33,10 +33,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `held`, or `dropped` with outcome `deny` when the port's holding queue is full).
 - **New daemon-level events**, written to the daemon's stdout (the journal under the systemd
   unit) because they happen outside any kennel's audit stream:
-  `lifecycle.kennel-start-refused` (outcome `deny`; `kennel`, `stage`, `reason`) for every
+  `lifecycle.kennel-start-refused` (outcome `deny`; `target`, `stage`, `reason`) for every
   start that does not produce a kennel, including signature, digest-pin and Landlock-floor
   refusals; `lifecycle.control-refused` (`deny`; `uid`) for a control connection from another
-  user; `lifecycle.control` (`info`; `op` = `stop`, `attach` or `reload`, `kennel`).
+  user; `lifecycle.control` (`info`; `op` = `stop`, `attach` or `reload`, `target`).
 - **`lifecycle.kennel-exit` `reason` is no longer always `stopped`.** It is `exited` when the
   workload ended, `stopped` after an operator's stop, and `reaped` when the kennel was killed
   with the requester that spawned it.
@@ -113,7 +113,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the add is now refused. A binder context manager that did not start was a warning and the
   kennel was brought up without one; the bring-up now fails. An OpenSSH private key whose END
   marker precedes its BEGIN marker panicked the parser; it is now an error.
-- **Kennel names starting with `spawn-` are reserved.** The daemon names spawned kennels
+- **Kennel names of the form `spawn-<number>-…` are reserved.** The daemon names spawned kennels
   `spawn-<requester ctx>-<n>` and reads parentage back from the name, so an operator's kennel
   with such a name was killed with that requester and shared its audit directory. A start
   under a reserved name is refused unless the daemon made the name.
