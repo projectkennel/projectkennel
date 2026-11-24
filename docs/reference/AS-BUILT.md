@@ -26,6 +26,24 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-24 — the overlay option string and dotted keys are bounded
+
+- **Bears-on:** Kennel book Vol 2: the view construction chapter (the OCI overlay, §7.11) and
+  the policy-parsing chapter (the parser's limits).
+- **Change:**
+  - *Overlay layers.* `mount_overlay` refuses a lower, upper or work path that is not UTF-8 or
+    contains `,`, `:` or `\`, before it attempts the mount. The rule was a comment on the
+    function ("callers pass only … paths, none of which carries those bytes"); the OCI staging
+    root is named by the factory's caller and was not checked.
+  - *Dotted keys.* Each part of a dotted key after the first counts toward `MAX_NESTING` (64),
+    the budget arrays, inline tables and table headers already share. A key is refused as soon
+    as it would pass the limit. A key of 100,000 parts used to overflow the stack.
+- **Why:** the factory performs the overlay mount with root's filesystem identity, so its
+  option string must not be shaped by its caller; and the parser runs on a file before the
+  file's signature is checked, so no input may cost unbounded stack.
+- **Source:** the 2026-11-24 follow-up review (findings N-01 and N-02); branch
+  `fix/overlay-options-and-dotted-keys`.
+
 ## 2026-11-20 — low-severity hardening, second group
 
 - **Bears-on:** Kennel book Vol 2: the view construction chapter (scaffolding, the OCI closure

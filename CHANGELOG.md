@@ -6,6 +6,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Security
+
+- **The OCI overlay mount refuses a layer path that would alter its options.** overlayfs takes
+  its layers as one comma-separated string, and the privileged factory built that string from a
+  staging directory named by its caller, then mounted with root's filesystem identity. A layer
+  path containing `,`, `:` or `\` (or not UTF-8) is now refused before the mount.
+- **A dotted key can no longer exhaust the policy parser's stack.** The parser runs before a
+  signature is checked. Its nesting limit covered arrays, inline tables and table headers but
+  not dotted keys, so `a.a.a…` with 100,000 parts (200 KB) aborted the CLI. The parts of a
+  dotted key now count toward the same limit of 64.
+
 ### Threat catalogue
 
 - **T1.8 no longer claims byte-counting, rate-limiting or volume audit at the proxy.** None of
