@@ -18,6 +18,8 @@
 // cascade and parsers (`kennel_lib_config`, `kennel_lib_compile`) every other
 // tool uses. Validation feeds the emitted bytes through `build_settled()`.
 
+#![forbid(unsafe_code)]
+
 mod probe;
 mod templates;
 

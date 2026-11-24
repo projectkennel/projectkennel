@@ -6,6 +6,8 @@
 //! `03-crate-decomposition.md`. CI runs it and `git diff --exit-code`s both outputs, so a
 //! crate-graph change that is not regenerated fails the build.
 
+#![forbid(unsafe_code)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

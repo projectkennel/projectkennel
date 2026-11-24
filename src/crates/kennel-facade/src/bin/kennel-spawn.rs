@@ -22,6 +22,8 @@
 //! `run` is the verb shared with the host unit ([`kennel_lib_cli::RUN`]): the same verb and the same
 //! `--`-separates-argv convention, with a `template@version` operand here where the host takes a policy.
 
+#![forbid(unsafe_code)]
+
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::Shutdown;

@@ -5,6 +5,8 @@
 //! fails the build. The schema is derived from the parser structs (no hand model), so it
 //! cannot drift. Usage: `gen-schema --out schema/policy.toml.schema`.
 
+#![forbid(unsafe_code)]
+
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

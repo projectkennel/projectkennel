@@ -49,12 +49,14 @@ pub fn open_no_magiclinks(path: &Path) -> io::Result<OwnedFd> {
 
 /// Open `path` as a bare `O_PATH` handle under `resolve` restrictions.
 ///
-/// The handle carries no I/O capability; it exists to be named as `/proc/self/fd/N`. It is
-/// deliberately opened without `O_CLOEXEC`, as it always has been: callers hold it across the
-/// mount it guards and close it themselves.
+/// The handle carries no I/O capability; it exists to be named as `/proc/self/fd/N`, or to be
+/// passed over a socket. It is close-on-exec: no caller hands one to a program it executes, and
+/// the factory's construction child holds one when it `fexecve`s `kennel-bin-init`.
 fn open_path_handle(path: &Path, resolve: nix::fcntl::ResolveFlag) -> io::Result<OwnedFd> {
     use nix::fcntl::{openat2, OFlag, OpenHow, AT_FDCWD};
-    let how = OpenHow::new().flags(OFlag::O_PATH).resolve(resolve);
+    let how = OpenHow::new()
+        .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+        .resolve(resolve);
     openat2(AT_FDCWD, path, how).map_err(io::Error::from)
 }
 
@@ -910,6 +912,17 @@ mod tests {
     }
 
     // ─── open_no_symlinks (openat2 RESOLVE_NO_SYMLINKS) ──────────────────
+
+    #[test]
+    fn path_handles_are_close_on_exec() {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        let dir = std::env::temp_dir();
+        for fd in [open_no_symlinks(&dir), open_no_magiclinks(&dir)] {
+            let fd = fd.expect("open the temp dir");
+            let flags = fcntl(&fd, FcntlArg::F_GETFD).expect("F_GETFD");
+            assert!(FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC));
+        }
+    }
 
     #[test]
     fn open_no_symlinks_succeeds_on_a_real_file() {
