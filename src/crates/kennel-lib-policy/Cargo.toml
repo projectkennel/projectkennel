@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The shared bounds-checked byte cursor for the wire decoders.
+kennel-lib-bytes = { path = "../kennel-lib-bytes" }
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 kennel-lib-toml = { path = "../kennel-lib-toml" }
 ed25519-compact = { version = "=2.6.1", default-features = false, features = ["std"] }

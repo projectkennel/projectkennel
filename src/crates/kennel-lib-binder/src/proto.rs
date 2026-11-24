@@ -398,7 +398,7 @@ pub fn parse(buf: &[u8]) -> Option<(Br, usize)> {
         BR_ERROR => Br::Error(r.i32()?),
         _ => return None,
     };
-    Some((br, r.pos))
+    Some((br, r.bytes.position()))
 }
 
 /// Append a `BC_TRANSACTION` (or `BC_REPLY` when `reply`) and its
@@ -463,35 +463,33 @@ impl ToNeBytesU32 for i32 {
     }
 }
 
-/// A bounds-checked sequential reader over a byte slice.
+/// The driver-return decoder's reader: the shared cursor, read in native byte order.
 struct Reader<'a> {
-    b: &'a [u8],
-    pos: usize,
+    bytes: kennel_lib_bytes::ByteReader<'a>,
 }
 
 impl<'a> Reader<'a> {
     const fn new(b: &'a [u8]) -> Self {
-        Self { b, pos: 0 }
+        Self {
+            bytes: kennel_lib_bytes::ByteReader::new(b),
+        }
     }
 
     /// Take the next `n` bytes, advancing the cursor; `None` if out of range.
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let end = self.pos.checked_add(n)?;
-        let slice = self.b.get(self.pos..end)?;
-        self.pos = end;
-        Some(slice)
+        self.bytes.take(n)
     }
 
     fn u32(&mut self) -> Option<u32> {
-        Some(u32::from_ne_bytes(self.take(4)?.try_into().ok()?))
+        self.bytes.array().map(u32::from_ne_bytes)
     }
 
     fn i32(&mut self) -> Option<i32> {
-        Some(i32::from_ne_bytes(self.take(4)?.try_into().ok()?))
+        self.bytes.array().map(i32::from_ne_bytes)
     }
 
     fn u64(&mut self) -> Option<u64> {
-        Some(u64::from_ne_bytes(self.take(8)?.try_into().ok()?))
+        self.bytes.array().map(u64::from_ne_bytes)
     }
 }
 

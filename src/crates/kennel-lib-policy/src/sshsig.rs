@@ -325,29 +325,26 @@ fn put_string(out: &mut Vec<u8>, s: &[u8]) {
 /// A bounds-checked cursor over SSH wire bytes: every read returns `None` rather than
 /// panicking on a short buffer (`parse-dont-validate`).
 struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+    bytes: kennel_lib_bytes::ByteReader<'a>,
 }
 
 impl<'a> Reader<'a> {
     const fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            bytes: kennel_lib_bytes::ByteReader::new(buf),
+        }
     }
 
     const fn is_empty(&self) -> bool {
-        self.pos >= self.buf.len()
+        self.bytes.is_empty()
     }
 
     fn take(&mut self, n: usize) -> Option<&'a [u8]> {
-        let end = self.pos.checked_add(n)?;
-        let slice = self.buf.get(self.pos..end)?;
-        self.pos = end;
-        Some(slice)
+        self.bytes.take(n)
     }
 
     fn u32(&mut self) -> Option<u32> {
-        let slice = self.take(4)?;
-        Some(u32::from_be_bytes(slice.try_into().ok()?))
+        self.bytes.array().map(u32::from_be_bytes)
     }
 
     fn string(&mut self) -> Option<&'a [u8]> {

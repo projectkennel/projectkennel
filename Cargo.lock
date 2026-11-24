@@ -153,6 +153,7 @@ dependencies = [
 name = "kennel-lib-binder"
 version = "0.8.1"
 dependencies = [
+ "kennel-lib-bytes",
  "kennel-lib-syscall",
  "libc",
 ]
@@ -165,6 +166,10 @@ dependencies = [
  "libc",
  "object",
 ]
+
+[[package]]
+name = "kennel-lib-bytes"
+version = "0.8.1"
 
 [[package]]
 name = "kennel-lib-cli"
@@ -196,6 +201,7 @@ dependencies = [
 name = "kennel-lib-control"
 version = "0.8.1"
 dependencies = [
+ "kennel-lib-bytes",
  "kennel-lib-syscall",
 ]
 
@@ -238,6 +244,7 @@ name = "kennel-lib-policy"
 version = "0.8.1"
 dependencies = [
  "ed25519-compact",
+ "kennel-lib-bytes",
  "kennel-lib-toml",
  "kennel-schema",
  "kennel-schema-derive",
@@ -258,6 +265,7 @@ version = "0.8.1"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-bpf",
+ "kennel-lib-bytes",
  "kennel-lib-policy",
  "kennel-lib-syscall",
 ]

@@ -23,8 +23,9 @@
 //!
 //! # Threat bearing
 //!
-//! Kept small and `kennel-lib-scm`-only (not the whole `kennel-lib-syscall` unsafe
-//! surface) so each delegate's own TCB stays minimal.
+//! Kept small: `kennel-lib-scm` for descriptor passing and `kennel-lib-os` (no `unsafe`) for
+//! the loopback-only listener, not the whole `kennel-lib-syscall` unsafe surface, so each
+//! delegate's own TCB stays minimal.
 //!
 //! # Non-goals
 //!

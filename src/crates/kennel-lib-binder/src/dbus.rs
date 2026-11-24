@@ -342,35 +342,33 @@ fn put_len(out: &mut Vec<u8>, n: usize) {
 
 /// A bounds-checked forward reader over a frame payload.
 struct Cursor<'a> {
-    buf: &'a [u8],
-    pos: usize,
+    bytes: kennel_lib_bytes::ByteReader<'a>,
 }
 
 impl<'a> Cursor<'a> {
     const fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            bytes: kennel_lib_bytes::ByteReader::new(buf),
+        }
     }
 
     const fn remaining(&self) -> usize {
-        self.buf.len().saturating_sub(self.pos)
+        self.bytes.remaining()
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
-        let end = self.pos.checked_add(n).ok_or(WireError::TooLong)?;
-        let slice = self.buf.get(self.pos..end).ok_or(WireError::Truncated)?;
-        self.pos = end;
-        Ok(slice)
+        self.bytes.take(n).ok_or(WireError::Truncated)
     }
 
     fn u8(&mut self) -> Result<u8, WireError> {
-        let b = self.take(1)?;
-        b.first().copied().ok_or(WireError::Truncated)
+        self.bytes.u8().ok_or(WireError::Truncated)
     }
 
     fn u32(&mut self) -> Result<u32, WireError> {
-        let b = self.take(4)?;
-        let array = <[u8; 4]>::try_from(b).map_err(|_| WireError::Truncated)?;
-        Ok(u32::from_be_bytes(array))
+        self.bytes
+            .array()
+            .map(u32::from_be_bytes)
+            .ok_or(WireError::Truncated)
     }
 
     fn len_prefixed(&mut self, max: usize) -> Result<&'a [u8], WireError> {

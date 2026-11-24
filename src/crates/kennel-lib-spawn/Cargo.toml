@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The shared bounds-checked byte cursor for the wire decoders.
+kennel-lib-bytes = { path = "../kennel-lib-bytes" }
 kennel-lib-bpf = { path = "../kennel-lib-bpf" }
 kennel-lib-binder = { path = "../kennel-lib-binder" }
 kennel-lib-policy = { path = "../kennel-lib-policy" }

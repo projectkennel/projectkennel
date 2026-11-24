@@ -318,44 +318,42 @@ fn put_strs(buf: &mut Vec<u8>, items: &[String]) {
 // --- Decoding primitives: a bounds-checked cursor over a byte slice. ---
 
 struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+    bytes: kennel_lib_bytes::ByteReader<'a>,
 }
 
 impl<'a> Reader<'a> {
     const fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            bytes: kennel_lib_bytes::ByteReader::new(buf),
+        }
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], WireError> {
-        let end = self.pos.checked_add(n).ok_or(WireError::Truncated)?;
-        let slice = self.buf.get(self.pos..end).ok_or(WireError::Truncated)?;
-        self.pos = end;
-        Ok(slice)
+        self.bytes.take(n).ok_or(WireError::Truncated)
+    }
+
+    fn fixed<const N: usize>(&mut self) -> Result<[u8; N], WireError> {
+        self.bytes.array().ok_or(WireError::Truncated)
     }
 
     fn u8(&mut self) -> Result<u8, WireError> {
-        self.take(1)?.first().copied().ok_or(WireError::Truncated)
+        self.bytes.u8().ok_or(WireError::Truncated)
     }
 
     fn u16(&mut self) -> Result<u16, WireError> {
-        let bytes: [u8; 2] = self.take(2)?.try_into().map_err(|_| WireError::Truncated)?;
-        Ok(u16::from_ne_bytes(bytes))
+        self.fixed().map(u16::from_ne_bytes)
     }
 
     fn u32_len(&mut self) -> Result<usize, WireError> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
-        Ok(u32::from_ne_bytes(bytes) as usize)
+        Ok(self.u32()? as usize)
     }
 
     fn u32(&mut self) -> Result<u32, WireError> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
-        Ok(u32::from_ne_bytes(bytes))
+        self.fixed().map(u32::from_ne_bytes)
     }
 
     fn i32(&mut self) -> Result<i32, WireError> {
-        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(|_| WireError::Truncated)?;
-        Ok(i32::from_ne_bytes(bytes))
+        self.fixed().map(i32::from_ne_bytes)
     }
 
     fn string(&mut self) -> Result<String, WireError> {
