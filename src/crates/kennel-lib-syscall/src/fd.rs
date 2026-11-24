@@ -1,11 +1,8 @@
 //! File-descriptor helpers: flag manipulation and `openat2` path resolution.
 //!
-//! The `openat2` wrapper (`open_no_symlinks`) is an `unsafe` site — the fourth in
-//! this crate — documented per §4 (SAFETY / INVARIANTS UPHELD / FAILURE MODE).
-//! It uses the raw `openat2(2)` syscall (Linux 5.6+, `__NR_openat2 = 437`) because
-//! neither `libc` nor `nix` wrap it. The pattern matches the existing `clone3`
-//! wrapper in `namespace.rs`: a `#[repr(C)]` kernel struct and a raw
-//! `libc::syscall`.
+//! Path resolution goes through `nix::fcntl::openat2` throughout; this module makes no raw
+//! syscall. Its `unsafe` is confined to the descriptor-table helpers at the end (`dup_onto`,
+//! `set_cloexec_at`, `close_inherited`, `adopt`), each documented per §4.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -15,63 +12,25 @@ use nix::fcntl::{fcntl, FcntlArg, FdFlag};
 
 // ─── openat2(2) — RESOLVE_NO_SYMLINKS / RESOLVE_NO_MAGICLINKS ────────────────
 
-/// The kernel's `struct open_how` (v0, `OPEN_HOW_SIZE_VER0 = 24`).
-///
-/// All fields are `__u64`; the kernel reads exactly `size_of::<OpenHow>()` bytes
-/// and retains no pointer. Defined in `<linux/openat2.h>`.
-#[repr(C)]
-struct OpenHow {
-    flags: u64,
-    mode: u64,
-    resolve: u64,
-}
-
-/// `RESOLVE_NO_MAGICLINKS` (`<linux/openat2.h>`, kernel 5.6+).
-///
-/// If any path component is a procfs/sysfs "magic link" (`/proc/<pid>/fd/…`,
-/// `/proc/<pid>/root`, …), the `openat2` call fails with `ELOOP`. Ordinary
-/// symbolic links still resolve.
-const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
-
-/// `RESOLVE_NO_SYMLINKS` (`<linux/openat2.h>`, kernel 5.6+).
-///
-/// If any path component (including the final one) is a symbolic link, the
-/// `openat2` call fails with `ELOOP`. Per `openat2(2)` this implies
-/// [`RESOLVE_NO_MAGICLINKS`].
-const RESOLVE_NO_SYMLINKS: u64 = 0x04;
-
-/// `__NR_openat2` — syscall 437 on x86-64 / aarch64 / riscv64.
-const SYS_OPENAT2: libc::c_long = 437;
-
-/// `AT_FDCWD`: resolve a relative path against the current directory.
-///
-/// Ignored for an absolute path. Re-exported so a `#![forbid(unsafe_code)]` caller without a
-/// `libc` dependency need not spell the magic number.
-pub const AT_FDCWD: RawFd = libc::AT_FDCWD;
-
-/// Open `path` relative to `dir_fd` with `RESOLVE_NO_SYMLINKS`, returning an
-/// `O_PATH` fd.
+/// Open `path` with `RESOLVE_NO_SYMLINKS`, returning an `O_PATH` fd.
 ///
 /// If any component of `path` is a symbolic link the call fails with `ELOOP`,
 /// closing the writable-bind-source symlink-aliasing class (0.4.0 F1
 /// residual). The returned fd is safe to use as `/proc/self/fd/N` — its target
 /// is the inode the path resolved to without following any symlink.
 ///
-/// `dir_fd` follows the kernel's `int dfd` semantics: pass `libc::AT_FDCWD` to
-/// resolve relative to the current directory, or an open directory fd for
-/// anchored resolution. For absolute paths the kernel ignores it.
+/// A relative `path` resolves against the current directory; every caller passes an absolute one.
 ///
 /// # Errors
 ///
 /// - `ELOOP`: a path component is a symlink.
 /// - `ENOSYS`: kernel < 5.6 (does not support `openat2`).
 /// - Any other `openat2` error (`ENOENT`, `EACCES`, …).
-pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
-    openat2_o_path(dir_fd, path, RESOLVE_NO_SYMLINKS)
+pub fn open_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
+    open_path_handle(path, nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS)
 }
 
-/// Open `path` relative to `dir_fd` with `RESOLVE_NO_MAGICLINKS`, returning an
-/// `O_PATH` fd.
+/// Open `path` with `RESOLVE_NO_MAGICLINKS`, returning an `O_PATH` fd.
 ///
 /// Ordinary symlinks resolve (an operator-owned source tree is commonly a
 /// symlink farm — stow/chezmoi/home-manager), but a procfs/sysfs magic link in
@@ -79,15 +38,24 @@ pub fn open_no_symlinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
 /// (a `source` aliased through `/proc/<pid>/root/…` out of the intended tree).
 /// The returned fd is safe to bind via `/proc/self/fd/N`.
 ///
-/// `dir_fd` follows the kernel's `int dfd` semantics (see [`open_no_symlinks`]).
-///
 /// # Errors
 ///
 /// - `ELOOP`: a path component is a magic link.
 /// - `ENOSYS`: kernel < 5.6 (does not support `openat2`).
 /// - Any other `openat2` error (`ENOENT`, `EACCES`, …).
-pub fn open_no_magiclinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
-    openat2_o_path(dir_fd, path, RESOLVE_NO_MAGICLINKS)
+pub fn open_no_magiclinks(path: &Path) -> io::Result<OwnedFd> {
+    open_path_handle(path, nix::fcntl::ResolveFlag::RESOLVE_NO_MAGICLINKS)
+}
+
+/// Open `path` as a bare `O_PATH` handle under `resolve` restrictions.
+///
+/// The handle carries no I/O capability; it exists to be named as `/proc/self/fd/N`. It is
+/// deliberately opened without `O_CLOEXEC`, as it always has been: callers hold it across the
+/// mount it guards and close it themselves.
+fn open_path_handle(path: &Path, resolve: nix::fcntl::ResolveFlag) -> io::Result<OwnedFd> {
+    use nix::fcntl::{openat2, OFlag, OpenHow, AT_FDCWD};
+    let how = OpenHow::new().flags(OFlag::O_PATH).resolve(resolve);
+    openat2(AT_FDCWD, path, how).map_err(io::Error::from)
 }
 
 /// Make sure the directory `path` exists and lies entirely on **kennel scaffolding**, creating
@@ -106,25 +74,16 @@ pub fn open_no_magiclinks(dir_fd: RawFd, path: &Path) -> io::Result<OwnedFd> {
 /// `InvalidInput` if `path` is not absolute plain names; `PermissionDenied` if a component is
 /// not on scaffolding; `ELOOP` for a symlink; any other `openat2`/`mkdirat`/`fstat` error.
 pub fn scaffold_dir(path: &Path, anchors: &[&Path]) -> io::Result<OwnedFd> {
-    use nix::errno::Errno;
-    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
-    use nix::sys::stat::{fstat, mkdirat, stat, Mode};
+    use nix::sys::stat::{fstat, stat};
 
-    if !path.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{} is not an absolute path", path.display()),
-        ));
-    }
-    let names = plain_names(path)?;
     let mut devices = Vec::new();
     for anchor in anchors {
         if let Ok(st) = stat(*anchor) {
             devices.push(st.st_dev);
         }
     }
-    let on_scaffold = |fd: &OwnedFd| -> io::Result<()> {
-        let st = fstat(fd).map_err(io::Error::from)?;
+    walk_from_host_root(path, |dir| {
+        let st = fstat(dir).map_err(io::Error::from)?;
         if devices.contains(&st.st_dev) {
             Ok(())
         } else {
@@ -136,38 +95,7 @@ pub fn scaffold_dir(path: &Path, anchors: &[&Path]) -> io::Result<OwnedFd> {
                 ),
             ))
         }
-    };
-    let mut current = open(
-        Path::new("/"),
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    on_scaffold(&current)?;
-    for name in &names {
-        let how = || {
-            OpenHow::new()
-                .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
-                .resolve(
-                    ResolveFlag::RESOLVE_BENEATH
-                        | ResolveFlag::RESOLVE_NO_SYMLINKS
-                        | ResolveFlag::RESOLVE_NO_MAGICLINKS,
-                )
-        };
-        let next = match openat2(&current, name.as_os_str(), how()) {
-            Ok(fd) => fd,
-            Err(Errno::ENOENT) => {
-                // `current` was just checked to be scaffolding, so this creates there.
-                mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
-                    .map_err(io::Error::from)?;
-                openat2(&current, name.as_os_str(), how()).map_err(io::Error::from)?
-            }
-            Err(e) => return Err(io::Error::from(e)),
-        };
-        on_scaffold(&next)?;
-        current = next;
-    }
-    Ok(current)
+    })
 }
 
 /// Make sure the directory at the absolute path `path` exists, creating missing components, with
@@ -182,8 +110,21 @@ pub fn scaffold_dir(path: &Path, anchors: &[&Path]) -> io::Result<OwnedFd> {
 /// `InvalidInput` if `path` is not absolute plain names; `ELOOP`/`ENOTDIR` if a component is a
 /// symlink or not a directory; any other `openat2`/`mkdirat` error.
 pub fn dir_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
+    walk_from_host_root(path, |_| Ok(()))
+}
+
+/// Walk the absolute path `path` from `/` one directory at a time, creating missing components,
+/// following no symlink, and return an `O_PATH` handle to the last directory.
+///
+/// `admit` is asked about `/` and about every directory on the way, existing or just created,
+/// before anything is created inside it; its error ends the walk. This is the one walk behind
+/// [`scaffold_dir`] and [`dir_no_symlinks`], which differ only in what they admit.
+fn walk_from_host_root(
+    path: &Path,
+    admit: impl Fn(&OwnedFd) -> io::Result<()>,
+) -> io::Result<OwnedFd> {
     use nix::errno::Errno;
-    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
     use nix::sys::stat::{mkdirat, Mode};
 
     if !path.is_absolute() {
@@ -192,13 +133,10 @@ pub fn dir_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
             format!("{} is not an absolute path", path.display()),
         ));
     }
-    let mut current = open(
-        Path::new("/"),
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    for name in &plain_names(path)? {
+    let names = plain_names(path)?;
+    let mut current = open_dir_handle(Path::new("/"))?;
+    admit(&current)?;
+    for name in &names {
         let how = || {
             OpenHow::new()
                 .flags(OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
@@ -208,17 +146,45 @@ pub fn dir_no_symlinks(path: &Path) -> io::Result<OwnedFd> {
                         | ResolveFlag::RESOLVE_NO_MAGICLINKS,
                 )
         };
-        current = match openat2(&current, name.as_os_str(), how()) {
+        let next = match openat2(&current, name.as_os_str(), how()) {
             Ok(fd) => fd,
             Err(Errno::ENOENT) => {
+                // `current` was admitted, so this creates in an admitted directory.
                 mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
                     .map_err(io::Error::from)?;
                 openat2(&current, name.as_os_str(), how()).map_err(io::Error::from)?
             }
             Err(e) => return Err(io::Error::from(e)),
         };
+        admit(&next)?;
+        current = next;
     }
     Ok(current)
+}
+
+/// An `O_PATH` handle to the directory at `path`, resolved by name (symlinks followed).
+fn open_dir_handle(path: &Path) -> io::Result<OwnedFd> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    open(
+        path,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)
+}
+
+/// How to create the file `name` in an already-resolved directory: exclusively, following
+/// nothing, with permission bits `mode`. `resolve` is added to `RESOLVE_BENEATH`.
+fn create_exclusive(mode: u32, resolve: nix::fcntl::ResolveFlag) -> nix::fcntl::OpenHow {
+    use nix::fcntl::{OFlag, OpenHow, ResolveFlag};
+    use nix::sys::stat::Mode;
+    OpenHow::new()
+        .flags(
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        )
+        .mode(Mode::from_bits_truncate(mode))
+        .resolve(ResolveFlag::RESOLVE_BENEATH | resolve)
 }
 
 /// The owner uid and file-type of an open descriptor's inode: `(uid, is_directory)`.
@@ -253,7 +219,7 @@ pub fn socket_in_dir(dir: &Path, leaf: &std::ffi::OsStr) -> io::Result<OwnedFd> 
             "socket name must be one plain name",
         ));
     }
-    let dir_fd = open_no_symlinks(AT_FDCWD, dir)?;
+    let dir_fd = open_no_symlinks(dir)?;
     let how = OpenHow::new()
         .flags(OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
         .resolve(
@@ -307,15 +273,9 @@ impl RootDir {
     ///
     /// The OS error if `path` is not an openable directory.
     pub fn open(path: &Path) -> io::Result<Self> {
-        use nix::fcntl::{open, OFlag};
-        use nix::sys::stat::Mode;
-        let fd = open(
-            path,
-            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io::Error::from)?;
-        Ok(Self { fd })
+        Ok(Self {
+            fd: open_dir_handle(path)?,
+        })
     }
 
     /// An `O_PATH` handle to `path` if it exists, without following a final symlink (the
@@ -472,22 +432,12 @@ impl RootDir {
     /// As [`ensure`](Self::ensure) for the parent; `EEXIST` if `path` exists (a symlink counts);
     /// any write or chmod error.
     pub fn write_new(&self, path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
-        use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
-        use nix::sys::stat::Mode;
+        use nix::fcntl::{openat2, ResolveFlag};
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
         let (parent, name) = self.parent_of(path)?;
         let mode = mode & 0o777;
-        let how = OpenHow::new()
-            .flags(
-                OFlag::O_WRONLY
-                    | OFlag::O_CREAT
-                    | OFlag::O_EXCL
-                    | OFlag::O_NOFOLLOW
-                    | OFlag::O_CLOEXEC,
-            )
-            .mode(Mode::from_bits_truncate(mode))
-            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+        let how = create_exclusive(mode, ResolveFlag::RESOLVE_NO_SYMLINKS);
         let mut file =
             std::fs::File::from(openat2(&parent, name.as_os_str(), how).map_err(io::Error::from)?);
         file.write_all(bytes)?;
@@ -542,16 +492,7 @@ impl RootDir {
             if next.is_none() {
                 let Some(kind) = create else { return Ok(None) };
                 if last && kind == NodeKind::File {
-                    let how = OpenHow::new()
-                        .flags(
-                            OFlag::O_WRONLY
-                                | OFlag::O_CREAT
-                                | OFlag::O_EXCL
-                                | OFlag::O_NOFOLLOW
-                                | OFlag::O_CLOEXEC,
-                        )
-                        .mode(Mode::from_bits_truncate(0o644))
-                        .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS);
+                    let how = create_exclusive(0o644, ResolveFlag::RESOLVE_NO_SYMLINKS);
                     openat2(&current, name.as_os_str(), how).map_err(io::Error::from)?;
                 } else {
                     mkdirat(&current, name.as_os_str(), Mode::from_bits_truncate(0o755))
@@ -641,29 +582,18 @@ fn plain_names(path: &Path) -> io::Result<Vec<std::ffi::OsString>> {
 /// `EXDEV` if the path crosses a mount point; any other `openat2`/`mkdirat` error.
 pub fn create_in_root_same_mount(root: &Path, rel: &Path, directory: bool) -> io::Result<()> {
     use nix::errno::Errno;
-    use nix::fcntl::{open, openat2, OFlag, OpenHow, ResolveFlag};
+    use nix::fcntl::{openat2, OFlag, OpenHow, ResolveFlag};
     use nix::sys::stat::{mkdirat, Mode};
-    use std::path::Component;
 
-    let mut names: Vec<&std::ffi::OsStr> = Vec::new();
-    for component in rel.components() {
-        match component {
-            Component::Normal(name) => names.push(name),
-            Component::CurDir => {}
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "mount point path must be plain names beneath the root",
-                ))
-            }
-        }
+    // Unlike a view path, a mount point is given relative to the root: a leading `/` is refused.
+    if rel.has_root() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mount point path must be plain names beneath the root",
+        ));
     }
-    let root_fd = open(
-        root,
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
+    let names = plain_names(rel)?;
+    let root_fd = open_dir_handle(root)?;
     let resolve = ResolveFlag::RESOLVE_IN_ROOT
         | ResolveFlag::RESOLVE_NO_XDEV
         | ResolveFlag::RESOLVE_NO_MAGICLINKS;
@@ -690,23 +620,18 @@ pub fn create_in_root_same_mount(root: &Path, rel: &Path, directory: bool) -> io
         let last = index.saturating_add(1) == names.len();
         if last && !directory {
             // One plain name under a parent we just resolved: create it there, exclusively.
-            let create = OpenHow::new()
-                .flags(
-                    OFlag::O_WRONLY
-                        | OFlag::O_CREAT
-                        | OFlag::O_EXCL
-                        | OFlag::O_NOFOLLOW
-                        | OFlag::O_CLOEXEC,
-                )
-                .mode(Mode::from_bits_truncate(0o644))
-                .resolve(
-                    ResolveFlag::RESOLVE_BENEATH
-                        | ResolveFlag::RESOLVE_NO_XDEV
-                        | ResolveFlag::RESOLVE_NO_SYMLINKS,
-                );
-            openat2(&parent_fd, *name, create).map_err(io::Error::from)?;
+            let create = create_exclusive(
+                0o644,
+                ResolveFlag::RESOLVE_NO_XDEV | ResolveFlag::RESOLVE_NO_SYMLINKS,
+            );
+            openat2(&parent_fd, name.as_os_str(), create).map_err(io::Error::from)?;
         } else {
-            mkdirat(&parent_fd, *name, Mode::from_bits_truncate(0o755)).map_err(io::Error::from)?;
+            mkdirat(
+                &parent_fd,
+                name.as_os_str(),
+                Mode::from_bits_truncate(0o755),
+            )
+            .map_err(io::Error::from)?;
         }
     }
     Ok(())
@@ -809,49 +734,6 @@ fn chown_tree_at(
         }
     }
     Ok(())
-}
-
-/// The shared `openat2(2)` body: open `path` as `O_PATH` under `resolve` restrictions.
-fn openat2_o_path(dir_fd: RawFd, path: &Path, resolve: u64) -> io::Result<OwnedFd> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))?;
-    let how = OpenHow {
-        flags: libc::O_PATH as u64, // fd-only, no read/write capability
-        mode: 0,
-        resolve,
-    };
-    // SAFETY: `openat2` with a valid `dir_fd` (or `AT_FDCWD`), a NUL-terminated
-    // `path`, and a correctly sized, stack-local `open_how` is a pure open-path
-    // call — no pointer is retained, no aliasing concern. `O_PATH` means no I/O
-    // capability is granted, only an fd for `/proc/self/fd/N` resolution. The
-    // returned descriptor is fresh and owned by us.
-    //
-    // INVARIANTS UPHELD: `how` is stack-local, correctly sized (24 bytes,
-    // `OPEN_HOW_SIZE_VER0`), zeroed in unused fields. `c_path` lives until
-    // the syscall returns. `SYS_OPENAT2` is the correct syscall number for
-    // all supported architectures (verified against `<asm/unistd.h>`).
-    //
-    // FAILURE MODE: -1 + errno → `Err`. The caller must not proceed with
-    // the bind mount — a symlink in the path is a potential escape.
-    let fd = unsafe {
-        libc::syscall(
-            SYS_OPENAT2,
-            dir_fd,
-            c_path.as_ptr(),
-            std::ptr::from_ref(&how),
-            std::mem::size_of::<OpenHow>(),
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: `openat2` returned a non-negative descriptor that we are the
-    // sole owner of; wrapping it transfers that ownership for RAII close.
-    let fd = RawFd::try_from(fd).map_err(|_| io::Error::other("openat2 fd out of range"))?;
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 // ─── FD flag helpers ─────────────────────────────────────────────────────────
@@ -1034,7 +916,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("kennel-test-openat2-real");
         std::fs::write(&path, b"ok").expect("create");
-        let fd = open_no_symlinks(libc::AT_FDCWD, &path);
+        let fd = open_no_symlinks(&path);
         let _ = std::fs::remove_file(&path);
         let fd = fd.expect("open_no_symlinks on a real file should succeed");
         // The fd is O_PATH — we can stat through /proc/self/fd/N.
@@ -1053,7 +935,7 @@ mod tests {
         std::fs::write(&real, b"ok").expect("create");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real, &link).expect("symlink");
-        let result = open_no_symlinks(libc::AT_FDCWD, &link);
+        let result = open_no_symlinks(&link);
         let _ = std::fs::remove_file(&real);
         let _ = std::fs::remove_file(&link);
         let err = result.expect_err("open_no_symlinks on a symlink target must fail");
@@ -1077,7 +959,7 @@ mod tests {
         std::os::unix::fs::symlink(&real_dir, &link_dir).expect("symlink");
         // Try to open link_dir/file — the link_dir component is a symlink.
         let via_link = link_dir.join("file");
-        let result = open_no_symlinks(libc::AT_FDCWD, &via_link);
+        let result = open_no_symlinks(&via_link);
         let _ = std::fs::remove_dir_all(&real_dir);
         let _ = std::fs::remove_file(&link_dir);
         let err = result.expect_err("open_no_symlinks with a symlink component must fail");
@@ -1086,5 +968,325 @@ mod tests {
             Some(libc::ELOOP),
             "expected ELOOP for symlink component, got: {err}"
         );
+    }
+
+    // ─── the descriptor walkers ──────────────────────────────────────────
+
+    /// A fresh directory under the system temp dir (canonical, so no symlink is in its own
+    /// path), removed on drop.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let base = std::fs::canonicalize(std::env::temp_dir()).expect("temp dir");
+            let dir = base.join(format!("kennel-fd-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).expect("scratch dir");
+            Self(dir)
+        }
+        fn path(&self, rel: &str) -> std::path::PathBuf {
+            self.0.join(rel)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::symlink_metadata(path).expect("stat").ino()
+    }
+
+    fn inode_of(fd: &OwnedFd) -> u64 {
+        nix::sys::stat::fstat(fd).expect("fstat").st_ino
+    }
+
+    #[test]
+    fn dir_no_symlinks_creates_missing_components_and_pins_the_directory() {
+        let s = Scratch::new("dns");
+        let target = s.path("a/b/c");
+        let fd = dir_no_symlinks(&target).expect("create");
+        assert_eq!(inode_of(&fd), inode(&target));
+        // A second call finds the same directory.
+        assert_eq!(
+            inode_of(&dir_no_symlinks(&target).expect("again")),
+            inode(&target)
+        );
+    }
+
+    #[test]
+    fn dir_no_symlinks_refuses_a_symlink_component_and_a_relative_path() {
+        let s = Scratch::new("dns-link");
+        std::fs::create_dir(s.path("real")).expect("mkdir");
+        std::os::unix::fs::symlink(s.path("real"), s.path("link")).expect("symlink");
+        assert!(
+            dir_no_symlinks(&s.path("link/sub")).is_err(),
+            "through a link"
+        );
+        assert!(
+            !s.path("real/sub").exists(),
+            "nothing was created behind the link"
+        );
+        assert!(dir_no_symlinks(&s.path("link")).is_err(), "a final link");
+        std::fs::write(s.path("file"), b"x").expect("write");
+        assert!(
+            dir_no_symlinks(&s.path("file/sub")).is_err(),
+            "through a file"
+        );
+        let err = dir_no_symlinks(Path::new("relative/dir")).expect_err("relative");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = dir_no_symlinks(&s.path("a/../b")).expect_err("dot-dot");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn scaffold_dir_creates_on_an_anchor_filesystem() {
+        let s = Scratch::new("scaf");
+        let target = s.path("mesh/a");
+        // `/` and the scratch directory's filesystem are the scaffolding here.
+        let fd = scaffold_dir(&target, &[Path::new("/"), s.0.as_path()]).expect("create");
+        assert_eq!(inode_of(&fd), inode(&target));
+    }
+
+    #[test]
+    fn scaffold_dir_refuses_a_path_off_the_anchors_and_a_symlink() {
+        let s = Scratch::new("scaf-off");
+        // Only procfs is an anchor: `/` itself is then not scaffolding.
+        let err = scaffold_dir(&s.path("x"), &[Path::new("/proc")]).expect_err("off anchor");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !s.path("x").exists(),
+            "nothing is created off the scaffolding"
+        );
+        // A path that crosses onto another filesystem part-way is refused there.
+        let err = scaffold_dir(Path::new("/proc/kennel-x"), &[Path::new("/")])
+            .expect_err("crosses onto procfs");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        std::fs::create_dir(s.path("real")).expect("mkdir");
+        std::os::unix::fs::symlink(s.path("real"), s.path("link")).expect("symlink");
+        assert!(scaffold_dir(&s.path("link/sub"), &[Path::new("/"), s.0.as_path()]).is_err());
+        assert!(!s.path("real/sub").exists());
+    }
+
+    #[test]
+    fn socket_in_dir_opens_a_socket_and_nothing_else() {
+        use std::ffi::OsStr;
+        let s = Scratch::new("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(s.path("s.sock")).expect("bind");
+        let fd = socket_in_dir(&s.0, OsStr::new("s.sock")).expect("socket");
+        assert_eq!(inode_of(&fd), inode(&s.path("s.sock")));
+
+        std::fs::write(s.path("plain"), b"x").expect("write");
+        let err = socket_in_dir(&s.0, OsStr::new("plain")).expect_err("not a socket");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        std::os::unix::fs::symlink(s.path("s.sock"), s.path("link.sock")).expect("symlink");
+        assert!(
+            socket_in_dir(&s.0, OsStr::new("link.sock")).is_err(),
+            "a link to a socket"
+        );
+        assert!(
+            socket_in_dir(&s.0, OsStr::new("../x")).is_err(),
+            "not one name"
+        );
+        assert!(socket_in_dir(&s.0, OsStr::new("a/b")).is_err(), "two names");
+        assert!(socket_in_dir(&s.0, OsStr::new("absent")).is_err());
+    }
+
+    #[test]
+    fn root_dir_ensure_creates_and_checks_kinds() {
+        let s = Scratch::new("root-ensure");
+        let root = RootDir::open(&s.0).expect("root");
+        let dir = root
+            .ensure(Path::new("/a/b"), NodeKind::Directory)
+            .expect("dir");
+        assert_eq!(inode_of(&dir), inode(&s.path("a/b")));
+        let file = root.ensure(Path::new("a/f"), NodeKind::File).expect("file");
+        assert_eq!(inode_of(&file), inode(&s.path("a/f")));
+        // Existing nodes are accepted as they are, and the wrong kind is refused.
+        root.ensure(Path::new("a/b"), NodeKind::Directory)
+            .expect("again");
+        assert!(root.ensure(Path::new("a/b"), NodeKind::File).is_err());
+        assert!(root.ensure(Path::new("a/f"), NodeKind::Directory).is_err());
+        assert!(root
+            .ensure(Path::new("a/f/under"), NodeKind::Directory)
+            .is_err());
+        assert!(root
+            .ensure(Path::new("a/../b"), NodeKind::Directory)
+            .is_err());
+    }
+
+    #[test]
+    fn root_dir_never_accepts_a_final_symlink_and_keeps_parent_links_inside() {
+        let s = Scratch::new("root-link");
+        let outside = Scratch::new("root-link-out");
+        std::fs::create_dir(s.path("usr")).expect("mkdir");
+        let root = RootDir::open(&s.0).expect("root");
+
+        // A final symlink is refused as a mount point, whatever it points at.
+        std::os::unix::fs::symlink("usr", s.path("bin")).expect("symlink");
+        assert!(root.ensure(Path::new("bin"), NodeKind::Directory).is_err());
+        // `lookup` sees the link itself; `resolve` sees where it leads.
+        let seen = root
+            .lookup(Path::new("bin"))
+            .expect("lookup")
+            .expect("present");
+        assert_eq!(inode_of(&seen), inode(&s.path("bin")));
+        let led = root
+            .resolve(Path::new("bin"))
+            .expect("resolve")
+            .expect("present");
+        assert_eq!(inode_of(&led), inode(&s.path("usr")));
+        assert!(
+            !root.is_dir(Path::new("bin")).expect("is_dir"),
+            "a link is not a directory"
+        );
+
+        // A parent that is a relative link is followed inside the root.
+        root.ensure(Path::new("bin/tool"), NodeKind::File)
+            .expect("through the link");
+        assert!(s.path("usr/tool").exists());
+
+        // A parent that is an ABSOLUTE link resolves against the root, not the host: the
+        // directory outside the root is never written.
+        std::os::unix::fs::symlink(&outside.0, s.path("abs")).expect("symlink");
+        let made = root.ensure(Path::new("abs/planted"), NodeKind::File);
+        assert!(
+            !outside.path("planted").exists(),
+            "nothing lands outside the root"
+        );
+        assert!(made.is_err(), "the link leads nowhere inside the root");
+        assert!(root.resolve(Path::new("abs")).expect("resolve").is_none());
+    }
+
+    #[test]
+    fn root_dir_lookup_reports_absence_without_creating() {
+        let s = Scratch::new("root-lookup");
+        let root = RootDir::open(&s.0).expect("root");
+        assert!(root.lookup(Path::new("no/such")).expect("lookup").is_none());
+        assert!(!s.path("no").exists());
+        assert!(!root.is_dir(Path::new("no")).expect("is_dir"));
+        std::fs::write(s.path("f"), b"x").expect("write");
+        assert!(root.lookup(Path::new("f/under")).expect("lookup").is_none());
+        assert!(root.lookup(Path::new("../x")).is_err());
+    }
+
+    #[test]
+    fn root_dir_writes_copies_links_and_removes_without_following() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = Scratch::new("root-io");
+        let outside = Scratch::new("root-io-out");
+        let root = RootDir::open(&s.0).expect("root");
+
+        root.write_new(Path::new("etc/passwd"), b"root:x:0:0\n", 0o4644)
+            .expect("write");
+        assert_eq!(
+            std::fs::read(s.path("etc/passwd")).expect("read"),
+            b"root:x:0:0\n"
+        );
+        let mode = std::fs::metadata(s.path("etc/passwd"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o644, "set-id bits are not carried");
+        assert!(
+            root.write_new(Path::new("etc/passwd"), b"x", 0o644)
+                .is_err(),
+            "no overwrite"
+        );
+
+        // A destination that is a symlink is never written through.
+        std::fs::write(outside.path("victim"), b"keep").expect("write");
+        std::os::unix::fs::symlink(outside.path("victim"), s.path("etc/link")).expect("symlink");
+        assert!(root.write_new(Path::new("etc/link"), b"x", 0o644).is_err());
+        std::fs::write(outside.path("src"), b"payload").expect("write");
+        std::fs::set_permissions(outside.path("src"), std::fs::Permissions::from_mode(0o6777))
+            .expect("chmod");
+        assert!(root
+            .copy_into(&outside.path("src"), Path::new("etc/link"))
+            .is_err());
+        assert_eq!(
+            std::fs::read(outside.path("victim")).expect("read"),
+            b"keep"
+        );
+
+        root.copy_into(&outside.path("src"), Path::new("bin/tool"))
+            .expect("copy");
+        assert_eq!(std::fs::read(s.path("bin/tool")).expect("read"), b"payload");
+        let mode = std::fs::metadata(s.path("bin/tool"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755, "no set-id, no group or other write");
+
+        root.symlink(Path::new("tool"), Path::new("bin/alias"))
+            .expect("symlink");
+        assert_eq!(
+            std::fs::read_link(s.path("bin/alias")).expect("readlink"),
+            Path::new("tool")
+        );
+        assert!(
+            root.symlink(Path::new("x"), Path::new("bin/alias"))
+                .is_err(),
+            "exists"
+        );
+
+        // Removing a link removes the link, not what it points at.
+        root.remove(Path::new("etc/link")).expect("remove");
+        assert!(std::fs::symlink_metadata(s.path("etc/link")).is_err());
+        assert!(outside.path("victim").exists());
+        root.remove(Path::new("etc/link")).expect("absent is fine");
+        root.remove(Path::new("no/parent/x"))
+            .expect("missing parent is fine");
+        assert!(
+            root.remove(Path::new("etc")).is_err(),
+            "a directory is not removed"
+        );
+        assert!(root.remove(Path::new("/")).is_err(), "nor the root");
+    }
+
+    #[test]
+    fn create_in_root_same_mount_makes_mount_points_inside_the_root_only() {
+        let s = Scratch::new("cirsm");
+        let outside = Scratch::new("cirsm-out");
+        create_in_root_same_mount(&s.0, Path::new("a/b/dir"), true).expect("dir");
+        assert!(s.path("a/b/dir").is_dir());
+        create_in_root_same_mount(&s.0, Path::new("a/b/file"), false).expect("file");
+        assert!(s.path("a/b/file").is_file());
+        // Existing paths are left alone.
+        std::fs::write(s.path("a/b/file"), b"kept").expect("write");
+        create_in_root_same_mount(&s.0, Path::new("a/b/file"), false).expect("again");
+        assert_eq!(std::fs::read(s.path("a/b/file")).expect("read"), b"kept");
+
+        let err = create_in_root_same_mount(&s.0, Path::new("../x"), true).expect_err("dot-dot");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = create_in_root_same_mount(&s.0, Path::new("/abs"), true).expect_err("absolute");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // An absolute symlink resolves inside the root: nothing is created at its host target.
+        std::os::unix::fs::symlink(&outside.0, s.path("abs")).expect("symlink");
+        let _ = create_in_root_same_mount(&s.0, Path::new("abs/planted"), true);
+        assert!(!outside.path("planted").exists());
+    }
+
+    #[test]
+    fn chown_tree_same_mount_walks_the_tree_without_following_links() {
+        // Unprivileged, the only owner we can give is ourselves, so this checks the walk: it
+        // reaches every entry, tolerates a dangling link and a link out of the tree (it re-owns
+        // the link, never the target), and honours `skip`.
+        let s = Scratch::new("chown");
+        let uid = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        std::fs::create_dir_all(s.path("t/a/b")).expect("mkdir");
+        std::fs::write(s.path("t/a/f"), b"x").expect("write");
+        std::os::unix::fs::symlink("/nonexistent/kennel", s.path("t/dangling")).expect("symlink");
+        std::os::unix::fs::symlink("/etc", s.path("t/out")).expect("symlink");
+        chown_tree_same_mount(&s.path("t"), uid, gid, Some(Path::new("a/b"))).expect("walk");
+        chown_tree_same_mount(&s.path("t"), uid, gid, None).expect("walk");
+        // The root of the walk must itself not be a symlink.
+        std::os::unix::fs::symlink(s.path("t"), s.path("tl")).expect("symlink");
+        assert!(chown_tree_same_mount(&s.path("tl"), uid, gid, None).is_err());
+        // A mount point inside the tree is skipped, not entered: procfs under a scratch root
+        // cannot be arranged unprivileged, so that half is covered by the root-only suite.
     }
 }

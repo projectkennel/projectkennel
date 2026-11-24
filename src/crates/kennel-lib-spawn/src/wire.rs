@@ -108,27 +108,22 @@ impl Writer {
 
 /// A bounds-checked cursor over the encoded blob.
 struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+    bytes: kennel_lib_bytes::ByteReader<'a>,
 }
 
 impl<'a> Reader<'a> {
     const fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            bytes: kennel_lib_bytes::ByteReader::new(buf),
+        }
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], PlanWireError> {
-        let end = self.pos.checked_add(n).ok_or(PlanWireError::TooLarge)?;
-        let slice = self
-            .buf
-            .get(self.pos..end)
-            .ok_or(PlanWireError::Truncated)?;
-        self.pos = end;
-        Ok(slice)
+        self.bytes.take(n).ok_or(PlanWireError::Truncated)
     }
 
     fn u8(&mut self) -> Result<u8, PlanWireError> {
-        Ok(*self.take(1)?.first().ok_or(PlanWireError::Truncated)?)
+        self.bytes.u8().ok_or(PlanWireError::Truncated)
     }
 
     fn bool(&mut self) -> Result<bool, PlanWireError> {
@@ -140,41 +135,23 @@ impl<'a> Reader<'a> {
     }
 
     fn u16(&mut self) -> Result<u16, PlanWireError> {
-        let b: [u8; 2] = self
-            .take(2)?
-            .try_into()
-            .map_err(|_| PlanWireError::Truncated)?;
-        Ok(u16::from_le_bytes(b))
+        self.fixed().map(u16::from_le_bytes)
     }
 
     fn u32(&mut self) -> Result<u32, PlanWireError> {
-        let b: [u8; 4] = self
-            .take(4)?
-            .try_into()
-            .map_err(|_| PlanWireError::Truncated)?;
-        Ok(u32::from_le_bytes(b))
+        self.fixed().map(u32::from_le_bytes)
     }
 
     fn u64(&mut self) -> Result<u64, PlanWireError> {
-        let b: [u8; 8] = self
-            .take(8)?
-            .try_into()
-            .map_err(|_| PlanWireError::Truncated)?;
-        Ok(u64::from_le_bytes(b))
+        self.fixed().map(u64::from_le_bytes)
     }
 
     fn i64(&mut self) -> Result<i64, PlanWireError> {
-        let b: [u8; 8] = self
-            .take(8)?
-            .try_into()
-            .map_err(|_| PlanWireError::Truncated)?;
-        Ok(i64::from_le_bytes(b))
+        self.fixed().map(i64::from_le_bytes)
     }
 
     fn fixed<const N: usize>(&mut self) -> Result<[u8; N], PlanWireError> {
-        self.take(N)?
-            .try_into()
-            .map_err(|_| PlanWireError::Truncated)
+        self.bytes.array().ok_or(PlanWireError::Truncated)
     }
 
     fn bytes(&mut self) -> Result<Vec<u8>, PlanWireError> {
@@ -637,7 +614,7 @@ pub fn decode_plan(buf: &[u8]) -> Result<(Plan, bool), PlanWireError> {
     let ttl_action = ttl_action_from_byte(r.u8()?);
     let hostname = get_opt_str(&mut r)?;
 
-    if r.pos != buf.len() {
+    if !r.bytes.is_empty() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
 
@@ -995,7 +972,7 @@ pub fn decode_supervision(buf: &[u8]) -> Result<Supervision, PlanWireError> {
     let ttl_seconds = if r.bool()? { Some(r.u64()?) } else { None };
     let log_level = r.u8()?;
 
-    if r.pos != buf.len() {
+    if !r.bytes.is_empty() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
 
@@ -1130,7 +1107,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
     let pty_fd_present = r.bool()?;
     let workload_fd_present = r.bool()?;
     let stdio_present = r.bool()?;
-    if r.pos != buf.len() {
+    if !r.bytes.is_empty() {
         return Err(PlanWireError::TooLarge); // trailing garbage
     }
     Ok(ConstructionHalf {

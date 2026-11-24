@@ -235,31 +235,8 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::Reply(reply) => return self.take_buffer(reply),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "binder transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let reply = self.roundtrip(&td, "binder transaction")?;
+        self.take_buffer(reply)
     }
 
     /// Send a **one-way** (async, no reply) transaction (`TF_ONE_WAY`).
@@ -281,31 +258,7 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::TransactionComplete => return Ok(()),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "oneway binder transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        self.send_oneway(&td, "oneway binder transaction")
     }
 
     /// Send a **one-way** transaction (`TF_ONE_WAY`) carrying a single file descriptor as a
@@ -345,31 +298,7 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::TransactionComplete => return Ok(()),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "oneway fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        self.send_oneway(&td, "oneway fd transaction")
     }
 
     /// Send a synchronous transaction that hands a **local node** `(ptr, cookie)` we own to the
@@ -409,8 +338,47 @@ impl Connection {
             offsets: offsets.as_ptr() as u64,
             ..TransactionData::default()
         };
+        let reply = self.roundtrip(&td, "node-register transaction")?;
+        self.take_buffer(reply)
+    }
+
+    /// Send the synchronous transaction `td` and return the reply's descriptor.
+    ///
+    /// `what` names the kind of transaction in a failure message. The reply's buffer is still
+    /// mapped and is the caller's to read and free (the `take_*` methods do both).
+    fn roundtrip(&self, td: &TransactionData, what: &str) -> io::Result<TransactionData> {
+        self.exchange(td, what, false)?.ok_or_else(|| {
+            io::Error::other("binder: a synchronous transaction ended without a reply")
+        })
+    }
+
+    /// Send the one-way transaction `td` and return once the driver has taken it
+    /// (`BR_TRANSACTION_COMPLETE`).
+    fn send_oneway(&self, td: &TransactionData, what: &str) -> io::Result<()> {
+        self.exchange(td, what, true).map(drop)
+    }
+
+    /// The one write-then-read loop behind every outgoing transaction.
+    ///
+    /// Writes `td`, then reads driver returns until the transaction is settled: for a one-way
+    /// send that is `BR_TRANSACTION_COMPLETE` (`None` is returned), for a synchronous one it is
+    /// `BR_REPLY` (its descriptor is returned). Reference-count requests that arrive meanwhile
+    /// are acknowledged; anything else is not for this caller and is passed over. `td` holds raw
+    /// addresses into the caller's buffers, which must stay alive until this returns.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::Other`] for `BR_FAILED_REPLY` (with the driver's extended errno),
+    /// `BR_DEAD_REPLY` or `BR_ERROR`; the OS error if a `BINDER_WRITE_READ` fails or the
+    /// transact deadline passes.
+    fn exchange(
+        &self,
+        td: &TransactionData,
+        what: &str,
+        oneway: bool,
+    ) -> io::Result<Option<TransactionData>> {
         let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
+        proto::write_transaction(&mut write, false, td);
         let mut to_send: &[u8] = &write;
         let deadline = transact_deadline();
         loop {
@@ -419,11 +387,12 @@ impl Connection {
             self.ack_refcounts(&brs)?;
             for br in brs {
                 match br {
-                    Br::Reply(reply) => return self.take_buffer(reply),
+                    Br::Reply(reply) if !oneway => return Ok(Some(reply)),
+                    Br::TransactionComplete if oneway => return Ok(None),
                     Br::Failed => {
                         let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
                         return Err(io::Error::other(format!(
-                            "node-register transaction failed (BR_FAILED_REPLY, extended errno {errno})"
+                            "{what} failed (BR_FAILED_REPLY, extended errno {errno})"
                         )));
                     }
                     Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
@@ -517,31 +486,8 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::Reply(reply) => return self.take_fd(reply),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "binder fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let reply = self.roundtrip(&td, "binder fd transaction")?;
+        self.take_fd(reply)
     }
 
     /// Send a synchronous transaction expecting **data and, optionally, a file
@@ -597,31 +543,8 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::Reply(reply) => return self.take_data_and_fds(reply),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "binder data+fd transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let reply = self.roundtrip(&td, "binder data+fd transaction")?;
+        self.take_data_and_fds(reply)
     }
 
     /// Reply to a received transaction with a single file descriptor (a
@@ -715,31 +638,8 @@ impl Connection {
             buffer: data.as_ptr() as u64,
             ..TransactionData::default()
         };
-        let mut write = Vec::new();
-        proto::write_transaction(&mut write, false, &td);
-        let mut to_send: &[u8] = &write;
-        let deadline = transact_deadline();
-        loop {
-            let brs = self.turn(to_send, deadline)?;
-            to_send = &[];
-            self.ack_refcounts(&brs)?;
-            for br in brs {
-                match br {
-                    Br::Reply(reply) => return self.take_handle(reply),
-                    Br::Failed => {
-                        let errno = sys::extended_error(self.fd.as_fd()).unwrap_or(0);
-                        return Err(io::Error::other(format!(
-                            "binder handle transaction failed (BR_FAILED_REPLY, extended errno {errno})"
-                        )));
-                    }
-                    Br::Dead => return Err(io::Error::other("binder target dead (BR_DEAD_REPLY)")),
-                    Br::Error(code) => {
-                        return Err(io::Error::other(format!("binder driver error {code}")))
-                    }
-                    _ => {}
-                }
-            }
-        }
+        let reply = self.roundtrip(&td, "binder handle transaction")?;
+        self.take_handle(reply)
     }
 
     /// Extract the translated handle from a `BINDER_TYPE_HANDLE` reply, then free the buffer.

@@ -349,10 +349,9 @@ fn construct(chan: BorrowedFd<'_>) -> io::Result<i32> {
         // inode and nothing else — no traversal into the view. No symlink is followed. A kennel
         // without a constructed view has no binderfs, so nothing is sent and the parent sees EOF.
         if has_binder {
-            let dev = match kennel_lib_syscall::fd::open_no_symlinks(
-                kennel_lib_syscall::fd::AT_FDCWD,
-                std::path::Path::new(IN_VIEW_BINDER_DEVICE),
-            ) {
+            let dev = match kennel_lib_syscall::fd::open_no_symlinks(std::path::Path::new(
+                IN_VIEW_BINDER_DEVICE,
+            )) {
                 Ok(fd) => fd,
                 Err(e) => {
                     eprintln!("kennel-privhelper: construction child: open binder device: {e}");

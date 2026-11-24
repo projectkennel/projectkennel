@@ -10,6 +10,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+# The shared bounds-checked byte cursor for the wire decoders.
+kennel-lib-bytes = { path = "../kennel-lib-bytes" }
 # socket.rs resolves the per-user runtime dir (real uid) and adopts an inherited
 # listener fd; both are thin wrappers over kennel-lib-syscall.
 kennel-lib-syscall = { path = "../kennel-lib-syscall" }

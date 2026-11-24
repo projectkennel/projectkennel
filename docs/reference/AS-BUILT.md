@@ -55,6 +55,28 @@ under `docs/archive/` when the trees moved.
   credentials stay inside the operator's own tree, which is the existing rule for the upper.
 - **Source:** #244.
 
+## 2026-11-24 — duplicated privileged code consolidated
+
+- **Bears-on:** Kennel book Vol 2: the view construction chapter (descriptor-based resolution),
+  §7.1 (the binder client), and the crate decomposition.
+- **Change:**
+  - `kennel-lib-syscall` `fd.rs` makes no raw syscall: `open_no_symlinks` and
+    `open_no_magiclinks` use `nix::fcntl::openat2` and take only a path. `scaffold_dir` and
+    `dir_no_symlinks` are one walk (`walk_from_host_root`) with and without a filesystem check.
+    `RootDir::walk` and `create_in_root_same_mount` remain separate: the first resolves one
+    name at a time and follows a parent symlink inside the root; the second resolves the whole
+    path under `RESOLVE_IN_ROOT | RESOLVE_NO_XDEV`.
+  - `kennel-lib-binder`'s outgoing transactions share one write-then-read loop (`exchange`).
+  - `kenneld` installs every in-kennel facade binary through `install_facade_binary`.
+  - A new leaf crate, `kennel-lib-bytes`, holds the bounds-checked byte reader. The SSHSIG
+    parser, the spawn-plan wire, the control socket, the D-Bus frame codec, the binder
+    driver-return reader and the spawn verb codec delegate their reads to it. It has no
+    dependencies and no `unsafe`, and is in the TCB closure (18 crates).
+- **Why:** the same check written several times is several places for it to be wrong; and the
+  hand-rolled `openat2` was `unsafe` the `nix` wrapper made unnecessary.
+- **Source:** branch `refactor/tcb-duplication`; the quality assessment in the 2026-11-24
+  follow-up review.
+
 ## 2026-11-24 — the follow-up review's remaining findings
 
 - **Bears-on:** Kennel book Vol 2 ch.8 (The Network: the tun path, the INet facade, the inbound

@@ -41,6 +41,8 @@ members = [
     "src/crates/kennel-lib-compile",
     "src/crates/kennel-lib-dbus",
     "src/crates/kennel-lib-landlock",
+    # The one bounds-checked byte cursor the wire decoders share (std-only, no unsafe).
+    "src/crates/kennel-lib-bytes",
     "src/crates/kennel-lib-manifest",
     "src/crates/kennel-lib-os",
     "src/crates/kennel-lib-policy",

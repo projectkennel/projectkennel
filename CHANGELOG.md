@@ -140,6 +140,21 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   all. Ulimit tokens and BPF map capacity already fail the spawn when wrong, and the proxy
   listen values are bounded by their types.
 
+### Internal / supply chain
+
+- **Duplicated privileged code is consolidated, with tests added first.** No behaviour change
+  is intended.
+  - `kennel-lib-syscall` `fd.rs`: the two host-root directory walkers are one, and the path
+    opens go through `nix::fcntl::openat2`. The hand-rolled `openat2` syscall, its private
+    `struct open_how` and one `unsafe` site are gone. `open_no_symlinks` and
+    `open_no_magiclinks` lose their `dir_fd` parameter (every caller passed `AT_FDCWD`).
+  - `kennel-lib-binder`: the seven copies of the transact loop are one.
+  - `kenneld`: the five facades are bound and granted execute by one function.
+  - **New crate `kennel-lib-bytes`** (std-only, `forbid(unsafe_code)`, no dependencies): the
+    bounds-checked byte reader six wire decoders each had a copy of. It joins the TCB closure.
+  - New unit tests: eleven for the `fd.rs` walkers and eight for the node-0 handlers, none
+    needing root or a binder device.
+
 ### Threat catalogue
 
 - **T1.8 no longer claims byte-counting, rate-limiting or volume audit at the proxy.** None of

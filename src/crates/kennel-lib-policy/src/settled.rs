@@ -930,6 +930,25 @@ impl UnixRuntime {
     }
 }
 
+/// Fill the per-instance placeholders a `[unix]` socket path may carry.
+///
+/// `<kennel>`, `<ctx>`, `<uid>` and `<home>` take the given values; `$XDG_RUNTIME_DIR` becomes
+/// `/run/user/<uid>` and `$UID` the uid. A leading `~` or `$HOME` is left for the caller, who
+/// knows which home it means (the real one for a `real` path, the view's for a `shim`).
+///
+/// The daemon calls this with the kennel's values when it resolves a grant. The compiler calls
+/// it with stand-ins to see the shape a path will resolve to, so both read a path the same way.
+#[must_use]
+pub fn fill_socket_placeholders(raw: &str, kennel: &str, ctx: u16, uid: u32, home: &str) -> String {
+    let uid = uid.to_string();
+    raw.replace("<kennel>", kennel)
+        .replace("<ctx>", &ctx.to_string())
+        .replace("<uid>", &uid)
+        .replace("<home>", home)
+        .replace("$XDG_RUNTIME_DIR", &format!("/run/user/{uid}"))
+        .replace("$UID", &uid)
+}
+
 /// One granted `AF_UNIX` socket shim: a real host socket bound into the kennel's view.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

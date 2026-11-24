@@ -1,0 +1,13 @@
+[package]
+name = "kennel-lib-bytes"
+version.workspace = true
+publish.workspace = true
+description = "Project Kennel bounds-checked byte reader: the one cursor the wire decoders (binder, control socket, spawn plan, SSHSIG) advance over untrusted bytes. Stdlib only, no unsafe, no indexing."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

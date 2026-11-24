@@ -428,12 +428,7 @@ pub mod spawn {
         out.extend_from_slice(s.as_bytes().get(..usize::from(len)).unwrap_or(s.as_bytes()));
     }
 
-    /// Advance `data` past `n` bytes, returning the consumed head (or `None` if short).
-    fn take<'a>(data: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
-        let (head, tail) = data.split_at_checked(n)?;
-        *data = tail;
-        Some(head)
-    }
+    use super::codec::take;
 
     /// Read one length-prefixed UTF-8 string off the cursor.
     fn take_str<'a>(data: &mut &'a [u8]) -> Option<&'a str> {
