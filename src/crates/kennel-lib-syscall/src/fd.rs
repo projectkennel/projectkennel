@@ -1087,4 +1087,324 @@ mod tests {
             "expected ELOOP for symlink component, got: {err}"
         );
     }
+
+    // ─── the descriptor walkers ──────────────────────────────────────────
+
+    /// A fresh directory under the system temp dir (canonical, so no symlink is in its own
+    /// path), removed on drop.
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let base = std::fs::canonicalize(std::env::temp_dir()).expect("temp dir");
+            let dir = base.join(format!("kennel-fd-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).expect("scratch dir");
+            Self(dir)
+        }
+        fn path(&self, rel: &str) -> std::path::PathBuf {
+            self.0.join(rel)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn inode(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt as _;
+        std::fs::symlink_metadata(path).expect("stat").ino()
+    }
+
+    fn inode_of(fd: &OwnedFd) -> u64 {
+        nix::sys::stat::fstat(fd).expect("fstat").st_ino
+    }
+
+    #[test]
+    fn dir_no_symlinks_creates_missing_components_and_pins_the_directory() {
+        let s = Scratch::new("dns");
+        let target = s.path("a/b/c");
+        let fd = dir_no_symlinks(&target).expect("create");
+        assert_eq!(inode_of(&fd), inode(&target));
+        // A second call finds the same directory.
+        assert_eq!(
+            inode_of(&dir_no_symlinks(&target).expect("again")),
+            inode(&target)
+        );
+    }
+
+    #[test]
+    fn dir_no_symlinks_refuses_a_symlink_component_and_a_relative_path() {
+        let s = Scratch::new("dns-link");
+        std::fs::create_dir(s.path("real")).expect("mkdir");
+        std::os::unix::fs::symlink(s.path("real"), s.path("link")).expect("symlink");
+        assert!(
+            dir_no_symlinks(&s.path("link/sub")).is_err(),
+            "through a link"
+        );
+        assert!(
+            !s.path("real/sub").exists(),
+            "nothing was created behind the link"
+        );
+        assert!(dir_no_symlinks(&s.path("link")).is_err(), "a final link");
+        std::fs::write(s.path("file"), b"x").expect("write");
+        assert!(
+            dir_no_symlinks(&s.path("file/sub")).is_err(),
+            "through a file"
+        );
+        let err = dir_no_symlinks(Path::new("relative/dir")).expect_err("relative");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = dir_no_symlinks(&s.path("a/../b")).expect_err("dot-dot");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn scaffold_dir_creates_on_an_anchor_filesystem() {
+        let s = Scratch::new("scaf");
+        let target = s.path("mesh/a");
+        // `/` and the scratch directory's filesystem are the scaffolding here.
+        let fd = scaffold_dir(&target, &[Path::new("/"), s.0.as_path()]).expect("create");
+        assert_eq!(inode_of(&fd), inode(&target));
+    }
+
+    #[test]
+    fn scaffold_dir_refuses_a_path_off_the_anchors_and_a_symlink() {
+        let s = Scratch::new("scaf-off");
+        // Only procfs is an anchor: `/` itself is then not scaffolding.
+        let err = scaffold_dir(&s.path("x"), &[Path::new("/proc")]).expect_err("off anchor");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            !s.path("x").exists(),
+            "nothing is created off the scaffolding"
+        );
+        // A path that crosses onto another filesystem part-way is refused there.
+        let err = scaffold_dir(Path::new("/proc/kennel-x"), &[Path::new("/")])
+            .expect_err("crosses onto procfs");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        std::fs::create_dir(s.path("real")).expect("mkdir");
+        std::os::unix::fs::symlink(s.path("real"), s.path("link")).expect("symlink");
+        assert!(scaffold_dir(&s.path("link/sub"), &[Path::new("/"), s.0.as_path()]).is_err());
+        assert!(!s.path("real/sub").exists());
+    }
+
+    #[test]
+    fn socket_in_dir_opens_a_socket_and_nothing_else() {
+        use std::ffi::OsStr;
+        let s = Scratch::new("sock");
+        let _listener = std::os::unix::net::UnixListener::bind(s.path("s.sock")).expect("bind");
+        let fd = socket_in_dir(&s.0, OsStr::new("s.sock")).expect("socket");
+        assert_eq!(inode_of(&fd), inode(&s.path("s.sock")));
+
+        std::fs::write(s.path("plain"), b"x").expect("write");
+        let err = socket_in_dir(&s.0, OsStr::new("plain")).expect_err("not a socket");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        std::os::unix::fs::symlink(s.path("s.sock"), s.path("link.sock")).expect("symlink");
+        assert!(
+            socket_in_dir(&s.0, OsStr::new("link.sock")).is_err(),
+            "a link to a socket"
+        );
+        assert!(
+            socket_in_dir(&s.0, OsStr::new("../x")).is_err(),
+            "not one name"
+        );
+        assert!(socket_in_dir(&s.0, OsStr::new("a/b")).is_err(), "two names");
+        assert!(socket_in_dir(&s.0, OsStr::new("absent")).is_err());
+    }
+
+    #[test]
+    fn root_dir_ensure_creates_and_checks_kinds() {
+        let s = Scratch::new("root-ensure");
+        let root = RootDir::open(&s.0).expect("root");
+        let dir = root
+            .ensure(Path::new("/a/b"), NodeKind::Directory)
+            .expect("dir");
+        assert_eq!(inode_of(&dir), inode(&s.path("a/b")));
+        let file = root.ensure(Path::new("a/f"), NodeKind::File).expect("file");
+        assert_eq!(inode_of(&file), inode(&s.path("a/f")));
+        // Existing nodes are accepted as they are, and the wrong kind is refused.
+        root.ensure(Path::new("a/b"), NodeKind::Directory)
+            .expect("again");
+        assert!(root.ensure(Path::new("a/b"), NodeKind::File).is_err());
+        assert!(root.ensure(Path::new("a/f"), NodeKind::Directory).is_err());
+        assert!(root
+            .ensure(Path::new("a/f/under"), NodeKind::Directory)
+            .is_err());
+        assert!(root
+            .ensure(Path::new("a/../b"), NodeKind::Directory)
+            .is_err());
+    }
+
+    #[test]
+    fn root_dir_never_accepts_a_final_symlink_and_keeps_parent_links_inside() {
+        let s = Scratch::new("root-link");
+        let outside = Scratch::new("root-link-out");
+        std::fs::create_dir(s.path("usr")).expect("mkdir");
+        let root = RootDir::open(&s.0).expect("root");
+
+        // A final symlink is refused as a mount point, whatever it points at.
+        std::os::unix::fs::symlink("usr", s.path("bin")).expect("symlink");
+        assert!(root.ensure(Path::new("bin"), NodeKind::Directory).is_err());
+        // `lookup` sees the link itself; `resolve` sees where it leads.
+        let seen = root
+            .lookup(Path::new("bin"))
+            .expect("lookup")
+            .expect("present");
+        assert_eq!(inode_of(&seen), inode(&s.path("bin")));
+        let led = root
+            .resolve(Path::new("bin"))
+            .expect("resolve")
+            .expect("present");
+        assert_eq!(inode_of(&led), inode(&s.path("usr")));
+        assert!(
+            !root.is_dir(Path::new("bin")).expect("is_dir"),
+            "a link is not a directory"
+        );
+
+        // A parent that is a relative link is followed inside the root.
+        root.ensure(Path::new("bin/tool"), NodeKind::File)
+            .expect("through the link");
+        assert!(s.path("usr/tool").exists());
+
+        // A parent that is an ABSOLUTE link resolves against the root, not the host: the
+        // directory outside the root is never written.
+        std::os::unix::fs::symlink(&outside.0, s.path("abs")).expect("symlink");
+        let made = root.ensure(Path::new("abs/planted"), NodeKind::File);
+        assert!(
+            !outside.path("planted").exists(),
+            "nothing lands outside the root"
+        );
+        assert!(made.is_err(), "the link leads nowhere inside the root");
+        assert!(root.resolve(Path::new("abs")).expect("resolve").is_none());
+    }
+
+    #[test]
+    fn root_dir_lookup_reports_absence_without_creating() {
+        let s = Scratch::new("root-lookup");
+        let root = RootDir::open(&s.0).expect("root");
+        assert!(root.lookup(Path::new("no/such")).expect("lookup").is_none());
+        assert!(!s.path("no").exists());
+        assert!(!root.is_dir(Path::new("no")).expect("is_dir"));
+        std::fs::write(s.path("f"), b"x").expect("write");
+        assert!(root.lookup(Path::new("f/under")).expect("lookup").is_none());
+        assert!(root.lookup(Path::new("../x")).is_err());
+    }
+
+    #[test]
+    fn root_dir_writes_copies_links_and_removes_without_following() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let s = Scratch::new("root-io");
+        let outside = Scratch::new("root-io-out");
+        let root = RootDir::open(&s.0).expect("root");
+
+        root.write_new(Path::new("etc/passwd"), b"root:x:0:0\n", 0o4644)
+            .expect("write");
+        assert_eq!(
+            std::fs::read(s.path("etc/passwd")).expect("read"),
+            b"root:x:0:0\n"
+        );
+        let mode = std::fs::metadata(s.path("etc/passwd"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o644, "set-id bits are not carried");
+        assert!(
+            root.write_new(Path::new("etc/passwd"), b"x", 0o644)
+                .is_err(),
+            "no overwrite"
+        );
+
+        // A destination that is a symlink is never written through.
+        std::fs::write(outside.path("victim"), b"keep").expect("write");
+        std::os::unix::fs::symlink(outside.path("victim"), s.path("etc/link")).expect("symlink");
+        assert!(root.write_new(Path::new("etc/link"), b"x", 0o644).is_err());
+        std::fs::write(outside.path("src"), b"payload").expect("write");
+        std::fs::set_permissions(outside.path("src"), std::fs::Permissions::from_mode(0o6777))
+            .expect("chmod");
+        assert!(root
+            .copy_into(&outside.path("src"), Path::new("etc/link"))
+            .is_err());
+        assert_eq!(
+            std::fs::read(outside.path("victim")).expect("read"),
+            b"keep"
+        );
+
+        root.copy_into(&outside.path("src"), Path::new("bin/tool"))
+            .expect("copy");
+        assert_eq!(std::fs::read(s.path("bin/tool")).expect("read"), b"payload");
+        let mode = std::fs::metadata(s.path("bin/tool"))
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o755, "no set-id, no group or other write");
+
+        root.symlink(Path::new("tool"), Path::new("bin/alias"))
+            .expect("symlink");
+        assert_eq!(
+            std::fs::read_link(s.path("bin/alias")).expect("readlink"),
+            Path::new("tool")
+        );
+        assert!(
+            root.symlink(Path::new("x"), Path::new("bin/alias"))
+                .is_err(),
+            "exists"
+        );
+
+        // Removing a link removes the link, not what it points at.
+        root.remove(Path::new("etc/link")).expect("remove");
+        assert!(std::fs::symlink_metadata(s.path("etc/link")).is_err());
+        assert!(outside.path("victim").exists());
+        root.remove(Path::new("etc/link")).expect("absent is fine");
+        root.remove(Path::new("no/parent/x"))
+            .expect("missing parent is fine");
+        assert!(
+            root.remove(Path::new("etc")).is_err(),
+            "a directory is not removed"
+        );
+        assert!(root.remove(Path::new("/")).is_err(), "nor the root");
+    }
+
+    #[test]
+    fn create_in_root_same_mount_makes_mount_points_inside_the_root_only() {
+        let s = Scratch::new("cirsm");
+        let outside = Scratch::new("cirsm-out");
+        create_in_root_same_mount(&s.0, Path::new("a/b/dir"), true).expect("dir");
+        assert!(s.path("a/b/dir").is_dir());
+        create_in_root_same_mount(&s.0, Path::new("a/b/file"), false).expect("file");
+        assert!(s.path("a/b/file").is_file());
+        // Existing paths are left alone.
+        std::fs::write(s.path("a/b/file"), b"kept").expect("write");
+        create_in_root_same_mount(&s.0, Path::new("a/b/file"), false).expect("again");
+        assert_eq!(std::fs::read(s.path("a/b/file")).expect("read"), b"kept");
+
+        let err = create_in_root_same_mount(&s.0, Path::new("../x"), true).expect_err("dot-dot");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = create_in_root_same_mount(&s.0, Path::new("/abs"), true).expect_err("absolute");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // An absolute symlink resolves inside the root: nothing is created at its host target.
+        std::os::unix::fs::symlink(&outside.0, s.path("abs")).expect("symlink");
+        let _ = create_in_root_same_mount(&s.0, Path::new("abs/planted"), true);
+        assert!(!outside.path("planted").exists());
+    }
+
+    #[test]
+    fn chown_tree_same_mount_walks_the_tree_without_following_links() {
+        // Unprivileged, the only owner we can give is ourselves, so this checks the walk: it
+        // reaches every entry, tolerates a dangling link and a link out of the tree (it re-owns
+        // the link, never the target), and honours `skip`.
+        let s = Scratch::new("chown");
+        let uid = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        std::fs::create_dir_all(s.path("t/a/b")).expect("mkdir");
+        std::fs::write(s.path("t/a/f"), b"x").expect("write");
+        std::os::unix::fs::symlink("/nonexistent/kennel", s.path("t/dangling")).expect("symlink");
+        std::os::unix::fs::symlink("/etc", s.path("t/out")).expect("symlink");
+        chown_tree_same_mount(&s.path("t"), uid, gid, Some(Path::new("a/b"))).expect("walk");
+        chown_tree_same_mount(&s.path("t"), uid, gid, None).expect("walk");
+        // The root of the walk must itself not be a symlink.
+        std::os::unix::fs::symlink(s.path("t"), s.path("tl")).expect("symlink");
+        assert!(chown_tree_same_mount(&s.path("tl"), uid, gid, None).is_err());
+        // A mount point inside the tree is skipped, not entered: procfs under a scratch root
+        // cannot be arranged unprivileged, so that half is covered by the root-only suite.
+    }
 }
