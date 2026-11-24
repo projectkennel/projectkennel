@@ -12,6 +12,7 @@
 //! pair is the one channel the factory already gives both ends. One datagram carries the whole set
 //! (≤ [`MAX_MESH_MOUNTS`]), with the mount fds and their in-view target directories.
 
+use std::io;
 use std::os::fd::{AsFd as _, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::PathBuf;
@@ -41,28 +42,95 @@ pub fn encode(mounts: &[(OwnedFd, PathBuf)]) -> (Vec<u8>, Vec<BorrowedFd<'_>>) {
 /// Decode the rendezvous datagram into `(mount fd, in-view target dir)` pairs.
 ///
 /// `fds` are the received mounts in send order (as [`kennel_lib_syscall::scm::recv_with_fds`] returns
-/// them). A truncated or short datagram yields only the pairs that parse cleanly.
-#[must_use]
-pub fn decode(data: &[u8], fds: Vec<OwnedFd>) -> Vec<(OwnedFd, PathBuf)> {
-    let count = data.first().copied().unwrap_or(0) as usize;
-    let mut out = Vec::with_capacity(count.min(fds.len()));
-    let mut rest = data.get(1..).unwrap_or(&[]);
-    let mut it = fds.into_iter();
-    for _ in 0..count {
-        let Some((lenb, after_len)) = rest.split_at_checked(2) else {
-            break;
+/// them). The datagram is all or nothing: the workload starts with every mesh mount its policy
+/// names or it does not start.
+///
+/// # Errors
+///
+/// `InvalidData` if the datagram is empty, a record is cut short, bytes follow the last record,
+/// or the number of descriptors is not the count the datagram states.
+pub fn decode(data: &[u8], fds: Vec<OwnedFd>) -> io::Result<Vec<(OwnedFd, PathBuf)>> {
+    let malformed = |what: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("mesh rendezvous datagram: {what}"),
+        )
+    };
+    let (count, mut rest) = data.split_first().ok_or_else(|| malformed("it is empty"))?;
+    let count = usize::from(*count);
+    if fds.len() != count {
+        return Err(malformed(&format!(
+            "it names {count} mount(s) and carries {} descriptor(s)",
+            fds.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(count);
+    for fd in fds {
+        let (lenb, after_len) = rest
+            .split_at_checked(2)
+            .ok_or_else(|| malformed("a record is cut short"))?;
+        let [a, b] = *lenb else {
+            return Err(malformed("a record is cut short"));
         };
-        let [a, b] = *lenb else { break };
-        let Some((pathb, after_path)) =
-            after_len.split_at_checked(usize::from(u16::from_le_bytes([a, b])))
-        else {
-            break;
-        };
-        let Some(fd) = it.next() else {
-            break;
-        };
+        let (pathb, after_path) = after_len
+            .split_at_checked(usize::from(u16::from_le_bytes([a, b])))
+            .ok_or_else(|| malformed("a path is cut short"))?;
         out.push((fd, PathBuf::from(std::ffi::OsStr::from_bytes(pathb))));
         rest = after_path;
     }
-    out
+    if !rest.is_empty() {
+        return Err(malformed("bytes follow the last record"));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+
+    fn mounts(targets: &[&str]) -> Vec<(OwnedFd, PathBuf)> {
+        targets
+            .iter()
+            .map(|t| {
+                let (a, _b) = UnixStream::pair().expect("pair");
+                (OwnedFd::from(a), PathBuf::from(t))
+            })
+            .collect()
+    }
+
+    fn fds(n: usize) -> Vec<OwnedFd> {
+        mounts(&vec!["/x"; n])
+            .into_iter()
+            .map(|(fd, _)| fd)
+            .collect()
+    }
+
+    #[test]
+    fn a_datagram_round_trips() {
+        let sent = mounts(&["/run/mesh/a", "/run/mesh/b"]);
+        let (data, _borrowed) = encode(&sent);
+        let got = decode(&data, fds(2)).expect("decode");
+        let targets: Vec<&PathBuf> = got.iter().map(|(_, t)| t).collect();
+        assert_eq!(
+            targets,
+            [&PathBuf::from("/run/mesh/a"), &PathBuf::from("/run/mesh/b")]
+        );
+        assert!(decode(&[0], Vec::new()).expect("no mesh").is_empty());
+    }
+
+    /// A workload must not start with some of its mesh mounts.
+    #[test]
+    fn a_damaged_datagram_yields_nothing_rather_than_a_partial_mesh() {
+        let sent = mounts(&["/run/mesh/a", "/run/mesh/b"]);
+        let (data, _borrowed) = encode(&sent);
+        let cut = data.get(..data.len().saturating_sub(3)).expect("cut");
+        assert!(decode(cut, fds(2)).is_err(), "truncated");
+        assert!(decode(&data, fds(1)).is_err(), "a descriptor short");
+        assert!(decode(&data, fds(3)).is_err(), "a descriptor over");
+        let mut long = data.clone();
+        long.push(0);
+        assert!(decode(&long, fds(2)).is_err(), "trailing bytes");
+        assert!(decode(&[], Vec::new()).is_err(), "empty");
+    }
 }

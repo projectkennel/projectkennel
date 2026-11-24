@@ -6,6 +6,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### CLI changes
+
+- **`kennel run` refuses a kennel name that starts with `spawn-`.** The prefix is reserved for
+  kennels the daemon spawns.
+
 ### Policy schema changes
 
 - **`[[unix.allow]]` is stricter.** A policy is now refused if a grant's `real` is anywhere in
@@ -91,6 +96,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `[[spawn.allow.add]]` entry for a template its parent already allows was discarded in
   favour of the parent's, dropping the child's narrowing; the child's entry now replaces the
   inherited one, with a warning.
+- **Four checks that failed open now fail closed.** A damaged mesh rendezvous message started
+  the workload with the mounts that happened to parse; it now starts with all of them or not
+  at all. The cap on loopback addresses counted zero when `/proc/net/if_inet6` was unreadable;
+  the add is now refused. A binder context manager that did not start was a warning and the
+  kennel was brought up without one; the bring-up now fails. An OpenSSH private key whose END
+  marker precedes its BEGIN marker panicked the parser; it is now an error.
+- **Kennel names starting with `spawn-` are reserved.** The daemon names spawned kennels
+  `spawn-<requester ctx>-<n>` and reads parentage back from the name, so an operator's kennel
+  with such a name was killed with that requester and shared its audit directory. A start
+  under a reserved name is refused unless the daemon made the name.
+- **A provider that ran healthily starts a fresh restart budget.** The supervisor's restart
+  count never reset, so a provider that crashed `max_attempts` times over any span was failed
+  for good. A run of a minute or more after reporting ready resets the count.
 
 ### Threat catalogue
 

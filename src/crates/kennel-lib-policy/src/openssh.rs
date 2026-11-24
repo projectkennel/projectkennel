@@ -97,7 +97,11 @@ pub fn parse_private_key(pem: &str) -> Result<([u8; 32], String), String> {
     let end = pem
         .find(PEM_END)
         .ok_or("not an OpenSSH private key (missing END marker)")?;
-    let b64_body: String = pem[start..end]
+    // `get`, not an index: a file whose END marker comes before its BEGIN marker gives
+    // `start > end`, and slicing that would panic on input the caller does not control.
+    let b64_body: String = pem
+        .get(start..end)
+        .ok_or("not an OpenSSH private key (END marker before BEGIN marker)")?
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
@@ -238,6 +242,13 @@ pub fn is_openssh_private(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markers_in_the_wrong_order_are_an_error_not_a_panic() {
+        let pem = format!("{PEM_END}\nAAAA\n{PEM_BEGIN}\n");
+        let err = parse_private_key(&pem).expect_err("refused");
+        assert!(err.contains("END marker before BEGIN"), "{err}");
+    }
 
     #[test]
     fn round_trip_pubkey_blob() {

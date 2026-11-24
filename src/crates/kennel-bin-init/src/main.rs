@@ -176,7 +176,7 @@ fn place_mesh_mounts(sup: &mut Supervision, tr: &kennel_lib_config::Tracer) -> i
         ));
     }
     for (mount, target) in
-        kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)
+        kennel_lib_spawn::mesh_rendezvous::decode(buf.get(..n).unwrap_or(&[]), fds)?
     {
         // We are host root here, and the view holds binds of host directories. The target comes
         // from our bus peer, so it is not created or mounted on by name: it must lie on the

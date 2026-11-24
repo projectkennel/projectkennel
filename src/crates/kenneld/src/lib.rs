@@ -1319,7 +1319,11 @@ fn bring_up<P: Privileged + Sync>(
                 "the factory returned no binder device handle for a kennel that has a binderfs",
             ))
         })?;
-        match acquire_binder_node0(
+        // Node 0 is where every mediated request of this kennel is decided, and where
+        // kennel-bin-init pulls its plan. A kennel whose context manager did not start has no
+        // reference monitor on its bus, so the bring-up fails here, as it does just above for a
+        // missing device handle.
+        let manager = acquire_binder_node0(
             &handle,
             ctx,
             prep,
@@ -1327,13 +1331,15 @@ fn bring_up<P: Privileged + Sync>(
             net_runtime,
             std::sync::Arc::clone(&inbound_runtime),
             tun_session,
-        ) {
-            Ok(manager) => {
-                tracer.step("bring-up: binder node 0 acquired, lifecycle served");
-                state.binder = Some(manager);
-            }
-            Err(e) => eprintln!("kenneld: warning: binder context manager not started: {e}"),
-        }
+        )
+        .map_err(|e| {
+            Error::Io(io::Error::new(
+                e.kind(),
+                format!("the binder context manager did not start: {e}"),
+            ))
+        })?;
+        tracer.step("bring-up: binder node 0 acquired, lifecycle served");
+        state.binder = Some(manager);
     }
 
     // Tell kennel-bin-init the bus is live so it pulls its plan and starts the workload (unconditional:
