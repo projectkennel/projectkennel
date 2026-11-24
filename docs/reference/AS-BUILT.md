@@ -26,6 +26,56 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-24 — the follow-up review's remaining findings
+
+- **Bears-on:** Kennel book Vol 2 ch.8 (The Network: the tun path, the INet facade, the inbound
+  mirror §7.5.7), §7.6 (`[unix]` grants), §7.12 (spawn), §7.13 (the mesh and the supervisor),
+  §9.7 (the TTL custodian), and the audit chapter.
+- **Change:**
+  - *The tun session channel is `SOCK_SEQPACKET`*, not a connected `SOCK_DGRAM` pair. Frames
+    are still one per message. A mediator exits on hang-up, on a zero-length read, or on a send
+    that reports the peer gone; `EINTR` no longer ends it. The broker admits two live sessions
+    for one kennel (keyed by the tun address kenneld writes into the session payload) and 256
+    overall, and reaps mediators from one thread. A refused session is answered at once, not
+    retried until the consume deadline. `facade-tun` exits when the channel closes.
+  - *A `[[unix.allow]]` `real`* may not be in the daemon's runtime directory
+    (`$XDG_RUNTIME_DIR/kennel/`, any part of it) nor in the workload-writable surface (`write` ∪
+    `exclusive` ∪ `home_persist` ∪ write-redirect sources). The daemon opens the socket with
+    `O_PATH`, applies the first rule to `/proc/self/fd/<n>`'s target, and connects through that
+    same path. A `shim`, and the `at` of an af-unix `[[consumes]]`, must be rooted at `/`,
+    `~/`, `$HOME/`, `$XDG_RUNTIME_DIR/` or `<home>/`, have no `.`, `..` or `=`, and not sit
+    directly under `/`.
+  - *The inbound mirror listener is bound to the `lo` device* (`SO_BINDTODEVICE`) before it is
+    bound to the kennel's address. `host-inetd` caps conduits per process. kenneld writes a
+    `net.inbound-connect` record per accepted connection, releases the binder reference a
+    repeated `REGISTER_MIRROR` replaced, and drains held conduits on each arrival.
+  - *Egress refuses the host's own addresses.* The INet decision and the UDP mediator list the
+    host's interface addresses (`getifaddrs`) at decision time and refuse a literal or resolved
+    destination that is one of them, on the same terms as special-use space. A `[net.udp]`
+    `name` must be a DNS name.
+  - *Enforcement results are reported.* The tripwire and the TTL handler audit a failed
+    freeze, kill or thaw as `error`. A registration whose death notification cannot be
+    requested is refused.
+  - *Spawn narrowing.* `mutable = []` is a compile error. A child's `[[spawn.allow.add]]` for
+    an inherited template replaces the inherited entry.
+  - *Load-time rules.* `invariant::validate` checks the identity names, the hostname, the
+    bind-port cap and the digest form with the compiler's predicates, and `patch::instantiate`
+    runs it on the policy it produces.
+  - *Smaller items.* The mesh rendezvous datagram is all or nothing; the loopback-address cap
+    refuses when it cannot count; a context manager that does not start fails the bring-up;
+    kennel names of the form `spawn-<number>-…` are reserved to the daemon; a provider's restart count
+    resets after a minute of readiness; start refusals, foreign control connections and
+    `stop`/`attach`/`reload` are audited through a daemon-level writer, and
+    `lifecycle.kennel-exit` carries `exited`, `stopped` or `reaped`.
+- **Not changed:** any local user can connect to a mirrored port (TCP has no peer identity to
+  check); the UDP path dials RFC1918, CGNAT and ULA by design; "narrowed to no fields" cannot
+  be expressed in a spawn grant (it would need a settled-schema field); `[fs.cwd]` is not part
+  of the load-time write-set check, because it is known only at spawn.
+- **Why:** each was a place where a control was stated and not enforced, enforced in one of two
+  places, or failed open on an error.
+- **Source:** the 2026-11-24 follow-up review (findings N-03 to N-23); branch
+  `fix/overlay-options-and-dotted-keys`.
+
 ## 2026-11-24 — the overlay option string and dotted keys are bounded
 
 - **Bears-on:** Kennel book Vol 2: the view construction chapter (the OCI overlay, §7.11) and
