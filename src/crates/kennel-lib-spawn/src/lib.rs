@@ -15,10 +15,12 @@
 //!
 //! # Scope of this build
 //!
-//! This crate is the pure half: verify → substitute → translate the signed policy into a
-//! [`Plan`] and a [`ConstructionHalf`]/[`Supervision`] pair, all testable off the spawn path.
-//! Execution is the privhelper **factory**: it clones the namespaces, writes the identity maps,
-//! builds the constructed view (`build_view_and_pivot`), and `fexecve`s `kennel-bin-init` as the
+//! Two halves live here. The first is pure: verify → substitute → translate the signed policy
+//! into a [`Plan`] and a [`ConstructionHalf`]/[`Supervision`] pair, all testable off the spawn
+//! path. The second is the view construction itself ([`build_view_and_pivot`]): mounts, binds
+//! and the pivot, run by the privhelper **factory** in its construction child.
+//! The factory clones the namespaces, writes the identity maps,
+//! builds the constructed view, and `fexecve`s `kennel-bin-init` as the
 //! kennel's uid-0 PID 1, which applies the irreversible seal (Landlock + seccomp + cgroup join)
 //! before running the workload. The post-`fork` `unsafe` lives in `kennel-lib-syscall`; egress BPF
 //! is attached in the same factory op. The root e2e exercises the whole vertical.
@@ -1245,89 +1247,6 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
             copy_dir_recursive(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Load the given BPF programs, populate their egress maps, and attach to a cgroup.
-///
-/// Populates each program's maps from `plan` and attaches it to `cgroup`. Returns
-/// the loaded handles, which the caller must keep alive: dropping them closes the
-/// map/program fds (and, with the program, the attachment).
-///
-/// `objects` pairs each program spec with its compiled object bytes (from
-/// `kennel_lib_bpf::programs` in production, or compiled in tests). This in-process
-/// helper mints each program its own maps and is used by the spawn root tests;
-/// the production egress path (the privhelper, `kennel_privhelper::exec`) instead
-/// creates one shared map set per kennel (`create_maps` + `load_program_against`)
-/// and pins it. Pass the program(s) whose maps you populate (e.g. `connect4` for
-/// the v4 egress allowlist).
-///
-/// # Errors
-///
-/// Returns [`SpawnError::Syscall`] if loading, map population, or attach fails.
-pub fn attach_egress(
-    cgroup: std::os::fd::BorrowedFd<'_>,
-    plan: &Plan,
-    objects: &[(&'static kennel_lib_bpf::ProgramSpec, &[u8])],
-) -> Result<Vec<kennel_lib_bpf::Loaded>, SpawnError> {
-    let mut loaded = Vec::new();
-    for (spec, elf) in objects {
-        let l = kennel_lib_bpf::load_program(elf, spec, kennel_lib_bpf::KENNEL_MAPS)
-            .map_err(SpawnError::Syscall)?;
-        populate_egress_maps(&l, plan)?;
-        // Seal the write-once meta map (§02-7-bpf-abi.md), consistent with the
-        // privhelper's production path.
-        kennel_lib_bpf::freeze_maps(&l.maps, &["kennel_meta_map"]).map_err(SpawnError::Syscall)?;
-        l.attach(cgroup, spec.attach_type)
-            .map_err(SpawnError::Syscall)?;
-        loaded.push(l);
-    }
-    Ok(loaded)
-}
-
-/// Write the plan's egress entries into whichever of a loaded program's maps it
-/// references (`kennel_meta_map`, `allow_v4`, `deny_v4`).
-fn populate_egress_maps(loaded: &kennel_lib_bpf::Loaded, plan: &Plan) -> Result<(), SpawnError> {
-    use kennel_lib_bpf::sys::BPF_ANY;
-
-    if loaded.maps.contains_key("kennel_meta_map") {
-        loaded
-            .update_map(
-                "kennel_meta_map",
-                &0u32.to_ne_bytes(),
-                &plan.bpf_meta,
-                BPF_ANY,
-            )
-            .map_err(SpawnError::Syscall)?;
-    }
-    if loaded.maps.contains_key("allow_v4") {
-        for (key, value) in &plan.bpf_allow_v4 {
-            loaded
-                .update_map("allow_v4", key, value, BPF_ANY)
-                .map_err(SpawnError::Syscall)?;
-        }
-    }
-    if loaded.maps.contains_key("deny_v4") {
-        for (key, value) in &plan.bpf_deny_v4 {
-            loaded
-                .update_map("deny_v4", key, value, BPF_ANY)
-                .map_err(SpawnError::Syscall)?;
-        }
-    }
-    if loaded.maps.contains_key("allow_v6") {
-        for (key, value) in &plan.bpf_allow_v6 {
-            loaded
-                .update_map("allow_v6", key, value, BPF_ANY)
-                .map_err(SpawnError::Syscall)?;
-        }
-    }
-    if loaded.maps.contains_key("deny_v6") {
-        for (key, value) in &plan.bpf_deny_v6 {
-            loaded
-                .update_map("deny_v6", key, value, BPF_ANY)
-                .map_err(SpawnError::Syscall)?;
         }
     }
     Ok(())

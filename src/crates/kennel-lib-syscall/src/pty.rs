@@ -170,7 +170,7 @@ pub fn is_terminal(fd: BorrowedFd<'_>) -> bool {
     nix::unistd::isatty(fd).unwrap_or(false)
 }
 
-/// Block `SIGWINCH` in the calling thread so [`relay_winch`] can `sigwait` it.
+/// Block `SIGWINCH` in the calling thread so [`wait_winch`] can `sigwait` it.
 ///
 /// Call once on the main thread before spawning the relay — threads spawned afterwards
 /// inherit the block, and the default disposition will not fire.
@@ -181,25 +181,6 @@ pub fn block_winch() -> io::Result<()> {
     let mut set = nix::sys::signal::SigSet::empty();
     set.add(nix::sys::signal::Signal::SIGWINCH);
     set.thread_block().map_err(io::Error::from)
-}
-
-/// Relay terminal-resize events forever: `sigwait` `SIGWINCH`, copy `from`'s window
-/// size onto `to`, repeat.
-///
-/// Run on a dedicated thread after [`block_winch`]. Takes owned fds for the thread's
-/// `'static` bound (it borrows them each iteration); returns on a `sigwait` error.
-#[allow(clippy::needless_pass_by_value)] // the spawned thread owns the fds for its lifetime
-pub fn relay_winch(from: OwnedFd, to: OwnedFd) {
-    let mut set = nix::sys::signal::SigSet::empty();
-    set.add(nix::sys::signal::Signal::SIGWINCH);
-    loop {
-        if set.wait().is_err() {
-            return;
-        }
-        if let Ok(ws) = get_winsize(from.as_fd()) {
-            let _ = set_winsize(to.as_fd(), &ws);
-        }
-    }
 }
 
 /// Block until the next `SIGWINCH` (`sigwait`), returning `Ok(())` per delivery.

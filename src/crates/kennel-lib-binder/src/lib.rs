@@ -13,8 +13,9 @@
 //!
 //! # Invariants
 //!
-//! - The `unsafe` surface is confined to [`sys`] (raw `ioctl`/`mmap`) per
-//!   CODING-STANDARDS.md §4; every other module is safe Rust over it.
+//! - The raw `ioctl`/`mmap`/`mount` calls are all in [`sys`]. [`client`] has the only other
+//!   `unsafe`: calls into `sys` whose safety contract it must uphold (the `BINDER_WRITE_READ`
+//!   buffers, adopting a received fd) and two `fcntl` calls. Every other module is safe Rust.
 //! - The `BC_*`/`BR_*` codec ([`proto`]) treats the kernel-supplied read buffer
 //!   as untrusted bytes: every field is bounds-checked, never indexed.
 //! - Binder protocol version is pinned: a device whose `BINDER_VERSION` is not

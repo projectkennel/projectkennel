@@ -44,8 +44,10 @@ fn main() -> ExitCode {
     // Release an exclusive host-bind over-mount (§2.7): `exclusive-unmount <host>`. The over-mount
     // is performed during construction; only the *release* is a standalone op, because it happens
     // at a different time — teardown, or `kennel release` recovery after a crash. Both are delegated
-    // to the `{sys_admin}` kennel-privhelper-mounts sub-helper (the factory holds no
-    // `CAP_SYS_ADMIN`); this op forwards to its `unmount` and passes its exit code through.
+    // to the `{sys_admin}` kennel-privhelper-mounts sub-helper, so the mount, the unmount and the
+    // ownership check that gates them live in one binary. The factory does hold `CAP_SYS_ADMIN`
+    // (for the identity-map write and the bpffs mount) but does not use it here: this op
+    // forwards to the sub-helper's `unmount` and passes its exit code through.
     let arg1 = std::env::args().nth(1);
     if arg1.as_deref() == Some("exclusive-unmount") {
         let Some(path) = std::env::args().nth(2) else {

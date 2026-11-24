@@ -142,6 +142,20 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Dead privileged code removed, and comments that described an earlier design corrected.**
+  No behaviour change.
+  - Removed: `namespace::fork_hold` (ten `unsafe` blocks, no caller), `pty::relay_winch`, and
+    `kennel_lib_spawn::attach_egress` with its map-population helper (the production egress
+    path is the helper's own).
+  - `kennel-privhelper`: the comments said both that the factory holds `CAP_SYS_ADMIN` and
+    that it does not, and that its drop to the operator comes later, directly above the drop.
+    They now say what happens: the factory holds the capability, drops everything once the
+    identity maps are written, and delegates the exclusive over-mount to the sub-helper.
+  - Module docs in `kennel-lib-syscall`, `kennel-lib-binder` and `kennel-lib-spawn` no longer
+    understate where `unsafe` lives or what the crate does.
+  - `CODING-STANDARDS.md`: the `unsafe` rule names the five permitted crates and the register's
+    real location, the fuzzing rule describes the harness that exists, and a new Appendix A.1
+    lists the rules the code does not yet meet.
 - **Duplicated privileged code is consolidated, with tests added first.** No behaviour change
   is intended.
   - `kennel-lib-syscall` `fd.rs`: the two host-root directory walkers are one, and the path
