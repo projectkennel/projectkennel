@@ -26,6 +26,35 @@ under `docs/archive/` when the trees moved.
 - **Source:** #<PR> / <commit>
 -->
 
+## 2026-11-24 — which directory may be an OCI image root
+
+- **Bears-on:** Kennel book Vol 2 §7.11.4a (the OCI substrate root) (best-effort).
+- **Change:** the construction child decides, with the operator's filesystem identity, whether
+  a directory may be the overlay's image lower (`kennel-lib-spawn/src/image.rs`), before the
+  one mount it makes as root:
+  - the operator must be able to list and search the directory. The kernel is asked (the
+    directory is opened for reading and a name is looked up in it); the `O_PATH` handle the
+    mount uses is granted without any access and proves nothing;
+  - the directory is the operator's own, or it is root's, not writable by group or other, and
+    lies beneath `/usr`, `/var`, `/etc`, `/lib`, `/lib64` or `/opt` — judged on the path the
+    handle resolved to, so a symlink or `..` does not change the answer. `/` and the roots
+    themselves do not qualify;
+  - every directory in the `kennel-etc` layer that the image also has as a directory must be
+    one the operator can list and search. Where the image has no directory of that name the
+    walk stops: nothing beneath merges;
+  - a root-owned image is refused with a persistent upper. The operator can add a directory
+    to their own upper at any time, which would cover the image directory of the same name,
+    and no check made before the mount can rule that out.
+  None of this applies when the operator is root.
+- **Why:** overlayfs reads lower inodes with the mounter's credentials and shows a merged
+  directory with the top layer's attributes. The factory acts as the operator so that it
+  cannot read what its caller could not; the image lower was the one input where being
+  reachable stood in for being accessible.
+- **Not changed:** an operator-owned image may still contain directories the operator cannot
+  enter (left there by root); with a persistent upper the operator could cover one. Root's
+  credentials stay inside the operator's own tree, which is the existing rule for the upper.
+- **Source:** #244.
+
 ## 2026-11-24 — the follow-up review's remaining findings
 
 - **Bears-on:** Kennel book Vol 2 ch.8 (The Network: the tun path, the INet facade, the inbound

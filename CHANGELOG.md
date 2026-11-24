@@ -50,6 +50,16 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   its layers as one comma-separated string, and the privileged factory built that string from a
   staging directory named by its caller, then mounted with root's filesystem identity. A layer
   path containing `,`, `:` or `\` (or not UTF-8) is now refused before the mount.
+- **An OCI image root must be one the caller could read themselves.** The overlay is mounted
+  with root's filesystem identity, and overlayfs then reads the image with it; a merged
+  directory is shown with the attributes of the topmost layer that has it. The image directory
+  was only required to be reachable, so a root-owned directory closed to the caller, and any
+  closed directory inside an image that a layer above also had, could be served to the workload
+  with its world-readable contents. The factory now requires, as the caller: read and search
+  access to the image directory; that it is the caller's own, or root's, not writable by group
+  or other, and beneath `/usr`, `/var`, `/etc`, `/lib`, `/lib64` or `/opt`; and that no directory
+  in the layer above covers an image directory the caller cannot enter. A root-owned image is
+  refused with `persistence = "persist"`.
 - **A dotted key can no longer exhaust the policy parser's stack.** The parser runs before a
   signature is checked. Its nesting limit covered arrays, inline tables and table headers but
   not dotted keys, so `a.a.a…` with 100,000 parts (200 KB) aborted the CLI. The parts of a
