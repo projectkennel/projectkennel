@@ -36,5 +36,6 @@
 #![forbid(unsafe_code)]
 
 pub mod control;
+pub mod name;
 pub mod readiness;
 pub mod socket;

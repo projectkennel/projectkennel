@@ -142,6 +142,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **A kennel name is a type in the daemon.** `KennelName` (in `kennel-lib-control`) can only
+  be built by parsing against the grammar `[a-z0-9][a-z0-9-]{0,63}`. The daemon's start,
+  stop, attach and resize paths, its name registry and `run_kennel` take it, so they cannot
+  be handed a string nobody checked. Two internal callers that started kennels without
+  checking the name now do: a spawned child (`spawn-<ctx>-…`, made by the daemon) and a mesh
+  provider (named by its enablement link). The control protocol's bytes are unchanged.
 - **The factory's construction failures are a typed error.** `kennel-privhelper`'s
   `construct` returned `io::Error`s carrying formatted text. `ConstructError` now separates a
   refusal (a malformed request, a granted gid that is not the caller's, an untrusted init

@@ -224,6 +224,15 @@ where
 {
     let id = prov.provider;
     let tier = prov.tier;
+    // A provider's name comes from the catalogue (an enablement link's file name). It is
+    // checked like a name from the control socket before a kennel is built under it.
+    let kname = match kennel_lib_control::name::KennelName::parse(&id) {
+        Ok(kname) => kname,
+        Err(e) => {
+            eprintln!("kenneld: supervisor: `{id}` is not a kennel name: {e}");
+            return;
+        }
+    };
     let mut restarts: u32 = 0;
     loop {
         // Construct the provider on a sub-thread — `run_kennel` blocks until the provider exits, like
@@ -244,9 +253,11 @@ where
             return;
         };
         let run_shared = Arc::clone(shared);
+        let run_name = kname.clone();
         let run = std::thread::spawn(move || {
             run_kennel(
                 &run_shared,
+                &run_name,
                 &req,
                 Vec::new(),
                 &mut sink,

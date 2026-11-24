@@ -37,6 +37,11 @@ use kennel_lib_policy::{
 use kennel_privhelper::validate::ReservedScope;
 use kenneld::HelperClient;
 
+/// The validated name of the kennel a request starts.
+fn name_of(req: &kenneld::control::StartRequest) -> kenneld::name::KennelName {
+    kenneld::name::KennelName::parse(&req.kennel).expect("a valid kennel name")
+}
+
 /// Locate a binary built alongside this test (`target/<profile>/<name>`).
 fn sibling_binary(name: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
@@ -351,6 +356,7 @@ fn no_ipc_kennel_runs_through_the_factory() {
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
     run_kennel(
         &shared,
+        &name_of(&req),
         &req,
         Vec::new(),
         &mut server,
@@ -495,6 +501,7 @@ fn trust_manifest_is_masked_inside_the_kennel() {
     let (mut client, mut server) = UnixStream::pair().expect("socketpair");
     run_kennel(
         &shared,
+        &name_of(&req),
         &req,
         Vec::new(),
         &mut server,
@@ -646,6 +653,7 @@ fn exclusive_bind_shadows_the_host_path_during_the_run_then_releases() {
         let handle = s.spawn(|| {
             run_kennel(
                 &shared,
+                &name_of(&req),
                 &req,
                 Vec::new(),
                 &mut server,
@@ -797,6 +805,7 @@ fn run_ttl_kennel(
     let started_at = std::time::Instant::now();
     run_kennel(
         &shared,
+        &name_of(&req),
         &req,
         Vec::new(),
         &mut server,
@@ -1039,6 +1048,7 @@ fn interactive_pty_attaches_a_controlling_tty_via_the_factory() {
         });
         run_kennel(
             &h.shared,
+            &name_of(&req),
             &req,
             vec![OwnedFd::from(child)],
             &mut server,
@@ -1128,6 +1138,7 @@ fn detach_keeps_the_workload_alive_then_reattach_takes_over() {
     let run_thread = std::thread::spawn(move || {
         run_kennel(
             &run_shared,
+            &name_of(&req),
             &req,
             vec![OwnedFd::from(client1_peer)],
             &mut server1,

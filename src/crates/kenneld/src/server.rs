@@ -30,6 +30,7 @@ use kennel_privhelper::validate::ReservedScope;
 use crate::control::{self, KennelInfo, Request, Response, StartRequest};
 use crate::ctx::CtxAllocator;
 use crate::{cgroup, start, Privileged};
+use kennel_lib_control::name::KennelName;
 
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
@@ -793,12 +794,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Reserve a name and allocate its context, atomically. Returns the context,
     /// or an error response if the name is taken or the pool is exhausted.
-    fn reserve(&self, name: &str) -> Result<u16, Response> {
+    fn reserve(&self, name: &KennelName) -> Result<u16, Response> {
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if reg.kennels.contains_key(name) {
+        if reg.kennels.contains_key(name.as_str()) {
             return Err(Response::Error(format!(
                 "kennel `{name}` is already running"
             )));
@@ -809,7 +810,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             ));
         };
         reg.kennels.insert(
-            name.to_owned(),
+            name.to_string(),
             KennelMeta {
                 ctx,
                 pid: None,
@@ -863,12 +864,14 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// A clone of the named kennel's PTY broker, or `None` if the kennel is unknown,
     /// not interactive, or not yet started.
-    fn broker_for(&self, name: &str) -> Option<crate::pty_broker::PtyBroker> {
+    fn broker_for(&self, name: &KennelName) -> Option<crate::pty_broker::PtyBroker> {
         let reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reg.kennels.get(name).and_then(|m| m.broker.clone())
+        reg.kennels
+            .get(name.as_str())
+            .and_then(|m| m.broker.clone())
     }
 
     /// The `(ctx, pid)` of a started kennel, or `None` if unknown or still starting.
@@ -936,12 +939,12 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// Deregister `name` and return its context to the pool.
-    fn release(&self, name: &str, ctx: u16) {
+    fn release(&self, name: &KennelName, ctx: u16) {
         let mut reg = self
             .registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        reg.kennels.remove(name);
+        reg.kennels.remove(name.as_str());
         reg.ctx.release(ctx);
     }
 
@@ -959,13 +962,13 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Handle a `Stop`: signal the named kennel's workload (the owning thread
     /// reaps and tears it down). Errors if the kennel is unknown or still starting.
-    fn stop(&self, name: &str) -> Response {
+    fn stop(&self, name: &KennelName) -> Response {
         let (ctx, started) = {
             let mut reg = self
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match reg.kennels.get_mut(name) {
+            match reg.kennels.get_mut(name.as_str()) {
                 Some(meta) => {
                     if meta.pid.is_some() {
                         meta.killed_as = Some("stopped");
@@ -1262,6 +1265,15 @@ where
                 eprintln!("kenneld: spawn `{name}`: could not make a construction sink");
                 return;
             };
+            // The daemon made this name itself (`spawn-<ctx>-…`); it is checked like any other,
+            // so nothing downstream handles a name that was merely assumed to be well formed.
+            let kname = match KennelName::parse(&name) {
+                Ok(kname) => kname,
+                Err(e) => {
+                    eprintln!("kenneld: spawn `{name}`: {e}");
+                    return;
+                }
+            };
             let req = StartRequest {
                 policy: PathBuf::new(),
                 kennel: name,
@@ -1277,6 +1289,7 @@ where
             // spawns — a no-op constructor suffices for the nested run.
             run_kennel(
                 &shared,
+                &kname,
                 &req,
                 Vec::from(stdio),
                 &mut sink,
@@ -1311,9 +1324,22 @@ pub fn dispatch_request<P, L>(
     L: PolicyLoader + Send + Sync + 'static,
 {
     let response = match request {
-        Request::Start(req) => match validate_kennel_name(&req.kennel) {
-            Ok(()) => return run_kennel(shared, &req, fds, conn, None, constructor, None, None),
+        Request::Start(req) => match KennelName::parse(&req.kennel) {
+            Ok(kname) => {
+                return run_kennel(
+                    shared,
+                    &kname,
+                    &req,
+                    fds,
+                    conn,
+                    None,
+                    constructor,
+                    None,
+                    None,
+                )
+            }
             Err(e) => {
+                let e = e.to_string();
                 eprintln!("kenneld: rejected start of `{}`: {e}", req.kennel);
                 // The name failed its grammar, so it is recorded as untrusted text.
                 crate::audit::daemon_audit().emit(&crate::audit::start_refused(
@@ -1324,14 +1350,14 @@ pub fn dispatch_request<P, L>(
                 Response::Error(e)
             }
         },
-        Request::Stop { kennel } => match validate_kennel_name(&kennel) {
-            Ok(()) => {
-                crate::audit::daemon_audit().emit(&crate::audit::control_request("stop", &kennel));
-                shared.stop(&kennel)
+        Request::Stop { kennel } => match KennelName::parse(&kennel) {
+            Ok(kname) => {
+                crate::audit::daemon_audit().emit(&crate::audit::control_request("stop", &kname));
+                shared.stop(&kname)
             }
             Err(e) => {
                 eprintln!("kenneld: rejected stop of `{kennel}`: {e}");
-                Response::Error(e)
+                Response::Error(e.to_string())
             }
         },
         Request::List => shared.list(),
@@ -1351,25 +1377,24 @@ pub fn dispatch_request<P, L>(
         // connection for the session (the CLI proxies its terminal until detach or
         // workload exit), so it returns rather than falling through to the single
         // response below.
-        Request::Attach { kennel } => match validate_kennel_name(&kennel) {
-            Ok(()) => {
-                crate::audit::daemon_audit()
-                    .emit(&crate::audit::control_request("attach", &kennel));
-                return run_attach(shared, &kennel, fds, conn);
+        Request::Attach { kennel } => match KennelName::parse(&kennel) {
+            Ok(kname) => {
+                crate::audit::daemon_audit().emit(&crate::audit::control_request("attach", &kname));
+                return run_attach(shared, &kname, fds, conn);
             }
-            Err(e) => Response::Error(e),
+            Err(e) => Response::Error(e.to_string()),
         },
         // Resize the kennel's pty (the broker holds the master). Fire-and-forget: a
         // `SIGWINCH` relay sends this on a throwaway connection; there is no reply, so
         // it falls through to the single send below only on a bad name.
-        Request::Resize { kennel, rows, cols } => match validate_kennel_name(&kennel) {
-            Ok(()) => {
-                if let Some(broker) = shared.broker_for(&kennel) {
+        Request::Resize { kennel, rows, cols } => match KennelName::parse(&kennel) {
+            Ok(kname) => {
+                if let Some(broker) = shared.broker_for(&kname) {
                     broker.resize(rows, cols);
                 }
                 return;
             }
-            Err(e) => Response::Error(e),
+            Err(e) => Response::Error(e.to_string()),
         },
         // A `PromptReply` is only meaningful mid-run, read by the `PromptPort` on the
         // already-running connection (§9.7) — never a fresh request to the dispatcher. An
@@ -1397,52 +1422,11 @@ fn is_reserved_kennel_name(name: &str) -> bool {
         .is_some_and(|(ctx, _)| !ctx.is_empty() && ctx.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// The maximum kennel-name length (`02-2-config-schema.md`: `[a-z0-9][a-z0-9-]{0,63}`).
-const MAX_KENNEL_NAME: usize = 64;
-
-/// Validate a kennel name against its grammar `[a-z0-9][a-z0-9-]{0,63}` (§02-2): a
-/// lowercase-alphanumeric first character, then lowercase-alphanumeric or hyphen, at
-/// most 64 characters. This is the trust-boundary-6 check (§04): the name is
-/// untrusted CLI input that becomes path components and the synthetic hostname.
-///
-/// # Errors
-/// A human-readable reason if the name is empty, too long, or contains a character
-/// outside the grammar (in particular `/`, `.`, NUL, whitespace, or control bytes).
 /// The hostname part of an SSH destination — the `user@` prefix stripped. This is the
 /// alias the synthetic `~/.ssh/config` keys its `Host` stanza on, because OpenSSH matches
 /// `Host` against the hostname with any user removed (`ssh git@github.com` → `github.com`).
 fn ssh_host_alias(dest: &str) -> &str {
     dest.rsplit_once('@').map_or(dest, |(_, host)| host)
-}
-
-fn validate_kennel_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("kennel name must not be empty".to_owned());
-    }
-    if name.len() > MAX_KENNEL_NAME {
-        return Err(format!(
-            "kennel name `{name}` is too long ({} chars; the limit is {MAX_KENNEL_NAME})",
-            name.len()
-        ));
-    }
-    let mut chars = name.chars();
-    let first = chars.next().expect("non-empty checked above");
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(format!(
-            "kennel name `{name}` must start with a lowercase letter or digit \
-             (the grammar is [a-z0-9][a-z0-9-]{{0,63}})"
-        ));
-    }
-    if let Some(bad) = name
-        .chars()
-        .find(|c| !c.is_ascii_lowercase() && !c.is_ascii_digit() && *c != '-')
-    {
-        return Err(format!(
-            "kennel name `{name}` contains the illegal character {bad:?} \
-             (only [a-z0-9-] are allowed, so it cannot traverse a path or inject a hostname)"
-        ));
-    }
-    Ok(())
 }
 
 /// Bring one kennel up for a `Start` request: report `Started`, block until the workload
@@ -1456,6 +1440,7 @@ fn validate_kennel_name(name: &str) -> Result<(), String> {
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn run_kennel<P, L>(
     shared: &Arc<Shared<P, L>>,
+    kname: &KennelName,
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     conn: &mut UnixStream,
@@ -1471,50 +1456,40 @@ pub fn run_kennel<P, L>(
     L: PolicyLoader + Send + Sync + 'static,
 {
     let tr = shared.identity.tracer;
-    tr.step(&format!("run_kennel: starting `{}`", req.kennel));
+    tr.step(&format!("run_kennel: starting `{kname}`"));
     // `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
     // kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
     // a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
     // operator's kennel or a provider with such a name would be reaped as some kennel's child.
-    if preloaded.is_none() && is_reserved_kennel_name(&req.kennel) {
+    if preloaded.is_none() && is_reserved_kennel_name(kname) {
         let msg = format!(
-            "kennel name `{}` is reserved: `spawn-<number>-…` is how the daemon names the \
-             kennels it spawns",
-            req.kennel
+            "kennel name `{kname}` is reserved: `spawn-<number>-…` is how the daemon names the \
+             kennels it spawns"
         );
-        eprintln!("kenneld: rejected start of `{}`: {msg}", req.kennel);
-        crate::audit::daemon_audit().emit(&crate::audit::start_refused(&req.kennel, "name", &msg));
+        eprintln!("kenneld: rejected start of `{kname}`: {msg}");
+        crate::audit::daemon_audit().emit(&crate::audit::start_refused(kname, "name", &msg));
         let _ = control::send_response(conn, &Response::Error(msg));
         return;
     }
     let mut mesh_bus_guard = MeshBusGuard::new(shared);
-    let ctx = match shared.reserve(&req.kennel) {
+    let ctx = match shared.reserve(kname) {
         Ok(ctx) => ctx,
         Err(resp) => {
             if let Response::Error(msg) = &resp {
-                eprintln!(
-                    "kenneld: kennel `{}` failed to start [reserve]: {msg}",
-                    req.kennel
-                );
-                crate::audit::daemon_audit().emit(&crate::audit::start_refused(
-                    &req.kennel,
-                    "reserve",
-                    msg,
-                ));
+                eprintln!("kenneld: kennel `{kname}` failed to start [reserve]: {msg}");
+                crate::audit::daemon_audit()
+                    .emit(&crate::audit::start_refused(kname, "reserve", msg));
             }
             let _ = control::send_response(conn, &resp);
             return;
         }
     };
-    tr.step(&format!(
-        "run_kennel: reserved ctx {ctx} for `{}`",
-        req.kennel
-    ));
+    tr.step(&format!("run_kennel: reserved ctx {ctx} for `{kname}`"));
 
     let subst = RuntimeSubstitutions {
         ctx,
         uid: shared.identity.uid,
-        kennel: req.kennel.clone(),
+        kennel: kname.to_string(),
         home: shared.identity.home.clone(),
         namespace: shared.identity.scope.namespace(),
     };
@@ -1524,7 +1499,7 @@ pub fn run_kennel<P, L>(
     let mut loaded = if let Some(instance) = preloaded {
         match crate::policy::loaded_from_settled(&instance, &subst) {
             Ok(loaded) => loaded,
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "spawn instance", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "spawn instance", reason),
         }
     } else {
         tr.step(&format!(
@@ -1533,7 +1508,7 @@ pub fn run_kennel<P, L>(
         ));
         match shared.loader.load(&req.policy, &subst) {
             Ok(loaded) => loaded,
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "load policy", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "load policy", reason),
         }
     };
     if tr.on() {
@@ -1550,7 +1525,7 @@ pub fn run_kennel<P, L>(
     if let Err(reason) =
         check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
     {
-        return fail(shared, &req.kennel, ctx, conn, "landlock", reason);
+        return fail(shared, kname, ctx, conn, "landlock", reason);
     }
     // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
     // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
@@ -1566,7 +1541,7 @@ pub fn run_kennel<P, L>(
         let Some(launcher) = shared.identity.oci_entry_bin.clone() else {
             return fail(
                 shared,
-                &req.kennel,
+                kname,
                 ctx,
                 conn,
                 "oci launcher",
@@ -1577,7 +1552,7 @@ pub fn run_kennel<P, L>(
         if req.oci_config.is_none() {
             return fail(
                 shared,
-                &req.kennel,
+                kname,
                 ctx,
                 conn,
                 "oci launcher",
@@ -1601,7 +1576,7 @@ pub fn run_kennel<P, L>(
     } else {
         match effective_workload(req, &loaded.workload) {
             Ok(pair) => pair,
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "workload", reason),
         }
     };
     // `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
@@ -1625,7 +1600,7 @@ pub fn run_kennel<P, L>(
                     if let Some(src) = loaded.plan.redirected_source_within(&resolved) {
                         return fail(
                             shared,
-                            &req.kennel,
+                            kname,
                             ctx,
                             conn,
                             "fs.cwd",
@@ -1647,7 +1622,7 @@ pub fn run_kennel<P, L>(
                 let mask_manifest = loaded.settled.effective_policy.trust.manifest;
                 loaded.plan.grant_cwd(resolved, writable, mask_manifest);
             }
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "fs.cwd", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "fs.cwd", reason),
         }
     }
     tr.detail(&format!(
@@ -1670,7 +1645,7 @@ pub fn run_kennel<P, L>(
             let Some(entry) = req.oci_config.as_deref().and_then(std::path::Path::parent) else {
                 return fail(
                     shared,
-                    &req.kennel,
+                    kname,
                     ctx,
                     conn,
                     "oci persist",
@@ -1684,7 +1659,7 @@ pub fn run_kennel<P, L>(
             {
                 return fail(
                     shared,
-                    &req.kennel,
+                    kname,
                     ctx,
                     conn,
                     "oci persist",
@@ -1715,7 +1690,7 @@ pub fn run_kennel<P, L>(
                 loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
                 _workload_fd = Some(fd);
             }
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "workload sha256", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "workload sha256", reason),
         }
     } else {
         _workload_fd = None;
@@ -1746,7 +1721,7 @@ pub fn run_kennel<P, L>(
             Err(e) => {
                 return fail(
                     shared,
-                    &req.kennel,
+                    kname,
                     ctx,
                     conn,
                     "pty master socketpair",
@@ -1756,7 +1731,7 @@ pub fn run_kennel<P, L>(
         }
         match command_for_interactive(&argv, &cwd) {
             Ok(command) => command,
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "prepare command", reason),
         }
     } else {
         if let [stdin, stdout, stderr, ..] = fds.as_slice() {
@@ -1764,7 +1739,7 @@ pub fn run_kennel<P, L>(
         }
         match command_for(&argv, &cwd, fds) {
             Ok(command) => command,
-            Err(reason) => return fail(shared, &req.kennel, ctx, conn, "prepare command", reason),
+            Err(reason) => return fail(shared, kname, ctx, conn, "prepare command", reason),
         }
     };
     loaded.plan.stdio_fds = stdio_raw;
@@ -1788,19 +1763,10 @@ pub fn run_kennel<P, L>(
             loaded.ssh.grants.len()
         ));
     }
-    let ssh = match shared.register_ssh(&req.kennel, &loaded.ssh, &shim_root, &policy_ssh_dir) {
+    let ssh = match shared.register_ssh(kname, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
-        Err(reason) => {
-            return fail(
-                shared,
-                &req.kennel,
-                ctx,
-                conn,
-                "register ssh egress",
-                reason,
-            )
-        }
+        Err(reason) => return fail(shared, kname, ctx, conn, "register ssh egress", reason),
     };
     // A mediated section IS the brokered path: each enabled section implies its capability
     // consume, synthesized when the policy does not spell it out — so a section-only policy
@@ -1847,7 +1813,7 @@ pub fn run_kennel<P, L>(
     // Record this kennel's consumed capabilities for the W6 idle-reap census (§7.13.6): while this
     // kennel runs, any ondemand provider it consumes is kept alive.
     shared.note_consumes(
-        &req.kennel,
+        kname,
         loaded
             .consumes
             .iter()
@@ -1874,7 +1840,7 @@ pub fn run_kennel<P, L>(
                 "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
                  destination-blind signing oracle (§7.10.1) — any code in the kennel can sign for \
                  any destination. The [ssh] re-origination bastion is the intended path.",
-                req.kennel, sock.name
+                kname, sock.name
             );
         }
         let shims_gpg_agent = sock.name.eq_ignore_ascii_case("gpg-agent")
@@ -1885,7 +1851,7 @@ pub fn run_kennel<P, L>(
                  destination-blind signing oracle — worse than ssh-agent, a signature stamps your \
                  identity onto whatever the kennel signs (malware, releases, forged commits). There \
                  is no bastion equivalent (design §11.1); the safe default is to sign on the host.",
-                req.kennel, sock.name
+                kname, sock.name
             );
         }
     }
@@ -1914,7 +1880,7 @@ pub fn run_kennel<P, L>(
         .identity
         .audit_base
         .as_ref()
-        .map(|base| base.join(audit_dir_name(&req.kennel)));
+        .map(|base| base.join(audit_dir_name(kname)));
     // Hand the seal the interactive return socket's raw fd (it sends the pty master
     // back over it during pre-exec). `return_sock` keeps the fd open until after the
     // spawn returns, so the forked child still has it.
@@ -1932,7 +1898,7 @@ pub fn run_kennel<P, L>(
             .identity
             .hostname
             .clone()
-            .unwrap_or_else(|| req.kennel.clone()),
+            .unwrap_or_else(|| kname.to_string()),
         uid: id.uid,
         gid: id.gid,
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
@@ -1969,7 +1935,7 @@ pub fn run_kennel<P, L>(
                 if let Err(e) = std::fs::create_dir_all(&host_dir) {
                     eprintln!(
                         "kenneld: provider `{}`: mesh rendezvous dir {}: {e}",
-                        req.kennel,
+                        kname,
                         host_dir.display()
                     );
                     continue;
@@ -2017,7 +1983,7 @@ pub fn run_kennel<P, L>(
                     Err(e) => {
                         eprintln!(
                             "kenneld: provider `{}`: mesh bus for `{}`: {e}",
-                            req.kennel, p.name
+                            kname, p.name
                         );
                     }
                 }
@@ -2058,10 +2024,7 @@ pub fn run_kennel<P, L>(
                     mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
                 }
                 Err(e) => {
-                    eprintln!(
-                        "kenneld: consumer `{}`: mesh bus for `{name}`: {e}",
-                        req.kennel
-                    );
+                    eprintln!("kenneld: consumer `{kname}`: mesh bus for `{name}`: {e}");
                 }
             }
         }
@@ -2111,17 +2074,16 @@ pub fn run_kennel<P, L>(
                     }
                 }
                 Err(e) => {
-                    eprintln!("kenneld: consumer `{}`: dbus mesh bus: {e}", req.kennel);
+                    eprintln!("kenneld: consumer `{kname}`: dbus mesh bus: {e}");
                 }
             }
         } else if dbus_enabled && broker_tier.is_none() {
             // Fail-closed, loudly: with the legacy delegate retired there is no fallback — the
             // bus(es) stay unserved until the shipped broker provider is enabled.
             eprintln!(
-                "kenneld: kennel `{}` grants [dbus] but no `dbus-broker` provider is enabled — \
+                "kenneld: kennel `{kname}` grants [dbus] but no `dbus-broker` provider is enabled — \
                  the bus(es) will be unserved. install.sh enables the shipped provider at \
-                 /etc/kennel/ondemand/dbus-broker; after adding a link, run `kennel daemon-reload`.",
-                req.kennel
+                 /etc/kennel/ondemand/dbus-broker; after adding a link, run `kennel daemon-reload`."
             );
         }
     }
@@ -2129,11 +2091,11 @@ pub fn run_kennel<P, L>(
     // Retain the verified settled struct on the kennel's record, so a mediation broker it consumes
     // (dbus, tun) can pull the section it needs to police the session — kenneld selects it by the
     // consume's shape, holding no filter table. The `Arc` clone is cheap and leaves `loaded` intact.
-    shared.set_settled(&req.kennel, std::sync::Arc::clone(&loaded.settled));
+    shared.set_settled(kname, std::sync::Arc::clone(&loaded.settled));
     // …and, for a supervised provider, the tier it was enabled at: what lets it (and nothing else)
     // register the services its signed policy provides.
     if let Some(tier) = provider_tier {
-        shared.set_provider_tier(&req.kennel, tier);
+        shared.set_provider_tier(kname, tier);
     }
 
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
@@ -2141,7 +2103,7 @@ pub fn run_kennel<P, L>(
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
     let mut spec = crate::Spec {
-        id: req.kennel.clone(),
+        id: kname.to_string(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
         scope: id.scope.clone(),
@@ -2170,7 +2132,7 @@ pub fn run_kennel<P, L>(
     // decorator is a transparent pass-through.
     let audit = state_dir.as_ref().map(|dir| {
         Arc::new(crate::audit::build_writer(
-            &req.kennel,
+            kname,
             dir,
             &audit_runtime,
             kennel_uuid.clone(),
@@ -2202,9 +2164,9 @@ pub fn run_kennel<P, L>(
         };
         // The registry records every decision (§7.1.4). With no audit state dir, a sink-less
         // writer keeps the bus running without recording.
-        let writer = audit.clone().unwrap_or_else(|| {
-            Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
-        });
+        let writer = audit
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(kname, kennel_uuid.clone())));
         // The operator-prompt channel for the TTL `renew` action (§9.7): a clone of this
         // control connection. Installed only for an interactive run — a non-interactive caller
         // has no terminal to surface the prompt on, so `renew` there falls back to a warn.
@@ -2298,20 +2260,13 @@ pub fn run_kennel<P, L>(
             // A bring-up failure after the egress step may have left BPF pins behind
             // (the teardown removes the cgroup, which detaches the programs, but the
             // pins outlive the helper). Clean them up best-effort.
-            crate::bpf_audit::cleanup_pins(&req.kennel);
-            return fail(
-                shared,
-                &req.kennel,
-                ctx,
-                conn,
-                "spawn workload",
-                e.to_string(),
-            );
+            crate::bpf_audit::cleanup_pins(kname);
+            return fail(shared, kname, ctx, conn, "spawn workload", e.to_string());
         }
     };
     let pid = kennel.id();
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
-    shared.set_pid(&req.kennel, pid);
+    shared.set_pid(kname, pid);
 
     // D-Bus sessions are brokered lazily: the consumer's filter rides the brokered DbusRelay
     // (resolved at construction), and a session node is minted per SVC_CONNECT(dbus-name) via
@@ -2339,7 +2294,7 @@ pub fn run_kennel<P, L>(
     // no drain, egress unaffected.
     let drain = audit.as_ref().and_then(|writer| {
         crate::bpf_audit::spawn(
-            crate::bpf_audit::pin_dir_for(&req.kennel),
+            crate::bpf_audit::pin_dir_for(kname),
             ctx,
             Arc::clone(writer),
         )
@@ -2370,7 +2325,7 @@ pub fn run_kennel<P, L>(
                         loaded_tty_filter,
                         client_sock.take(),
                     );
-                    shared.set_broker(&req.kennel, b.clone());
+                    shared.set_broker(kname, b.clone());
                     Some(b)
                 },
             )
@@ -2393,9 +2348,9 @@ pub fn run_kennel<P, L>(
     // there is nothing to watch (no triggers / `[trust].manifest = false` ⇒ empty `watch_paths`)
     // or inotify is unavailable; the teardown `kennel review` is the authoritative backstop.
     let tripwire = {
-        let writer = audit.clone().unwrap_or_else(|| {
-            Arc::new(crate::audit::noop_writer(&req.kennel, kennel_uuid.clone()))
-        });
+        let writer = audit
+            .clone()
+            .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(kname, kennel_uuid.clone())));
         crate::tripwire::Tripwire::start(
             &req.watch_paths,
             on_change,
@@ -2428,7 +2383,7 @@ pub fn run_kennel<P, L>(
                 "kenneld: warning: could not release exclusive over-mount {}: {e} \
                  (run `kennel release {}` to clear it)",
                 src.display(),
-                req.kennel
+                kname
             );
         }
     }
@@ -2439,7 +2394,7 @@ pub fn run_kennel<P, L>(
     }
     if let Some(writer) = &audit {
         writer.emit(&crate::audit::workload_exit(pid, exit_code(&status)));
-        writer.emit(&crate::audit::kennel_exit(shared.exit_reason(&req.kennel)));
+        writer.emit(&crate::audit::kennel_exit(shared.exit_reason(kname)));
     }
     // Stop the BPF drain after the lifecycle events: a final sweep captures events
     // committed just before exit, then the per-kennel pins are removed.
@@ -2452,12 +2407,12 @@ pub fn run_kennel<P, L>(
     shared.reap_children(ctx);
     // D-Bus sessions need no explicit teardown: when this consumer's kennel exits, its
     // session-node handles are released and the broker reclaims each on Br::Release.
-    shared.deregister_ssh(&req.kennel);
-    shared.release(&req.kennel, ctx);
+    shared.deregister_ssh(kname);
+    shared.release(kname, ctx);
     // Reclaim complete: the cgroup is gone and the registry entry released. For a spawned sibling the
     // `max_instances` slot frees microseconds later when this `run_kennel` returns and the constructor
     // thread drops its `SlotGuard` — so this milestone marks the kennel fully torn down (§7.12.7).
-    tr.step(&format!("run_kennel: teardown complete `{}`", req.kennel));
+    tr.step(&format!("run_kennel: teardown complete `{kname}`"));
     let _ = control::send_response(
         conn,
         &Response::Exited {
@@ -2471,8 +2426,12 @@ pub fn run_kennel<P, L>(
 /// session ends — `Exited` if the workload exits, `Detached` if a later attach takes
 /// over. No workload lifecycle here: the broker (and the kennel's own `run_kennel`
 /// thread) own that; attach is a pure subscriber.
-fn run_attach<P, L>(shared: &Shared<P, L>, kennel: &str, fds: Vec<OwnedFd>, conn: &mut UnixStream)
-where
+fn run_attach<P, L>(
+    shared: &Shared<P, L>,
+    kennel: &KennelName,
+    fds: Vec<OwnedFd>,
+    conn: &mut UnixStream,
+) where
     P: Privileged + Clone + Sync,
     L: PolicyLoader,
 {
@@ -2531,7 +2490,7 @@ where
 /// `reason`. Returns the same `Response::Error(reason)` it logged.
 fn fail<P: Privileged + Clone, L: PolicyLoader>(
     shared: &Shared<P, L>,
-    name: &str,
+    name: &KennelName,
     ctx: u16,
     conn: &mut UnixStream,
     stage: &str,
@@ -2967,6 +2926,11 @@ fn mesh_bus_key(tier: crate::catalogue::Tier, name: &str, key: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kennel name for a test (the literal is known to be in the grammar).
+    fn kn(name: &str) -> KennelName {
+        KennelName::parse(name).expect("a valid kennel name")
+    }
     use std::net::IpAddr;
 
     use kennel_lib_syscall::landlock::AccessFs;
@@ -3273,7 +3237,7 @@ mod tests {
             "x".repeat(64).as_str(),
         ] {
             assert!(
-                validate_kennel_name(ok).is_ok(),
+                KennelName::parse(ok).is_ok(),
                 "`{ok}` should be a valid kennel name"
             );
         }
@@ -3294,13 +3258,10 @@ mod tests {
             "nul\0byte",
             "emoji😀",
         ] {
-            assert!(
-                validate_kennel_name(bad).is_err(),
-                "`{bad}` must be rejected"
-            );
+            assert!(KennelName::parse(bad).is_err(), "`{bad}` must be rejected");
         }
         // 65 chars is one over the limit.
-        assert!(validate_kennel_name(&"a".repeat(65)).is_err());
+        assert!(KennelName::parse(&"a".repeat(65)).is_err());
     }
 
     #[derive(Clone)]
@@ -3434,11 +3395,11 @@ mod tests {
     #[test]
     fn reserve_allocates_and_refuses_duplicates() {
         let s = shared();
-        assert_eq!(s.reserve("a"), Ok(1));
-        assert_eq!(s.reserve("b"), Ok(2));
-        assert!(s.reserve("a").is_err(), "duplicate name refused");
-        s.release("a", 1);
-        assert_eq!(s.reserve("a"), Ok(1), "released ctx is reusable");
+        assert_eq!(s.reserve(&kn("a")), Ok(1));
+        assert_eq!(s.reserve(&kn("b")), Ok(2));
+        assert!(s.reserve(&kn("a")).is_err(), "duplicate name refused");
+        s.release(&kn("a"), 1);
+        assert_eq!(s.reserve(&kn("a")), Ok(1), "released ctx is reusable");
     }
 
     #[test]
@@ -3522,16 +3483,16 @@ mod tests {
     fn stop_reports_unknown_and_still_starting() {
         let s = shared();
         assert!(
-            matches!(s.stop("ghost"), Response::Error(_)),
+            matches!(s.stop(&kn("ghost")), Response::Error(_)),
             "unknown kennel errors"
         );
-        let ctx = s.reserve("p").expect("reserve");
+        let ctx = s.reserve(&kn("p")).expect("reserve");
         // pid not yet set -> still starting.
         assert!(
-            matches!(s.stop("p"), Response::Error(_)),
+            matches!(s.stop(&kn("p")), Response::Error(_)),
             "still-starting kennel cannot be stopped"
         );
-        s.release("p", ctx);
+        s.release(&kn("p"), ctx);
     }
 
     #[test]
@@ -3580,8 +3541,8 @@ mod tests {
     #[test]
     fn list_reflects_the_registry() {
         let s = shared();
-        s.reserve("a").expect("a");
-        s.reserve("b").expect("b");
+        s.reserve(&kn("a")).expect("a");
+        s.reserve(&kn("b")).expect("b");
         s.set_pid("a", 4242);
         let Response::Listing(mut kennels) = s.list() else {
             unreachable!("listing")

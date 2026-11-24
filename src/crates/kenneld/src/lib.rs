@@ -55,7 +55,7 @@ pub mod tun_sink;
 // `kennel` CLI can link it without the daemon's enforcement code. Re-exported here
 // so the daemon's `crate::control` / `crate::socket` (and `kenneld::*` from the
 // `kenneld`/`kennel-akc` binaries) keep resolving unchanged.
-pub use kennel_lib_control::{control, socket};
+pub use kennel_lib_control::{control, name, socket};
 
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
