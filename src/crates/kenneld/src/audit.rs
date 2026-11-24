@@ -259,6 +259,18 @@ pub fn fs_mutation(path: &str, action: &'static str, enforced: bool) -> Event {
         .field("action", Value::untrusted(action))
 }
 
+/// `fs.mutation` for a disposition that could not be applied.
+///
+/// The watched path changed, the policy says `freeze` or `kill`, and the cgroup write failed.
+/// The outcome is `error`, never `deny`: the workload was not stopped.
+#[must_use]
+pub fn fs_mutation_unenforced(path: &str, action: &'static str, error: &str) -> Event {
+    Event::new("fs.mutation", Resource::Fs, Outcome::Error, Source::Kenneld)
+        .field("path", Value::untrusted(path))
+        .field("action", Value::untrusted(action))
+        .field("error", Value::untrusted(error))
+}
+
 /// `lifecycle.kennel-exit`: the kennel was torn down.
 #[must_use]
 pub fn kennel_exit(reason: &'static str) -> Event {

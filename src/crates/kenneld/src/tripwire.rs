@@ -98,11 +98,24 @@ fn watch_loop(
         };
         for event in events {
             let path = event.name.unwrap_or_default();
-            let enforced = apply(action, cgroup);
-            writer.emit(&fs_mutation(&path, action_name(action), enforced));
-            // After a kill the cgroup is gone; nothing left to watch.
-            if matches!(action, OnChangeAction::Kill) {
-                return;
+            match apply(action, cgroup) {
+                Ok(enforced) => {
+                    writer.emit(&fs_mutation(&path, action_name(action), enforced));
+                    // After a kill the cgroup is gone; nothing left to watch.
+                    if matches!(action, OnChangeAction::Kill) {
+                        return;
+                    }
+                }
+                // The workload was not stopped. Say so, and keep watching: the next mutation
+                // tries again.
+                Err(e) => {
+                    eprintln!("kenneld: tripwire {} failed: {e}", action_name(action));
+                    writer.emit(&crate::audit::fs_mutation_unenforced(
+                        &path,
+                        action_name(action),
+                        &e.to_string(),
+                    ));
+                }
             }
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -111,17 +124,16 @@ fn watch_loop(
 
 /// Apply the disposition to the cgroup. Returns whether the workload was acted on (an
 /// enforcement, for the audit outcome) — `warn` is audit-only, `freeze`/`kill` enforce.
-fn apply(action: OnChangeAction, cgroup: &Path) -> bool {
+///
+/// # Errors
+///
+/// The OS error if the cgroup write for `freeze` or `kill` fails. The caller must not record
+/// the mutation as enforced.
+fn apply(action: OnChangeAction, cgroup: &Path) -> std::io::Result<bool> {
     match action {
-        OnChangeAction::Warn => false,
-        OnChangeAction::Freeze => {
-            let _ = crate::cgroup::freeze_cgroup(cgroup);
-            true
-        }
-        OnChangeAction::Kill => {
-            let _ = crate::cgroup::kill_cgroup(cgroup);
-            true
-        }
+        OnChangeAction::Warn => Ok(false),
+        OnChangeAction::Freeze => crate::cgroup::freeze_cgroup(cgroup).map(|()| true),
+        OnChangeAction::Kill => crate::cgroup::kill_cgroup(cgroup).map(|()| true),
     }
 }
 
@@ -136,6 +148,17 @@ const fn action_name(action: OnChangeAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A disposition that could not be applied is an error, not an enforcement.
+    #[test]
+    fn a_disposition_that_cannot_be_applied_is_reported() {
+        let missing =
+            std::env::temp_dir().join(format!("kennel-tripwire-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(apply(OnChangeAction::Freeze, &missing).is_err());
+        assert!(apply(OnChangeAction::Kill, &missing).is_err());
+        assert_eq!(apply(OnChangeAction::Warn, &missing).ok(), Some(false));
+    }
 
     /// End to end through the real watcher: a write to a watched directory drives the
     /// `freeze` disposition, which writes `1` to the (stand-in) cgroup's `cgroup.freeze` —

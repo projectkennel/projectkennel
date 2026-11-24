@@ -21,6 +21,9 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **New event `net.inbound-connect`** (resource `net`, source `kenneld`): one per connection
   accepted on a mirrored `[net.bind]` port, with `port`, `ctx` and `state` (`delivered`,
   `held`, or `dropped` with outcome `deny` when the port's holding queue is full).
+- **`fs.mutation` and the `binder.ttl-*` events can now carry outcome `error`**, when the
+  freeze, kill or thaw they report did not take effect. `fs.mutation` then has an `error`
+  field with the OS error.
 
 ### Security
 
@@ -73,6 +76,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 - **A `[net.udp]` grant must name a host.** The endpoint is name-only, but a name was not
   checked, so `name = "10.0.0.5"` resolved to itself and was a grant of that address. The
   compiler, the policy loader and the mediator now refuse a name that is not a DNS name.
+- **An enforcement that failed is no longer audited as done.** The trust tripwire's freeze and
+  kill, and the TTL handler's kill and thaw, discarded the result of the cgroup write and
+  recorded the action as taken. A failure now gives an `error` record and a line on the
+  daemon's stderr; the tripwire keeps watching and tries again on the next mutation. A mirror,
+  tun-sink or mesh-service registration whose death notification cannot be requested is
+  refused instead of being kept with no way to learn that its node died.
 
 ### Threat catalogue
 

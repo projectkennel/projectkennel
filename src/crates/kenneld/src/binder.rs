@@ -332,7 +332,14 @@ fn ttl_expired(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
 ) -> (&'static str, Outcome, Reply) {
-    let _ = crate::cgroup::freeze_cgroup(&lifecycle.cgroup);
+    // The freeze holds the workload still while this is decided. If it fails the decision is
+    // still made, and the kill or thaw below reports its own result.
+    if let Err(e) = crate::cgroup::freeze_cgroup(&lifecycle.cgroup) {
+        eprintln!(
+            "kenneld: kennel '{}': TTL freeze failed: {e}",
+            lifecycle.name
+        );
+    }
     // W6 idle-reap (§7.13.6): an ondemand provider's TTL is its idle grace. On each fire, keep it
     // (re-arm) while a consumer kennel runs, reap it when none — riding this existing TTL custodian,
     // not a parallel reaper. "Consumer" = a running kennel whose `[[consumes]]` names a capability
@@ -346,10 +353,9 @@ fn ttl_expired(
         // No activator (a construction-only path) ⇒ cannot census ⇒ keep it: never destroy a
         // provider on a blind check (mirrors the missed-prompt `renew` fallback).
         if activator.is_none_or(|a| a.has_running_consumer(&offers)) {
-            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
             return (
                 "binder.ttl-provider-keep",
-                Outcome::Info,
+                ttl_thaw(lifecycle),
                 Reply::Data(one(ttl::RENEW)),
             );
         }
@@ -359,10 +365,9 @@ fn ttl_expired(
         if let Some(a) = activator {
             a.mark_idle_reaped(&lifecycle.name);
         }
-        let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
         return (
             "binder.ttl-provider-reap",
-            Outcome::Allow,
+            ttl_kill(lifecycle),
             Reply::Data(one(ttl::TERMINATE)),
         );
     }
@@ -370,21 +375,17 @@ fn ttl_expired(
         kennel_lib_policy::TtlAction::Exit => {
             // Stay frozen and terminate (SIGKILL reaches frozen tasks). kennel-bin-init is
             // killed, so it never reads the reply; the reply byte is moot.
-            let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
             (
                 "binder.ttl-terminate",
-                Outcome::Allow,
+                ttl_kill(lifecycle),
                 Reply::Data(one(ttl::TERMINATE)),
             )
         }
-        kennel_lib_policy::TtlAction::Warn => {
-            let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
-            (
-                "binder.ttl-warn",
-                Outcome::Info,
-                Reply::Data(one(ttl::RESUME)),
-            )
-        }
+        kennel_lib_policy::TtlAction::Warn => (
+            "binder.ttl-warn",
+            ttl_thaw(lifecycle),
+            Reply::Data(one(ttl::RESUME)),
+        ),
         kennel_lib_policy::TtlAction::Renew => {
             let question = format!(
                 "kennel '{}' reached its TTL — renew for another period? [y/N]",
@@ -393,33 +394,63 @@ fn ttl_expired(
             match lifecycle.prompt.as_ref().and_then(|p| p.ask(&question)) {
                 Some(true) => {
                     // Approved: thaw and tell kennel-bin-init to re-arm for another period.
-                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-renew",
-                        Outcome::Info,
+                        ttl_thaw(lifecycle),
                         Reply::Data(one(ttl::RENEW)),
                     )
                 }
                 Some(false) => {
                     // Declined: the deadline stands — terminate like `exit`.
-                    let _ = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-decline",
-                        Outcome::Allow,
+                        ttl_kill(lifecycle),
                         Reply::Data(one(ttl::TERMINATE)),
                     )
                 }
                 None => {
                     // No operator could be asked (non-interactive, detached, timed out): fall
                     // back to a warn (resume, no re-arm).
-                    let _ = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
                     (
                         "binder.ttl-warn-no-operator",
-                        Outcome::Info,
+                        ttl_thaw(lifecycle),
                         Reply::Data(one(ttl::RESUME)),
                     )
                 }
             }
+        }
+    }
+}
+
+/// Kill the kennel for its TTL; the outcome to audit (`Allow` if the kill took effect).
+fn ttl_kill(lifecycle: &Lifecycle) -> Outcome {
+    let result = crate::cgroup::kill_cgroup(&lifecycle.cgroup);
+    enforced(lifecycle, "kill", result, Outcome::Allow)
+}
+
+/// Thaw the kennel after a TTL decision; the outcome to audit (`Info` if the thaw took effect).
+fn ttl_thaw(lifecycle: &Lifecycle) -> Outcome {
+    let result = crate::cgroup::thaw_cgroup(&lifecycle.cgroup);
+    enforced(lifecycle, "thaw", result, Outcome::Info)
+}
+
+/// The outcome to audit for one TTL step: `done` if the cgroup write took effect, `Error` if it
+/// did not. A kill that failed leaves the workload running past its deadline, and a thaw that
+/// failed leaves it frozen; neither may be recorded as the action having happened.
+fn enforced(
+    lifecycle: &Lifecycle,
+    step: &str,
+    result: std::io::Result<()>,
+    done: Outcome,
+) -> Outcome {
+    match result {
+        Ok(()) => done,
+        Err(e) => {
+            eprintln!(
+                "kenneld: kennel '{}': TTL {step} failed: {e}",
+                lifecycle.name
+            );
+            Outcome::Error
         }
     }
 }
@@ -969,7 +1000,19 @@ fn register_mirror(
         ));
         return Reply::Data(one(status::BAD_REQUEST));
     }
-    let _ = conn.request_death(handle, u64::from(handle));
+    // Without the death notification the daemon would go on pushing conduits to a node that is
+    // gone. A registration that cannot be watched is not made.
+    if conn.request_death(handle, u64::from(handle)).is_err() {
+        let _ = conn.release_handle(handle);
+        writer.emit(&inet_event(
+            incoming,
+            ctx,
+            "mirror-register",
+            port,
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::UNAVAILABLE));
+    }
     inbound.register(conn, port, handle);
     writer.emit(&inet_event(
         incoming,
@@ -1037,7 +1080,21 @@ fn register_tun_sink(
         ));
         return Reply::Data(one(status::BAD_REQUEST));
     }
-    let _ = conn.request_death(handle, crate::tun_sink::SINK_DEATH_COOKIE);
+    // Without the death notification a dead broker would stay registered, and every consumer
+    // would be sent to it. A sink that cannot be watched is not recorded.
+    if conn
+        .request_death(handle, crate::tun_sink::SINK_DEATH_COOKIE)
+        .is_err()
+    {
+        let _ = conn.release_handle(handle);
+        writer.emit(&tun_event(
+            incoming,
+            ctx,
+            "tun-sink-register",
+            Outcome::Error,
+        ));
+        return Reply::Data(one(status::UNAVAILABLE));
+    }
     tun.sink.set(Arc::clone(tun.cm), handle);
     writer.emit(&tun_event(
         incoming,
