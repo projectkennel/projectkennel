@@ -298,6 +298,58 @@ mod tests {
         p
     }
 
+    fn unix_violations(real: &str, shim: &str, write: &[&str]) -> Vec<&'static str> {
+        let mut p = sample_settled();
+        p.effective_policy
+            .fs
+            .write
+            .extend(write.iter().map(|w| (*w).to_owned()));
+        p.unix.sockets.push(crate::settled::UnixSocket {
+            name: "s".to_owned(),
+            real: real.to_owned(),
+            shim: shim.to_owned(),
+            env: None,
+        });
+        match validate(&p) {
+            Ok(()) => Vec::new(),
+            Err(v) => v
+                .into_iter()
+                .map(|x| x.id)
+                .filter(|id| id.starts_with("unix."))
+                .collect(),
+        }
+    }
+
+    /// A socket the workload can replace is not the socket the operator granted.
+    #[test]
+    fn a_unix_grant_whose_real_path_is_workload_writable_is_refused() {
+        for (real, write) in [
+            ("~/proj/agent.sock", "~/proj/**"),
+            ("~/proj/run/agent.sock", "~/proj"),
+            ("/srv/data/./x/../agent.sock", "/srv/data/"),
+        ] {
+            assert_eq!(
+                unix_violations(real, "/tmp/s.sock", &[write]),
+                ["unix.real.write-set"],
+                "`{real}` under `{write}`"
+            );
+        }
+        assert!(unix_violations("~/.gnupg/S.gpg-agent", "/tmp/s.sock", &["~/proj/**"]).is_empty());
+    }
+
+    /// The facade gets Landlock rights over its shim's parent directory.
+    #[test]
+    fn a_unix_shim_that_is_not_a_plain_path_is_refused() {
+        for shim in ["/x.sock", "x.sock", "/tmp/../x.sock", "/tmp/a=b.sock", ""] {
+            assert_eq!(
+                unix_violations("/run/host.sock", shim, &[]),
+                ["unix.shim"],
+                "shim `{shim}`"
+            );
+        }
+        assert!(unix_violations("/run/host.sock", "~/x.sock", &[]).is_empty());
+    }
+
     /// The metadata deny is only the invariant if it covers the whole address.
     #[test]
     fn a_metadata_deny_limited_to_one_port_does_not_satisfy_the_floor() {

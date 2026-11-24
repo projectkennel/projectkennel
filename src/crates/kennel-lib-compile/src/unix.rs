@@ -252,6 +252,68 @@ mod tests {
         );
     }
 
+    fn errors_for(real: &str, shim: &str) -> Vec<String> {
+        let unix = UnixSection {
+            allow: vec![allow("s", real, shim)].into(),
+            ..UnixSection::default()
+        };
+        match validate(&policy_with(unix)) {
+            Err(PolicyError::SourceValidation(m)) => m,
+            Ok(_) => Vec::new(),
+            Err(other) => vec![format!("{other:?}")],
+        }
+    }
+
+    #[test]
+    fn a_grant_targeting_any_socket_of_the_daemon_is_refused() {
+        // The delegates' command sockets dial whatever they are told, with no policy of their own.
+        for real in [
+            "/run/user/1000/kennel/proxy/netproxy-cmd-7.sock",
+            "/run/user/1000/kennel/proxy/inetd-cmd-7.sock",
+            "$XDG_RUNTIME_DIR/kennel/proxy/netproxy-cmd-7.sock",
+            "$XDG_RUNTIME_DIR/kennel/control.sock",
+            "/run/user/<uid>/kennel/control.sock",
+            "/run/user/$UID/kennel/x/../proxy/netproxy-cmd-<ctx>.sock",
+        ] {
+            assert!(
+                errors_for(real, "/tmp/s.sock")
+                    .iter()
+                    .any(|m| m.contains("kenneld")),
+                "`{real}` must be refused"
+            );
+        }
+        assert!(errors_for("$XDG_RUNTIME_DIR/wayland-0", "/tmp/s.sock").is_empty());
+        assert!(errors_for("$XDG_RUNTIME_DIR/kennel-other/x.sock", "/tmp/s.sock").is_empty());
+    }
+
+    #[test]
+    fn a_shim_must_be_a_plain_path_below_a_directory_of_its_own() {
+        // The facade is granted its shim's parent directory, so the parent must not be `/`.
+        for shim in [
+            "/x.sock",
+            "x.sock",
+            "/tmp/../x.sock",
+            "/tmp/./x.sock",
+            "/tmp/a=b.sock",
+            "/tmp/",
+        ] {
+            assert!(
+                errors_for("/run/host.sock", shim)
+                    .iter()
+                    .any(|m| m.contains("shim")),
+                "shim `{shim}` must be refused"
+            );
+        }
+        for shim in [
+            "/tmp/x.sock",
+            "~/x.sock",
+            "$HOME/.cache/x.sock",
+            "$XDG_RUNTIME_DIR/bus",
+        ] {
+            assert!(errors_for("/run/host.sock", shim).is_empty(), "`{shim}`");
+        }
+    }
+
     #[test]
     fn a_dotdot_disguised_control_socket_grant_is_still_refused() {
         // A path-string that differs but normalises to the control socket — a naive string check
