@@ -318,6 +318,34 @@ pub fn unmount_detach(target: &Path) -> io::Result<()> {
     nix::mount::umount2(target, MntFlags::MNT_DETACH).map_err(map_err)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_overlay_path_that_would_split_the_option_string_is_refused() {
+        // overlayfs takes its layers as one comma-separated option string with `:` between
+        // lowers, so a path carrying either byte would add or replace an option. The refusal
+        // comes before any mount is attempted, so this needs no privilege.
+        let plain = Path::new("/nonexistent/kennel/layer");
+        let target = Path::new("/nonexistent/kennel/merged");
+        for bad in ["/tmp/x,lowerdir=/etc", "/tmp/a:/etc", "/tmp/trailing\\"] {
+            let bad = Path::new(bad);
+            let as_lower = mount_overlay(&[plain, bad], None, target).expect_err("lower refused");
+            assert_eq!(as_lower.kind(), io::ErrorKind::InvalidInput, "{as_lower}");
+            let as_upper =
+                mount_overlay(&[plain], Some((bad, plain)), target).expect_err("upper refused");
+            assert_eq!(as_upper.kind(), io::ErrorKind::InvalidInput, "{as_upper}");
+            let as_work =
+                mount_overlay(&[plain], Some((plain, bad)), target).expect_err("work refused");
+            assert_eq!(as_work.kind(), io::ErrorKind::InvalidInput, "{as_work}");
+        }
+        // A plain path gets past the check and fails at the mount itself.
+        let plain_err = mount_overlay(&[plain], None, target).expect_err("no such mount");
+        assert_ne!(plain_err.kind(), io::ErrorKind::InvalidInput, "{plain_err}");
+    }
+}
+
 #[cfg(all(test, feature = "e2e"))]
 mod root_tests {
     //! Run via `sudo -E cargo test --features e2e`. Each test runs inside
