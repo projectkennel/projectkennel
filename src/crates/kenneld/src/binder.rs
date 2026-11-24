@@ -1208,6 +1208,26 @@ fn decode_name(data: &[u8]) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A TTL action that could not be applied must not be audited as applied.
+    #[test]
+    fn a_ttl_kill_or_thaw_that_fails_is_audited_as_an_error() {
+        let missing = std::env::temp_dir().join(format!("kennel-ttl-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        for action in [
+            kennel_lib_policy::TtlAction::Exit,
+            kennel_lib_policy::TtlAction::Warn,
+        ] {
+            let lifecycle = Lifecycle {
+                cgroup: missing.clone(),
+                ttl_action: action,
+                name: "k".to_owned(),
+                ..Lifecycle::default()
+            };
+            let (name, outcome, _reply) = ttl_expired(&lifecycle, None, None);
+            assert_eq!(outcome, Outcome::Error, "{name}");
+        }
+    }
+
     #[test]
     fn lifecycle_gate_requires_the_exact_init_pid_and_uid0() {
         // `kennel-bin-init` is the only uid-0 process; the gate is the exact init host pid AND
