@@ -164,6 +164,12 @@ impl Drop for Mapping {
         // SAFETY: `ptr`/`len` are exactly what `mmap` returned and we have not
         // unmapped them before; `munmap` releases the region. Errors are ignored
         // (nothing actionable at drop).
+        //
+        // INVARIANTS UPHELD: the mapping is released exactly once, and no slice into it
+        // outlives `self` (they borrow from it).
+        //
+        // FAILURE MODE: a failed `munmap` leaves the region mapped until the process exits; the
+        // result is ignored.
         unsafe {
             libc::munmap(self.ptr, self.len);
         }

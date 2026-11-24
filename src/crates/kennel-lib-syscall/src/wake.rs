@@ -21,11 +21,20 @@ use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 /// Returns the OS error if `eventfd(2)` fails.
 pub fn make_wake_eventfd() -> io::Result<OwnedFd> {
     // SAFETY: `eventfd` takes a count and flags and returns a fresh owned fd or -1; no pointers.
+    //
+    // INVARIANTS UPHELD: nothing existing is changed; a new descriptor is created.
+    //
+    // FAILURE MODE: -1 is returned as the OS error.
     let raw = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
     if raw < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: `raw` is a fresh, exclusively-owned, open fd from a successful `eventfd`.
+    //
+    // INVARIANTS UPHELD: the new descriptor has one owner.
+    //
+    // FAILURE MODE: not reachable with a bad value: a negative result is returned as an error
+    // above.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
@@ -39,6 +48,11 @@ pub fn signal_wake(wake: BorrowedFd<'_>) -> io::Result<()> {
     let one: u64 = 1;
     let buf = one.to_ne_bytes();
     // SAFETY: `buf` is a live 8-byte buffer; `write` reads exactly its length and retains nothing.
+    //
+    // INVARIANTS UPHELD: `buf` is only read.
+    //
+    // FAILURE MODE: -1 with `EAGAIN` means the counter is already raised and is treated as
+    // success; any other error is returned.
     let ret = unsafe { libc::write(wake.as_raw_fd(), buf.as_ptr().cast(), buf.len()) };
     if ret < 0 {
         let err = io::Error::last_os_error();

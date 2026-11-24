@@ -159,6 +159,10 @@ where
 pub fn set_hostname(name: &str) -> io::Result<()> {
     // SAFETY: the pointer/length pair describes the borrowed `name` bytes for the
     // duration of the call; sethostname reads them and holds no reference after.
+    //
+    // INVARIANTS UPHELD: `name` is only read.
+    //
+    // FAILURE MODE: -1 is returned as the OS error and the hostname is unchanged.
     let rc = unsafe { libc::sethostname(name.as_ptr().cast::<libc::c_char>(), name.len()) };
     if rc == 0 {
         Ok(())
@@ -185,6 +189,10 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
     let flags =
         libc::OPEN_TREE_CLONE | libc::OPEN_TREE_CLOEXEC | libc::AT_RECURSIVE as libc::c_uint;
     // SAFETY: `open_tree` reads the NUL-terminated `path` and returns an fd or -1; no retained pointer.
+    //
+    // INVARIANTS UPHELD: `c` outlives the call and is only read.
+    //
+    // FAILURE MODE: -1 is returned below as the OS error.
     let fd = unsafe { libc::syscall(libc::SYS_open_tree, libc::AT_FDCWD, c.as_ptr(), flags) };
     if fd < 0 {
         return Err(io::Error::last_os_error());
@@ -192,6 +200,11 @@ pub fn open_tree_clone(path: &std::path::Path) -> io::Result<std::os::fd::OwnedF
     let fd = std::os::fd::RawFd::try_from(fd)
         .map_err(|_| io::Error::other("open_tree returned an out-of-range fd"))?;
     // SAFETY: `fd` is a fresh, owned mount fd from a successful `open_tree`.
+    //
+    // INVARIANTS UPHELD: the mount descriptor has one owner.
+    //
+    // FAILURE MODE: not reachable with a bad value: a negative or out-of-range result is
+    // returned as an error above.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
 }
 
@@ -285,6 +298,10 @@ pub fn move_mount_fd(
     use std::os::fd::AsRawFd as _;
     // SAFETY: both descriptors are live for the call; both paths are the empty string, which the
     // two EMPTY_PATH flags make "the descriptor itself". The kernel retains no pointer.
+    //
+    // INVARIANTS UPHELD: neither descriptor is consumed or closed.
+    //
+    // FAILURE MODE: -1 is returned below as the OS error and the mount stays detached.
     let r = unsafe {
         libc::syscall(
             libc::SYS_move_mount,
@@ -331,20 +348,48 @@ where
 
     // SAFETY: `fork`. The child runs only atfork-safe `malloc` + syscalls (the `setup` contract) and
     // never returns to the caller — it serves on its socket or `_exit`s.
+    //
+    // INVARIANTS UPHELD: the parent continues with its state untouched, and the child never
+    // returns into the caller's frames.
+    //
+    // FAILURE MODE: -1 is reported below as the OS error. A child that took a lock another
+    // thread held at the fork would never report, and the parent would block in the read below
+    // — which is why `setup` may take none.
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         // SAFETY (whole child branch): post-fork, single-threaded, async-signal-disciplined.
+        //
+        // INVARIANTS UPHELD: only the child's copy is closed; the parent's handle is its own.
+        //
+        // FAILURE MODE: a failed close is ignored; the descriptor is then closed by the
+        // `close_range` below.
         unsafe { libc::close(kenneld_raw) };
         let ok = setup().is_ok();
         let byte = [u8::from(ok) * READY];
         // SAFETY: report the mount verdict up the socket.
+        //
+        // INVARIANTS UPHELD: `byte` lives on this frame and is only read.
+        //
+        // FAILURE MODE: a failed write leaves the parent reading end-of-file, which it treats
+        // as a failed setup.
         unsafe { libc::write(holder_raw, byte.as_ptr().cast(), 1) };
         if !ok {
             // SAFETY: setup failed — exit without unwinding the forked caller's state.
+            //
+            // INVARIANTS UPHELD: no destructor or `atexit` handler copied from the parent runs
+            // in the child.
+            //
+            // FAILURE MODE: `_exit` does not return.
             unsafe { libc::_exit(1) };
         }
         // Re-home the serve socket at fd 3, then drop every other inherited fd.
         // SAFETY: dup the serve socket low, then close everything above it.
+        //
+        // INVARIANTS UPHELD: afterwards the child holds descriptors 0 to 3 only, 3 being the
+        // serve socket.
+        //
+        // FAILURE MODE: if the `dup2` failed, descriptor 3 is not the socket; the serve loop's
+        // first read then fails and the holder exits.
         unsafe {
             if holder_raw != 3 {
                 libc::dup2(holder_raw, 3);
@@ -361,6 +406,11 @@ where
     }
     let mut byte = [0u8; 1];
     // SAFETY: read the one-byte mount verdict.
+    //
+    // INVARIANTS UPHELD: at most one byte is written, into `byte`.
+    //
+    // FAILURE MODE: an error or end-of-file is a failed setup: the holder is killed and reaped
+    // and an error returned.
     let n = unsafe { libc::read(kenneld_raw, byte.as_mut_ptr().cast(), 1) };
     if n == 1 && byte[0] == READY {
         Ok((pid, kenneld_end))
@@ -378,13 +428,28 @@ where
 fn serve_mount_clones(sock: libc::c_int, dir: &std::path::Path) -> ! {
     use std::os::fd::AsFd as _;
     // SAFETY: `sock` is the holder's serve socket; borrow it for each call.
+    //
+    // INVARIANTS UPHELD: the socket is not closed by the borrow; it lives until the process
+    // exits.
+    //
+    // FAILURE MODE: were `sock` not the socket, the reads and sends on it fail and the holder
+    // exits.
     let bsock = unsafe { BorrowedFd::borrow_raw(sock) };
     let mut req = [0u8; 1];
     loop {
         // SAFETY: block for the next one-byte clone request.
+        //
+        // INVARIANTS UPHELD: at most one byte is written, into `req`.
+        //
+        // FAILURE MODE: an error or end-of-file ends the holder, just below.
         let n = unsafe { libc::read(sock, req.as_mut_ptr().cast(), 1) };
         if n <= 0 {
             // SAFETY: `kenneld` closed the socket (or error) — the bus is gone; exit, dropping the mount.
+            //
+            // INVARIANTS UPHELD: no destructor copied from the parent runs; the kernel releases
+            // the mount namespace with the process.
+            //
+            // FAILURE MODE: `_exit` does not return.
             unsafe { libc::_exit(0) };
         }
         match open_tree_clone(dir) {

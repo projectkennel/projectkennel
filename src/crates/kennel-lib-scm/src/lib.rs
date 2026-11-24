@@ -156,6 +156,13 @@ pub fn recv_with_fds(sock: BorrowedFd<'_>, buf: &mut [u8]) -> io::Result<(usize,
                 // SAFETY: `raw` is a fresh fd the kernel just installed for this
                 // process (with O_CLOEXEC, via MSG_CMSG_CLOEXEC) and that nothing
                 // else owns; wrapping it transfers ownership for RAII close.
+                //
+                // INVARIANTS UPHELD: every received descriptor is wrapped exactly once, so each
+                // is closed exactly once — on the truncated path too.
+                //
+                // FAILURE MODE: were `raw` not a fresh descriptor, the wrapper would later
+                // close some other descriptor of this process. nix yields only the descriptors
+                // in the `SCM_RIGHTS` control message of this one `recvmsg`.
                 fds.push(unsafe { OwnedFd::from_raw_fd(raw) });
             }
         }

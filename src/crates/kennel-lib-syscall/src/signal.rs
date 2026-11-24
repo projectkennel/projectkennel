@@ -31,6 +31,8 @@ fn send(pid: u32, signal: i32) -> io::Result<()> {
     let pid = i32::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: kill(2) sends `signal` to `pid`; both are plain integers and no
     // memory is read or written. FAILURE MODE: -1 -> last_os_error.
+    //
+    // INVARIANTS UPHELD: nothing in this process is changed.
     let result = unsafe { libc::kill(pid, signal) };
     if result < 0 {
         return Err(io::Error::last_os_error());

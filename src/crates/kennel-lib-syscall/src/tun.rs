@@ -49,6 +49,11 @@ pub fn create() -> io::Result<(OwnedFd, String)> {
     // SAFETY: `ifr` is a correctly-sized, zeroed `struct ifreq` for `TUNSETIFF` on a fd we own;
     // the kernel reads `ifr_flags`, creates the interface, and writes the assigned name back into
     // `ifr_name` (offset 0). The ioctl touches only `ifr`.
+    //
+    // INVARIANTS UPHELD: only `ifr` is written; the descriptor stays owned by `file`.
+    //
+    // FAILURE MODE: -1 is returned as the OS error. A buffer smaller than `struct ifreq` would
+    // be overrun; it is declared with that size.
     let rc = unsafe { libc::ioctl(file.as_raw_fd(), libc::TUNSETIFF, ifr.as_mut_ptr()) };
     if rc < 0 {
         return Err(io::Error::last_os_error());

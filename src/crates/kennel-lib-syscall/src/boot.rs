@@ -28,6 +28,12 @@ use nix::errno::Errno;
 const fn borrow(fd: RawFd) -> BorrowedFd<'static> {
     // SAFETY: the caller guarantees `fd` is open for the duration of the call (an inherited or
     // owned descriptor); we only borrow it for the single write/read below.
+    //
+    // INVARIANTS UPHELD: no ownership is taken; the descriptor is not closed here.
+    //
+    // FAILURE MODE: if `fd` is not open the calls on it fail with `EBADF`. If the number had
+    // been reused for another file the read or write would go there; callers pass only a fixed
+    // inherited slot or a descriptor they own.
     unsafe { BorrowedFd::borrow_raw(fd) }
 }
 
@@ -57,12 +63,23 @@ pub fn signal_facade_ready(fd_value: Option<&str>) -> io::Result<()> {
         ));
     }
     // SAFETY: F_GETFD on a plain integer descriptor reads no memory; -1/EBADF if it is not open.
+    //
+    // INVARIANTS UPHELD: nothing is changed.
+    //
+    // FAILURE MODE: -1 (`EBADF`) is returned as the error, and `READY_FD` is never adopted.
     if unsafe { libc::fcntl(READY_FD, libc::F_GETFD) } < 0 {
         return Err(io::Error::last_os_error());
     }
     // SAFETY: READY_FD is open (checked just above) and was placed in this process by
     // kennel-bin-init for exactly this one write; nothing else in the facade owns it, so taking
     // ownership to write and then close it cannot double-close or alias.
+    //
+    // INVARIANTS UPHELD: the descriptor is adopted once and closed when `fd` drops, after the
+    // write.
+    //
+    // FAILURE MODE: if anything else in the process owned this number it would be closed twice.
+    // The value is checked to be the fixed `READY_FD` and to be open, and a facade signals
+    // once.
     let fd = unsafe { OwnedFd::from_raw_fd(READY_FD) };
     nix::unistd::write(&fd, &[1]).map_err(io::Error::from)?;
     Ok(())
@@ -212,6 +229,13 @@ pub fn place_injected_stdio() -> io::Result<()> {
     for slot in [INJECT_STDIN_FD, INJECT_STDOUT_FD, INJECT_STDERR_FD] {
         // SAFETY: the factory placed a live fd at `slot` with no other owner in this process; take
         // ownership to close it (the workload keeps only the 0/1/2 copies). Dropping closes it.
+        //
+        // INVARIANTS UPHELD: each injected slot is closed exactly once; the copies at 0, 1 and
+        // 2 stay open.
+        //
+        // FAILURE MODE: if a slot were not open the close fails and is ignored. If the number
+        // had been reused it would close that file; the slots are reserved numbers the factory
+        // fills.
         drop(unsafe { OwnedFd::from_raw_fd(slot) });
     }
     Ok(())

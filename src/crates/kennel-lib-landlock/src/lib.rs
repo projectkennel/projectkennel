@@ -524,6 +524,12 @@ impl Ruleset {
 fn set_no_new_privs() -> io::Result<()> {
     // SAFETY: prctl(PR_SET_NO_NEW_PRIVS, 1) takes no pointers and only sets the calling thread's
     // no-new-privs bit; the unused args are 0 per the man page. -1 ⇒ errno.
+    //
+    // INVARIANTS UPHELD: only this thread's no-new-privs bit is set, which is irreversible by
+    // design.
+    //
+    // FAILURE MODE: -1 is returned as the OS error, and the caller does not go on to restrict
+    // itself.
     let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
     if rc < 0 {
         return Err(io::Error::last_os_error());

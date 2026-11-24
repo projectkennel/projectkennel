@@ -64,6 +64,10 @@ impl<'fd> RingBuffer<'fd> {
         }
         // SAFETY: sysconf(_SC_PAGESIZE) returns the page size or -1; we reject
         // non-positive results before using it.
+        //
+        // INVARIANTS UPHELD: reads a constant of the process; nothing changes.
+        //
+        // FAILURE MODE: -1 fails the conversion to `usize` and is returned as an error.
         let page_size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) })
             .map_err(|_| invalid("bad page size"))?;
         if page_size == 0 {
@@ -80,6 +84,11 @@ impl<'fd> RingBuffer<'fd> {
         // SAFETY: a fresh anonymous request (addr NULL) for `page_size` bytes of
         // the map at offset 0 — the consumer page. The kernel validates fd/offset;
         // MAP_FAILED is checked. We own the mapping until Drop munmaps it.
+        //
+        // INVARIANTS UPHELD: the mapping is owned by this value and unmapped once: in `Drop`,
+        // or just below if the second mapping fails.
+        //
+        // FAILURE MODE: `MAP_FAILED` is returned as the OS error, with nothing mapped.
         let consumer = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -98,6 +107,10 @@ impl<'fd> RingBuffer<'fd> {
 
         // SAFETY: as above, for the producer page + double-mapped data at offset
         // `page_size`. On failure we must munmap the consumer page we already hold.
+        //
+        // INVARIANTS UPHELD: the mapping is owned by this value and unmapped once in `Drop`.
+        //
+        // FAILURE MODE: `MAP_FAILED` unmaps the consumer page and returns the OS error.
         let producer = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
@@ -112,6 +125,12 @@ impl<'fd> RingBuffer<'fd> {
         if producer == libc::MAP_FAILED {
             let err = io::Error::last_os_error();
             // SAFETY: unmapping the consumer page we successfully mapped above.
+            //
+            // INVARIANTS UPHELD: the value is never constructed on this path, so `Drop` will
+            // not unmap the page a second time.
+            //
+            // FAILURE MODE: a failed `munmap` leaves one page mapped; the result is ignored and
+            // the original error returned.
             unsafe { libc::munmap(consumer.as_ptr().cast(), page_size) };
             return Err(err);
         }
@@ -119,6 +138,13 @@ impl<'fd> RingBuffer<'fd> {
             NonNull::new(producer.cast::<u8>()).ok_or_else(|| invalid("mmap returned null"))?;
         // SAFETY: `producer` is valid for `producer_len >= page_size` bytes, so
         // `producer + page_size` (the data area start) is within the mapping.
+        //
+        // INVARIANTS UPHELD: `data` points inside the producer mapping for as long as that
+        // mapping lives.
+        //
+        // FAILURE MODE: were `producer_len` smaller than `page_size` the pointer would be out
+        // of bounds; it is `page_size + 2 * data_size`, computed with checked arithmetic. It is
+        // non-null because `producer` is and the addition stays inside the mapping.
         let data = unsafe { NonNull::new_unchecked(producer.as_ptr().add(page_size)) };
 
         Ok(Self {
@@ -147,6 +173,12 @@ impl<'fd> RingBuffer<'fd> {
             revents: 0,
         };
         // SAFETY: a single valid pollfd; poll writes back only revents.
+        //
+        // INVARIANTS UPHELD: `pfd` lives on this frame for the call; the map descriptor is not
+        // consumed.
+        //
+        // FAILURE MODE: -1 is returned as the OS error, except `EINTR`, which is reported as
+        // "nothing ready".
         let rc = unsafe { libc::poll(std::ptr::from_mut(&mut pfd), 1, timeout_ms) };
         if rc < 0 {
             let err = io::Error::last_os_error();
@@ -188,7 +220,21 @@ impl<'fd> RingBuffer<'fd> {
         // of the producer page `producer_pos`; both pages are page-aligned, so the
         // u64 references are aligned. All accesses to these locations (here and in
         // the kernel) are atomic, matching the kernel's acquire/release protocol.
+        //
+        // INVARIANTS UPHELD: the reference lives no longer than this `&mut self` borrow, and
+        // this consumer is the only writer of `consumer_pos`.
+        //
+        // FAILURE MODE: an unaligned or unmapped pointer would be undefined behaviour; this one
+        // is the start of a live, page-aligned mapping.
         let cons_atomic = unsafe { &*self.consumer.as_ptr().cast::<AtomicU64>() };
+        // SAFETY: as for the consumer page: the first 8 bytes of the page-aligned producer
+        // mapping hold `producer_pos`.
+        //
+        // INVARIANTS UPHELD: the reference lives no longer than this `&mut self` borrow, and
+        // `producer_pos` is only loaded here (the page is mapped read-only).
+        //
+        // FAILURE MODE: an unaligned or unmapped pointer would be undefined behaviour; this one
+        // is the start of a live, page-aligned mapping.
         let prod_atomic = unsafe { &*self.producer.as_ptr().cast::<AtomicU64>() };
 
         let mut cons_pos = cons_atomic.load(Ordering::Acquire);
@@ -202,6 +248,12 @@ impl<'fd> RingBuffer<'fd> {
                 .map_err(|_| invalid("ring offset overflow"))?;
             // SAFETY: `off < data_size`; the data area is mapped for `2*data_size`,
             // so `data + off` is in-bounds and 8-aligned (records are 8-aligned).
+            //
+            // INVARIANTS UPHELD: the record header is only loaded, and the reference is dropped
+            // before the consumer position moves.
+            //
+            // FAILURE MODE: an `off` beyond the data area would read outside the mapping; it is
+            // masked with `data_mask`, so it is below `data_size`.
             let len_atomic = unsafe { &*self.data.as_ptr().add(off).cast::<AtomicU32>() };
             let len = len_atomic.load(Ordering::Acquire);
             if len & BUSY_BIT != 0 {
@@ -224,6 +276,13 @@ impl<'fd> RingBuffer<'fd> {
                 // SAFETY: `start + sample_len <= off + data_size`, within the
                 // double-mapped data area; the bytes are committed (BUSY clear) and
                 // read-only for the lifetime of this borrow.
+                //
+                // INVARIANTS UPHELD: the slice is passed to `f` and dropped before
+                // `consumer_pos` is published, so the kernel does not reuse the bytes while
+                // they are borrowed.
+                //
+                // FAILURE MODE: a `sample_len` taken on trust could read past the mapping; the
+                // `need > data_size` check above bounds header plus payload to one ring.
                 let sample =
                     unsafe { slice::from_raw_parts(self.data.as_ptr().add(start), sample_len) };
                 f(sample);
@@ -248,6 +307,11 @@ impl Drop for RingBuffer<'_> {
             .saturating_add(self.data_size.saturating_mul(2));
         // SAFETY: both pointers and lengths are exactly what we mapped in `new`;
         // after this the mappings are gone and the struct is being dropped.
+        //
+        // INVARIANTS UPHELD: each mapping is released exactly once.
+        //
+        // FAILURE MODE: a failed `munmap` leaves the region mapped until the process exits; the
+        // results are ignored.
         unsafe {
             libc::munmap(self.consumer.as_ptr().cast(), self.page_size);
             libc::munmap(self.producer.as_ptr().cast(), producer_len);

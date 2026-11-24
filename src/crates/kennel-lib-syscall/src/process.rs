@@ -186,6 +186,11 @@ pub fn arm_ttl_alarm(secs: u32) -> io::Result<()> {
         SigSet::empty(),
     );
     // SAFETY: the handler only stores to an AtomicBool, which is async-signal-safe.
+    //
+    // INVARIANTS UPHELD: only the disposition of `SIGALRM` is replaced, and the handler touches
+    // one atomic.
+    //
+    // FAILURE MODE: an error is returned and the alarm is not armed.
     unsafe { sigaction(Signal::SIGALRM, &action) }
         .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
     nix::unistd::alarm::set(secs);

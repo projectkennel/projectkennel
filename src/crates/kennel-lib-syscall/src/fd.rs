@@ -785,6 +785,13 @@ pub fn dup_onto(src: BorrowedFd<'_>, dst: RawFd) -> io::Result<()> {
     // SAFETY: a plain dup2 of a valid borrowed descriptor onto a raw target number. We work
     // in descriptor numbers, not `OwnedFd`, so there is no Rust ownership/aliasing concern;
     // the kernel closes any file previously at `dst` and the new `dst` is not close-on-exec.
+    //
+    // INVARIANTS UPHELD: `src` is unchanged and still the caller's; `dst` now names the same
+    // open file.
+    //
+    // FAILURE MODE: -1 is returned as the OS error and `dst` is left as it was. Were `dst` a
+    // number some `OwnedFd` owns, that handle would silently name another file; callers pass
+    // only reserved fixed numbers.
     let rc = unsafe { libc::dup2(src.as_raw_fd(), dst) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -834,6 +841,12 @@ pub fn close_inherited(fd: RawFd) -> io::Result<()> {
     // SAFETY: a plain close of a raw descriptor the caller knows is open in this process (the
     // post-clone child's inherited copy). We operate in descriptor numbers, not `OwnedFd`, so
     // there is no double-close of a Rust-owned handle in this process.
+    //
+    // INVARIANTS UPHELD: exactly that descriptor number is closed, once.
+    //
+    // FAILURE MODE: `EBADF` is returned as the error. Were `fd` owned by an `OwnedFd` in this
+    // process, that handle would close it again later, possibly after reuse; the contract
+    // limits this to inherited copies the child does not own.
     let rc = unsafe { libc::close(fd) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -856,6 +869,10 @@ pub fn dup_above(src: BorrowedFd<'_>, base: RawFd) -> io::Result<OwnedFd> {
         .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
     // SAFETY: `F_DUPFD_CLOEXEC` returned a fresh, owned descriptor we are the sole holder of;
     // wrapping it transfers that ownership for RAII close.
+    //
+    // INVARIANTS UPHELD: the new descriptor has one owner.
+    //
+    // FAILURE MODE: not reachable with a bad value: an `fcntl` error is returned above.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
@@ -872,6 +889,12 @@ pub fn dup_above(src: BorrowedFd<'_>, base: RawFd) -> io::Result<OwnedFd> {
 pub fn adopt(fd: RawFd) -> OwnedFd {
     // SAFETY: per the documented caller contract, `fd` is an owned, singly-wrapped inherited
     // descriptor; wrapping it transfers ownership for RAII close.
+    //
+    // INVARIANTS UPHELD: one `OwnedFd` per inherited slot.
+    //
+    // FAILURE MODE: a second `adopt` of a slot, or adopting a number another handle owns,
+    // closes it twice — the second time possibly after reuse. That is the caller's contract,
+    // stated above.
     unsafe { OwnedFd::from_raw_fd(fd) }
 }
 

@@ -146,6 +146,13 @@ pub fn map_create(
     };
     // SAFETY: `attr` is a live, fully-initialised MapCreateAttr; we pass its
     // address and exact size. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` lives on this frame until `bpf` returns; the kernel keeps no
+    // pointer to it.
+    //
+    // FAILURE MODE: the kernel validates the attributes and returns -1 with errno, returned
+    // below as the OS error. A wrong size would have it read past `attr`; the size is `size_of`
+    // the struct passed.
     let ret = unsafe {
         bpf(
             BPF_MAP_CREATE,
@@ -226,6 +233,12 @@ pub unsafe fn map_update(
     // SAFETY: `attr` is fully initialised; `key`/`value` outlive the call and are
     // valid for reads of the map's key_size/value_size bytes (the caller passes
     // slices at least that long — see the doc contract). The kernel only reads.
+    //
+    // INVARIANTS UPHELD: `attr`, `key` and `value` live until `bpf` returns and are only read.
+    //
+    // FAILURE MODE: a slice shorter than the map's key or value size is an out-of-bounds read
+    // in the kernel, which is why this function is `unsafe` and its callers check the lengths.
+    // A kernel refusal is returned as the OS error.
     let ret = unsafe {
         bpf(
             BPF_MAP_UPDATE_ELEM,
@@ -281,6 +294,13 @@ pub fn prog_load(
     // SAFETY: `attr` is fully initialised; `insns`/`license`/`log` outlive the
     // call and are valid for the lengths given to the kernel (insns: insn_cnt*8
     // bytes; license: NUL-terminated; log: log_size bytes, written by the kernel).
+    //
+    // INVARIANTS UPHELD: `attr`, the instructions, the licence string and the log buffer all
+    // live until `bpf` returns; only the log buffer is written.
+    //
+    // FAILURE MODE: the verifier rejects a bad program with -1 and fills the log, returned
+    // below as an error. A count or size larger than its buffer would have the kernel read or
+    // write past it; each is derived from the slice it describes.
     let ret = unsafe {
         bpf(
             BPF_PROG_LOAD,
@@ -312,6 +332,10 @@ pub fn prog_attach_cgroup(
     };
     // SAFETY: `attr` is fully initialised with two valid fds (BorrowedFd) and the
     // attach type; we pass its address and size. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` lives until `bpf` returns; neither descriptor is consumed.
+    //
+    // FAILURE MODE: -1 with errno, returned below as the OS error; nothing is attached.
     let ret = unsafe {
         bpf(
             BPF_PROG_ATTACH,
@@ -344,6 +368,12 @@ pub fn prog_detach_cgroup(cgroup: BorrowedFd<'_>, attach_type: u32) -> io::Resul
     };
     // SAFETY: `attr` is fully initialised with a valid cgroup fd and the attach
     // type; we pass its address and size. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` lives until `bpf` returns; the cgroup descriptor is not
+    // consumed.
+    //
+    // FAILURE MODE: -1 with errno, returned below as the OS error; the attachment is left as it
+    // was.
     let ret = unsafe {
         bpf(
             BPF_PROG_DETACH,
@@ -375,6 +405,12 @@ pub fn obj_pin(fd: BorrowedFd<'_>, path: &CStr) -> io::Result<()> {
     };
     // SAFETY: `attr` is fully initialised; `path` outlives the call and is
     // NUL-terminated, so the kernel reads a valid C string. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` and `path` live until `bpf` returns; the descriptor is not
+    // consumed.
+    //
+    // FAILURE MODE: -1 with errno, returned below as the OS error; nothing is pinned. A path
+    // without a terminating NUL would be read past its end; `CStr` guarantees one.
     let ret = unsafe {
         bpf(
             BPF_OBJ_PIN,
@@ -402,6 +438,12 @@ pub fn obj_get(path: &CStr) -> io::Result<OwnedFd> {
     };
     // SAFETY: `attr` is fully initialised; `path` outlives the call and is
     // NUL-terminated. The kernel returns a fresh fd we own, or -1. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` and `path` live until `bpf` returns; a returned descriptor is
+    // wrapped once, below.
+    //
+    // FAILURE MODE: -1 with errno, returned below as the OS error. A path without a terminating
+    // NUL would be read past its end; `CStr` guarantees one.
     let ret = unsafe {
         bpf(
             BPF_OBJ_GET,
@@ -430,6 +472,10 @@ pub fn map_freeze(map: BorrowedFd<'_>) -> io::Result<()> {
     };
     // SAFETY: `attr` is fully initialised (map_fd set, rest zeroed); the kernel reads
     // only `map_fd` for BPF_MAP_FREEZE. See `bpf`.
+    //
+    // INVARIANTS UPHELD: `attr` lives until `bpf` returns; the map descriptor is not consumed.
+    //
+    // FAILURE MODE: -1 with errno, returned below as the OS error; the map stays writable.
     let ret = unsafe {
         bpf(
             BPF_MAP_FREEZE,
