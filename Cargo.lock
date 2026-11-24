@@ -137,6 +137,7 @@ dependencies = [
 name = "kennel-host-delegate"
 version = "0.8.1"
 dependencies = [
+ "kennel-lib-os",
  "kennel-lib-scm",
 ]
 
@@ -328,6 +329,7 @@ dependencies = [
  "kennel-host-delegate",
  "kennel-lib-binder",
  "kennel-lib-policy",
+ "kennel-lib-scm",
  "kennel-lib-syscall",
  "nix",
  "simple-dns",
