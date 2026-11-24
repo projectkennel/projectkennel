@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The broker's event loop (W2 Part D): fold the facade channel and per-flow sockets into one loop.
 //!
 //! [`Broker`] holds the per-kennel state — the allowlist, the synthetic [`Pool`], the

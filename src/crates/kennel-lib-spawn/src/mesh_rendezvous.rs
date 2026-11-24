@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The mesh-mount rendezvous (§7.13.4a): how `kenneld` hands `kennel-bin-init` the detached binderfs
 //! mounts to place in the view — without touching the privhelper factory.
 //!

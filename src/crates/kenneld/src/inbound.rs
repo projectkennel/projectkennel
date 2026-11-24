@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The inbound BIND runtime: kenneld as the fd router for the §7.5.7 host-side mirror.
 //!
 //! The reverse of [`crate::inet`]'s egress dial. The `[net.bpf].bind` cgroup ACL already decided —

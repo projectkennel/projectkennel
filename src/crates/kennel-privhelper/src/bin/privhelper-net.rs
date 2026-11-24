@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-privhelper-net` — the bind-mirror network sub-helper.
 //!
 //! Adds or removes a kennel's per-instance loopback address on the **host** `lo`,
@@ -20,6 +22,8 @@
 //! arbitrary address configuration.
 
 #![forbid(unsafe_code)]
+// The helper never panics on a failed assumption in shipped code (CODING-STANDARDS.md §8.3, §12.2).
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 use std::ffi::CString;
 use std::net::IpAddr;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel's TOML (de)serializer for [Serde].
 //!
 //! This is [basic-toml] 0.1.10 by Alex Crichton and David Tolnay, brought in-tree as a

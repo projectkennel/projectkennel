@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel policy compiler (the authoring front end).
 //!
 //! # Purpose

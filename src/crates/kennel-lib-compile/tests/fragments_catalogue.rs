@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The composable fragment catalogue (`05-templates.md` §5.10) — per-fragment tests.
 //!
 //! Each `fragments/<name>/policy.toml` is a signed, additive-only capability bundle a

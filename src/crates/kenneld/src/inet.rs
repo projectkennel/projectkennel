@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `INet` egress decision: kenneld as the policy decision point for outbound
 //! connections (Kennel book Vol 2 ch.8 (The Network)).
 //!

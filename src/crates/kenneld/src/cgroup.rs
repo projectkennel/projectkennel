@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Locating kenneld's own cgroup and placing kennel cgroups under it.
 //!
 //! kenneld runs as a systemd *user* service, so its own cgroup lives inside the

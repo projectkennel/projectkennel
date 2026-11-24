@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bidirectional byte relay between two connected stream sockets.
 //!
 //! The conduit pattern shared by every connector delegate and facade: once kenneld (or a delegate)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The settled-policy types — the flat, signed, runtime artefact consumed by
 //! `kennel-lib-spawn`.
 //!

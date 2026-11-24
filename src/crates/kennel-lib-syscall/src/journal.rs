@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! systemd-journald submission via `sd_journal_sendv` (feature `audit-journald`).
 //!
 //! This is the only FFI the audit subsystem needs. `sd_journal_send` is

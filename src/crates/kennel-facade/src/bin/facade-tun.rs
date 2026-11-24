@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-kennel UDP-egress L3 forwarder: copy whole IPv6 frames between the kennel's tun and the
 //! fenced flow broker, behind a symmetric shape predicate (W2 Part C).
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-session channel between a consumer's `facade-tun` and its `tun-flow` mediator, and the
 //! broker's count of live sessions.
 //!

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compile-time validation of the `[ssh]` section.
 //!
 //! # Purpose

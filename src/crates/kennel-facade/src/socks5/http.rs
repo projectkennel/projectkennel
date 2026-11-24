@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! HTTP-proxy request parsing, server side.
 //!
 //! The second protocol the one listener serves ([`super::protocol`] routes here on a leading

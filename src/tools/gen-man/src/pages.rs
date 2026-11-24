@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The page data: the single editable source for every manpage.
 //!
 //! Plain Rust `const` data rather than a parsed sidecar, so there is no TOML

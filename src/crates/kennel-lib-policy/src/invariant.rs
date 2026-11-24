@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Framework-invariant re-assertion.
 //!
 //! Framework invariants are re-checked against the `effective_policy` at runtime,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated transaction round-trip across **two processes** (binder forbids the
 //! context manager's own process from calling it): a child process becomes the
 //! context manager (node 0); the parent is a client and does a real transaction —

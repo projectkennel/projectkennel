@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The privhelper IPC wire format: fixed-layout request/response messages.
 //!
 //! Per the maintainer's call, the protocol is *classic struct messages* — a

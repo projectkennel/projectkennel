@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The enforcement plan: a pure translation of a verified, substituted settled
 //! policy into the kernel objects `kennel-lib-syscall` and `kennel-lib-bpf` apply.
 //!

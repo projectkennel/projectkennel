@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! binderfs instance lifecycle: mount, named-device allocation, device open.
 //!
 //! A per-kennel binderfs instance is an independent mount (like devpts/tmpfs).

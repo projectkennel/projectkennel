@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The source-policy schema — what an operator (or a template author) writes.
 //!
 //! # Purpose

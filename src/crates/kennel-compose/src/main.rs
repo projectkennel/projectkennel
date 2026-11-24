@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // kennel-compose — standalone policy-authoring tool.
 //
 // A fully standalone binary (separate optional install, not part of the

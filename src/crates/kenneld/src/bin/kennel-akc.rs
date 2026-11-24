@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-akc` — the bastion's root-owned `AuthorizedKeysCommand` (§7.10.7).
 //!
 //! OpenSSH `sshd` invokes this on every bastion authentication, passing the offered

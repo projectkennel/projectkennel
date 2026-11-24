@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `facade-spawn-probe` — the in-kennel `SPAWN` round-trip probe (`02-10` §7.12).
 //!
 //! The reference in-kennel `SPAWN` client and the workload of the `spawn-roundtrip` policy-suite
@@ -12,6 +14,7 @@
 //! returned fds. No host privilege, no JSON — `kenneld` brokers the fds and steps out of the byte path.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};

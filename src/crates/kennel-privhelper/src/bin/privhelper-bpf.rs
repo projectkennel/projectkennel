@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-privhelper-bpf` — the host-mode egress sub-helper.
 //!
 //! Loads the per-kennel cgroup egress BPF programs against one shared map set,
@@ -26,6 +28,8 @@
 //! on stdin.
 
 #![forbid(unsafe_code)]
+// The helper never panics on a failed assumption in shipped code (CODING-STANDARDS.md §8.3, §12.2).
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 use std::io::Read as _;
 use std::process::ExitCode;

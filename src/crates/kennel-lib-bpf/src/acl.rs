@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Build the LPM-trie entries for an address ACL from its individual rules.
 //!
 //! # Why this exists

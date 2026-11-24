@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-bin-init` — the kennel's uid-0 PID 1.
 //!
 //! # Role

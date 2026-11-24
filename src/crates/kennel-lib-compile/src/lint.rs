@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Coherence linting of a **settled** policy (`kennel policy lint`).
 //!
 //! Distinct from compile-time warnings (footgun grants on the *source*): the linter

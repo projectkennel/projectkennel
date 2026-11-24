@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compile `bpf/*.bpf.c` against the kernel UAPI (no CO-RE) and embed the
 //! objects, when the `embed-programs` feature is enabled.
 //!

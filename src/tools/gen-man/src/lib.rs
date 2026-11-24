@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `gen_man` — the manpage data and the roff emitter.
 //!
 //! The binary (`main.rs`) is a thin CLI over this library. The `.1` command

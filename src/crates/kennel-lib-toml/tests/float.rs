@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Upstream basic-toml 0.1.10 test, kept unchanged as the behavioural reference for the in-tree
 // parser (#228); the workspace's test-code lints are relaxed for these upstream files alone.
 #![allow(

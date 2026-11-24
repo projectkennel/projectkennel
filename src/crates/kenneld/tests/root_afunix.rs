@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated e2e for the af-unix facade: a granted `[[unix.allow]]` socket reached
 //! through binder. A child manager (kenneld's role) gates `CONNECT_AFUNIX` against a
 //! `UnixRuntime` and connects the real host socket; the parent client receives the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The signed spawn-target template set (Kennel book Vol 2 ch.13 (Dynamic Spawning))
 //! — per-template gate, mirroring `fragments_catalogue.rs`.
 //!

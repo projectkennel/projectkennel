@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-kennel SSH re-origination bastion (`kennel-sshd`): config and launch.
 //!
 //! Per-kennel SSH leaves the kennel only through a managed instance of stock

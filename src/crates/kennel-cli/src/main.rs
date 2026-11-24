@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-host` — the host-side execution unit of the `kennel` CLI.
 //!
 //! Installed at `/usr/libexec/kennel/host` and reached through the `kennel` shim (which
@@ -6,6 +8,7 @@
 //! `audit` — over the `kennel_cli` library crate.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::process::ExitCode;
 

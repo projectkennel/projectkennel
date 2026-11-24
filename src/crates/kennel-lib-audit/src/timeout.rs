@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A non-blocking sink wrapper that bounds how long emitting can stall the writer.
 //!
 //! `02-3` requires each sink not to block the writer past a configured

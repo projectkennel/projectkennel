@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The facade's connection state machine (§7.7.2): terminate one workload D-Bus connection,
 //! parse its adversarial wire, and emit typed transactions.
 //!

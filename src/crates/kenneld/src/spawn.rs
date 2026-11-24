@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The node-0 `SPAWN` handler (Kennel book Vol 2 ch.13 (Dynamic Spawning)).
 //!
 //! A requester workload transacts [`verb::SPAWN`](kennel_lib_binder::service::verb::SPAWN) naming an

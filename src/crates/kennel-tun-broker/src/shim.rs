@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The broker's DNS naming shim (W2 Part D): allowlist check → mint a synthetic → build the reply.
 //!
 //! A query arrives at the broker's reserved resolver address. The shim checks the queried name

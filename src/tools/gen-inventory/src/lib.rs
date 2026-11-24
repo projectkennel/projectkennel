@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Compute the crate inventory from the workspace itself (std-only).
 //!
 //! The inventory that `03-crate-decomposition.md` documents drifts on every crate-graph change

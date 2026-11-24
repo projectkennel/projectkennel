@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `gen-inventory --json <path> [--doc <path>] [--crates <dir>]` — emit the crate inventory.
 //!
 //! Mirrors `gen-man`/`gen-schema`: a std-only generator run from CI. It computes the per-crate
@@ -7,6 +9,7 @@
 //! crate-graph change that is not regenerated fails the build.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::process::ExitCode;
 

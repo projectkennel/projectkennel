@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // allow(unnecessary_box_returns): `Box<Error>` is this deserializer's serde error type
 // (`Deserializer::Error`), boxed so every `Result` in the parser stays one pointer wide; the
 // constructors return it boxed by design.

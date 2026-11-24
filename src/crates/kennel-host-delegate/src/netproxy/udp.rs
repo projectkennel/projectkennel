@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `host-netproxy`'s UDP mode: resolve a name and open a connected UDP socket (W2).
 //!
 //! The operator-context resolve-and-dial half of UDP egress, reused by the tun broker exactly as the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The mechanical filter (§7.7.2a): decide a typed [`crate::wire::Call`] against the compiled
 //! `[dbus]` table.
 //!

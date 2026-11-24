@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The broker's flow forwarder (W2 Part D, half 2): the pure wire half.
 //!
 //! Route between the tun's L3 frames and the host-side UDP dial. `facade-tun` hands the broker

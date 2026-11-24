@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `facade-tun`'s L3 shape predicate: the pure, workload-facing parser (W2 Part C).
 //!
 //! `facade-tun` copies whole IPv6 L3 frames between the kennel's tun and the flow broker behind a

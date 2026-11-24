@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Schema↔parser agreement — now by construction, not by a hand-kept mirror.
 //!
 //! `schema/policy.toml.schema` is *derived* from these parser structs (`#[derive(SchemaType)]`,

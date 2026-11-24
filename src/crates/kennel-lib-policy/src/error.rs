@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The crate's top-level error type.
 
 use crate::invariant::InvariantViolation;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fuzz / property harnesses for Project Kennel's untrusted-input parsers.
 //!
 //! # Purpose
@@ -318,6 +320,164 @@ mod tests {
             self.0 = x;
             x.wrapping_mul(0x2545_F491_4F6C_DD1D)
         }
+    }
+
+    /// Strings that stress a text format: quotes, escapes, control characters, the format's own
+    /// punctuation, and non-ASCII of one to four bytes.
+    fn odd_string(rng: &mut Rng) -> String {
+        const ALPHABET: &[&str] = &[
+            "a", "Z", "0", " ", "_", "-", ".", "/", "~", "#", "=", "[", "]", "{", "}", ",", ":",
+            "\"", "'", "\\", "\n", "\r", "\t", "\u{1}", "\u{7f}", "é", "日", "🦀", "$", "<", ">",
+        ];
+        let len = (rng.next() % 13) as usize;
+        (0..len)
+            .map(|_| ALPHABET[(rng.next() as usize) % ALPHABET.len()])
+            .collect()
+    }
+
+    fn odd_strings(rng: &mut Rng) -> Vec<String> {
+        let n = (rng.next() % 5) as usize;
+        (0..n).map(|_| odd_string(rng)).collect()
+    }
+
+    /// Property: whatever the TOML serializer emits, the parser reads back as the same value.
+    ///
+    /// Generated documents are tables of tables of string arrays, integer arrays and booleans,
+    /// with keys and strings drawn from [`odd_string`]. A serializer that refuses a value is
+    /// fine; one that emits text the parser reads differently is not.
+    #[test]
+    fn toml_round_trips_generated_documents() {
+        use std::collections::BTreeMap;
+        type Doc = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+        let mut rng = Rng(0x5EED_0001_C0FF_EE01);
+        let mut written = 0u32;
+        for _ in 0..4_000 {
+            let mut doc = Doc::new();
+            for _ in 0..(rng.next() % 4) {
+                let mut table = BTreeMap::new();
+                for _ in 0..(rng.next() % 4) {
+                    table.insert(odd_string(&mut rng), odd_strings(&mut rng));
+                }
+                doc.insert(odd_string(&mut rng), table);
+            }
+            if let Ok(text) = kennel_lib_toml::to_string(&doc) {
+                written += 1;
+                let back: Doc = kennel_lib_toml::from_str(&text)
+                    .unwrap_or_else(|e| panic!("emitted TOML does not parse: {e}\n{text}"));
+                assert_eq!(back, doc, "round trip changed the document:\n{text}");
+            }
+
+            let mut numbers: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+            let mut flags: BTreeMap<String, bool> = BTreeMap::new();
+            for _ in 0..(rng.next() % 5) {
+                let n = (rng.next() % 4) as usize;
+                #[allow(clippy::cast_possible_wrap)] // any bit pattern is a fine i64 here
+                let values = (0..n).map(|_| rng.next() as i64).collect();
+                numbers.insert(odd_string(&mut rng), values);
+                flags.insert(odd_string(&mut rng), rng.next() & 1 == 1);
+            }
+            if let Ok(text) = kennel_lib_toml::to_string(&numbers) {
+                let back: BTreeMap<String, Vec<i64>> = kennel_lib_toml::from_str(&text)
+                    .unwrap_or_else(|e| panic!("emitted TOML does not parse: {e}\n{text}"));
+                assert_eq!(back, numbers, "round trip changed the document:\n{text}");
+            }
+            if let Ok(text) = kennel_lib_toml::to_string(&flags) {
+                let back: BTreeMap<String, bool> = kennel_lib_toml::from_str(&text)
+                    .unwrap_or_else(|e| panic!("emitted TOML does not parse: {e}\n{text}"));
+                assert_eq!(back, flags, "round trip changed the document:\n{text}");
+            }
+        }
+        // The property is vacuous if the serializer refuses the generated documents.
+        assert!(
+            written > 3_000,
+            "only {written} of 4000 documents were serialised"
+        );
+    }
+
+    /// Property: a signed policy file says what the policy that was signed says.
+    ///
+    /// The fixture policy's free-text fields are replaced with generated strings; the policy is
+    /// signed and written out; the file is read back. The policy read must equal the policy
+    /// signed, its canonical bytes must be the same, and the signature must verify.
+    #[test]
+    fn a_signed_policy_reads_back_as_the_policy_that_was_signed() {
+        use kennel_lib_policy::canonical::canonical_bytes;
+        use kennel_lib_policy::{settled::sample_settled, sign_settled, to_bytes, SigningKey};
+        let key = SigningKey::from_seed("fuzz", &[3u8; 32]).expect("key");
+        let mut rng = Rng(0x5EED_0002_C0FF_EE02);
+        let mut written = 0u32;
+        for _ in 0..1_500 {
+            let mut policy = sample_settled();
+            policy.name = odd_string(&mut rng);
+            policy.deferred_substitutions = odd_strings(&mut rng);
+            let fs = &mut policy.effective_policy.fs;
+            fs.read = odd_strings(&mut rng);
+            fs.write = odd_strings(&mut rng);
+            fs.exclusive = odd_strings(&mut rng);
+            fs.home_persist = odd_strings(&mut rng);
+            fs.home_shadow = rng.next() & 1 == 1;
+            fs.home_readonly = rng.next() & 1 == 1;
+
+            let Ok(doc) = sign_settled(&policy, &key) else {
+                continue; // a value the canonical form refuses is not written at all
+            };
+            let Ok(bytes) = to_bytes(&doc) else { continue };
+            written += 1;
+            let read = kennel_lib_policy::parse_settled_unverified(&bytes)
+                .unwrap_or_else(|e| panic!("a written policy does not read back: {e:?}"));
+            assert_eq!(
+                read, policy,
+                "the file says something the signed policy did not"
+            );
+            assert_eq!(
+                canonical_bytes(&read).ok(),
+                canonical_bytes(&policy).ok(),
+                "canonical form differs after a round trip"
+            );
+        }
+        // The property is vacuous if the generated policies are never written.
+        assert!(
+            written > 1_000,
+            "only {written} of 1500 policies were written"
+        );
+    }
+
+    /// The time-boxed run (CODING-STANDARDS.md §7.3): fresh random inputs for as long as
+    /// `KENNEL_FUZZ_SECONDS` says, from `KENNEL_FUZZ_SEED` or the clock. The seed is printed so
+    /// a failure can be replayed. Without the variable this test does nothing; CI sets it.
+    #[test]
+    fn parsers_never_panic_for_the_configured_duration() {
+        let Some(seconds) = std::env::var("KENNEL_FUZZ_SECONDS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let seed = std::env::var("KENNEL_FUZZ_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(1, |d| d.as_nanos() as u64 | 1)
+            });
+        eprintln!("kennel-fuzz: {seconds}s of random inputs, KENNEL_FUZZ_SEED={seed}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        let mut rng = Rng(seed | 1);
+        let mut buf = Vec::with_capacity(4096);
+        let mut runs = 0u64;
+        while std::time::Instant::now() < deadline {
+            for _ in 0..256 {
+                let len = (rng.next() % 4096) as usize;
+                buf.clear();
+                for _ in 0..len {
+                    buf.push((rng.next() & 0xff) as u8);
+                }
+                run(&buf);
+                runs += 1;
+            }
+        }
+        eprintln!("kennel-fuzz: {runs} inputs");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! OpenSSH Ed25519 key format parsing and generation.
 //!
 //! Handles:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-kennel `AF_UNIX` proxy: present each granted socket at its in-view path and
 //! broker connections to the `org.projectkennel.IAfUnix` binder facade.
 //!

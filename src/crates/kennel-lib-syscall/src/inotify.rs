@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A minimal `inotify` wrapper for the workspace-trigger tripwire (§2.5, T2.8).
 //!
 //! `kenneld` watches each writable bind's pinned triggers (and trigger directories) on the

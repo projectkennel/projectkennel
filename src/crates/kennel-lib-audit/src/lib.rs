@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel unified audit writer.
 //!
 //! This crate is the seam between audit *sources* (the BPF programs drained by

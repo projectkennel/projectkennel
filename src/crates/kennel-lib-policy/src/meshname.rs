@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The grammar of a mesh capability `name` and `key` (`[[provides]]` / `[[consumes]]`).
 //!
 //! `kenneld` joins a provider's `name` (and `key`) into a host path — the rendezvous directory it

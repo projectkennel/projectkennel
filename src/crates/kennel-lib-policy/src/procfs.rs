@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! How a `fs.read` grant under `/proc` is served in the constructed view (#218).
 //!
 //! # Purpose

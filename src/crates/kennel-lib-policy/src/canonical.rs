@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Canonical-form serialisation: the exact bytes a signature covers.
 //!
 //! The signature on a settled policy is computed over the canonical form of its

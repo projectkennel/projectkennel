@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The `INet` conduit: kenneld drives the dumb dialer (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! kenneld is the decision point — it approves a request, resolves the name, and **pins** the

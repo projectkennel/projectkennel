@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The kenneld daemon binary.
 //!
 //! A user-space, per-user daemon: socket-activated on the first `kennel run` and

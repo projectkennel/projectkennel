@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! PTY allocation and terminal control for interactive kennels.
 //!
 //! An interactive `kennel run` needs the workload on its **own** pseudo-terminal so
@@ -49,6 +51,10 @@ pub fn get_winsize(fd: BorrowedFd<'_>) -> io::Result<Winsize> {
         ws_ypixel: 0,
     };
     // SAFETY: `ws` is a valid, sized-correctly out-param for TIOCGWINSZ on a fd we own.
+    //
+    // INVARIANTS UPHELD: only `ws` is written.
+    //
+    // FAILURE MODE: -1 (`ENOTTY` for a non-terminal) is returned as the OS error.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &raw mut ws) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -62,6 +68,10 @@ pub fn get_winsize(fd: BorrowedFd<'_>) -> io::Result<Winsize> {
 /// The OS error if the `ioctl` fails.
 pub fn set_winsize(fd: BorrowedFd<'_>, ws: &Winsize) -> io::Result<()> {
     // SAFETY: `ws` is a valid TIOCSWINSZ in-param for a terminal fd we own.
+    //
+    // INVARIANTS UPHELD: `ws` is only read.
+    //
+    // FAILURE MODE: -1 is returned as the OS error and the size is unchanged.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, std::ptr::from_ref(ws)) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -103,6 +113,11 @@ pub fn set_controlling_tty(fd: BorrowedFd<'_>) -> io::Result<()> {
     nix::unistd::setsid().map_err(io::Error::from)?;
     // SAFETY: TIOCSCTTY with arg 0 (do not steal another session's tty); `fd` is the
     // fresh slave pty and we are now a session leader after `setsid`.
+    //
+    // INVARIANTS UPHELD: no memory is passed; argument 0 never takes a terminal from another
+    // session.
+    //
+    // FAILURE MODE: -1 is returned as the OS error and no controlling terminal is acquired.
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSCTTY, 0) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -144,6 +159,11 @@ pub fn setup_view_pty(return_fd: RawFd) -> io::Result<()> {
     let _ = nix::unistd::setsid();
     // SAFETY: TIOCSCTTY with arg 0 (never steal another session's tty); `p.slave` is
     // a fresh slave and we attempted to lead a session above.
+    //
+    // INVARIANTS UPHELD: no memory is passed; argument 0 never takes a terminal from another
+    // session.
+    //
+    // FAILURE MODE: -1 is returned as the OS error and no controlling terminal is acquired.
     let rc = unsafe { libc::ioctl(p.slave.as_raw_fd(), libc::TIOCSCTTY, 0) };
     if rc < 0 {
         return Err(io::Error::last_os_error());
@@ -152,6 +172,11 @@ pub fn setup_view_pty(return_fd: RawFd) -> io::Result<()> {
     // terminal to it. One data byte is required by the SCM_RIGHTS contract.
     // SAFETY: `return_fd` is the connected socket the controller passed in; we only
     // borrow it for this send.
+    //
+    // INVARIANTS UPHELD: the socket is not closed by the borrow.
+    //
+    // FAILURE MODE: were `return_fd` not a connected socket, the send below fails and its error
+    // is returned.
     let ret = unsafe { BorrowedFd::borrow_raw(return_fd) };
     crate::scm::send_with_fds(ret, &[0u8], &[p.master.as_fd()])?;
     // The slave becomes the workload's stdio. dup2 leaves fds 0/1/2 as independent
@@ -204,6 +229,10 @@ pub fn wait_winch() -> io::Result<()> {
 pub fn adopt_stdin_as_controlling_tty() {
     // SAFETY: fd 0 is the workload's stdin, dup'd into place by std before the seal
     // runs; we only borrow it for the duration of these calls.
+    //
+    // INVARIANTS UPHELD: descriptor 0 is not closed by the borrow.
+    //
+    // FAILURE MODE: if descriptor 0 is closed, `is_terminal` is false and nothing is done.
     let stdin = unsafe { BorrowedFd::borrow_raw(0) };
     if is_terminal(stdin) {
         let _ = set_controlling_tty(stdin);

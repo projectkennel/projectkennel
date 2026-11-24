@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Facade readiness: a one-byte-per-facade signal from each socket-serving facade to
 //! `kennel-bin-init`, so the workload starts only once every facade is listening.
 //!

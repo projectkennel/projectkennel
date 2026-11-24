@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Template/fragment discovery for Mode B (interactive composer).
 //
 // Templates and fragments live on the live system in the standard cascade:

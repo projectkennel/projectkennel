@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Readiness-atomic `AF_UNIX` listeners for the facades that serve a socket path inside the view
 //! (`facade-dbus`, `facade-afunix`).
 //!

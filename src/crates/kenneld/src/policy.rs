@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Loading and verifying policies against a trust store.
 //!
 //! The daemon's production [`crate::server::PolicyLoader`]. The

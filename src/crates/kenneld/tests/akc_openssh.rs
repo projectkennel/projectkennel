@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated proof of the production key source (§7.10.7): the **root-owned
 //! `kennel-akc` binary, invoked exactly as OpenSSH's `AuthorizedKeysCommand` invokes it
 //! (`%t %k` argv), vends the forced-command line for a synthetic key bound to a live

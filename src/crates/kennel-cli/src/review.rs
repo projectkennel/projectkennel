@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel review` and `kennel release` — host-side trust-manifest sign-off (T2.8) and
 //! exclusive-bind crash recovery (§2.7). Split out of `main.rs`.
 //!

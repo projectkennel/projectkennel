@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel **safe** OS primitives.
 //!
 //! These are the helpers that wrap the operating system without needing `unsafe`: they go

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A tiny anonymous-pipe **ready/ack** handshake between two cooperating local processes.
 //!
 //! # Purpose

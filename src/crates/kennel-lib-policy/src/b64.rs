@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Standard Base64 (RFC 4648) encode/decode, std-only.
 //!
 //! The signature envelope carries the Ed25519 signature as Base64, and public

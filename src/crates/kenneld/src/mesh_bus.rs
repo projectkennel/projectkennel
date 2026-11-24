@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The mesh bus: a shared binderfs instance for `binder-connector` capabilities (§7.13.4a).
 //!
 //! The binder analogue of the `af-unix` rendezvous directory ([`super::mesh`]):

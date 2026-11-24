@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Translate a resolved, folded source policy into the settled `EffectivePolicy`.
 //!
 //! # Purpose

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The rendered record and its sink encodings.
 //!
 //! A [`Record`] is the canonical, ordered, already-sanitised field list the

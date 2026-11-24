@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The mutable-field manifest and its **constraint family** (Kennel book Vol 2 ch.13 (Dynamic Spawning)
 //! §7.12.3).
 //!

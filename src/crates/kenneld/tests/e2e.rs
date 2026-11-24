@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! End-to-end hardware tests of the **unprivileged** production vertical, gated
 //! behind the `e2e` feature; they run as the ordinary operator, *no sudo*.
 //!

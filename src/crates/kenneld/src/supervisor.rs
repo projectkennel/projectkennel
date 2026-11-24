@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The sidecar supervisor's restart decision (`07-13-service-catalog.md` §7.13.7): what to do when a
 //! supervised provider exits.
 //!

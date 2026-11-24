@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-spawn` — the in-cage spawn execution unit (`02-10` §7.12, W10).
 //!
 //! Installed as `/usr/libexec/kennel-facades/spawn` and reached through the `kennel` shim, this is the
@@ -23,6 +25,7 @@
 //! `--`-separates-argv convention, with a `template@version` operand here where the host takes a policy.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
 use std::fs::OpenOptions;
 use std::io::{self, Write};

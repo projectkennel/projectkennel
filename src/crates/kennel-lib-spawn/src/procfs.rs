@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The curated `/proc` (#218): render the synthesized top-level files and over-mount the
 //! view's fresh procfs.
 //!

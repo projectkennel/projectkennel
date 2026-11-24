@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel` — the unified command shim (W10).
 //!
 //! The one name a user or agent types, in either context. It holds **no authority** and does no

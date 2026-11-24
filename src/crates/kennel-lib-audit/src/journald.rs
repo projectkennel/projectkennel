@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The systemd-journald sink (feature `audit-journald`).
 //!
 //! Each canonical field becomes a `KENNEL_<UPPER>` journal field; the writer's

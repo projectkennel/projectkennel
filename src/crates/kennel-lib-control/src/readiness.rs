@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The service-kennel readiness state machine (`07-13-service-catalog.md` §7.13.7).
 //!
 //! # Purpose

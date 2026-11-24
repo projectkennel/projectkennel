@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Robustness guard for the parser on the TCB path (#228): it must return a value or an `Error`
 //! on any input, and never panic. Built from upstream's own fixtures: every prefix (on a char
 //! boundary) of every valid and invalid document, plus a set of single-byte corruptions of each

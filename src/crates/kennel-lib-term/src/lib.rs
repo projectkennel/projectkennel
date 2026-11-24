@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Terminal-escape filtering for the workload→operator PTY stream.
 //!
 //! A confined workload writes to the operator's real terminal through the PTY

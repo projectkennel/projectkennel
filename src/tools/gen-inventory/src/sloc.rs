@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Source-line counting: test-cfg-stripped, comment-and-blank-excluding (std-only).
 //!
 //! Reproduces the method `03-crate-decomposition.md` used by hand — verified to match its prior

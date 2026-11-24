@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Client side of the privhelper IPC: invoke the helper binary and exchange one
 //! message.
 //!

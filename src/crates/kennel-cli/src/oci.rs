@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The OCI named-image store (§7.11, arch `02-9-oci.md`).
 //!
 //! `kennel oci build <name>` populates an operator-owned store entry; `kennel oci run <name>`

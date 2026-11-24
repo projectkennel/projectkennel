@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The egress allowlist evaluator (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! Pure, network-free policy logic: given a destination the client asked for,

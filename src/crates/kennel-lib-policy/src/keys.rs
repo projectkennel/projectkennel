@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The trust store: Ed25519 public keys identified by `key_id`, plus the
 //! signing-key wrapper used by the compiler and tests.
 //!

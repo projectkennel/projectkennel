@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Render the inventory as the markdown that lands between the generated markers in
 //! `03-crate-decomposition.md`: the inventory table plus the totals line.
 

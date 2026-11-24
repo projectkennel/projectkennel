@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `ICMPv6` Destination Unreachable synthesis (W2 Part D): the broker's local error replies.
 //!
 //! When a flow cannot proceed the broker answers **locally**, with the triggering packet in hand —

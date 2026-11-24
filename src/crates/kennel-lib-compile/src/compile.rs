@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The compiler orchestrator: a source policy + its templates → a settled policy.
 //!
 //! # Purpose

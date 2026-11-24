@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The dependency-free sinks: JSONL file (the default), stdout, and RFC 5424
 //! syslog. The journald sink lives in the `journald` module behind a feature
 //! flag because it alone needs FFI.

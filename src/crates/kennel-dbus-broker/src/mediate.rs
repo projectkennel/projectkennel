@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-session D-Bus mediation loop (§7.7).
 //!
 //! The bus-side I/O around the I/O-free [`kennel_lib_dbus::delegate::Delegate`] core. Per

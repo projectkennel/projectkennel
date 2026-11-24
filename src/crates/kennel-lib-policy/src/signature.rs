@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The signature envelope and its verification.
 //!
 //! A signature is an SSHSIG (OpenSSH detached signature, [`crate::sshsig`]) over the

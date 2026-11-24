@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! ELF parsing (via `object`), map creation, relocation patching, and program
 //! load. The map/program ABI mirrors `bpf/maps.h` and the `SEC()` names of
 //! `bpf/*.bpf.c`.
@@ -281,6 +283,12 @@ impl Loaded {
         }
         // SAFETY: validated above that `key`/`value` are at least the map's key_size/value_size,
         // so the kernel reads only in-bounds bytes from each.
+        //
+        // INVARIANTS UPHELD: `key` and `value` are borrowed for the call and not modified.
+        //
+        // FAILURE MODE: a slice shorter than the map's sizes would be an out-of-bounds read by
+        // the kernel; the length check above returns an error instead. A kernel refusal is
+        // returned as the OS error.
         unsafe { sys::map_update(map.as_fd(), key, value, flags) }
     }
 
@@ -519,6 +527,12 @@ pub fn update_kennel_map(
     }
     // SAFETY: validated above that `key`/`value` are at least the map's key_size/value_size, so
     // the kernel reads only in-bounds bytes from each.
+    //
+    // INVARIANTS UPHELD: `key` and `value` are borrowed for the call and not modified.
+    //
+    // FAILURE MODE: a slice shorter than the map's sizes would be an out-of-bounds read by the
+    // kernel; the length check above returns an error instead. A kernel refusal is returned as
+    // the OS error.
     unsafe { sys::map_update(fd.as_fd(), key, value, flags) }
 }
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-connection nested-compositor orchestrator — the GUI service kennel's workload.
 //!
 //! The GUI service kennel holds the rights (the host Wayland leg and `/dev/dri`) but runs *no*

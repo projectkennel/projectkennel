@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The inbound BIND conduit: kenneld drives the dumb listener (Kennel book Vol 2 ch.8 (The Network)).
 //!
 //! The reverse of `host_netproxy::conduit`. kenneld is the decision point — the `[net.bpf].bind`

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Project Kennel privileged-operation helper — library core.
 //!
 //! # Purpose
@@ -36,6 +38,8 @@
 //! transient: one validated operation per invocation.
 
 #![forbid(unsafe_code)]
+// The helper never panics on a failed assumption in shipped code (CODING-STANDARDS.md §8.3, §12.2).
+#![cfg_attr(not(test), deny(clippy::expect_used))]
 
 /// The bpffs mount root for a user's egress-BPF map pins: `/run/user/<uid>/kennel/bpf`.
 ///

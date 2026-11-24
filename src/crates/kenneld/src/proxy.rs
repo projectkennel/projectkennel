@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Launching the per-kennel egress dial delegate.
 //!
 //! kenneld owns the egress decision (`crate::inet`): it resolves names under policy, re-checks the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The canonical audit event: the producer-facing envelope and the typed value
 //! model the writer renders into every sink.
 //!

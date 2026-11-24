@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stable `MESSAGE_ID` UUIDs per event type, for the journald sink (`02-3`).
 //!
 //! journald's `MESSAGE_ID` lets `journalctl MESSAGE_ID=<uuid>` filter by event

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Hand-rolled `rtnetlink` for interface-address management.
 //!
 //! The privileged helper adds the per-kennel loopback addresses (a `127.x.y.0/24`

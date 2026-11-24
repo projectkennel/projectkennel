@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `host-netproxy`: the per-kennel egress **dial delegate**.
 //!
 //! `kenneld` owns the egress decision (allow/deny, DNS resolution, address pinning —

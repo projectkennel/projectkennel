@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The enablement scan (`07-13-service-catalog.md` §7.13.6): the catalogue's membership.
 //!
 //! Installing a provider (its signed policy in the cascade) and *enabling* one are distinct: a

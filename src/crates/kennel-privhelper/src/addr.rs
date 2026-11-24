@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Forward construction of a kennel's IPv6 loopback address.
 //!
 //! The privhelper [`validate`](crate::validate)s an address by taking it apart

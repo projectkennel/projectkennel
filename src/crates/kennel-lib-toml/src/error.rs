@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fmt::{self, Debug, Display};
 
 /// Errors that can occur when serializing or deserializing TOML.

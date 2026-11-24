@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The seam a reviewer will probe: our in-process SSHSIG verifier must agree with
 //! `ssh-keygen` byte-for-byte. These tests sign with the real `ssh-keygen -Y sign`,
 //! verify with our code (the public `verify_signature` entry point), and verify our

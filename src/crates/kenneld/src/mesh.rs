@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The host-owned rendezvous point for `af-unix` mesh providers (§7.13.4b).
 //!
 //! A provider listens at its policy `endpoint` inside its own view. kenneld derives the host

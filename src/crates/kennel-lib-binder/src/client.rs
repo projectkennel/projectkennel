@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A binder connection: one `open` of the device, its `mmap`ped buffer, and the
 //! `BINDER_WRITE_READ` cycle both endpoints ride.
 //!
@@ -208,10 +210,20 @@ impl Connection {
     pub fn set_nonblocking(&self) -> io::Result<()> {
         let raw = self.fd.as_raw_fd();
         // SAFETY: F_GETFL/F_SETFL on our own open fd; no pointers, no aliasing.
+        //
+        // INVARIANTS UPHELD: reading the flags changes nothing on the descriptor.
+        //
+        // FAILURE MODE: a descriptor that is not open gives -1 (`EBADF`), returned as the OS
+        // error. No memory is touched.
         let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
         if flags < 0 {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `F_SETFL` on the same open descriptor with an integer argument; no pointers.
+        //
+        // INVARIANTS UPHELD: only `O_NONBLOCK` is added to the flags just read.
+        //
+        // FAILURE MODE: -1 is returned as the OS error and the flags are left as they were.
         let rc = unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
         if rc < 0 {
             return Err(io::Error::last_os_error());
@@ -679,6 +691,13 @@ impl Connection {
             })?;
         // SAFETY: `raw` was just transferred to us by the binder driver (a translated
         // BINDER_TYPE_FD object) and filtered `>= 0` above, so it is a valid fd we solely own.
+        //
+        // INVARIANTS UPHELD: the received descriptor is wrapped exactly once, so it is closed
+        // exactly once.
+        //
+        // FAILURE MODE: were `raw` not a descriptor the driver installed, the wrapper would
+        // later close some other descriptor of this process. The value is taken only from a
+        // `BINDER_TYPE_FD` object in a buffer the driver delivered.
         let owned = unsafe { sys::own_fd(raw) };
         guard.free()?;
         Ok(owned)
@@ -816,6 +835,13 @@ impl Connection {
                 })?;
             // SAFETY: `raw` is a fd the binder driver just transferred to us, filtered `>= 0` above —
             // a valid fd we solely own.
+            //
+            // INVARIANTS UPHELD: each received descriptor is wrapped exactly once, so it is
+            // closed exactly once.
+            //
+            // FAILURE MODE: were `raw` not a descriptor the driver installed, the wrapper would
+            // later close some other descriptor of this process. The value is taken only from a
+            // `BINDER_TYPE_FD` object in a buffer the driver delivered.
             fds.push(unsafe { sys::own_fd(raw) });
         }
 
@@ -931,6 +957,13 @@ impl Connection {
             if let Some(raw) = proto::flat_binder_object_fd_value(obj).filter(|&fd| fd >= 0) {
                 // SAFETY: `raw` is a fd the driver just installed into us (a translated
                 // BINDER_TYPE_FD), filtered `>= 0` — a valid fd we solely own.
+                //
+                // INVARIANTS UPHELD: each received descriptor is wrapped exactly once, so it is
+                // closed exactly once.
+                //
+                // FAILURE MODE: were `raw` not a descriptor the driver installed, the wrapper
+                // would later close some other descriptor of this process. The value is taken
+                // only from a `BINDER_TYPE_FD` object in a buffer the driver delivered.
                 fds.push(unsafe { sys::own_fd(raw) });
             }
         }
@@ -1029,6 +1062,12 @@ impl Connection {
         };
         // SAFETY: `write_buffer` points at `write` (live for the call) with `write_size` set to
         // its length; the read side is zero-sized. The kernel reads only those `write_size` bytes.
+        //
+        // INVARIANTS UPHELD: `write` is neither moved nor freed until the ioctl returns, and
+        // `bwr` describes exactly it.
+        //
+        // FAILURE MODE: a length larger than the buffer would have the kernel read past it; the
+        // length is the slice's own. An ioctl error is returned to the caller.
         unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) }
     }
 
@@ -1096,6 +1135,13 @@ impl Connection {
         // On a non-blocking endpoint (the looper pool, see `set_nonblocking`) a read with nothing
         // pending returns `EAGAIN`; treat that as an empty cycle so the `poll`-woken loser of a
         // thundering herd does not block.
+        //
+        // INVARIANTS UPHELD: `write` and `read` are neither moved nor freed until the ioctl
+        // returns, and `bwr` describes exactly them.
+        //
+        // FAILURE MODE: a length larger than a buffer would have the kernel read or write past
+        // it (memory corruption); both lengths are the slices' own. An ioctl error other than
+        // `EAGAIN` is returned to the caller.
         match unsafe { sys::write_read(self.fd.as_fd(), &mut bwr) } {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(Vec::new()),

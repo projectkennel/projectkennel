@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Root-gated e2e for the real `facade-afunix` proxy binary brokering an
 //! `AF_UNIX` socket through the binder facade.
 //!

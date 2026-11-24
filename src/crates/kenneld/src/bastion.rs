@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The per-user SSH bastion's lifecycle and key state (Kennel book Vol 2 ch.10 (Cryptographic Services)).
 //!
 //! `kenneld` runs **one** `kennel-sshd` for the session, shared by all the user's

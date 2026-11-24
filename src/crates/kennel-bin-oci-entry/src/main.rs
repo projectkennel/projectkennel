@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! `kennel-bin-oci-entry` — the OCI launcher (§7.11.5, arch `02-9-oci.md`).
 //!
 //! Workload-side `argv[0]` for an image-root kennel. It runs post-`pivot_root` at the workload's

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! A token-bucket rate limiter for messages crossing the D-Bus mediation boundary.
 //!
 //! # Why this exists

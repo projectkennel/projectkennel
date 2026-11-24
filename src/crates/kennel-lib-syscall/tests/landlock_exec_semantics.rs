@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Empirical proof of the exec-allowlist model (Kennel book Vol 2 ch.7 (Execution)):
 //! a binary runs with only **READ** on its library dirs plus **EXECUTE** on the
 //! binary itself — and a binary that has READ but *not* EXECUTE is refused.

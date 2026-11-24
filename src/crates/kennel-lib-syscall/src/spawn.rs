@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Spawning a child with a post-`fork`, pre-`execve` *seal* hook.
 //!
 //! The confinement that must be irreversible and inherited across `execve` —
@@ -130,6 +132,11 @@ where
             if !dropped {
                 // SAFETY: _exit ends the child fail-closed without unwinding the
                 // parent's shared Drop/atexit state.
+                //
+                // INVARIANTS UPHELD: the forked child never returns into the parent's frames,
+                // and none of the parent's destructors run in it.
+                //
+                // FAILURE MODE: `_exit` does not return.
                 unsafe { libc::_exit(126) };
             }
             // Exec the workload. With `exec_fd` set, `fexecve` the pinned fd — the exact
@@ -137,6 +144,13 @@ where
             // swap the binary between the hash and the exec. Otherwise `execve` the path.
             // SAFETY: both pointer arrays are NULL-terminated and point into fork-copied
             // CStrs; on success the image is replaced, on failure control returns and we _exit.
+            //
+            // INVARIANTS UPHELD: nothing after a successful exec runs; after a failed one the
+            // child goes on to `_exit(127)`.
+            //
+            // FAILURE MODE: an exec failure returns -1 and the child exits 127. An array
+            // without its terminating null would be read past its end; both are built with one,
+            // in the parent.
             unsafe {
                 match exec_fd {
                     Some(fd) => {
@@ -175,6 +189,10 @@ pub fn fexecve(fd: BorrowedFd<'_>, argv: &[&CStr], envp: &[&CStr]) -> io::Error 
     // pointer arrays are NULL-terminated and point into the borrowed CStrs, which outlive
     // this call. On success control never returns here; on failure it returns and we read
     // errno. No shared state is mutated.
+    //
+    // INVARIANTS UPHELD: the caller's strings are only borrowed.
+    //
+    // FAILURE MODE: if `fexecve` returns, it failed; errno is read and returned.
     unsafe {
         libc::fexecve(fd.as_raw_fd(), argv_p.as_ptr(), envp_p.as_ptr());
     }

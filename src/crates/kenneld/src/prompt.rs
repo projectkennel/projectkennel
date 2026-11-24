@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The daemon end of the operator-prompt channel (§9.7).
 //!
 //! kenneld is a daemon with no session of its own, so it cannot ask the operator a

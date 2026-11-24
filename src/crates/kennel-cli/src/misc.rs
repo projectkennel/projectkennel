@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Miscellaneous verbs: `version`, `audit`.
 //!
 //! The smaller operator verbs that do not fit the run/policy/key/oci groups.

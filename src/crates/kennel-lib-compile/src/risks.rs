@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Risk evaluation: map a resolved policy's `threats` tags against the catalogue.
 //!
 //! `kennel policy risks` surfaces what a policy's grants **expose** and **mitigate**

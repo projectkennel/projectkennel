@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! In-kennel inbound BIND facade: register callback nodes and deliver pushed connections.
 //!
 //! # Purpose

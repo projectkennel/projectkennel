@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Adopting a socket-activated listener fd (systemd `sd_listen_fds`).
 //!
 //! When kenneld is started by socket activation, systemd has already created and
@@ -33,5 +35,11 @@ pub fn take_listener() -> Option<OwnedFd> {
     // SAFETY: under socket activation systemd guarantees fd SD_LISTEN_FDS_START
     // is an open listening socket transferred to us; we take ownership exactly
     // once (this function clears the environment so it cannot run twice).
+    //
+    // INVARIANTS UPHELD: the socket is taken once; the cleared environment makes a second call
+    // return `None`.
+    //
+    // FAILURE MODE: if the environment lied, this would own and later close whatever is at that
+    // number. The `LISTEN_PID` check above ties the variables to this process.
     Some(unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) })
 }

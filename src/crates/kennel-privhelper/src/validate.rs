@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Request validation: the security core of the privileged helper.
 //!
 //! # Purpose

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! The live workspace-trigger tripwire (§2.5, T2.8).
 //!
 //! While a kennel runs, `kenneld` watches each writable bind's pinned triggers and trigger

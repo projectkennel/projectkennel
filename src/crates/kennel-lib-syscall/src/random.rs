@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! OS CSPRNG access via `getrandom(2)`.
 //!
 //! Used for the random bits of the audit `kennel_uuid` (a `UUIDv7`). The system
