@@ -72,23 +72,23 @@ fn run_manager() {
     ));
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
-    let manager = binder::spawn(
-        fd,
-        7,
+    let manager = binder::spawn(binder::NodeZero {
+        device_fd: fd,
+        ctx: 7,
         unix,
-        binder::Lifecycle::default(),
-        kenneld::inet::NetRuntime::denied(),
-        std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
-        false,
+        lifecycle: binder::Lifecycle::default(),
+        net: kenneld::inet::NetRuntime::denied(),
+        inbound: std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
+        dbus_mesh: false,
         writer,
-        None,
-        Vec::new(),
-        None,
-        None,
-        kenneld::tun_sink::TunSink::new(),
-        false,
-        None,
-    )
+        spawn: None,
+        consumes: Vec::new(),
+        catalogue: None,
+        activator: None,
+        tun_sink: kenneld::tun_sink::TunSink::new(),
+        tun_provider: false,
+        tun_session: None,
+    })
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
 

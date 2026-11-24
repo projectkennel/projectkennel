@@ -646,69 +646,30 @@ pub fn start<P: Privileged + Sync>(
     spec: Spec,
     command: &mut Command,
 ) -> Result<Kennel, Error> {
-    let Spec {
-        id,
-        cgroup,
-        ctx,
-        scope,
-        mut plan,
-        net,
-        proxy,
-        etc,
-        view_root,
-        ssh,
-        unix,
-        dbus,
-        facade_tun_bin,
-        binder,
-        oci,
-        mesh_mounts,
-        tracer,
-    } = spec;
+    let mut spec = spec;
     let mut state = Provision::default();
 
-    match bring_up(
-        privileged,
-        &id,
-        &cgroup,
-        ctx,
-        &scope,
-        &mut plan,
-        &net,
-        proxy.as_ref(),
-        etc.as_ref(),
-        view_root.as_deref(),
-        &ssh,
-        &unix,
-        &dbus,
-        facade_tun_bin.as_deref(),
-        binder.as_ref(),
-        &oci,
-        &mesh_mounts,
-        tracer,
-        command,
-        &mut state,
-    ) {
+    match bring_up(privileged, &mut spec, command, &mut state) {
         Ok(init_pid) => Ok(Kennel {
             init_pid,
-            cgroup,
-            ctx,
+            cgroup: spec.cgroup,
+            ctx: spec.ctx,
             v6: state.v6,
             proxy: state.proxy,
             inetd: state.inetd,
             view_root: state.view_root,
             binder: state.binder,
-            tracer,
+            tracer: spec.tracer,
         }),
         Err(e) => {
             if let Some(manager) = state.binder.take() {
                 manager.stop();
             }
             teardown(
-                tracer,
+                spec.tracer,
                 privileged,
-                ctx,
-                state.made_cgroup.then_some(cgroup.as_path()),
+                spec.ctx,
+                state.made_cgroup.then_some(spec.cgroup.as_path()),
                 state.v6,
                 state.proxy,
                 state.inetd,
@@ -741,29 +702,39 @@ fn is_image_owned_system_path(target: &Path) -> bool {
 // allow: one ordered bring-up sequence (cgroup, addresses, egress, proxy, /etc, ssh,
 // unix, view, spawn) whose steps share `state` for the reverse-order unwind.
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)]
 fn bring_up<P: Privileged + Sync>(
     privileged: &P,
-    id: &str,
-    cgroup: &Path,
-    ctx: u16,
-    scope: &ReservedScope,
-    plan: &mut Plan,
-    net: &NetPolicy,
-    proxy: Option<&ProxySetup>,
-    etc: Option<&EtcSetup>,
-    view_root: Option<&Path>,
-    ssh: &SshPrep,
-    unix: &UnixPrep,
-    dbus: &DbusPrep,
-    facade_tun: Option<&Path>,
-    binder: Option<&BinderPrep>,
-    oci: &OciPrep,
-    mesh_mounts: &[(std::os::fd::OwnedFd, PathBuf)],
-    tracer: kennel_lib_config::Tracer,
+    spec: &mut Spec,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<i32, Error> {
+    // The inputs, by name. Only the plan is changed here (the facade binds and grants are
+    // added to it as each facade is prepared); everything else is read.
+    let Spec {
+        id,
+        cgroup,
+        ctx,
+        scope,
+        plan,
+        net,
+        proxy,
+        etc,
+        view_root,
+        ssh,
+        unix,
+        dbus,
+        facade_tun_bin,
+        binder,
+        oci,
+        mesh_mounts,
+        tracer,
+    } = spec;
+    let (id, cgroup, ctx, tracer) = (id.as_str(), cgroup.as_path(), *ctx, *tracer);
+    let (scope, net, ssh, unix, dbus, oci) = (&*scope, &*net, &*ssh, &*unix, &*dbus, &*oci);
+    let (proxy, etc, binder) = (proxy.as_ref(), etc.as_ref(), binder.as_ref());
+    let (view_root, facade_tun) = (view_root.as_deref(), facade_tun_bin.as_deref());
+    let mesh_mounts = mesh_mounts.as_slice();
+
     // 1. cgroup (unprivileged: within kenneld's delegated subtree).
     std::fs::create_dir_all(cgroup)?;
     state.made_cgroup = true;
@@ -1514,27 +1485,25 @@ fn acquire_binder_node0(
         .write(true)
         .open(&dev)
         .map_err(|e| io::Error::new(e.kind(), format!("open kennel binder device: {e}")))?;
-    crate::binder::spawn(
-        OwnedFd::from(file),
+    crate::binder::spawn(crate::binder::NodeZero {
+        device_fd: OwnedFd::from(file),
         ctx,
-        prep.unix.clone(),
+        unix: prep.unix.clone(),
         lifecycle,
         net,
         inbound,
-        prep.brokered_dbus,
-        std::sync::Arc::clone(&prep.writer),
-        prep.spawn.clone(),
-        prep.consumes.clone(),
-        prep.catalogue.clone(),
-        prep.activator.clone(),
-        prep.tun_sink.clone(),
-        prep.tun_provider,
+        dbus_mesh: prep.brokered_dbus,
+        writer: std::sync::Arc::clone(&prep.writer),
+        spawn: prep.spawn.clone(),
+        consumes: prep.consumes.clone(),
+        catalogue: prep.catalogue.clone(),
+        activator: prep.activator.clone(),
+        tun_sink: prep.tun_sink.clone(),
+        tun_provider: prep.tun_provider,
         tun_session,
-    )
+    })
 }
 
-/// The workload pid: the first child of the `Command`-spawned intermediate (which
-/// double-forks the PID-1 workload). `None` until the child exists.
 /// The in-view binder device the af-unix proxy transacts the facade over (the seal
 /// mounts the per-kennel binderfs here; §7.1).
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";

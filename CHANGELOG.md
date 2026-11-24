@@ -142,6 +142,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Two long positional call sites in the daemon take a struct.** `bring_up` took twenty
+  positional parameters unpacked from `Spec`, and `binder::spawn` fifteen, two of them
+  adjacent `bool`s a swap would not have broken. `bring_up` now takes the `Spec`, and
+  `binder::spawn` a `NodeZero` with named fields. No behaviour change.
 - **Dead privileged code removed, and comments that described an earlier design corrected.**
   No behaviour change.
   - Removed: `namespace::fork_hold` (ten `unsafe` blocks, no caller), `pty::relay_winch`, and

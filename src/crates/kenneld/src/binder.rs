@@ -126,31 +126,68 @@ impl Manager {
     }
 }
 
-/// Take node 0 of the binder instance behind `device_fd` and serve its registry on a
-/// per-kennel thread, gating against `policy` and auditing through `writer`.
+/// What node 0 of one kennel's binder instance serves with.
+///
+/// The device, and each subsystem's state for that kennel. Named fields, because several are
+/// the same type (two `bool`s among them) and a positional call could swap them unnoticed.
+pub struct NodeZero {
+    /// The kennel's binder device, opened by the daemon from the handle the factory returned.
+    pub device_fd: OwnedFd,
+    /// The kennel's context number.
+    pub ctx: u16,
+    /// The `[unix]` grants.
+    pub unix: UnixRuntime,
+    /// The supervision plan, exit reporting and prompts.
+    pub lifecycle: Lifecycle,
+    /// The egress decision state.
+    pub net: crate::inet::NetRuntime,
+    /// The inbound mirror state.
+    pub inbound: Arc<crate::inbound::InboundRuntime>,
+    /// Whether D-Bus is brokered through the mesh for this kennel.
+    pub dbus_mesh: bool,
+    /// The kennel's audit writer.
+    pub writer: Arc<Writer>,
+    /// The spawn runtime, when the policy allows spawning.
+    pub spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
+    /// The mesh services this kennel consumes.
+    pub consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
+    /// The mesh catalogue, when the kennel takes part in the mesh.
+    pub catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
+    /// Starts a provider kennel on demand.
+    pub activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
+    /// Where a tun broker's session sink is registered and looked up.
+    pub tun_sink: crate::tun_sink::TunSink,
+    /// Whether this kennel is the tun broker (it may register the sink).
+    pub tun_provider: bool,
+    /// The session payload for a kennel with UDP egress.
+    pub tun_session: Option<Vec<u8>>,
+}
+
+/// Take node 0 of the binder instance behind `serve.device_fd` and serve its registry on a
+/// per-kennel thread, gating against the policy state and auditing through `serve.writer`.
 ///
 /// # Errors
 ///
 /// Returns the OS error if becoming context manager (open/`mmap`/`SET_CONTEXT_MGR`/
 /// looper) fails, or the worker thread cannot be spawned.
-#[allow(clippy::too_many_arguments)] // the node-0 serve inputs; each is one subsystem's state
-pub fn spawn(
-    device_fd: OwnedFd,
-    ctx: u16,
-    unix: UnixRuntime,
-    lifecycle: Lifecycle,
-    net: crate::inet::NetRuntime,
-    inbound: Arc<crate::inbound::InboundRuntime>,
-    dbus_mesh: bool,
-    writer: Arc<Writer>,
-    spawn: Option<Arc<crate::spawn::SpawnRuntime>>,
-    consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
-    catalogue: Option<Arc<Mutex<crate::catalogue::Catalogue>>>,
-    activator: Option<Arc<dyn crate::supervisor::ProviderActivator>>,
-    tun_sink: crate::tun_sink::TunSink,
-    tun_provider: bool,
-    tun_session: Option<Vec<u8>>,
-) -> io::Result<Manager> {
+pub fn spawn(serve: NodeZero) -> io::Result<Manager> {
+    let NodeZero {
+        device_fd,
+        ctx,
+        unix,
+        lifecycle,
+        net,
+        inbound,
+        dbus_mesh,
+        writer,
+        spawn,
+        consumes,
+        catalogue,
+        activator,
+        tun_sink,
+        tun_provider,
+        tun_session,
+    } = serve;
     let cm = Arc::new(ContextManager::new(device_fd, MAP_SIZE)?);
     let stop = Arc::new(AtomicBool::new(false));
 
