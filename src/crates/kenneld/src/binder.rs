@@ -163,6 +163,35 @@ pub struct NodeZero {
     pub tun_session: Option<Vec<u8>>,
 }
 
+impl NodeZero {
+    /// A node 0 that grants nothing: no socket grants, egress denied, no inbound mirror, no
+    /// spawn, no mesh, no tun.
+    ///
+    /// The starting point for a caller that enables one subsystem — a test of a single verb,
+    /// say — with `NodeZero { unix, ..NodeZero::closed(fd, ctx, writer) }`. Every field it
+    /// fills in is the refusing value, so forgetting to set one leaves that subsystem shut.
+    #[must_use]
+    pub fn closed(device_fd: OwnedFd, ctx: u16, writer: Arc<Writer>) -> Self {
+        Self {
+            device_fd,
+            ctx,
+            unix: UnixRuntime::default(),
+            lifecycle: Lifecycle::default(),
+            net: crate::inet::NetRuntime::denied(),
+            inbound: Arc::new(crate::inbound::InboundRuntime::new()),
+            dbus_mesh: false,
+            writer,
+            spawn: None,
+            consumes: Vec::new(),
+            catalogue: None,
+            activator: None,
+            tun_sink: crate::tun_sink::TunSink::new(),
+            tun_provider: false,
+            tun_session: None,
+        }
+    }
+}
+
 /// Take node 0 of the binder instance behind `serve.device_fd` and serve its registry on a
 /// per-kennel thread, gating against the policy state and auditing through `serve.writer`.
 ///

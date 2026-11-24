@@ -21,7 +21,7 @@ use std::time::Duration;
 use kennel_lib_binder::binderfs;
 use kennel_lib_binder::client::{Connection, CONTEXT_MANAGER_HANDLE};
 use kennel_lib_binder::service::lifecycle;
-use kennel_lib_policy::{AuditRuntime, UnixRuntime};
+use kennel_lib_policy::AuditRuntime;
 use kenneld::binder;
 
 const ROLE_ENV: &str = "KENNEL_BINDER_ROLE";
@@ -78,21 +78,8 @@ fn run_manager() {
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
     let manager = binder::spawn(binder::NodeZero {
-        device_fd: fd,
-        ctx: 7,
-        unix: UnixRuntime::default(),
         lifecycle,
-        net: kenneld::inet::NetRuntime::denied(),
-        inbound: std::sync::Arc::new(kenneld::inbound::InboundRuntime::new()),
-        dbus_mesh: false,
-        writer,
-        spawn: None,
-        consumes: Vec::new(),
-        catalogue: None,
-        activator: None,
-        tun_sink: kenneld::tun_sink::TunSink::new(),
-        tun_provider: false,
-        tun_session: None,
+        ..binder::NodeZero::closed(fd, 7, writer)
     })
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
