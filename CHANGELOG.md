@@ -154,6 +154,9 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
     bounds-checked byte reader six wire decoders each had a copy of. It joins the TCB closure.
   - New unit tests: eleven for the `fd.rs` walkers and eight for the node-0 handlers, none
     needing root or a binder device.
+- **`host-inetd` and `host-netproxy` forbid `unsafe` at their own crate roots.** The library
+  already did; a binary is a separate crate root, so nothing stopped `unsafe` being added to
+  either `main`. Neither contained any.
 
 ### Threat catalogue
 
@@ -170,12 +173,6 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the loopback-device bind and the per-connection audit record, says any local user can
   connect (as to any loopback service), and separates the framework's mirror from a listener
   the operator binds by hand.
-
-### Internal / supply chain
-
-- **`host-inetd` and `host-netproxy` forbid `unsafe` at their own crate roots.** The library
-  already did; a binary is a separate crate root, so nothing stopped `unsafe` being added to
-  either `main`. Neither contained any.
 
 ### Docs & tooling
 
