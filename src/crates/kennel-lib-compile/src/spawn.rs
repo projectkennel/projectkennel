@@ -125,6 +125,17 @@ fn check_narrowing(
     let Some(narrow) = &entry.mutable else {
         return Ok(());
     };
+    // The settled form records the narrowing as a list in which empty means "not narrowed", so an
+    // explicit empty list would settle as the template's FULL manifest: the opposite of what it
+    // says. Refuse it rather than grant everything to an author who asked for nothing.
+    if narrow.is_empty() {
+        return Err(PolicyError::Spawn(format!(
+            "[[spawn.allow]] template = \"{reference}\": `mutable = []` cannot be expressed — an \
+             empty narrowing is recorded the same way as no narrowing, which would open the \
+             template's whole manifest. Omit `mutable` for the full manifest, or name the fields \
+             this requester may write"
+        )));
+    }
     let declared: BTreeSet<&str> = target.manifest.iter().map(|v| v.field.as_str()).collect();
     for field in narrow {
         if !declared.contains(field.as_str()) {
@@ -280,6 +291,14 @@ mod tests {
             grant.allow.first().expect("target").mutable_narrow,
             vec!["fs.write".to_owned()]
         );
+        // An explicit empty narrowing is refused: it would settle as the full manifest.
+        let err = resolve_grant(
+            &spawner("mutable = []\n"),
+            &OneSettled(settled_target(Some("fs.write"))),
+            &Trust::dev(),
+        )
+        .expect_err("empty narrowing");
+        assert!(format!("{err}").contains("cannot be expressed"), "{err}");
         // A narrowing naming an undeclared field is rejected.
         let err = resolve_grant(
             &spawner("mutable = [\"net.proxy.allow\"]\n"),

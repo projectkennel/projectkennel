@@ -13,6 +13,9 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   `fs.exclusive` or a persisted home path, or if `shim` is not rooted at `/`, `~/`, `$HOME/`
   or `$XDG_RUNTIME_DIR/`, has a `.`, `..` or `=`, or sits directly under `/`. The shipped
   templates are unaffected.
+- **`[[spawn.allow]]` `mutable = []` is refused.** Omit `mutable` for the template's full
+  manifest, or list the fields. A `[[spawn.allow.add]]` entry for an inherited template now
+  replaces the inherited entry instead of being ignored.
 - **`[[net.udp.allow]]` `name` must be a DNS name** (letters, digits, `-`, `_`; an optional
   leading `.`; a last label that is not all digits). An IP literal in that field is refused.
 
@@ -82,6 +85,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   daemon's stderr; the tripwire keeps watching and tries again on the next mutation. A mirror,
   tun-sink or mesh-service registration whose death notification cannot be requested is
   refused instead of being kept with no way to learn that its node died.
+- **A spawn grant's `mutable` narrowing can no longer be lost.** `mutable = []` settled as the
+  template's full manifest, because the settled form records "narrowed to nothing" and "not
+  narrowed" the same way; it is now a compile error. And a child policy's
+  `[[spawn.allow.add]]` entry for a template its parent already allows was discarded in
+  favour of the parent's, dropping the child's narrowing; the child's entry now replaces the
+  inherited one, with a warning.
 
 ### Threat catalogue
 
