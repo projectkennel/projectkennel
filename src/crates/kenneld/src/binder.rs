@@ -816,7 +816,20 @@ fn svc_connect_handoff(
     // the connection — and the consumer — to whatever host socket it points at, kenneld's own
     // control socket included. Pin the entry inside the directory, require it to be a socket,
     // and connect to that inode.
-    let (dir, leaf) = crate::mesh::host_rp_parts(sel.tier, name, sel.key.as_deref(), &sel.endpoint);
+    // The name came from the consumer and matched a catalogue entry; it is still checked here,
+    // because it is about to become part of a host path.
+    let Some((cap_name, cap_key)) = crate::mesh::capability(name, sel.key.as_deref()) else {
+        return emit_svc_connect(
+            writer,
+            incoming,
+            ctx,
+            name,
+            Outcome::Error,
+            status::UNAVAILABLE,
+        );
+    };
+    let (dir, leaf) =
+        crate::mesh::host_rp_parts(sel.tier, &cap_name, cap_key.as_ref(), &sel.endpoint);
     kennel_lib_syscall::fd::socket_in_dir(&dir, &leaf)
         .and_then(|sock| {
             kennel_lib_syscall::net::connect_unix_timeout(

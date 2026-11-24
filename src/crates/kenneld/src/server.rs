@@ -736,7 +736,13 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                 // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
                 // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
                 // owned by kenneld's own uid); the socket lets kenneld request movable clones.
-                let mount_dir = crate::mesh::host_rp_dir(tier, name, key);
+                let (cap_name, cap_key) = crate::mesh::capability(name, key).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "mesh capability name or key is not well formed",
+                    )
+                })?;
+                let mount_dir = crate::mesh::host_rp_dir(tier, &cap_name, cap_key.as_ref());
                 let holder = crate::mesh_holder::spawn(&mount_dir)?;
                 // Who may register a service on this bus: the supervised provider of that name at
                 // this bus's tier, decided from the daemon's registry (see `provides_at`).
@@ -1954,8 +1960,16 @@ pub fn run_kennel<P, L>(
                 if p.shape != kennel_lib_policy::settled::Shape::AfUnix {
                     continue;
                 }
-                let key = p.key.as_deref();
-                let host_dir = crate::mesh::host_rp_dir(tier, &p.name, key);
+                let Some((cap_name, cap_key)) = crate::mesh::capability(&p.name, p.key.as_deref())
+                else {
+                    eprintln!(
+                        "kenneld: provider `{kname}`: capability `{}` has a malformed name or key",
+                        p.name
+                    );
+                    continue;
+                };
+                let key = cap_key.as_ref();
+                let host_dir = crate::mesh::host_rp_dir(tier, &cap_name, key);
                 // kenneld owns the rendezvous directory; create it (0700) and clear any stale socket
                 // before construction binds it in and the provider binds afresh at its endpoint.
                 if let Err(e) = std::fs::create_dir_all(&host_dir) {
@@ -1972,7 +1986,7 @@ pub fn run_kennel<P, L>(
                 );
                 let _ = std::fs::remove_file(crate::mesh::host_rp_socket(
                     tier,
-                    &p.name,
+                    &cap_name,
                     key,
                     &p.endpoint,
                 ));
