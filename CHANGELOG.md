@@ -14,6 +14,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   or `$XDG_RUNTIME_DIR/`, has a `.`, `..` or `=`, or sits directly under `/`. The shipped
   templates are unaffected.
 
+### Audit schema changes
+
+- **New event `net.inbound-connect`** (resource `net`, source `kenneld`): one per connection
+  accepted on a mirrored `[net.bind]` port, with `port`, `ctx` and `state` (`delivered`,
+  `held`, or `dropped` with outcome `deny` when the port's holding queue is full).
+
 ### Security
 
 - **The OCI overlay mount refuses a layer path that would alter its options.** overlayfs takes
@@ -45,6 +51,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   Landlock rights over the shim's parent directory, and `shim = "/x.sock"` made that `/`. Both
   are refused when a policy is loaded, so a signed artefact that never passed the compiler is
   covered; the same shim rule applies to the `at` of an af-unix `[[consumes]]`.
+- **The inbound mirror listens only on the loopback interface.** A `[net.bind]` port is
+  mirrored on an address assigned to host `lo`. That does not confine it: Linux accepts a
+  packet for a local address on any interface, so a LAN peer that routed the address to the
+  host reached the kennel's service unless a host firewall stopped it. `host-inetd` now binds
+  the listener to the `lo` device before it binds the address (checked on the test VM: a peer
+  on another interface connects to an unbound listener and is refused by a bound one).
+- **The inbound delegate and the daemon's mirror state are bounded.** `host-inetd` caps
+  conduits for the whole process (it was per listener), waits after a failed `accept` instead
+  of spinning, and survives a refused thread. A repeated `REGISTER_MIRROR` no longer leaves a
+  binder reference in the daemon per call. Connections held before a facade registered are
+  delivered with the next arrival, in order, and a mirror reader that stops says why.
 
 ### Threat catalogue
 
@@ -52,6 +69,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   the three exists. The entry now states what does: a per-connect audit record (destination,
   port, process, outcome) and a cap on concurrent connections. A correction to the mitigation
   text; no threat is added or renumbered, and the catalogue version stays 0.6.
+- **T3.3 states who can reach a kennel's loopback address.** It said "the LAN cannot" without a
+  control behind it, and did not say that other local users can. The mitigation text now names
+  the loopback-device bind and the per-connection audit record, says any local user can
+  connect (as to any loopback service), and separates the framework's mirror from a listener
+  the operator binds by hand.
 
 ### Docs & tooling
 

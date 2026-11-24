@@ -158,6 +158,7 @@ pub fn spawn(
     // on the open that received it — so the inbound runtime borrows the context manager. Attached
     // before the pool serves, so a REGISTER_MIRROR can never race an unattached pusher.
     inbound.attach_pusher(Arc::clone(&cm));
+    inbound.attach_audit(Arc::clone(&writer), ctx);
 
     // The handler runs concurrently on every looper, so its shared state is held by Arc.
     let unix = Arc::new(unix);

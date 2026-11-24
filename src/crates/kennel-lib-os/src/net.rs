@@ -1,8 +1,8 @@
 //! Safe socket helpers (no `unsafe`; std + nix).
 
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::net::{SocketAddr, TcpListener};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,7 +11,8 @@ use nix::errno::Errno;
 use nix::fcntl::{open, OFlag};
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 use nix::sys::socket::{
-    connect, getsockopt, socket, sockopt, AddressFamily, SockFlag, SockType, UnixAddr,
+    bind, connect, getsockopt, listen, setsockopt, socket, sockopt, AddressFamily, Backlog,
+    SockFlag, SockType, SockaddrIn, SockaddrIn6, UnixAddr,
 };
 use nix::sys::stat::Mode;
 
@@ -86,13 +87,40 @@ impl PinnedSocket {
     }
 }
 
-/// Listen for TCP on `addr`, an address assigned to the loopback interface.
+/// The loopback interface's name. Linux creates it as `lo` in every network namespace.
+const LOOPBACK_DEVICE: &str = "lo";
+
+/// Listen for TCP on `addr`, taking connections only from the loopback interface.
+///
+/// An address assigned to `lo` is not confined to it: Linux accepts a packet for any local
+/// address on whichever interface it arrives, so a peer on the LAN that routes the address to
+/// this host reaches a socket that is only bound to the address. The socket is therefore also
+/// bound to the device (`SO_BINDTODEVICE`), before `bind(2)`, so there is no moment in which it
+/// listens unbound. A process may bind its own unbound socket to a device without privilege
+/// (Linux 5.7 and later); on a kernel that refuses, this fails and nothing listens.
 ///
 /// # Errors
 ///
-/// The OS error if the bind fails.
+/// The OS error if the socket cannot be created, bound to the device, bound to `addr`, or put
+/// into the listening state.
 pub fn loopback_listener(addr: SocketAddr) -> io::Result<TcpListener> {
-    TcpListener::bind(addr)
+    let family = match addr {
+        SocketAddr::V4(_) => AddressFamily::Inet,
+        SocketAddr::V6(_) => AddressFamily::Inet6,
+    };
+    let sock = socket(family, SockType::Stream, SockFlag::SOCK_CLOEXEC, None)?;
+    setsockopt(&sock, sockopt::ReuseAddr, &true)?;
+    setsockopt(
+        &sock,
+        sockopt::BindToDevice,
+        &std::ffi::OsString::from(LOOPBACK_DEVICE),
+    )?;
+    match addr {
+        SocketAddr::V4(v4) => bind(sock.as_raw_fd(), &SockaddrIn::from(v4))?,
+        SocketAddr::V6(v6) => bind(sock.as_raw_fd(), &SockaddrIn6::from(v6))?,
+    }
+    listen(&sock, Backlog::MAXCONN)?;
+    Ok(TcpListener::from(sock))
 }
 
 /// The interface `listener` is bound to (`SO_BINDTODEVICE`), or the empty string for none.

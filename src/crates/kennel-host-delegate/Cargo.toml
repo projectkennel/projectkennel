@@ -26,6 +26,8 @@ path = "src/bin/host-inetd.rs"
 # owner-only kenneld<->delegate AF_UNIX socket. A small focused crate, so each
 # delegate's TCB stays minimal (not the whole kennel-lib-syscall unsafe surface).
 kennel-lib-scm = { path = "../kennel-lib-scm" }
+# The loopback-only TCP listener for the inbound mirror (a `forbid(unsafe_code)` crate).
+kennel-lib-os = { path = "../kennel-lib-os" }
 
 [lints]
 workspace = true
