@@ -62,8 +62,8 @@ fn main() -> ExitCode {
         // The over-mount: the caller (this helper's real uid) must own the path.
         Some("mount") => match mount_exclusive(host, uid) {
             Ok(()) => ExitCode::from(0),
-            Err(reason) => {
-                eprintln!("kennel-privhelper-mounts: {reason}");
+            Err(e) => {
+                eprintln!("kennel-privhelper-mounts: {}", e.describe(host));
                 ExitCode::from(1)
             }
         },
@@ -75,6 +75,49 @@ fn main() -> ExitCode {
     }
 }
 
+/// Why an exclusive over-mount was not made.
+///
+/// The first group are refusals — the path is not something this caller may shadow. The second
+/// are system calls that failed on a path that passed.
+#[derive(Debug)]
+enum OverMountError {
+    /// The path is not a directory.
+    NotADirectory,
+    /// The directory is not owned by the caller (whose uid is given): shadowing it is overreach.
+    NotOwned(u32),
+    /// What the path led to changed between the mount and the check of the result.
+    Changed,
+    /// The path could not be opened without following a symlink.
+    Open(std::io::Error),
+    /// The pinned directory could not be examined.
+    Stat(std::io::Error),
+    /// The tmpfs mount failed.
+    Mount(std::io::Error),
+    /// The path could not be opened again after the mount.
+    Reopen(std::io::Error),
+}
+
+impl OverMountError {
+    /// The message for the journal, naming `host`.
+    fn describe(&self, host: &Path) -> String {
+        let host = host.display();
+        match self {
+            Self::NotADirectory => format!("{host} is not a directory"),
+            Self::NotOwned(uid) => format!(
+                "{host} is not owned by uid {uid} (an exclusive blind-mount over a path you do \
+                 not own would be overreach)"
+            ),
+            Self::Changed => {
+                format!("{host} changed while it was being over-mounted; the lock was not sealed")
+            }
+            Self::Open(e) => format!("cannot open {host}: {e}"),
+            Self::Stat(e) => format!("cannot stat {host}: {e}"),
+            Self::Mount(e) => format!("exclusive over-mount of {host} failed: {e}"),
+            Self::Reopen(e) => format!("cannot reopen {host}: {e}"),
+        }
+    }
+}
+
 /// Over-mount an opaque sentinel on `host` (an owned writable-bind path).
 ///
 /// Refuses a path `owner_uid` does not own (the authoritative overreach gate). A small,
@@ -82,37 +125,32 @@ fn main() -> ExitCode {
 /// already-built view.
 ///
 /// # Errors
-/// A human-readable reason if `host` is not a directory owned by `owner_uid`, or the over-mount
+/// The [`OverMountError`] if `host` is not a directory owned by `owner_uid`, or the over-mount
 /// fails.
-fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), String> {
+fn mount_exclusive(host: &Path, owner_uid: u32) -> Result<(), OverMountError> {
     use kennel_lib_syscall::fd;
     // Pin the directory first, then check and mount THAT inode. The path is the caller's, and
     // this helper holds CAP_SYS_ADMIN in the host mount namespace: checking a name and then
     // mounting on the name would let the caller swap what it leads to in between. No symlink is
     // followed in any component (the same rule a writable bind's source already obeys).
-    let dir =
-        fd::open_no_symlinks(host).map_err(|e| format!("cannot open {}: {e}", host.display()))?;
-    check_owned_dir(&dir, host, owner_uid)?;
+    let dir = fd::open_no_symlinks(host).map_err(OverMountError::Open)?;
+    check_owned_dir(&dir, owner_uid)?;
     let under = std::fs::metadata(fd::proc_path(&dir))
-        .map_err(|e| format!("cannot stat {}: {e}", host.display()))?
+        .map_err(OverMountError::Stat)?
         .dev();
     // mode 0755 so the operator can see the sentinel.
     mount::mount_tmpfs(&fd::proc_path(&dir), Some(1), Some("0755"), false, false)
-        .map_err(|e| format!("exclusive over-mount of {} failed: {e}", host.display()))?;
+        .map_err(OverMountError::Mount)?;
     // Resolve the path again to reach the mount just made, and make sure that is what we got: a
     // fresh, empty tmpfs of the caller's, on a different device from the directory it covers.
-    let top =
-        fd::open_no_symlinks(host).map_err(|e| format!("cannot reopen {}: {e}", host.display()))?;
+    let top = fd::open_no_symlinks(host).map_err(OverMountError::Reopen)?;
     let top_path = fd::proc_path(&top);
-    let fresh = check_owned_dir(&top, host, owner_uid).is_ok()
+    let fresh = check_owned_dir(&top, owner_uid).is_ok()
         && mount::is_tmpfs(&top_path).unwrap_or(false)
         && std::fs::metadata(&top_path).is_ok_and(|m| m.dev() != under)
         && std::fs::read_dir(&top_path).is_ok_and(|mut entries| entries.next().is_none());
     if !fresh {
-        return Err(format!(
-            "{} changed while it was being over-mounted; the lock was not sealed",
-            host.display()
-        ));
+        return Err(OverMountError::Changed);
     }
     // Drop the sentinel, then seal the over-mount read-only (best-effort — the shadow itself is
     // the control; the read-only remount is hardening).
@@ -147,7 +185,7 @@ fn unmount_exclusive(host: &Path, owner_uid: u32) -> ExitCode {
         return refuse("cannot open it without following a symlink");
     };
     let at = fd::proc_path(&dir);
-    if check_owned_dir(&dir, host, owner_uid).is_err() {
+    if check_owned_dir(&dir, owner_uid).is_err() {
         return refuse("not a directory you own");
     }
     if !mount::is_tmpfs(&at).unwrap_or(false) {
@@ -176,18 +214,14 @@ fn unmount_exclusive(host: &Path, owner_uid: u32) -> ExitCode {
 }
 
 /// The ownership predicate (parameterised by `uid` for testability): `Ok` iff the opened `dir`
-/// (reached as `host`, named only in messages) is a directory owned by `uid`. A non-owned path is
-/// the overreach case. It tests the pinned inode, never the name.
-fn check_owned_dir(dir: &std::os::fd::OwnedFd, host: &Path, uid: u32) -> Result<(), String> {
+/// is a directory owned by `uid`. A non-owned path is the overreach case. It tests the pinned
+/// inode, never a name.
+fn check_owned_dir(dir: &std::os::fd::OwnedFd, uid: u32) -> Result<(), OverMountError> {
     match kennel_lib_syscall::fd::owner_and_kind(dir) {
-        Ok((_, false)) => Err(format!("{} is not a directory", host.display())),
-        Ok((owner, true)) if owner != uid => Err(format!(
-            "{} is not owned by uid {uid} (an exclusive blind-mount over a path you do not own \
-             would be overreach)",
-            host.display()
-        )),
+        Ok((_, false)) => Err(OverMountError::NotADirectory),
+        Ok((owner, true)) if owner != uid => Err(OverMountError::NotOwned(uid)),
         Ok(_) => Ok(()),
-        Err(e) => Err(format!("cannot stat {}: {e}", host.display())),
+        Err(e) => Err(OverMountError::Stat(e)),
     }
 }
 
@@ -203,10 +237,10 @@ mod tests {
         let open = |p: &Path| kennel_lib_syscall::fd::open_no_symlinks(p);
         // A directory the caller owns is accepted; the same inode under a foreign uid is refused.
         let fd = open(&dir).expect("open dir");
-        assert!(check_owned_dir(&fd, &dir, me).is_ok(), "owned dir accepted");
+        assert!(check_owned_dir(&fd, me).is_ok(), "owned dir accepted");
         let other = me.wrapping_add(1);
         assert!(
-            check_owned_dir(&fd, &dir, other).is_err(),
+            matches!(check_owned_dir(&fd, other), Err(OverMountError::NotOwned(uid)) if uid == other),
             "a path not owned by the (pretend) caller is overreach"
         );
         // A regular file is not a valid exclusive target.
@@ -214,8 +248,16 @@ mod tests {
         std::fs::write(&file, b"x").expect("write");
         let ffd = open(&file).expect("open file");
         assert!(
-            check_owned_dir(&ffd, &file, me).is_err(),
+            matches!(
+                check_owned_dir(&ffd, me),
+                Err(OverMountError::NotADirectory)
+            ),
             "a file is not a directory"
+        );
+        // The journal text names the path and the rule.
+        assert_eq!(
+            OverMountError::NotADirectory.describe(&file),
+            format!("{} is not a directory", file.display())
         );
         // A missing path cannot even be pinned.
         assert!(open(&dir.join("nope")).is_err(), "absent path refused");

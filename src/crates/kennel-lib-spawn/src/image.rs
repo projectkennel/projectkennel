@@ -16,13 +16,13 @@
 //! the caller's own or a root-owned directory in a system location, and no directory in a layer
 //! stacked above it may cover an image directory the caller cannot read and search.
 
-use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use kennel_lib_syscall::fd::RootDir;
 
 use super::{fd_path, overlay_dir};
+use crate::view_error::{ImageRefusal, InPhase as _, Phase, ViewError};
 
 /// Where a root-owned image may live: a directory **beneath** one of these.
 ///
@@ -38,26 +38,19 @@ fn in_system_location(real: &Path) -> bool {
     })
 }
 
-fn refused(what: &Path, why: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!("image {}: {why}", what.display()),
-    )
-}
-
 /// Require that the CURRENT filesystem identity can list and search the directory `dir` names.
 ///
 /// The kernel answers, not the mode bits: the directory is opened for reading, and a name is
 /// looked up in it. `dir` is typically an `O_PATH` handle, which the kernel hands out for a
 /// directory the caller has no access to at all — holding one proves nothing.
-fn require_access(dir: &std::fs::File, what: &Path) -> io::Result<()> {
+fn require_access(dir: &std::fs::File, what: &Path) -> Result<(), ViewError> {
     let at = fd_path(dir);
     std::fs::read_dir(&at)
         .map(drop)
-        .map_err(|e| refused(what, &format!("the caller cannot read it ({e})")))?;
+        .map_err(|e| ViewError::image(what, ImageRefusal::CannotRead(e)))?;
     std::fs::symlink_metadata(at.join("."))
         .map(drop)
-        .map_err(|e| refused(what, &format!("the caller cannot search it ({e})")))
+        .map_err(|e| ViewError::image(what, ImageRefusal::CannotSearch(e)))
 }
 
 /// Open the image directory for the overlay's lower, as an `O_PATH` handle pinning its inode.
@@ -80,42 +73,37 @@ fn require_access(dir: &std::fs::File, what: &Path) -> io::Result<()> {
 /// # Errors
 ///
 /// `PermissionDenied` naming the rule the image breaks; the OS error if it cannot be opened.
-pub fn image_dir(path: &Path, caller: Option<u32>, persist: bool) -> io::Result<std::fs::File> {
-    let dir = overlay_dir(path, None)?;
+pub fn image_dir(
+    path: &Path,
+    caller: Option<u32>,
+    persist: bool,
+) -> Result<std::fs::File, ViewError> {
+    let dir = overlay_dir(path, None).phase(Phase::Image)?;
     let Some(caller) = caller else {
         return Ok(dir);
     };
     require_access(&dir, path)?;
-    let meta = dir.metadata()?;
+    let meta = dir.metadata().phase(Phase::Image)?;
     if meta.uid() == caller {
         return Ok(dir);
     }
-    if meta.uid() != 0 {
-        return Err(refused(
-            path,
-            &format!(
-                "owned by uid {}, neither the caller ({caller}) nor root",
-                meta.uid()
-            ),
-        ));
-    }
-    if persist {
-        return Err(refused(
-            path,
-            "a root-owned image cannot be combined with a persistent rootfs",
-        ));
-    }
-    if meta.mode() & 0o022 != 0 {
-        return Err(refused(path, "root-owned but writable by group or other"));
-    }
-    let real: PathBuf = std::fs::read_link(fd_path(&dir))?;
-    if !in_system_location(&real) {
-        return Err(refused(
-            path,
-            "a root-owned image must sit beneath /usr, /var, /etc, /lib, /lib64 or /opt",
-        ));
-    }
-    Ok(dir)
+    let refusal = if meta.uid() != 0 {
+        ImageRefusal::ForeignOwner {
+            owner: meta.uid(),
+            caller,
+        }
+    } else if persist {
+        ImageRefusal::RootOwnedWithPersistentUpper
+    } else if meta.mode() & 0o022 != 0 {
+        ImageRefusal::RootOwnedWritable
+    } else {
+        let real: PathBuf = std::fs::read_link(fd_path(&dir)).phase(Phase::Image)?;
+        if in_system_location(&real) {
+            return Ok(dir);
+        }
+        ImageRefusal::NotASystemLocation
+    };
+    Err(ViewError::image(path, refusal))
 }
 
 /// Refuse a `layer` stacked above `image` that would open up an image directory.
@@ -130,15 +118,15 @@ pub fn image_dir(path: &Path, caller: Option<u32>, persist: bool) -> io::Result<
 ///
 /// `PermissionDenied` naming the first image directory the caller has no access to; the OS error
 /// if either tree cannot be walked.
-pub fn guard_merges(image: &std::fs::File, layer: &Path) -> io::Result<()> {
-    let root = RootDir::open(&fd_path(image))?;
+pub fn guard_merges(image: &std::fs::File, layer: &Path) -> Result<(), ViewError> {
+    let root = RootDir::open(&fd_path(image)).phase(Phase::Image)?;
     guard_merges_under(&root, layer, Path::new("/"))
 }
 
-fn guard_merges_under(image: &RootDir, layer_dir: &Path, at: &Path) -> io::Result<()> {
-    for entry in std::fs::read_dir(layer_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+fn guard_merges_under(image: &RootDir, layer_dir: &Path, at: &Path) -> Result<(), ViewError> {
+    for entry in std::fs::read_dir(layer_dir).phase(Phase::Image)? {
+        let entry = entry.phase(Phase::Image)?;
+        if !entry.file_type().phase(Phase::Image)?.is_dir() {
             continue;
         }
         let at = at.join(entry.file_name());
@@ -146,11 +134,11 @@ fn guard_merges_under(image: &RootDir, layer_dir: &Path, at: &Path) -> io::Resul
         // follows no symlink: the final component is never followed, and no parent is one.
         let under = image
             .lookup(&at)
-            .map_err(|e| refused(&at, &format!("inside the image, cannot be examined ({e})")))?;
+            .map_err(|e| ViewError::image(&at, ImageRefusal::Unexaminable(e)))?;
         let Some(under) = under.map(std::fs::File::from) else {
             continue;
         };
-        if !under.metadata()?.is_dir() {
+        if !under.metadata().phase(Phase::Image)?.is_dir() {
             continue;
         }
         require_access(&under, &at)?;
@@ -263,7 +251,16 @@ mod tests {
         for mode in [0o000, 0o400, 0o100] {
             let img = s.dir(&format!("m{mode:o}"), mode);
             let err = image_dir(&img, Some(uid), false).expect_err("must refuse");
-            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "mode {mode:o}");
+            assert!(
+                matches!(
+                    err,
+                    ViewError::Image {
+                        refusal: ImageRefusal::CannotRead(_) | ImageRefusal::CannotSearch(_),
+                        ..
+                    }
+                ),
+                "mode {mode:o}: {err}"
+            );
         }
     }
 
@@ -341,7 +338,16 @@ mod tests {
         let top = s.dir("top", 0o755);
         s.dir("top/closed", 0o755);
         let err = guard_merges(&image, &top).expect_err("covers a closed directory");
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            matches!(
+                err,
+                ViewError::Image {
+                    refusal: ImageRefusal::CannotRead(_) | ImageRefusal::CannotSearch(_),
+                    ..
+                }
+            ),
+            "{err}"
+        );
 
         let nested = s.dir("nested", 0o755);
         s.dir("nested/gate/inner", 0o755);

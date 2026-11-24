@@ -284,13 +284,78 @@ pub fn daemon_audit() -> &'static Writer {
     WRITER.get_or_init(|| daemon_writer("kenneld"))
 }
 
+/// The step of a kennel start that refused it, as recorded in `lifecycle.kennel-start-refused`.
+///
+/// The `stage` field of that record takes exactly these values ([`StartStage::as_str`]), so a
+/// reader of the audit log can match on them and a new refusal point cannot invent a spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartStage {
+    /// The name is not a kennel name, or is reserved to the daemon.
+    Name,
+    /// No context could be reserved (the name is running, or the pool is exhausted).
+    Reserve,
+    /// A spawned kennel's instance policy was refused.
+    SpawnInstance,
+    /// The policy did not load or verify.
+    LoadPolicy,
+    /// The host cannot enforce the policy's Landlock requirements.
+    Landlock,
+    /// The workload to run was refused.
+    Workload,
+    /// The working directory was refused.
+    FsCwd,
+    /// The workload's digest pin did not match.
+    WorkloadSha256,
+    /// An OCI image's launcher or its `config.json` could not be set up.
+    OciLauncher,
+    /// An OCI image's persistent rootfs could not be set up.
+    OciPersist,
+    /// The command could not be prepared.
+    PrepareCommand,
+    /// The socket pair for an interactive kennel's terminal could not be made.
+    PtyMasterSocketpair,
+    /// The SSH egress edges could not be registered.
+    RegisterSshEgress,
+    /// The kennel could not be built or its workload started.
+    SpawnWorkload,
+}
+
+impl StartStage {
+    /// The value written to the audit record's `stage` field.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Reserve => "reserve",
+            Self::SpawnInstance => "spawn instance",
+            Self::LoadPolicy => "load policy",
+            Self::Landlock => "landlock",
+            Self::Workload => "workload",
+            Self::FsCwd => "fs.cwd",
+            Self::WorkloadSha256 => "workload sha256",
+            Self::OciLauncher => "oci launcher",
+            Self::OciPersist => "oci persist",
+            Self::PrepareCommand => "prepare command",
+            Self::PtyMasterSocketpair => "pty master socketpair",
+            Self::RegisterSshEgress => "register ssh egress",
+            Self::SpawnWorkload => "spawn workload",
+        }
+    }
+}
+
+impl std::fmt::Display for StartStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// `lifecycle.kennel-start-refused`: a start did not produce a running kennel.
 ///
 /// `stage` is where the bring-up stopped (`name`, `reserve`, `load`, `verify`, …) and `reason`
 /// is what the operator was told. A refusal on a signature, a digest pin or a Landlock floor is
 /// a security decision and is recorded as a `deny`.
 #[must_use]
-pub fn start_refused(kennel: &str, stage: &str, reason: &str) -> Event {
+pub fn start_refused(kennel: &str, stage: StartStage, reason: &str) -> Event {
     Event::new(
         "lifecycle.kennel-start-refused",
         Resource::Lifecycle,
@@ -298,7 +363,7 @@ pub fn start_refused(kennel: &str, stage: &str, reason: &str) -> Event {
         Source::Kenneld,
     )
     .field("target", Value::untrusted(kennel))
-    .field("stage", Value::untrusted(stage))
+    .field("stage", Value::str(stage.as_str()))
     .field("reason", Value::untrusted(reason))
 }
 
