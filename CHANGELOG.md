@@ -6,6 +6,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Threat catalogue
+
+- **T1.8 no longer claims byte-counting, rate-limiting or volume audit at the proxy.** None of
+  the three exists. The entry now states what does: a per-connect audit record (destination,
+  port, process, outcome) and a cap on concurrent connections. A correction to the mitigation
+  text; no threat is added or renumbered, and the catalogue version stays 0.6.
+
 ### Docs & tooling
 
 - **`stage-tree.sh` no longer stages `dist/repo` into the release payload.** It copied all of
