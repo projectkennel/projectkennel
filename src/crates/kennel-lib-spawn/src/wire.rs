@@ -1429,6 +1429,39 @@ mod tests {
         assert_eq!(back, s);
     }
 
+    /// Every single-byte change to a valid blob, for each of the three decoders a privileged
+    /// process runs. The outcome may be an error or another value; it may not be a panic, and a
+    /// count turned huge may not become an allocation.
+    #[test]
+    fn a_mutated_blob_is_an_error_or_a_value_never_a_panic() {
+        fn each_mutation(seed: &[u8], f: impl Fn(&[u8])) {
+            let mut m = seed.to_vec();
+            for i in 0..seed.len() {
+                for pat in [0x01u8, 0x08, 0x40, 0x7f, 0x80, 0xff] {
+                    if let (Some(slot), Some(orig)) = (m.get_mut(i), seed.get(i)) {
+                        *slot = orig ^ pat;
+                    }
+                    f(&m);
+                }
+                if let (Some(slot), Some(orig)) = (m.get_mut(i), seed.get(i)) {
+                    *slot = *orig;
+                }
+            }
+            for cut in 0..seed.len() {
+                f(seed.get(..cut).unwrap_or_default());
+            }
+        }
+        each_mutation(&encode_plan(&rich_plan()), |d| {
+            let _ = decode_plan(d);
+        });
+        each_mutation(&encode_supervision(&rich_supervision()), |d| {
+            let _ = decode_supervision(d);
+        });
+        each_mutation(&encode_construction(&rich_construction()), |d| {
+            let _ = decode_construction(d);
+        });
+    }
+
     #[test]
     fn truncated_supervision_is_an_error_not_a_panic() {
         let full = encode_supervision(&rich_supervision());

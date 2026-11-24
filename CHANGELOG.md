@@ -173,6 +173,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Docs & tooling
 
+- **The fuzz job starts from valid inputs as well as random bytes.** Random bytes rarely get
+  past a decoder's first length check. For the binder service requests, the D-Bus conduit
+  frame, the control protocol, the helper's messages, the mesh rendezvous datagram, the SSHSIG
+  armor, the public-key line and the three plan-wire decoders, a valid input is now built and
+  every truncation and single-byte change of it is decoded. A signed policy with any one byte
+  changed must fail verification or verify as the policy that was signed. No defect was found.
 - **`stage-tree.sh` no longer stages `dist/repo` into the release payload.** It copied all of
   `dist/` except `release/`, so on a host that had published an earlier release the signed
   APT/DNF tree went into both tarballs (18 MB instead of 3 MB at the 0.8.1 cut, caught before
