@@ -142,6 +142,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The three node-0 handlers without a test have one.** `register_mirror`,
+  `register_tun_sink` and `tun_connect` each mixed a decision with calls on the binder
+  connection, which `cargo test` cannot open. The decisions are now functions of their own
+  (`mirror_request`, `tun_sink_request`, `settle_delivery`), and `tun_connect` takes the sink
+  and the session it reads. Tests cover the port gate, the provider gate, a request with no
+  node object, a node the driver did not report, the no-session denial, and how a delivery
+  settles. The parts that acquire a handle and request a death notification still need a
+  binder device and are covered by the end-to-end suite only.
 - **Two daemon locks are no longer held across blocking work.**
   - *The mesh-bus table.* One lock covered the whole table while a bus was created (a fork
     and a mount), while its mount was cloned (a socket round trip to the holder), and while

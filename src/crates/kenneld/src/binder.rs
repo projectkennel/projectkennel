@@ -344,7 +344,15 @@ fn handle(
             // kenneld resolves this consumer's grants and has the broker mint a per-session mediator
             // (§8 / W2), so it is special-cased ahead of the generic mesh / host-socket dispatch.
             if name == kennel_lib_binder::service::tun_broker::CAPABILITY {
-                return tun_connect(tun, catalogue, activator, incoming, ctx, writer);
+                return tun_connect(
+                    tun.sink,
+                    tun.session,
+                    catalogue,
+                    activator,
+                    incoming,
+                    ctx,
+                    writer,
+                );
             }
             if consumes.iter().any(|c| c.name == name) {
                 return svc_connect(
@@ -1031,43 +1039,12 @@ fn register_mirror(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    use kennel_lib_binder::service::inet::decode_port_prefix;
-
-    let Some((_transport, port)) = decode_port_prefix(&incoming.data) else {
-        writer.emit(&inet_event(
-            incoming,
-            ctx,
-            "mirror-register",
-            0,
-            Outcome::Error,
-        ));
-        return Reply::Data(one(status::BAD_REQUEST));
-    };
-    // Guard 3: registration is port-gated, not caller-gated (the facade and the workload share the
-    // persona uid, so kenneld cannot tell them apart by sender_euid). Only a policy-mirrored port
-    // is accepted; a workload registering its own mirrored port merely gets its own conduits.
-    if !inbound.is_allowed(port) {
-        writer.emit(&inet_event(
-            incoming,
-            ctx,
-            "mirror-register",
-            port,
-            Outcome::Deny,
-        ));
-        return Reply::Data(one(status::DENIED));
-    }
-    // The node object the facade sent is the trailing flat_binder_object; the driver translated it
-    // to a handle for us.
-    let handle = incoming.trailing_handle();
-    let Some(handle) = handle else {
-        writer.emit(&inet_event(
-            incoming,
-            ctx,
-            "mirror-register",
-            port,
-            Outcome::Error,
-        ));
-        return Reply::Data(one(status::BAD_REQUEST));
+    let (port, handle) = match mirror_request(inbound, incoming) {
+        Ok(request) => request,
+        Err((port, outcome, code)) => {
+            writer.emit(&inet_event(incoming, ctx, "mirror-register", port, outcome));
+            return Reply::Data(one(code));
+        }
     };
     // Keep the handle past this transaction's buffer free, and learn when its node dies. Both ride
     // `conn` here, before the reply (and its BC_FREE_BUFFER) drops the transaction's temporary ref.
@@ -1125,30 +1102,12 @@ fn register_tun_sink(
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    // The sink is daemon-global: whoever registers it receives every `[net.udp]` kennel's egress
-    // session. Every kennel can send this verb to its own node 0, so the verb arriving proves
-    // nothing — only a kennel whose signed policy provides the tun capability may register.
-    if !tun.provider {
-        writer.emit(&tun_event(
-            incoming,
-            ctx,
-            "tun-sink-register",
-            Outcome::Deny,
-        ));
-        return Reply::Data(one(status::DENIED));
-    }
-
-    // The node object the broker sent is the trailing flat_binder_object (the driver translated it to
-    // a handle for us); REGISTER_TUN_SINK carries no data before it.
-    let handle = incoming.trailing_handle();
-    let Some(handle) = handle else {
-        writer.emit(&tun_event(
-            incoming,
-            ctx,
-            "tun-sink-register",
-            Outcome::Error,
-        ));
-        return Reply::Data(one(status::BAD_REQUEST));
+    let handle = match tun_sink_request(tun.provider, incoming) {
+        Ok(handle) => handle,
+        Err((outcome, code)) => {
+            writer.emit(&tun_event(incoming, ctx, "tun-sink-register", outcome));
+            return Reply::Data(one(code));
+        }
     };
     // Keep the handle past this transaction's buffer free, and learn when the broker dies — both ride
     // `conn` here, before the reply (and its BC_FREE_BUFFER) drops the transaction's temporary ref.
@@ -1234,29 +1193,26 @@ fn activate_for_capability(
 /// synchronous cross-connection transact to the broker's connection; safe because the broker is a
 /// different process, so this thread's outgoing transaction only draws its own reply back.
 fn tun_connect(
-    tun: &TunCtx<'_>,
+    sink: &crate::tun_sink::TunSink,
+    session: Option<&[u8]>,
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
     ctx: u16,
     writer: &Writer,
 ) -> Reply {
-    let Some(payload) = tun.session else {
+    let Some(payload) = session else {
         writer.emit(&tun_event(incoming, ctx, "tun-connect", Outcome::Deny));
         return Reply::Data(one(status::DENIED));
     };
     // What a settled delivery replies, audited. `None` means no broker answered: worth waiting.
     let settle = |delivery: Delivery| -> Option<Reply> {
-        let (outcome, reply) = match delivery {
-            Delivery::Session(fd) => (Outcome::Allow, Reply::Fd(fd)),
-            Delivery::Refused => (Outcome::Deny, Reply::Data(one(status::UNAVAILABLE))),
-            Delivery::NoBroker => return None,
-        };
+        let (outcome, reply) = settle_delivery(delivery)?;
         writer.emit(&tun_event(incoming, ctx, "tun-connect", outcome));
         Some(reply)
     };
     // Fast path: a warm sink (the standing/already-activated broker) delivers now.
-    if let Some(reply) = settle(tun_deliver(tun, payload)) {
+    if let Some(reply) = settle(tun_deliver(sink, payload)) {
         return reply;
     }
     // Cold: socket-activate the tun-broker generically, then consume-with-wait until its sink is
@@ -1269,7 +1225,7 @@ fn tun_connect(
     let start = std::time::Instant::now();
     loop {
         std::thread::sleep(CONSUME_WAIT_POLL);
-        if let Some(reply) = settle(tun_deliver(tun, payload)) {
+        if let Some(reply) = settle(tun_deliver(sink, payload)) {
             return reply;
         }
         if start.elapsed() >= CONSUME_WAIT_DEADLINE {
@@ -1291,12 +1247,72 @@ enum Delivery {
 }
 
 /// Deliver the session `payload` to the tun sink once, and say which of the three outcomes it was.
-fn tun_deliver(tun: &TunCtx<'_>, payload: &[u8]) -> Delivery {
-    match tun.sink.deliver(payload) {
+fn tun_deliver(sink: &crate::tun_sink::TunSink, payload: &[u8]) -> Delivery {
+    match sink.deliver(payload) {
         Ok(fd) => Delivery::Session(fd),
         // A reply that carries no descriptor is the broker's answer, not its absence.
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Delivery::Refused,
         Err(_) => Delivery::NoBroker,
+    }
+}
+
+/// What a `REGISTER_MIRROR` request asks for, checked against the policy: the port and the
+/// handle of the facade's callback node. This is the part of the handler that decides; it does
+/// not touch the binder connection.
+///
+/// # Errors
+/// `(port, outcome, status)` for the audit record and the reply: `BAD_REQUEST` for a payload
+/// with no port prefix or no trailing node object, `DENIED` for a port the policy does not mirror.
+fn mirror_request(
+    inbound: &crate::inbound::InboundRuntime,
+    incoming: &Incoming,
+) -> Result<(u16, u32), (u16, Outcome, u8)> {
+    use kennel_lib_binder::service::inet::decode_port_prefix;
+
+    let Some((_transport, port)) = decode_port_prefix(&incoming.data) else {
+        return Err((0, Outcome::Error, status::BAD_REQUEST));
+    };
+    // Guard 3: registration is port-gated, not caller-gated (the facade and the workload share the
+    // persona uid, so kenneld cannot tell them apart by sender_euid). Only a policy-mirrored port
+    // is accepted; a workload registering its own mirrored port merely gets its own conduits.
+    if !inbound.is_allowed(port) {
+        return Err((port, Outcome::Deny, status::DENIED));
+    }
+    // The node object the facade sent is the trailing flat_binder_object; the driver translated it
+    // to a handle for us.
+    let Some(handle) = incoming.trailing_handle() else {
+        return Err((port, Outcome::Error, status::BAD_REQUEST));
+    };
+    Ok((port, handle))
+}
+
+/// The handle a `REGISTER_TUN_SINK` request registers, if this kennel may register one.
+///
+/// The sink is daemon-global: whoever registers it receives every `[net.udp]` kennel's egress
+/// session. Every kennel can send this verb to its own node 0, so the verb arriving proves
+/// nothing. Only a kennel whose signed policy provides the tun capability (`provider`) may
+/// register. The node object is the trailing `flat_binder_object`; the verb carries no data
+/// before it.
+///
+/// # Errors
+/// `(outcome, status)`: `DENIED` for a kennel that is not a provider, `BAD_REQUEST` for a request
+/// with no trailing node object.
+fn tun_sink_request(provider: bool, incoming: &Incoming) -> Result<u32, (Outcome, u8)> {
+    if !provider {
+        return Err((Outcome::Deny, status::DENIED));
+    }
+    incoming
+        .trailing_handle()
+        .ok_or((Outcome::Error, status::BAD_REQUEST))
+}
+
+/// What a delivery attempt settles to: the audit outcome and the reply, or `None` when no broker
+/// answered and the caller should wait for one.
+fn settle_delivery(delivery: Delivery) -> Option<(Outcome, Reply)> {
+    match delivery {
+        Delivery::Session(fd) => Some((Outcome::Allow, Reply::Fd(fd))),
+        Delivery::Refused => Some((Outcome::Deny, Reply::Data(one(status::UNAVAILABLE)))),
+        Delivery::NoBroker => None,
     }
 }
 
@@ -1414,6 +1430,112 @@ mod tests {
                 env: None,
             }],
         }
+    }
+
+    /// A request whose data ends in a node object the driver translated to `handle`.
+    fn request_with_node(code: u32, prefix: &[u8], handle: u32) -> Incoming {
+        let mut incoming = request(code, prefix, 9, 1000);
+        incoming.objects = vec![prefix.len()];
+        incoming
+            .data
+            .extend_from_slice(&kennel_lib_binder::proto::flat_binder_object_handle(handle));
+        incoming
+    }
+
+    #[test]
+    fn mirror_registration_is_gated_on_the_policy_mirror_set() {
+        use kennel_lib_binder::service::inet::encode_bind_request;
+        let inbound = crate::inbound::InboundRuntime::new();
+        inbound.allow_ports([8080]);
+        let mirrored = encode_bind_request(0, 8080);
+
+        // A mirrored port with the facade's node: the port and the translated handle.
+        let ok = request_with_node(verb::REGISTER_MIRROR, &mirrored, 41);
+        assert_eq!(mirror_request(&inbound, &ok), Ok((8080, 41)));
+
+        // A port the policy does not mirror is denied, node or no node.
+        let other = request_with_node(verb::REGISTER_MIRROR, &encode_bind_request(0, 22), 41);
+        assert_eq!(
+            mirror_request(&inbound, &other),
+            Err((22, Outcome::Deny, status::DENIED))
+        );
+
+        // A mirrored port with no node object cannot be registered.
+        let bare = request(verb::REGISTER_MIRROR, &mirrored, 9, 1000);
+        assert_eq!(
+            mirror_request(&inbound, &bare),
+            Err((8080, Outcome::Error, status::BAD_REQUEST))
+        );
+        // Nor can an object-sized tail the driver did not mark as an object: a handle is only
+        // taken from an offset the driver reported.
+        let mut forged = request_with_node(verb::REGISTER_MIRROR, &mirrored, 41);
+        forged.objects.clear();
+        assert_eq!(
+            mirror_request(&inbound, &forged),
+            Err((8080, Outcome::Error, status::BAD_REQUEST))
+        );
+
+        // A payload too short to carry a port is a bad request, audited against port 0.
+        let short = request(verb::REGISTER_MIRROR, &[0], 9, 1000);
+        assert_eq!(
+            mirror_request(&inbound, &short),
+            Err((0, Outcome::Error, status::BAD_REQUEST))
+        );
+    }
+
+    #[test]
+    fn only_a_tun_provider_may_register_the_sink() {
+        let with_node = request_with_node(verb::REGISTER_TUN_SINK, &[], 7);
+        // The verb arriving proves nothing: a kennel that does not provide the capability is
+        // denied even with a well-formed node.
+        assert_eq!(
+            tun_sink_request(false, &with_node),
+            Err((Outcome::Deny, status::DENIED))
+        );
+        // A provider registers the handle the driver translated.
+        assert_eq!(tun_sink_request(true, &with_node), Ok(7));
+        // A provider's request with no node object is a bad request.
+        let bare = request(verb::REGISTER_TUN_SINK, &[], 9, 1000);
+        assert_eq!(
+            tun_sink_request(true, &bare),
+            Err((Outcome::Error, status::BAD_REQUEST))
+        );
+    }
+
+    #[test]
+    fn tun_connect_is_denied_to_a_kennel_with_no_udp_session() {
+        // No session payload means the policy grants no `[net.udp]` tun: the connect is denied
+        // before any broker is looked for or started.
+        let (writer, seen) = recording_writer();
+        let sink = crate::tun_sink::TunSink::new();
+        let reply = tun_connect(
+            &sink,
+            None,
+            None,
+            None,
+            &request(verb::SVC_CONNECT, b"x", 9, 1000),
+            3,
+            &writer,
+        );
+        assert_eq!(status_of(&reply), Some(status::DENIED));
+        assert_eq!(seen.all(), [("binder.tun", Outcome::Deny)]);
+    }
+
+    #[test]
+    fn a_tun_delivery_settles_to_the_right_outcome() {
+        // With no broker registered, a delivery finds none, and the caller is told to wait.
+        let sink = crate::tun_sink::TunSink::new();
+        assert!(matches!(tun_deliver(&sink, b"session"), Delivery::NoBroker));
+        assert!(settle_delivery(Delivery::NoBroker).is_none());
+        // A broker that refuses the session is a denial, reported as unavailable.
+        let (outcome, reply) = settle_delivery(Delivery::Refused).expect("settled");
+        assert_eq!(outcome, Outcome::Deny);
+        assert_eq!(status_of(&reply), Some(status::UNAVAILABLE));
+        // A session is an allow that carries the descriptor.
+        let fd = OwnedFd::from(std::fs::File::open("/dev/null").expect("open /dev/null"));
+        let (outcome, reply) = settle_delivery(Delivery::Session(fd)).expect("settled");
+        assert_eq!(outcome, Outcome::Allow);
+        assert!(matches!(reply, Reply::Fd(_)));
     }
 
     #[test]
