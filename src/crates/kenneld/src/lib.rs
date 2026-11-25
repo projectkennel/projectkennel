@@ -712,17 +712,38 @@ fn is_image_owned_system_path(target: &Path) -> bool {
 }
 
 /// The bring-up steps, recording provisioning into `state` as it goes.
-// allow: one ordered bring-up sequence (cgroup, addresses, egress, proxy, /etc, ssh,
-// unix, view, spawn) whose steps share `state` for the reverse-order unwind.
-#[allow(clippy::too_many_lines)]
+// Two halves, each an ordered sequence of the stage functions below: everything that shapes
+// the plan before the kennel exists, then the factory call and what follows it. Both record
+// into `state` for the reverse-order unwind.
 fn bring_up<P: Privileged + Sync>(
     privileged: &P,
     spec: &mut Spec,
     command: &mut Command,
     state: &mut Provision,
 ) -> Result<i32, Error> {
-    // The inputs, by name. Only the plan is changed here (the facade binds and grants are
-    // added to it as each facade is prepared); everything else is read.
+    let prepared = prepare_plan(spec, command, state)?;
+    construct_and_start(privileged, spec, command, state, prepared)
+}
+
+/// What [`prepare_plan`] hands to [`construct_and_start`].
+struct Prepared {
+    proxied: bool,
+    mirror_ports: Vec<u16>,
+    loopback: Vec<kennel_lib_spawn::LoopbackAddr>,
+    egress_bytes: Vec<u8>,
+    command_socket: Option<PathBuf>,
+    net_runtime: crate::inet::NetRuntime,
+    inbound_runtime: std::sync::Arc<crate::inbound::InboundRuntime>,
+    tun_session: Option<Vec<u8>>,
+}
+
+/// The first half of bring-up: the cgroup, the addresses, and everything added to the plan
+/// before the kennel is constructed. Only the plan is changed; the rest of `spec` is read.
+fn prepare_plan(
+    spec: &mut Spec,
+    command: &mut Command,
+    state: &mut Provision,
+) -> Result<Prepared, Error> {
     let Spec {
         id,
         cgroup,
@@ -739,14 +760,12 @@ fn bring_up<P: Privileged + Sync>(
         facade_tun_bin,
         binder,
         oci,
-        mesh_mounts,
-        tracer,
+        ..
     } = spec;
-    let (id, cgroup, ctx, tracer) = (id.as_str(), cgroup.as_path(), *ctx, *tracer);
+    let (id, cgroup, ctx) = (id.as_str(), cgroup.as_path(), *ctx);
     let (scope, net, ssh, unix, dbus, oci) = (&*scope, &*net, &*ssh, &*unix, &*dbus, &*oci);
     let (proxy, etc, binder) = (proxy.as_ref(), etc.as_ref(), binder.as_ref());
     let (view_root, facade_tun) = (view_root.as_deref(), facade_tun_bin.as_deref());
-    let mesh_mounts = mesh_mounts.as_slice();
 
     // 1. cgroup (unprivileged: within kenneld's delegated subtree).
     std::fs::create_dir_all(cgroup)?;
@@ -827,57 +846,11 @@ fn bring_up<P: Privileged + Sync>(
         });
     }
 
-    // 3. egress BPF. The factory attaches it (folded into the one construct op); here we just
-    //    build and encode the payload to ride the construction datagram. The helper pins this
-    //    kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
-    //    drain the audit ringbuf and the owner can inspect the maps (§02-7). Only `host` mode ships
-    //    a payload — every other mode (`none`/`constrained`/`unconstrained`) ships an EMPTY one, so
-    //    the factory loads + attaches no programs (the net-ns is the boundary, see `bpf_egress`).
-    let egress_bytes = if bpf_egress {
-        EgressPayload {
-            meta: plan.bpf_meta,
-            allow_v4: plan.bpf_allow_v4.clone(),
-            deny_v4: plan.bpf_deny_v4.clone(),
-            allow_v6: plan.bpf_allow_v6.clone(),
-            deny_v6: plan.bpf_deny_v6.clone(),
-            bind_allow_v4: plan.bpf_bind_allow_v4.clone(),
-            bind_deny_v4: plan.bpf_bind_deny_v4.clone(),
-            bind_allow_v6: plan.bpf_bind_allow_v6.clone(),
-            bind_deny_v6: plan.bpf_bind_deny_v6.clone(),
-            bind_allowed_ports: plan.bind_allowed_ports.clone(),
-            pin_id: id.to_owned(),
-        }
-        .encode()
-    } else {
-        Vec::new()
-    };
+    // 3. The egress BPF payload for the factory to attach (empty unless `host` mode).
+    let egress_bytes = egress_payload(plan, id, bpf_egress);
 
-    // 3b. The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
-    //     The delegate launch is deferred to *after* construct (below); here we only fix the socket
-    //     path and build the in-process decision runtime from the signed policy. ONLY the proxied
-    //     modes (constrained/unconstrained) run a SOCKS delegate + inject HTTPS_PROXY; `open`
-    //     (host netns, direct egress, BPF/Landlock-gated) and `none` (no network) run none, so
-    //     every INet request is refused for them (the workload egresses directly or not at all).
-    let (command_socket, net_runtime): (Option<PathBuf>, crate::inet::NetRuntime) =
-        if let (true, Some(setup)) = (proxied, proxy) {
-            std::fs::create_dir_all(&setup.config_dir)?;
-            // The owner-only kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
-            // it; kenneld connects per INet CONNECT to drive the dial.
-            let command_socket = setup.config_dir.join(format!("netproxy-cmd-{ctx}.sock"));
-            let host_services = ssh
-                .host_service
-                .iter()
-                .copied()
-                .collect::<Vec<std::net::SocketAddr>>();
-            let net_runtime = crate::inet::NetRuntime::from_policy(
-                net,
-                host_services,
-                Some(command_socket.clone()),
-            );
-            (Some(command_socket), net_runtime)
-        } else {
-            (None, crate::inet::NetRuntime::denied())
-        };
+    // 3b. The dial delegate's command socket and the decision runtime.
+    let (command_socket, net_runtime) = net_runtime_for(net, ssh, proxy, proxied, ctx)?;
 
     // 3b-inbound. The per-kennel inbound BIND mirror (§7.5.7): the runtime kenneld pushes
     //     DELIVER_INET through, plus the set of policy-mirrored ports to bind host-side. The
@@ -901,9 +874,426 @@ fn bring_up<P: Privileged + Sync>(
                 .any(|c| c.name == kennel_lib_binder::service::tun_broker::CAPABILITY)
         });
 
-    // 3c. render the synthetic /etc (the libc/NSS files) and hand the spawn the
-    //     binds that shadow them over the kennel's view. Built here because it
-    //     needs the kennel's just-computed primary addresses.
+    // 3c. The synthetic `/etc`, the home dotfiles and the synthetic `~/.ssh`, as file binds.
+    wire_file_binds(plan, etc, ssh, state, scope, ctx, tun_active)?;
+
+    // 3c. The in-kennel facades: SOCKS5 egress, inbound client, AF_UNIX, D-Bus and the UDP tun.
+    let tun_session = wire_facades(
+        plan,
+        command,
+        &FacadeWiring {
+            proxy,
+            unix,
+            dbus,
+            facade_tun,
+            net,
+            scope,
+            ctx,
+            port,
+            mirror_ports: &mirror_ports,
+            pivoting: view_root.is_some() && plan.view.is_some(),
+            has_egress: command_socket.is_some(),
+            tun_active,
+        },
+    )?;
+
+    // 3d. The constructed-view wiring: framework binds, HOME, and the staging root.
+    wire_view(plan, view_root, ssh, oci, command, state)?;
+
+    Ok(Prepared {
+        proxied,
+        mirror_ports,
+        loopback,
+        egress_bytes,
+        command_socket,
+        net_runtime,
+        inbound_runtime,
+        tun_session,
+    })
+}
+
+/// The second half of bring-up: construct the kennel through the factory, then start what
+/// serves it (the delegates, binder node 0) and release `kennel-bin-init`.
+fn construct_and_start<P: Privileged + Sync>(
+    privileged: &P,
+    spec: &mut Spec,
+    command: &Command,
+    state: &mut Provision,
+    prepared: Prepared,
+) -> Result<i32, Error> {
+    let Spec {
+        id,
+        cgroup,
+        ctx,
+        plan,
+        net,
+        proxy,
+        binder,
+        mesh_mounts,
+        tracer,
+        ..
+    } = spec;
+    let (id, cgroup, ctx, tracer) = (id.as_str(), cgroup.as_path(), *ctx, *tracer);
+    let (net, proxy, binder) = (&*net, proxy.as_ref(), binder.as_ref());
+    let mesh_mounts = mesh_mounts.as_slice();
+    let Prepared {
+        proxied,
+        mirror_ports,
+        loopback,
+        egress_bytes,
+        command_socket,
+        net_runtime,
+        inbound_runtime,
+        tun_session,
+    } = prepared;
+
+    // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one privileged op,
+    //    which now provisions everything in a single invocation: it adds the loopback addresses
+    //    (re-validating each), attaches the egress BPF, clones the namespaces, builds the view +
+    //    binderfs (chowned to the operator), and `fexecve`s `kennel-bin-init`. Every kennel runs the
+    //    factory + a binder bus, so a `BinderPrep` is required. The privhelper resolves
+    //    `kennel-bin-init` from its own root-owned config (never the wire), so kenneld needs none here.
+    plan.cgroup = cgroup.to_path_buf();
+    let Some(prep) = binder else {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a kennel must be constructed via the factory, which requires a BinderPrep",
+        )));
+    };
+    tracer.step(&format!(
+        "bring-up: invoking privhelper factory (ctx {ctx}, {} loopback addr(s), {} egress bytes)",
+        loopback.len(),
+        egress_bytes.len()
+    ));
+    // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
+    // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
+    let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
+    // Create the UDP-egress tun when the policy opts in (`[net.udp]`, W2). Valid only on the
+    // proxied modes, which own their net-ns — the same window `lo_up` covers.
+    let tun = net.udp;
+    let (built, supervision_bytes) = construct_via_factory(
+        privileged,
+        plan,
+        command,
+        ctx,
+        &loopback,
+        lo_up,
+        tun,
+        &egress_bytes,
+        tracer.level_u8(),
+        state,
+    )?;
+    let kennel_privhelper::client::Constructed {
+        mut child,
+        init_pid,
+        sync,
+        binder: binder_handle,
+        stderr: helper_stderr,
+    } = built;
+    tracer.step(&format!(
+        "bring-up: factory returned, kennel-bin-init pid={init_pid}; awaiting boot-sync (exec)"
+    ));
+    let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
+
+    // Boot-sync: wait until kennel-bin-init has execed.
+    await_boot_sync(sync_fd, &helper_stderr, tracer)?;
+
+    // The egress and inbound delegates, before the binder pull is released.
+    start_delegates(
+        proxy,
+        command_socket.as_ref(),
+        &mirror_ports,
+        ctx,
+        &inbound_runtime,
+        state,
+        tracer,
+    )?;
+
+    // Take binder node 0 and serve the lifecycle, so kennel-bin-init can pull its plan.
+    serve_binder(
+        plan,
+        id,
+        prep,
+        BinderServed {
+            init_pid,
+            supervision: supervision_bytes,
+            handle: binder_handle,
+            net_runtime,
+            inbound_runtime: std::sync::Arc::clone(&inbound_runtime),
+            tun_session,
+        },
+        ctx,
+        tracer,
+        state,
+    )?;
+
+    // Tell kennel-bin-init the bus is live so it pulls its plan and starts the workload (unconditional:
+    // it always blocks for this). Then reap the factory parent, which exits the moment it has
+    // reported the pid; `kennel-bin-init` has reparented to kenneld (the subreaper), so the `Kennel`
+    // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
+    tracer.step(
+        "bring-up: signalling bus-live — kennel-bin-init may pull its plan + start the workload",
+    );
+    kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
+
+    // Mesh rendezvous: hand kennel-bin-init the binderfs clones to place.
+    send_mesh_rendezvous(&sync, mesh_mounts, tracer)?;
+    let _ = child.wait();
+    Ok(init_pid)
+}
+
+/// What [`wire_facades`] reads: where each facade binary is, and which facades this kennel has.
+struct FacadeWiring<'a> {
+    proxy: Option<&'a ProxySetup>,
+    unix: &'a UnixPrep,
+    dbus: &'a DbusPrep,
+    facade_tun: Option<&'a Path>,
+    net: &'a NetPolicy,
+    scope: &'a ReservedScope,
+    ctx: u16,
+    /// The port the SOCKS5 facade listens on.
+    port: u16,
+    mirror_ports: &'a [u16],
+    /// Whether the kennel has a constructed view to bind the facades into.
+    pivoting: bool,
+    /// Whether the kennel has proxied egress (a dial delegate).
+    has_egress: bool,
+    tun_active: bool,
+}
+
+/// Bind the in-kennel facades into the view and register them to be launched. Returns the tun
+/// session payload for a `[net.udp]` tun consumer.
+fn wire_facades(
+    plan: &mut Plan,
+    command: &mut Command,
+    wiring: &FacadeWiring<'_>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let &FacadeWiring {
+        proxy,
+        unix,
+        dbus,
+        facade_tun,
+        net,
+        scope,
+        ctx,
+        port,
+        mirror_ports,
+        pivoting,
+        has_egress,
+        tun_active,
+    } = wiring;
+    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind facade-socks5 into the view, launch it
+    //     on the kennel's loopback at `port`, and point the workload's proxy env at it. It brokers
+    //     each connect to node 0 as CONNECT_INET; kenneld decides + drives the dial delegate. Needs
+    //     the constructed view, so it engages only when pivoting and the kennel has egress.
+    if pivoting && has_egress {
+        if let Some(setup) = proxy {
+            // The facade listens on the kennel's own loopback: `127.0.0.1`, isolated by the
+            // kennel's net-ns, needs no per-kennel address.
+            let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+            apply_socks5(plan, &setup.socks5, listen, command)?;
+            // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
+            //     ports, bind facade-client into the view and launch it on those ports. It pulls
+            //     each inbound conduit (BIND_INET) and connects the workload's native listener.
+            if !mirror_ports.is_empty() {
+                let kennel_ip = listen.ip();
+                apply_facade_client(plan, &setup.facade_client, kennel_ip, mirror_ports)?;
+            }
+        }
+    }
+
+    // 3c-unix. AF_UNIX socket shims (§7.6): bind each granted socket into the view at
+    //     its shim path, set env vars, and grant Landlock. The shim model needs the
+    //     constructed view (a mount namespace), so it engages only when pivoting.
+    apply_afunix(plan, unix, command, pivoting)?;
+
+    // 3c-dbus. D-Bus mediation (§7.7): bind facade-dbus into the view, point the workload's
+    //     DBUS_*_BUS_ADDRESS at the in-view sockets it presents, and grant the Landlock the facade
+    //     needs to bind them. The standing dbus-broker mediates over the mesh, beside the
+    //     other host delegates. Needs the constructed view, so it engages only when pivoting.
+    apply_dbus(plan, dbus, command, pivoting)?;
+
+    // 3c-tun. UDP egress (§8, W2): bind facade-tun into the view for a `[net.udp]` consumer of the
+    //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
+    //     bound into the view), so it needs the constructed view — engages only when pivoting. The
+    //     tun addr is derived the single-source way (matching the constructor and the mesh filter).
+    // The DELIVER_TUN_SESSION payload kenneld hands the tun-broker when this consumer connects
+    // (§8 / W2): its grants + tun `/64`, resolved here in kenneld's own namespace. `Some` iff this is
+    // a `[net.udp]` tun consumer (`tun_active`, computed above) — its presence is the grant the
+    // node-0 handler gates the connect on.
+    let tun_session: Option<Vec<u8>> = if tun_active {
+        let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
+        apply_tun(plan, facade_tun, tun_addr, pivoting)?;
+        Some(encode_tun_session(tun_addr, &net.udp_allow_names))
+    } else {
+        None
+    };
+    Ok(tun_session)
+}
+
+/// What node 0 is served with, moved into the binder manager.
+struct BinderServed {
+    init_pid: i32,
+    supervision: Vec<u8>,
+    /// The binder device handle the factory returned, if the kennel has a binderfs.
+    handle: Option<std::os::fd::OwnedFd>,
+    net_runtime: crate::inet::NetRuntime,
+    inbound_runtime: std::sync::Arc<crate::inbound::InboundRuntime>,
+    tun_session: Option<Vec<u8>>,
+}
+
+/// Take binder node 0 of the kennel's binderfs and serve the lifecycle on it. A no-op for a
+/// kennel without a binderfs.
+fn serve_binder(
+    plan: &Plan,
+    id: &str,
+    prep: &BinderPrep,
+    served: BinderServed,
+    ctx: u16,
+    tracer: kennel_lib_config::Tracer,
+    state: &mut Provision,
+) -> Result<(), Error> {
+    // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
+    // so kennel-bin-init can pull its supervision-half — a single open, no retry.
+    if plan.view.as_ref().is_some_and(|v| v.binder) {
+        let lifecycle = crate::binder::Lifecycle {
+            init_host_pid: Some(served.init_pid),
+            supervision: served.supervision,
+            // The TTL custodian's inputs: kennel-bin-init's timer fires NOTIFY_TTL_EXPIRED and the
+            // node-0 handler freezes/thaws/kills this cgroup per the action (§9.7).
+            cgroup: plan.cgroup.clone(),
+            ttl_action: plan.ttl_action,
+            name: id.to_owned(),
+            // The operator-prompt channel for the TTL `renew` action; `None` ⇒ fall back to warn.
+            prompt: prep.prompt.clone(),
+        };
+        tracer.step("bring-up: acquiring binder node 0 through the factory's device handle");
+        // The kennel's userns is root-owned, so there is no path to its binderfs from here; the
+        // factory hands the device over as a descriptor. A kennel that needs a bus but came back
+        // without one cannot be served — refuse it rather than run a workload with no mediation.
+        let handle = served.handle.ok_or_else(|| {
+            Error::Io(io::Error::other(
+                "the factory returned no binder device handle for a kennel that has a binderfs",
+            ))
+        })?;
+        // Node 0 is where every mediated request of this kennel is decided, and where
+        // kennel-bin-init pulls its plan. A kennel whose context manager did not start has no
+        // reference monitor on its bus, so the bring-up fails here, as it does just above for a
+        // missing device handle.
+        let manager = acquire_binder_node0(
+            &handle,
+            ctx,
+            prep,
+            lifecycle,
+            served.net_runtime,
+            served.inbound_runtime,
+            served.tun_session,
+        )
+        .map_err(|e| {
+            Error::Io(io::Error::new(
+                e.kind(),
+                format!("the binder context manager did not start: {e}"),
+            ))
+        })?;
+        tracer.step("bring-up: binder node 0 acquired, lifecycle served");
+        state.binder = Some(manager);
+    }
+    Ok(())
+}
+
+/// Grant Landlock read on the parent directory of each file bind's target.
+fn grant_read_on_parents(
+    landlock_fs: &mut Vec<(PathBuf, kennel_lib_syscall::landlock::AccessFs)>,
+    binds: &[(PathBuf, PathBuf)],
+) {
+    use kennel_lib_syscall::landlock::AccessFs;
+    let dirs: std::collections::BTreeSet<PathBuf> = binds
+        .iter()
+        .filter_map(|(_src, target)| target.parent().map(Path::to_path_buf))
+        .collect();
+    for dir in dirs {
+        landlock_fs.push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
+    }
+}
+
+/// The egress BPF payload the factory attaches to the kennel cgroup; empty when the cgroup BPF
+/// is not the egress gate.
+///
+// Egress BPF. The factory attaches it (folded into the one construct op); here we just
+// build and encode the payload to ride the construction datagram. The helper pins this
+// kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
+// drain the audit ringbuf and the owner can inspect the maps (§02-7). Only `host` mode ships
+// a payload — every other mode (`none`/`constrained`/`unconstrained`) ships an EMPTY one, so
+// the factory loads + attaches no programs (the net-ns is the boundary, see `bpf_egress`).
+fn egress_payload(plan: &Plan, id: &str, bpf_egress: bool) -> Vec<u8> {
+    if bpf_egress {
+        EgressPayload {
+            meta: plan.bpf_meta,
+            allow_v4: plan.bpf_allow_v4.clone(),
+            deny_v4: plan.bpf_deny_v4.clone(),
+            allow_v6: plan.bpf_allow_v6.clone(),
+            deny_v6: plan.bpf_deny_v6.clone(),
+            bind_allow_v4: plan.bpf_bind_allow_v4.clone(),
+            bind_deny_v4: plan.bpf_bind_deny_v4.clone(),
+            bind_allow_v6: plan.bpf_bind_allow_v6.clone(),
+            bind_deny_v6: plan.bpf_bind_deny_v6.clone(),
+            bind_allowed_ports: plan.bind_allowed_ports.clone(),
+            pin_id: id.to_owned(),
+        }
+        .encode()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The dial delegate's command socket (proxied modes only) and the daemon's decision runtime.
+///
+// The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
+// The delegate launch is deferred to *after* construct (below); here we only fix the socket
+// path and build the in-process decision runtime from the signed policy. ONLY the proxied
+// modes (constrained/unconstrained) run a SOCKS delegate + inject HTTPS_PROXY; `open`
+// (host netns, direct egress, BPF/Landlock-gated) and `none` (no network) run none, so
+// every INet request is refused for them (the workload egresses directly or not at all).
+fn net_runtime_for(
+    net: &NetPolicy,
+    ssh: &SshPrep,
+    proxy: Option<&ProxySetup>,
+    proxied: bool,
+    ctx: u16,
+) -> Result<(Option<PathBuf>, crate::inet::NetRuntime), Error> {
+    if let (true, Some(setup)) = (proxied, proxy) {
+        std::fs::create_dir_all(&setup.config_dir)?;
+        // The owner-only kenneld↔delegate conduit command socket (§7.5.2): the delegate binds
+        // it; kenneld connects per INet CONNECT to drive the dial.
+        let command_socket = setup.config_dir.join(format!("netproxy-cmd-{ctx}.sock"));
+        let host_services = ssh
+            .host_service
+            .iter()
+            .copied()
+            .collect::<Vec<std::net::SocketAddr>>();
+        let net_runtime =
+            crate::inet::NetRuntime::from_policy(net, host_services, Some(command_socket.clone()));
+        Ok((Some(command_socket), net_runtime))
+    } else {
+        Ok((None, crate::inet::NetRuntime::denied()))
+    }
+}
+
+/// Render the synthetic `/etc`, the home dotfiles and the synthetic `~/.ssh`, and add them to
+/// the plan as file binds with the Landlock read rules they need.
+///
+// Render the synthetic /etc (the libc/NSS files) and hand the spawn the
+// binds that shadow them over the kennel's view. Built here because it
+// needs the kennel's just-computed primary addresses.
+fn wire_file_binds(
+    plan: &mut Plan,
+    etc: Option<&EtcSetup>,
+    ssh: &SshPrep,
+    state: &Provision,
+    scope: &ReservedScope,
+    ctx: u16,
+    tun_active: bool,
+) -> Result<(), Error> {
     if let Some(etc) = etc {
         let params = crate::etc::EtcParams {
             hostname: &etc.hostname,
@@ -935,17 +1325,7 @@ fn bring_up<P: Privileged + Sync>(
         // exactly as the dotfiles and synthetic ~/.ssh below do. The constructed /etc
         // holds only framework content (the host /etc is never bound in), so this is safe.
         {
-            use kennel_lib_syscall::landlock::AccessFs;
-            let mut etc_dirs = std::collections::BTreeSet::new();
-            for (_src, target) in &plan.file_binds {
-                if let Some(parent) = target.parent() {
-                    etc_dirs.insert(parent.to_path_buf());
-                }
-            }
-            for dir in etc_dirs {
-                plan.landlock_fs
-                    .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
-            }
+            grant_read_on_parents(&mut plan.landlock_fs, &plan.file_binds);
         }
 
         // Synthesise the user shell-init dotfiles into the kennel home (§7.9.2a):
@@ -956,17 +1336,7 @@ fn bring_up<P: Privileged + Sync>(
         let dot_binds =
             crate::etc::materialize_home_dotfiles(&dot_dir, &etc.home, &etc.home_persist)?;
         if !dot_binds.is_empty() {
-            use kennel_lib_syscall::landlock::AccessFs;
-            let mut dot_dirs = std::collections::BTreeSet::new();
-            for (_src, target) in &dot_binds {
-                if let Some(parent) = target.parent() {
-                    dot_dirs.insert(parent.to_path_buf());
-                }
-            }
-            for dir in dot_dirs {
-                plan.landlock_fs
-                    .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
-            }
+            grant_read_on_parents(&mut plan.landlock_fs, &dot_binds);
             plan.file_binds.extend(dot_binds);
         }
     }
@@ -979,78 +1349,31 @@ fn bring_up<P: Privileged + Sync>(
         // Grant Landlock read on the synthetic ~/.ssh dir(s): the files are copied
         // into the view like the synthetic /etc, but unlike /etc the home subtree is
         // not in `fs.read`, so without this `ssh` is denied reading its own config.
-        use kennel_lib_syscall::landlock::AccessFs;
-        let mut ssh_dirs = std::collections::BTreeSet::new();
-        for (_src, target) in &ssh.file_binds {
-            if let Some(parent) = target.parent() {
-                ssh_dirs.insert(parent.to_path_buf());
-            }
-        }
-        for dir in ssh_dirs {
-            plan.landlock_fs
-                .push((dir, AccessFs::READ_FILE | AccessFs::READ_DIR));
-        }
+        grant_read_on_parents(&mut plan.landlock_fs, &ssh.file_binds);
         plan.file_binds.extend(ssh.file_binds.iter().cloned());
     }
+    Ok(())
+}
 
-    // 3c-net. The in-kennel SOCKS5 egress shim (§7.5): bind facade-socks5 into the view, launch it
-    //     on the kennel's loopback at `port`, and point the workload's proxy env at it. It brokers
-    //     each connect to node 0 as CONNECT_INET; kenneld decides + drives the dial delegate. Needs
-    //     the constructed view, so it engages only when pivoting and the kennel has egress.
-    let net_pivoting = view_root.is_some() && plan.view.is_some();
-    if net_pivoting && command_socket.is_some() {
-        if let Some(setup) = proxy {
-            // The facade listens on the kennel's own loopback: `127.0.0.1`, isolated by the
-            // kennel's net-ns, needs no per-kennel address.
-            let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
-            apply_socks5(plan, &setup.socks5, listen, command)?;
-            // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
-            //     ports, bind facade-client into the view and launch it on those ports. It pulls
-            //     each inbound conduit (BIND_INET) and connects the workload's native listener.
-            if !mirror_ports.is_empty() {
-                let kennel_ip = listen.ip();
-                apply_facade_client(plan, &setup.facade_client, kennel_ip, &mirror_ports)?;
-            }
-        }
-    }
-
-    // 3c-unix. AF_UNIX socket shims (§7.6): bind each granted socket into the view at
-    //     its shim path, set env vars, and grant Landlock. The shim model needs the
-    //     constructed view (a mount namespace), so it engages only when pivoting.
-    let unix_pivoting = view_root.is_some() && plan.view.is_some();
-    apply_afunix(plan, unix, command, unix_pivoting)?;
-
-    // 3c-dbus. D-Bus mediation (§7.7): bind facade-dbus into the view, point the workload's
-    //     DBUS_*_BUS_ADDRESS at the in-view sockets it presents, and grant the Landlock the facade
-    //     needs to bind them. The standing dbus-broker mediates over the mesh, beside the
-    //     other host delegates. Needs the constructed view, so it engages only when pivoting.
-    apply_dbus(plan, dbus, command, unix_pivoting)?;
-
-    // 3c-tun. UDP egress (§8, W2): bind facade-tun into the view for a `[net.udp]` consumer of the
-    //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
-    //     bound into the view), so it needs the constructed view — engages only when pivoting. The
-    //     tun addr is derived the single-source way (matching the constructor and the mesh filter).
-    // The DELIVER_TUN_SESSION payload kenneld hands the tun-broker when this consumer connects
-    // (§8 / W2): its grants + tun `/64`, resolved here in kenneld's own namespace. `Some` iff this is
-    // a `[net.udp]` tun consumer (`tun_active`, computed above) — its presence is the grant the
-    // node-0 handler gates the connect on.
-    let tun_session: Option<Vec<u8>> = if tun_active {
-        let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
-        apply_tun(plan, facade_tun, tun_addr, unix_pivoting)?;
-        Some(encode_tun_session(tun_addr, &net.udp_allow_names))
-    } else {
-        None
-    };
-
-    // 3d. constructed-view wiring (§7.4.5). When the plan carries a shim view and
-    //     the daemon gave us a staging mountpoint: point HOME at the shim root,
-    //     add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
-    //     read-only — distro content, no host specifics), and hand the seal the
-    //     new-root staging dir to pivot_root into. Without a view (or staging) the
-    //     seal keeps the in-place fallback.
-    // An OCI substrate view (§7.11) seeds its own `/etc` from the image, so the
-    // host TLS/linker subtrees must not be bound over it; everything else (the ssh
-    // dialer, the HOME env) applies the same.
+/// Wire the constructed view: the framework's own binds, `HOME`, and the staging root.
+///
+// Constructed-view wiring (§7.4.5). When the plan carries a shim view and
+// the daemon gave us a staging mountpoint: point HOME at the shim root,
+// add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
+// read-only — distro content, no host specifics), and hand the seal the
+// new-root staging dir to pivot_root into. Without a view (or staging) the
+// seal keeps the in-place fallback.
+// An OCI substrate view (§7.11) seeds its own `/etc` from the image, so the
+// host TLS/linker subtrees must not be bound over it; everything else (the ssh
+// dialer, the HOME env) applies the same.
+fn wire_view(
+    plan: &mut Plan,
+    view_root: Option<&Path>,
+    ssh: &SshPrep,
+    oci: &OciPrep,
+    command: &mut Command,
+    state: &mut Provision,
+) -> Result<(), Error> {
     let oci_view = plan.view.as_ref().is_some_and(|v| v.image.is_some());
     if view_root.is_some() {
         if let Some(view) = plan.view.as_mut() {
@@ -1121,60 +1444,21 @@ fn bring_up<P: Privileged + Sync>(
             state.view_root = Some(view_root.to_path_buf());
         }
     }
+    Ok(())
+}
 
-    // 4. Construct the kennel via the privhelper **factory** (`07-2`) — the one privileged op,
-    //    which now provisions everything in a single invocation: it adds the loopback addresses
-    //    (re-validating each), attaches the egress BPF, clones the namespaces, builds the view +
-    //    binderfs (chowned to the operator), and `fexecve`s `kennel-bin-init`. Every kennel runs the
-    //    factory + a binder bus, so a `BinderPrep` is required. The privhelper resolves
-    //    `kennel-bin-init` from its own root-owned config (never the wire), so kenneld needs none here.
-    plan.cgroup = cgroup.to_path_buf();
-    let Some(prep) = binder else {
-        return Err(Error::Io(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "a kennel must be constructed via the factory, which requires a BinderPrep",
-        )));
-    };
-    tracer.step(&format!(
-        "bring-up: invoking privhelper factory (ctx {ctx}, {} loopback addr(s), {} egress bytes)",
-        loopback.len(),
-        egress_bytes.len()
-    ));
-    // Bring the in-ns `lo` up for proxied modes so the facade's `127.0.0.1`/`::1` are reachable —
-    // independent of whether any per-kennel address is added. `none`/`host` keep lo as-is.
-    let lo_up = plan.namespaces.contains(Namespaces::NET) && proxied;
-    // Create the UDP-egress tun when the policy opts in (`[net.udp]`, W2). Valid only on the
-    // proxied modes, which own their net-ns — the same window `lo_up` covers.
-    let tun = net.udp;
-    let (built, supervision_bytes) = construct_via_factory(
-        privileged,
-        plan,
-        command,
-        ctx,
-        &loopback,
-        lo_up,
-        tun,
-        &egress_bytes,
-        tracer.level_u8(),
-        state,
-    )?;
-    let kennel_privhelper::client::Constructed {
-        mut child,
-        init_pid,
-        sync,
-        binder: binder_handle,
-        stderr: helper_stderr,
-    } = built;
-    tracer.step(&format!(
-        "bring-up: factory returned, kennel-bin-init pid={init_pid}; awaiting boot-sync (exec)"
-    ));
-    let sync_fd = std::os::fd::AsRawFd::as_raw_fd(&sync);
-
-    // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed and is blocked
-    // waiting for the bus. This is what lets node 0 be claimed deterministically, before the pull. A failure here leaves the kennel up but
-    // binder-less; the workload (which it gates) will not start, so surface it. The construction child
-    // shares the factory's captured stderr (W15): on a boot-sync failure its own cause — e.g.
-    // `construction child: build_kennel: <reason>` — is folded in, not just the transport symptom.
+/// Wait for `kennel-bin-init` to announce it has execed.
+///
+// Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed and is blocked
+// waiting for the bus. This is what lets node 0 be claimed deterministically, before the pull. A failure here leaves the kennel up but
+// binder-less; the workload (which it gates) will not start, so surface it. The construction child
+// shares the factory's captured stderr (W15): on a boot-sync failure its own cause — e.g.
+// `construction child: build_kennel: <reason>` — is folded in, not just the transport symptom.
+fn await_boot_sync(
+    sync_fd: std::os::fd::RawFd,
+    helper_stderr: &kennel_privhelper::client::HelperStderr,
+    tracer: kennel_lib_config::Tracer,
+) -> Result<(), Error> {
     if let Err(e) = kennel_lib_syscall::boot::await_init_ready(sync_fd) {
         let cause = helper_stderr.recent();
         let msg = if cause.is_empty() {
@@ -1185,10 +1469,23 @@ fn bring_up<P: Privileged + Sync>(
         return Err(Error::Io(io::Error::new(e.kind(), msg)));
     }
     tracer.step("bring-up: boot-sync received — kennel-bin-init has execed");
+    Ok(())
+}
 
-    // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
-    // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
-    if let (Some(setup), Some(sock)) = (proxy, command_socket.as_ref()) {
+/// Start the egress dial delegate and, for mirrored ports, the inbound bind delegate.
+///
+// Launch the egress dial delegate *before* releasing the binder pull (which is what lets
+// kennel-bin-init start the workload), so its command socket is bound before the first INet request.
+fn start_delegates(
+    proxy: Option<&ProxySetup>,
+    command_socket: Option<&PathBuf>,
+    mirror_ports: &[u16],
+    ctx: u16,
+    inbound_runtime: &std::sync::Arc<crate::inbound::InboundRuntime>,
+    state: &mut Provision,
+    tracer: kennel_lib_config::Tracer,
+) -> Result<(), Error> {
+    if let (Some(setup), Some(sock)) = (proxy, command_socket) {
         tracer.step(&format!(
             "bring-up: spawning egress delegate {}",
             setup.binary.display()
@@ -1213,10 +1510,10 @@ fn bring_up<P: Privileged + Sync>(
                 ));
                 state.inetd =
                     Some(crate::proxy::spawn(&setup.inetd, &inetd_sock).map_err(Error::Proxy)?);
-                for &port in &mirror_ports {
+                for &port in mirror_ports {
                     match crate::inbound::bind_via_delegate(&inetd_sock, kennel_ip, port) {
                         Ok(conn) => {
-                            let rt = std::sync::Arc::clone(&inbound_runtime);
+                            let rt = std::sync::Arc::clone(inbound_runtime);
                             std::thread::spawn(move || crate::inbound::run_reader(&rt, &conn));
                         }
                         Err(e) => eprintln!(
@@ -1227,68 +1524,22 @@ fn bring_up<P: Privileged + Sync>(
             }
         }
     }
+    Ok(())
+}
 
-    // Take binder node 0 of the kennel's binderfs and serve the lifecycle (gated on the init pid)
-    // so kennel-bin-init can pull its supervision-half — a single open, no retry.
-    if plan.view.as_ref().is_some_and(|v| v.binder) {
-        let lifecycle = crate::binder::Lifecycle {
-            init_host_pid: Some(init_pid),
-            supervision: supervision_bytes,
-            // The TTL custodian's inputs: kennel-bin-init's timer fires NOTIFY_TTL_EXPIRED and the
-            // node-0 handler freezes/thaws/kills this cgroup per the action (§9.7).
-            cgroup: plan.cgroup.clone(),
-            ttl_action: plan.ttl_action,
-            name: id.to_owned(),
-            // The operator-prompt channel for the TTL `renew` action; `None` ⇒ fall back to warn.
-            prompt: prep.prompt.clone(),
-        };
-        tracer.step("bring-up: acquiring binder node 0 through the factory's device handle");
-        // The kennel's userns is root-owned, so there is no path to its binderfs from here; the
-        // factory hands the device over as a descriptor. A kennel that needs a bus but came back
-        // without one cannot be served — refuse it rather than run a workload with no mediation.
-        let handle = binder_handle.ok_or_else(|| {
-            Error::Io(io::Error::other(
-                "the factory returned no binder device handle for a kennel that has a binderfs",
-            ))
-        })?;
-        // Node 0 is where every mediated request of this kennel is decided, and where
-        // kennel-bin-init pulls its plan. A kennel whose context manager did not start has no
-        // reference monitor on its bus, so the bring-up fails here, as it does just above for a
-        // missing device handle.
-        let manager = acquire_binder_node0(
-            &handle,
-            ctx,
-            prep,
-            lifecycle,
-            net_runtime,
-            std::sync::Arc::clone(&inbound_runtime),
-            tun_session,
-        )
-        .map_err(|e| {
-            Error::Io(io::Error::new(
-                e.kind(),
-                format!("the binder context manager did not start: {e}"),
-            ))
-        })?;
-        tracer.step("bring-up: binder node 0 acquired, lifecycle served");
-        state.binder = Some(manager);
-    }
-
-    // Tell kennel-bin-init the bus is live so it pulls its plan and starts the workload (unconditional:
-    // it always blocks for this). Then reap the factory parent, which exits the moment it has
-    // reported the pid; `kennel-bin-init` has reparented to kenneld (the subreaper), so the `Kennel`
-    // handle can `waitpid(init_pid)` for the workload's status with no ECHILD race.
-    tracer.step(
-        "bring-up: signalling bus-live — kennel-bin-init may pull its plan + start the workload",
-    );
-    kennel_lib_syscall::boot::signal_bus_live(sync_fd).map_err(Error::Io)?;
-
-    // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place, as one
-    // datagram on the boot-sync socket right after GO. The init reads it after pulling its plan and
-    // `move_mount`s each fd into its target before forking the workload. Always sent (a count-0
-    // datagram for a kennel with no mesh participation), so the init's receive is unconditional
-    // and never hangs. There is no socket in the kennel's view for this: the userns is root-owned,
-    // so kenneld could not reach one.
+/// Send `kennel-bin-init` the mesh rendezvous message.
+///
+// Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place, as one
+// datagram on the boot-sync socket right after GO. The init reads it after pulling its plan and
+// `move_mount`s each fd into its target before forking the workload. Always sent (a count-0
+// datagram for a kennel with no mesh participation), so the init's receive is unconditional
+// and never hangs. There is no socket in the kennel's view for this: the userns is root-owned,
+// so kenneld could not reach one.
+fn send_mesh_rendezvous(
+    sync: &std::os::fd::OwnedFd,
+    mesh_mounts: &[(std::os::fd::OwnedFd, PathBuf)],
+    tracer: kennel_lib_config::Tracer,
+) -> Result<(), Error> {
     {
         use std::os::fd::AsFd as _;
         let (data, fds) = kennel_lib_spawn::mesh_rendezvous::encode(mesh_mounts);
@@ -1300,8 +1551,7 @@ fn bring_up<P: Privileged + Sync>(
             ));
         }
     }
-    let _ = child.wait();
-    Ok(init_pid)
+    Ok(())
 }
 
 /// The set of ports the inbound BIND mirror (§7.5.7) exposes host-side: the explicit
