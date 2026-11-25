@@ -33,6 +33,7 @@ use crate::{cgroup, start, Privileged};
 use kennel_lib_control::name::KennelName;
 
 use crate::audit::StartStage;
+use crate::start_error::{CwdError, LandlockFloorError, SshEgressError, WorkloadError};
 
 /// A loaded, verified policy, split into the two artefacts kenneld applies.
 ///
@@ -504,14 +505,15 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// `[ssh]` grant or this daemon runs no bastion.
     ///
     /// # Errors
-    /// A human-readable reason if minting, the bastion, or materialisation fails.
+    /// The [`SshEgressError`] if a grant has no minted key, the bastion did not come up, or
+    /// staging, registration or materialisation fails.
     fn register_ssh(
         &self,
         kennel: &str,
         ssh: &kennel_lib_policy::SshRuntime,
         shim_root: &Path,
         policy_ssh_dir: &Path,
-    ) -> Result<crate::SshPrep, String> {
+    ) -> Result<crate::SshPrep, SshEgressError> {
         let Some(setup) = self.identity.bastion.as_ref() else {
             return Ok(crate::SshPrep::default());
         };
@@ -535,19 +537,17 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         // Stage a copy of the private key for the kennel's `~/.ssh`, and register the edge
         // with the SIGNED public key (never a key minted here) + the host-side `options`.
         let staging = setup.dir.join("synthetic").join(kennel);
-        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&staging).map_err(SshEgressError::Io)?;
         let mut host_files: Vec<(String, String)> = Vec::new();
         for grant in &ssh.grants {
             if grant.public_key.is_empty() || grant.key_file.is_empty() {
-                return Err(format!(
-                    "ssh grant for `{}` has no minted key (recompile the policy with \
-                     `kennel policy compile`)",
-                    grant.dest
-                ));
+                return Err(SshEgressError::NoMintedKey {
+                    dest: grant.dest.clone(),
+                });
             }
             let key_file = grant.key_file.clone();
             crate::ssh::stage_synthetic_key(policy_ssh_dir, &staging, &key_file)
-                .map_err(|e| e.to_string())?;
+                .map_err(SshEgressError::Io)?;
             bastion
                 .register(crate::bastion::Edge {
                     kennel: kennel.to_owned(),
@@ -555,7 +555,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     options: grant.options.clone(),
                     synthetic_pub: grant.public_key.clone(),
                 })
-                .map_err(|e| e.to_string())?;
+                .map_err(SshEgressError::Io)?;
             // The synthetic `~/.ssh/config` stanza is keyed by the host the workload types
             // (`ssh git@github.com` → `Host github.com`): OpenSSH matches `Host` against the
             // hostname with any `user@` stripped, so the config alias is the host part while
@@ -564,12 +564,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         }
         let host_pub = bastion
             .host_pub()
-            .ok_or("bastion failed to start (no host key)")?
+            .ok_or(SshEgressError::NoHostKey)?
             .to_owned();
         // The port sshd actually bound (a random high port, discovered at start).
-        let bastion_port = bastion
-            .port()
-            .ok_or("bastion started but reported no bound port")?;
+        let bastion_port = bastion.port().ok_or(SshEgressError::NoPort)?;
         // The bastion lock is only needed for minting + registration; release it
         // before the synthetic-config file I/O below.
         drop(guard);
@@ -595,7 +593,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         };
         let ssh_dir = shim_root.join(".ssh");
         let file_binds =
-            crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(|e| e.to_string())?;
+            crate::ssh::materialize(&staging, &ssh_dir, &params).map_err(SshEgressError::Io)?;
         Ok(crate::SshPrep {
             file_binds,
             host_service: Some(SocketAddr::new(setup.listen, bastion_port)),
@@ -2566,8 +2564,9 @@ fn fail<P: Privileged + Clone, L: PolicyLoader>(
     ctx: u16,
     conn: &mut UnixStream,
     stage: StartStage,
-    reason: String,
+    reason: impl std::fmt::Display,
 ) {
+    let reason = reason.to_string();
     eprintln!("kenneld: kennel `{name}` failed to start [{stage}]: {reason}");
     crate::audit::daemon_audit().emit(&crate::audit::start_refused(name, stage, &reason));
     // Drop any SSH edges registered before the failing step (a no-op otherwise), so
@@ -2657,24 +2656,33 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
 /// and not the operator's `$HOME`; every `required` marker must be present. Resolution is
 /// host-side, in operator context, before the kennel exists — the workload (the adversary) is
 /// not yet running, so there is no TOCTOU against it.
-fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String> {
+fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, CwdError> {
     use std::os::unix::fs::MetadataExt as _;
     // Realpath-normalise: resolve symlinks to the real directory, so the bound path is the
     // canonical owned inode (a symlinked invocation dir resolves to its target, which the
     // ownership check below then vets — a symlink into a non-owned tree is refused there).
-    let resolved = std::fs::canonicalize(cwd)
-        .map_err(|e| format!("cannot resolve the invocation cwd {}: {e}", cwd.display()))?;
-    let meta = std::fs::metadata(&resolved)
-        .map_err(|e| format!("cannot stat {}: {e}", resolved.display()))?;
+    let resolved = std::fs::canonicalize(cwd).map_err(|source| CwdError::Resolve {
+        cwd: cwd.to_path_buf(),
+        source,
+    })?;
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(meta) => meta,
+        Err(source) => {
+            return Err(CwdError::Stat {
+                path: resolved,
+                source,
+            })
+        }
+    };
     if !meta.is_dir() {
-        return Err(format!("{} is not a directory", resolved.display()));
+        return Err(CwdError::NotADirectory(resolved));
     }
     let uid = kennel_lib_syscall::unistd::real_uid();
     if meta.uid() != uid {
-        return Err(format!(
-            "{} is not owned by the operator (uid {uid}); the cwd grant is refused",
-            resolved.display()
-        ));
+        return Err(CwdError::NotOwned {
+            path: resolved,
+            uid,
+        });
     }
     // Not world-writable: a writable bind of an other-writable dir lets ANY host user plant content
     // (and the required markers) in the tree the confined workload then reads/writes — a cross-user
@@ -2682,32 +2690,24 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
     // a project dir is commonly `0775` with the operator's OWN single-member group, so refusing
     // group-write would be a false positive; only the unambiguous world-writable case is refused.)
     if meta.mode() & 0o002 != 0 {
-        return Err(format!(
-            "{} is world-writable ({:04o}); the cwd grant refuses a bind any host user can write",
-            resolved.display(),
-            meta.mode() & 0o7777
-        ));
+        return Err(CwdError::WorldWritable {
+            path: resolved,
+            mode: meta.mode() & 0o7777,
+        });
     }
     // Never `$HOME`: a whole-home bind is exactly what the persona view exists to prevent (a path
     // *under* the home is fine — a project dir — the home root itself is not). This floor is
     // non-overridable, so it must fail CLOSED: if the operator's `$HOME` cannot be resolved (unset,
     // or a broken/absent path), we cannot prove `resolved` is not the home, so refuse rather than
     // silently bind a possibly-home directory.
-    let home = std::env::var_os("HOME")
+    let Some(home) = std::env::var_os("HOME")
         .map(PathBuf::from)
         .and_then(|h| std::fs::canonicalize(&h).ok())
-        .ok_or_else(|| {
-            format!(
-                "cannot resolve the operator's $HOME to floor-check the cwd grant for {} — refusing \
-                 (set HOME, or run from a resolvable project dir)",
-                resolved.display()
-            )
-        })?;
+    else {
+        return Err(CwdError::HomeUnresolvable(resolved));
+    };
     if home == resolved {
-        return Err(format!(
-            "the invocation cwd {} is the operator's $HOME; the cwd grant never binds $HOME",
-            resolved.display()
-        ));
+        return Err(CwdError::IsHome(resolved));
     }
     // Markers: each required dirent must be present (a trailing slash requires a directory),
     // so the grant applies only to a project the operator has marked for agent use.
@@ -2717,11 +2717,10 @@ fn resolve_cwd_grant(cwd: &Path, required: &[String]) -> Result<PathBuf, String>
             .map_or((marker.as_str(), false), |n| (n, true));
         let present = std::fs::metadata(resolved.join(name)).is_ok_and(|m| !want_dir || m.is_dir());
         if !present {
-            return Err(format!(
-                "the invocation cwd {} is missing the required marker `{marker}` — mark the \
-                 project for agent use (e.g. `mkdir {name}`) or run from a marked project root",
-                resolved.display()
-            ));
+            return Err(CwdError::MissingMarker {
+                path: resolved,
+                marker: marker.clone(),
+            });
         }
     }
     Ok(resolved)
@@ -2776,20 +2775,20 @@ const fn needs_landlock_scope(mode: kennel_lib_policy::NetMode) -> bool {
 fn check_landlock_floor(
     mode: kennel_lib_policy::NetMode,
     abi: io::Result<u32>,
-) -> Result<(), String> {
+) -> Result<(), LandlockFloorError> {
     if !needs_landlock_scope(mode) {
         return Ok(());
     }
     match abi {
         Ok(abi) if abi >= LANDLOCK_SCOPE_ABI => Ok(()),
-        Ok(abi) => Err(format!(
-            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI} (Linux 6.12) to keep the \
-             workload off the host's abstract unix sockets; this kernel provides ABI {abi}"
-        )),
-        Err(e) => Err(format!(
-            "net.mode = \"host\" needs Landlock ABI {LANDLOCK_SCOPE_ABI}, and the kernel's \
-             Landlock ABI could not be read: {e}"
-        )),
+        Ok(abi) => Err(LandlockFloorError::TooOld {
+            needed: LANDLOCK_SCOPE_ABI,
+            abi,
+        }),
+        Err(source) => Err(LandlockFloorError::Unreadable {
+            needed: LANDLOCK_SCOPE_ABI,
+            source,
+        }),
     }
 }
 
@@ -2806,15 +2805,11 @@ const fn runs_policy_program(
 fn effective_workload(
     req: &StartRequest,
     workload: &kennel_lib_policy::WorkloadRuntime,
-) -> Result<(Vec<String>, PathBuf), String> {
+) -> Result<(Vec<String>, PathBuf), WorkloadError> {
     if req.argv.is_empty() {
         // Policy-driven: use the embedded workload, and its cwd if it set one.
         if workload.argv.is_empty() {
-            return Err(
-                "no workload: the policy has no [workload] and no command was given \
-                 (kennel run … -- <cmd>)"
-                    .to_owned(),
-            );
+            return Err(WorkloadError::NoWorkload);
         }
         let cwd = workload
             .cwd
@@ -2836,12 +2831,10 @@ fn effective_workload(
     }
     // Request-supplied argv: overrides the policy workload unless it is pinned.
     if workload.pinned && !req.force {
-        return Err(format!(
-            "policy [workload] is pinned to `{}`; refusing the `-- {}` override \
-             (pass --force to override, or set [workload] allowed_args to append)",
-            workload.argv.join(" "),
-            req.argv.join(" ")
-        ));
+        return Err(WorkloadError::PinnedOverride {
+            pinned: workload.argv.clone(),
+            given: req.argv.clone(),
+        });
     }
     Ok((req.argv.clone(), req.cwd.clone()))
 }
@@ -2863,14 +2856,14 @@ fn effective_workload(
 ///
 /// # Errors
 ///
-/// A human-readable reason on resolution, open, hashing, or digest-mismatch failure.
+/// The [`WorkloadError`] on resolution, open, hashing, or digest-mismatch failure.
 fn verify_workload_digest(
     program: Option<&String>,
     exec_path: &[String],
     accepted: &[String],
-) -> Result<OwnedFd, String> {
+) -> Result<OwnedFd, WorkloadError> {
     use std::os::fd::AsRawFd as _;
-    let program = program.ok_or("workload sha256 pin set but the workload argv is empty")?;
+    let program = program.ok_or(WorkloadError::PinWithoutProgram)?;
     // Resolve a bare name against the policy PATH (host side); an explicit path is used as-is.
     let resolved = if program.contains('/') {
         PathBuf::from(program)
@@ -2879,13 +2872,18 @@ fn verify_workload_digest(
             .iter()
             .map(|d| Path::new(d).join(program))
             .find(|p| p.is_file())
-            .ok_or_else(|| {
-                format!("workload `{program}` not found on the policy PATH to hash it")
-            })?
+            .ok_or_else(|| WorkloadError::NotOnPath(program.clone()))?
     };
     // Open the binary ONCE; everything downstream keys on this fd (hash + fexecve).
-    let file = std::fs::File::open(&resolved)
-        .map_err(|e| format!("opening workload {} to pin it: {e}", resolved.display()))?;
+    let file = match std::fs::File::open(&resolved) {
+        Ok(file) => file,
+        Err(source) => {
+            return Err(WorkloadError::Open {
+                path: resolved,
+                source,
+            })
+        }
+    };
     // Hash the fd itself via /proc/<pid>/fd, so the digest is over the open inode, not a path
     // that could be re-looked-up to different bytes. The pid is THIS process's (not
     // `/proc/self`, which in the spawned sha256sum would be the child's own fd table).
@@ -2894,13 +2892,12 @@ fn verify_workload_digest(
         .arg("-b")
         .arg(&fd_path)
         .output()
-        .map_err(|e| format!("running sha256sum on the workload fd: {e}"))?;
+        .map_err(WorkloadError::Hasher)?;
     if !out.status.success() {
-        return Err(format!(
-            "sha256sum failed on workload {}: {}",
-            resolved.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(WorkloadError::HashFailed {
+            path: resolved,
+            stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+        });
     }
     // `sha256sum` prints `<hex>  <path>` (or `<hex> *<path>` with -b); take the first field.
     let digest = String::from_utf8_lossy(&out.stdout)
@@ -2911,10 +2908,10 @@ fn verify_workload_digest(
     if accepted.iter().any(|a| a == &digest) {
         Ok(OwnedFd::from(file))
     } else {
-        Err(format!(
-            "workload {} sha256 {digest} is not in the policy's accepted set",
-            resolved.display()
-        ))
+        Err(WorkloadError::DigestNotAccepted {
+            path: resolved,
+            digest,
+        })
     }
 }
 
@@ -2958,8 +2955,8 @@ where
 
 /// Build the workload command from `argv`/`cwd`, wiring the passed stdio fds if
 /// all three are present (otherwise the workload inherits the daemon's stdio).
-fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, String> {
-    let (program, rest) = argv.split_first().ok_or_else(|| "empty argv".to_owned())?;
+fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command, WorkloadError> {
+    let (program, rest) = argv.split_first().ok_or(WorkloadError::EmptyArgv)?;
     let mut command = Command::new(program);
     command.args(rest).current_dir(cwd);
     let mut fds = fds.into_iter();
@@ -2975,8 +2972,8 @@ fn command_for(argv: &[String], cwd: &Path, fds: Vec<OwnedFd>) -> Result<Command
 /// Build the workload command for an **interactive** run. Stdio is `null` here — the
 /// spawn seal allocates a controlling pty inside the kennel's devpts and `dup2`s its
 /// slave onto fds 0/1/2 (§7.9.2), so any inherited stdio would be overwritten anyway.
-fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, String> {
-    let (program, rest) = argv.split_first().ok_or_else(|| "empty argv".to_owned())?;
+fn command_for_interactive(argv: &[String], cwd: &Path) -> Result<Command, WorkloadError> {
+    let (program, rest) = argv.split_first().ok_or(WorkloadError::EmptyArgv)?;
     let mut command = Command::new(program);
     command
         .args(rest)
@@ -3056,15 +3053,24 @@ mod tests {
         // A missing marker refuses with a naming diagnostic.
         let err =
             resolve_cwd_grant(&base, &["NOPE".to_owned()]).expect_err("missing marker refuses");
-        assert!(err.contains("NOPE"), "{err}");
+        assert!(
+            matches!(&err, CwdError::MissingMarker { marker, .. } if marker == "NOPE"),
+            "{err}"
+        );
         // A trailing-slash marker that exists only as a file is refused.
         std::fs::write(base.join("marker"), b"x").expect("write file");
         assert!(
-            resolve_cwd_grant(&base, &["marker/".to_owned()]).is_err(),
+            matches!(
+                resolve_cwd_grant(&base, &["marker/".to_owned()]),
+                Err(CwdError::MissingMarker { .. })
+            ),
             "file cannot satisfy a dir marker"
         );
         // A non-existent cwd refuses.
-        assert!(resolve_cwd_grant(&base.join("does-not-exist"), &[]).is_err());
+        assert!(matches!(
+            resolve_cwd_grant(&base.join("does-not-exist"), &[]),
+            Err(CwdError::Resolve { .. })
+        ));
         let _ = std::fs::remove_dir_all(&base);
         let _ = uid; // real_uid is the ownership anchor the fn checks against.
     }
@@ -3074,7 +3080,7 @@ mod tests {
         if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
             if home.is_dir() {
                 let err = resolve_cwd_grant(&home, &[]).expect_err("$HOME must be refused");
-                assert!(err.contains("$HOME"), "{err}");
+                assert!(matches!(err, CwdError::IsHome(_)), "{err}");
             }
         }
     }
@@ -3092,7 +3098,10 @@ mod tests {
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o777)).expect("chmod");
         // Owned by the test uid, but world-writable → refused (any host user could plant content).
         let err = resolve_cwd_grant(&base, &[]).expect_err("world-writable must be refused");
-        assert!(err.contains("world-writable"), "{err}");
+        assert!(
+            matches!(err, CwdError::WorldWritable { mode: 0o777, .. }),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -3136,12 +3145,17 @@ mod tests {
         assert!(check_landlock_floor(NetMode::Host, Ok(6)).is_ok());
         assert!(check_landlock_floor(NetMode::Host, Ok(7)).is_ok());
         let err = check_landlock_floor(NetMode::Host, Ok(5)).expect_err("ABI 5 cannot scope");
-        assert!(err.contains("ABI 5"), "{err}");
-        assert!(check_landlock_floor(
-            NetMode::Host,
-            Err(io::Error::from(io::ErrorKind::Unsupported))
-        )
-        .is_err());
+        assert!(
+            matches!(err, LandlockFloorError::TooOld { needed: 6, abi: 5 }),
+            "{err}"
+        );
+        assert!(matches!(
+            check_landlock_floor(
+                NetMode::Host,
+                Err(io::Error::from(io::ErrorKind::Unsupported))
+            ),
+            Err(LandlockFloorError::Unreadable { .. })
+        ));
         // A kennel with its own network namespace does not depend on the scope.
         for mode in [NetMode::None, NetMode::Constrained, NetMode::Unconstrained] {
             assert!(check_landlock_floor(mode, Ok(5)).is_ok(), "{mode:?}");
@@ -3200,7 +3214,11 @@ mod tests {
             &workload(&["run.sh"], None, true),
         )
         .expect_err("pinned refuses");
-        assert!(err.contains("pinned"), "{err}");
+        assert!(
+            matches!(&err, WorkloadError::PinnedOverride { pinned, given }
+                if pinned == &["run.sh"] && given == &["bash"]),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3217,7 +3235,7 @@ mod tests {
     fn effective_workload_errors_when_neither_supplies_argv() {
         let err = effective_workload(&start_req(&[], false), &workload(&[], None, false))
             .expect_err("no workload");
-        assert!(err.contains("no workload"), "{err}");
+        assert!(matches!(err, WorkloadError::NoWorkload), "{err}");
     }
 
     #[test]
@@ -3245,12 +3263,16 @@ mod tests {
         // A non-matching set → refused.
         let err = verify_workload_digest(Some(&name), &exec_path, &["0".repeat(64)])
             .expect_err("mismatch");
-        assert!(err.contains("not in the policy's accepted set"), "{err}");
+        assert!(
+            matches!(err, WorkloadError::DigestNotAccepted { .. }),
+            "{err}"
+        );
         // A program that does not resolve → refused (fail closed).
         let nope = "nope".to_owned();
-        assert!(
-            verify_workload_digest(Some(&nope), &exec_path, std::slice::from_ref(&real)).is_err()
-        );
+        assert!(matches!(
+            verify_workload_digest(Some(&nope), &exec_path, std::slice::from_ref(&real)),
+            Err(WorkloadError::NotOnPath(name)) if name == "nope"
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
