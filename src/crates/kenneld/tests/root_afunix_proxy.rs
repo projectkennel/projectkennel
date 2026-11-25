@@ -75,7 +75,11 @@ fn run_manager() {
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
     let manager = binder::spawn(binder::NodeZero {
         unix,
-        ..binder::NodeZero::closed(fd, 7, writer)
+        ..binder::NodeZero::closed(
+            fd,
+            kennel_lib_spawn::Ctx::new(7).expect("a non-zero ctx"),
+            writer,
+        )
     })
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
@@ -198,7 +202,7 @@ fn proxy_binary() -> PathBuf {
     let bin = dir.join("facade-afunix");
     assert!(
         bin.exists(),
-        "build facade-afunix first (cargo build -p facade-afunix): {}",
+        "build facade-afunix first (cargo build -p kennel-facade): {}",
         bin.display()
     );
     bin

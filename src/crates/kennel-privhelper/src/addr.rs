@@ -20,6 +20,7 @@
 //! allocation: both sides recompute it from the same uid, so the "add only your
 //! own subnet" capability holds with no `/etc` file.
 
+use kennel_lib_spawn::Ctx;
 use std::net::Ipv6Addr;
 
 /// The fixed prefix length of a per-kennel IPv6 ULA subnet.
@@ -79,8 +80,8 @@ pub const TUN_RESOLVER_HOST: u64 = 2;
 /// tells the tun broker the consumer's `/64` over `ACCEPT_SESSION`) derive it from, so the two can
 /// never disagree on where a kennel's synthetics live.
 #[must_use]
-pub fn tun_addr(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
-    loopback_v6(op_uid, kennel_ctx ^ TUN_CTX_FLIP, TUN_HOST)
+pub fn tun_addr(op_uid: u32, kennel_ctx: Ctx) -> Ipv6Addr {
+    loopback_v6(op_uid, kennel_ctx.get() ^ TUN_CTX_FLIP, TUN_HOST)
 }
 
 /// The kennel's tun-broker resolver address (`::2` in the same `/64` as [`tun_addr`], W2).
@@ -90,8 +91,8 @@ pub fn tun_addr(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
 /// name is NODATA — with zero wire activity either way. Derived from the same uid+ctx as the tun
 /// interface, so it lands in the tun `/64` the broker also computes its resolver in.
 #[must_use]
-pub fn tun_resolver_addr(op_uid: u32, kennel_ctx: u16) -> Ipv6Addr {
-    loopback_v6(op_uid, kennel_ctx ^ TUN_CTX_FLIP, TUN_RESOLVER_HOST)
+pub fn tun_resolver_addr(op_uid: u32, kennel_ctx: Ctx) -> Ipv6Addr {
+    loopback_v6(op_uid, kennel_ctx.get() ^ TUN_CTX_FLIP, TUN_RESOLVER_HOST)
 }
 
 #[cfg(test)]

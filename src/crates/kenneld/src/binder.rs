@@ -13,6 +13,7 @@
 //! node 0 (the verb codes and the status/byte replies) is internal-stable: `kenneld`
 //! and the in-kennel client agree because they ship from one release.
 
+use kennel_lib_spawn::Ctx;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,7 +137,7 @@ pub struct NodeZero {
     /// The kennel's binder device, opened by the daemon from the handle the factory returned.
     pub device_fd: OwnedFd,
     /// The kennel's context number.
-    pub ctx: u16,
+    pub ctx: Ctx,
     /// The `[unix]` grants.
     pub unix: UnixRuntime,
     /// The supervision plan, exit reporting and prompts.
@@ -173,7 +174,7 @@ impl NodeZero {
     /// say — with `NodeZero { unix, ..NodeZero::closed(fd, ctx, writer) }`. Every field it
     /// fills in is the refusing value, so forgetting to set one leaves that subsystem shut.
     #[must_use]
-    pub fn closed(device_fd: OwnedFd, ctx: u16, writer: Arc<Writer>) -> Self {
+    pub fn closed(device_fd: OwnedFd, ctx: Ctx, writer: Arc<Writer>) -> Self {
         Self {
             device_fd,
             ctx,
@@ -303,7 +304,7 @@ fn handle(
     tun: &TunCtx<'_>,
     incoming: &Incoming,
     conn: &Connection,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     // Lifecycle/config verbs (the high range) are spoken only by kennel-bin-init and gated
@@ -541,7 +542,7 @@ fn lifecycle_handle(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let authorized = lifecycle_authorized(
@@ -642,7 +643,7 @@ fn svc_connect(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
     dbus_mesh: bool,
 ) -> Reply {
@@ -704,7 +705,7 @@ fn svc_connect_activate_wait(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     name: &str,
     writer: &Writer,
     sel: &crate::broker::Selected,
@@ -766,7 +767,7 @@ fn svc_connect_activate_wait(
 fn svc_connect_handoff(
     writer: &Writer,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     name: &str,
     sel: &crate::broker::Selected,
     dbus_mesh: bool,
@@ -879,7 +880,7 @@ fn svc_connect_handoff(
 fn emit_svc_connect(
     writer: &Writer,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     name: &str,
     outcome: Outcome,
     status: u8,
@@ -939,7 +940,7 @@ fn connect_granted_socket(
 /// A name the policy does not grant is denied. A granted name whose socket is one of the
 /// daemon's own is denied too, and one with nothing connectable behind it is reported as not
 /// found. Every outcome is audited.
-fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
+fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: Ctx, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested
         .as_deref()
@@ -983,7 +984,7 @@ fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &W
 fn inet_connect(
     net: &crate::inet::NetRuntime,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     use crate::inet::allow::Destination;
@@ -1042,7 +1043,7 @@ fn register_mirror(
     inbound: &crate::inbound::InboundRuntime,
     incoming: &Incoming,
     conn: &Connection,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let (port, handle) = match mirror_request(inbound, incoming) {
@@ -1105,7 +1106,7 @@ fn register_tun_sink(
     tun: &TunCtx<'_>,
     incoming: &Incoming,
     conn: &Connection,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let handle = match tun_sink_request(tun.provider, incoming) {
@@ -1204,7 +1205,7 @@ fn tun_connect(
     catalogue: Option<&Arc<Mutex<crate::catalogue::Catalogue>>>,
     activator: Option<&Arc<dyn crate::supervisor::ProviderActivator>>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let Some(payload) = session else {
@@ -1323,7 +1324,7 @@ fn settle_delivery(delivery: Delivery) -> Option<(Outcome, Reply)> {
 }
 
 /// The audit event for a tun-egress node-0 decision (sink registration / consumer connect).
-fn tun_event(incoming: &Incoming, ctx: u16, op: &str, outcome: Outcome) -> Event {
+fn tun_event(incoming: &Incoming, ctx: Ctx, op: &str, outcome: Outcome) -> Event {
     Event::new("binder.tun", Resource::Binder, outcome, Source::Kenneld)
         .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
         .field("op", Value::untrusted(op.to_owned()))
@@ -1331,7 +1332,7 @@ fn tun_event(incoming: &Incoming, ctx: u16, op: &str, outcome: Outcome) -> Event
 }
 
 /// The audit event for an `INet` CONNECT decision.
-fn inet_event(incoming: &Incoming, ctx: u16, dest: &str, port: u16, outcome: Outcome) -> Event {
+fn inet_event(incoming: &Incoming, ctx: Ctx, dest: &str, port: u16, outcome: Outcome) -> Event {
     Event::new(
         "binder.inet-connect",
         Resource::Binder,
@@ -1520,7 +1521,7 @@ mod tests {
             None,
             None,
             &request(verb::SVC_CONNECT, b"x", 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1551,7 +1552,7 @@ mod tests {
         let reply = af_unix_connect(
             &unix,
             &request(verb::CONNECT_AFUNIX, b"other", 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1560,7 +1561,7 @@ mod tests {
         let reply = af_unix_connect(
             &unix,
             &request(verb::CONNECT_AFUNIX, b"", 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1579,7 +1580,7 @@ mod tests {
             let reply = af_unix_connect(
                 &unix_grant("agent", &path),
                 &request(verb::CONNECT_AFUNIX, asked.as_bytes(), 9, 1000),
-                3,
+                Ctx::new(3).expect("a non-zero ctx"),
                 &writer,
             );
             assert!(
@@ -1605,7 +1606,7 @@ mod tests {
         let reply = af_unix_connect(
             &unix,
             &request(verb::CONNECT_AFUNIX, b"agent", 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::NOT_FOUND));
@@ -1620,7 +1621,7 @@ mod tests {
         let reply = af_unix_connect(
             &unix_grant("cmd", &daemon),
             &request(verb::CONNECT_AFUNIX, b"cmd", 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1636,7 +1637,7 @@ mod tests {
         let reply = inet_connect(
             &net,
             &request(verb::CONNECT_INET, &[0], 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::BAD_REQUEST));
@@ -1645,7 +1646,7 @@ mod tests {
         let reply = inet_connect(
             &net,
             &request(verb::CONNECT_INET, &udp, 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1654,7 +1655,7 @@ mod tests {
         let reply = inet_connect(
             &net,
             &request(verb::CONNECT_INET, &tcp, 9, 1000),
-            3,
+            Ctx::new(3).expect("a non-zero ctx"),
             &writer,
         );
         assert_eq!(status_of(&reply), Some(status::DENIED));
@@ -1678,19 +1679,47 @@ mod tests {
         };
         // The workload (operator uid, another pid) asks for the plan: denied, audited.
         let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4300, 1000);
-        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        let reply = lifecycle_handle(
+            &lifecycle,
+            None,
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+        );
         assert_eq!(status_of(&reply), Some(status::DENIED));
         // A process that is uid 0 in the kennel but is not init: denied.
         let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4300, 0);
-        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        let reply = lifecycle_handle(
+            &lifecycle,
+            None,
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+        );
         assert_eq!(status_of(&reply), Some(status::DENIED));
         // Init itself gets the supervision half, byte for byte.
         let asked = request(lifecycle::GET_SANDBOX_PLAN, &[], 4242, 0);
-        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        let reply = lifecycle_handle(
+            &lifecycle,
+            None,
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+        );
         assert!(matches!(&reply, Reply::Data(bytes) if bytes == b"plan-bytes"));
         // A code in the lifecycle range that names no verb is a bad request, also for init.
         let asked = request(0x1ff, &[], 4242, 0);
-        let reply = lifecycle_handle(&lifecycle, None, None, &asked, 3, &writer);
+        let reply = lifecycle_handle(
+            &lifecycle,
+            None,
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+        );
         assert_eq!(status_of(&reply), Some(status::BAD_REQUEST));
         assert_eq!(
             seen.all(),
@@ -1707,7 +1736,15 @@ mod tests {
     fn svc_connect_denies_a_capability_the_policy_does_not_consume() {
         let (writer, seen) = recording_writer();
         let asked = request(verb::SVC_CONNECT, b"org.example.thing", 9, 1000);
-        let reply = svc_connect(&[], None, None, &asked, 3, &writer, false);
+        let reply = svc_connect(
+            &[],
+            None,
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+            false,
+        );
         assert_eq!(status_of(&reply), Some(status::DENIED));
         assert_eq!(seen.all(), [("binder.svc-connect", Outcome::Deny)]);
     }
@@ -1716,10 +1753,16 @@ mod tests {
     fn spawn_verbs_are_denied_to_a_kennel_with_no_spawn_grant() {
         let (writer, seen) = recording_writer();
         let asked = request(verb::SPAWN, b"anything", 9, 1000);
-        let reply = crate::spawn::handle_spawn(None, &asked, 3, &writer);
+        let reply =
+            crate::spawn::handle_spawn(None, &asked, Ctx::new(3).expect("a non-zero ctx"), &writer);
         assert_eq!(status_of(&reply), Some(status::DENIED));
         let asked = request(verb::SPAWN_QUERY, &[], 9, 1000);
-        let reply = crate::spawn::handle_spawn_query(None, &asked, 3, &writer);
+        let reply = crate::spawn::handle_spawn_query(
+            None,
+            &asked,
+            Ctx::new(3).expect("a non-zero ctx"),
+            &writer,
+        );
         assert_eq!(status_of(&reply), Some(status::DENIED));
         assert!(seen
             .all()

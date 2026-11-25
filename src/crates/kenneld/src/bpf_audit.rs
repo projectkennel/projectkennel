@@ -15,6 +15,7 @@
 //! sample on a per-kennel buffer) are dropped — defence in depth atop the
 //! one-buffer-per-kennel pinning.
 
+use kennel_lib_spawn::Ctx;
 use std::ffi::CString;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -98,7 +99,7 @@ fn ringbuf_capacity() -> Option<usize> {
 /// privhelper, or pinning failed — egress still works, just no BPF audit), or the
 /// buffer cannot be reopened/mapped. A `None` is logged by the caller, not fatal.
 #[must_use]
-pub fn spawn(pin_dir: PathBuf, ctx: u16, writer: Arc<Writer>) -> Option<Drain> {
+pub fn spawn(pin_dir: PathBuf, ctx: Ctx, writer: Arc<Writer>) -> Option<Drain> {
     let capacity = ringbuf_capacity()?;
     let ringbuf = pin_dir.join("audit_ringbuf");
     let cpath = CString::new(ringbuf.as_os_str().as_encoded_bytes()).ok()?;
@@ -145,7 +146,7 @@ fn drain_loop(
     fd: &OwnedFd,
     lost: Option<&OwnedFd>,
     capacity: usize,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
     stop: &AtomicBool,
     wake: BorrowedFd<'_>,
@@ -197,7 +198,7 @@ fn lost_event(total: u64, reported: &mut u64) -> Option<Event> {
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Consume every committed record, emitting the ones that parse for this kennel.
-fn drain_available(rb: &mut kennel_lib_bpf::RingBuffer<'_>, ctx: u16, writer: &Writer) {
+fn drain_available(rb: &mut kennel_lib_bpf::RingBuffer<'_>, ctx: Ctx, writer: &Writer) {
     let _ = rb.consume(|sample| {
         if let Some(event) = parse_event(sample, ctx) {
             writer.emit(&event);
@@ -207,11 +208,11 @@ fn drain_available(rb: &mut kennel_lib_bpf::RingBuffer<'_>, ctx: u16, writer: &W
 
 /// Parse one ringbuf sample into a canonical `02-3` network event, or `None` if it
 /// is not one of our events or belongs to another kennel (`ctx` mismatch).
-fn parse_event(sample: &[u8], ctx: u16) -> Option<Event> {
+fn parse_event(sample: &[u8], ctx: Ctx) -> Option<Event> {
     if u32_at(sample, hdr::MAGIC)? != AUDIT_MAGIC {
         return None;
     }
-    if u16_at(sample, hdr::CTX_BYTE)? != ctx {
+    if u16_at(sample, hdr::CTX_BYTE)? != ctx.get() {
         return None; // foreign/corrupt sample on a per-kennel buffer — drop it
     }
     let event_kind = u16_at(sample, hdr::KIND)?;
@@ -415,13 +416,13 @@ mod tests {
     /// Build a connect-deny sample: 40-byte header + connect body, assembled in
     /// field order (no slice-indexing). Header ints native order, port network
     /// order, v4 network-order octets. `comm` is NUL-padded to 16 bytes.
-    fn connect_deny_sample(ctx: u16, pid: u32, comm: &str, addr: [u8; 4], port: u16) -> Vec<u8> {
+    fn connect_deny_sample(ctx: Ctx, pid: u32, comm: &str, addr: [u8; 4], port: u16) -> Vec<u8> {
         let mut s = Vec::new();
         s.extend_from_slice(&AUDIT_MAGIC.to_ne_bytes()); // magic   @0
         s.extend_from_slice(&1u16.to_ne_bytes()); // version @4
         s.extend_from_slice(&kind::CONNECT_DENY.to_ne_bytes()); // kind    @6
         s.extend_from_slice(&0u64.to_ne_bytes()); // ts_ns   @8
-        s.extend_from_slice(&ctx.to_ne_bytes()); // ctx     @16
+        s.extend_from_slice(&ctx.get().to_ne_bytes()); // ctx     @16
         s.extend_from_slice(&0u16.to_ne_bytes()); // length  @18
         s.extend_from_slice(&pid.to_ne_bytes()); // pid     @20
         let mut comm16 = [0u8; 16]; // comm    @24
@@ -458,8 +459,14 @@ mod tests {
 
     #[test]
     fn parses_a_connect_deny_event() {
-        let s = connect_deny_sample(7, 4242, "curl", [169, 254, 169, 254], 80);
-        let ev = parse_event(&s, 7).expect("parse");
+        let s = connect_deny_sample(
+            Ctx::new(7).expect("a non-zero ctx"),
+            4242,
+            "curl",
+            [169, 254, 169, 254],
+            80,
+        );
+        let ev = parse_event(&s, Ctx::new(7).expect("a non-zero ctx")).expect("parse");
         assert_eq!(ev.event, "net.connect-deny");
         assert_eq!(ev.outcome, Outcome::Deny);
         assert_eq!(ev.source, Source::Bpf);
@@ -474,17 +481,27 @@ mod tests {
 
     #[test]
     fn drops_a_foreign_ctx_and_a_non_event() {
-        let s = connect_deny_sample(7, 1, "x", [127, 0, 0, 1], 9);
+        let s = connect_deny_sample(
+            Ctx::new(7).expect("a non-zero ctx"),
+            1,
+            "x",
+            [127, 0, 0, 1],
+            9,
+        );
         // Wrong ctx ⇒ dropped.
-        assert!(parse_event(&s, 9).is_none());
+        assert!(parse_event(&s, Ctx::new(9).expect("a non-zero ctx")).is_none());
         // Corrupt magic ⇒ dropped.
         let mut bad = s.clone();
         if let Some(b) = bad.first_mut() {
             *b ^= 0xff;
         }
-        assert!(parse_event(&bad, 7).is_none());
+        assert!(parse_event(&bad, Ctx::new(7).expect("a non-zero ctx")).is_none());
         // Too short ⇒ dropped, not a panic.
-        assert!(parse_event(s.get(..10).expect("len"), 7).is_none());
+        assert!(parse_event(
+            s.get(..10).expect("len"),
+            Ctx::new(7).expect("a non-zero ctx")
+        )
+        .is_none());
     }
 
     #[test]

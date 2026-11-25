@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ctx;
 mod image;
 pub mod mesh_rendezvous;
 pub mod plan;
@@ -47,6 +48,7 @@ use kennel_lib_syscall::fd::{proc_path, NodeKind, RootDir};
 use crate::view_error::{InPhase as _, Phase, ViewError};
 use kennel_lib_syscall::landlock::{AccessFs, AccessNet, Ruleset};
 
+pub use ctx::Ctx;
 pub use plan::{
     AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan, ProcView,
     ProxyEndpoint, ShimView, Supervision,
@@ -101,7 +103,7 @@ impl From<RulesetError> for io::Error {
 pub struct RuntimeSubstitutions {
     /// The kennel's context number (`<ctx>`), assigned at start. IPv4-enabled
     /// kennels are capped at 255; v6-only kennels may range higher.
-    pub ctx: u16,
+    pub ctx: Ctx,
     /// The user's UID (`<uid>`).
     pub uid: u32,
     /// The kennel's runtime ID (`<kennel>`).
@@ -1497,7 +1499,7 @@ mod tests {
 
     fn subst() -> RuntimeSubstitutions {
         RuntimeSubstitutions {
-            ctx: 7,
+            ctx: Ctx::new(7).expect("a non-zero ctx"),
             uid: 1000,
             kennel: "ai-coding".to_owned(),
             home: PathBuf::from("/home/dev"),
@@ -1576,8 +1578,13 @@ mod tests {
     fn a_writable_cwd_grant_gets_the_trust_manifest_mask() {
         let masks = |writable: bool, manifest: bool| {
             let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-            let mut plan =
-                Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+            let mut plan = Plan::from_policy(
+                &p,
+                Ctx::new(7).expect("a non-zero ctx"),
+                "kennel-dev",
+                Path::new("/home/dev"),
+            )
+            .expect("plan");
             plan.grant_cwd(PathBuf::from("/work/project"), writable, manifest)
                 .expect("an absolute cwd");
             let view = plan.view.expect("constructed view");
@@ -1606,7 +1613,13 @@ mod tests {
         };
 
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         assert!(
             home_writable(&plan),
             "the constructed home is writable by default"
@@ -1615,7 +1628,13 @@ mod tests {
         let mut ro = policy_with_placeholders();
         ro.effective_policy.fs.home_readonly = true;
         let ro = substitute(&ro, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&ro, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &ro,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         assert!(
             !home_writable(&plan),
             "[fs.home].readonly suppresses the home write grant"
@@ -1633,7 +1652,13 @@ mod tests {
         ];
         p.effective_policy.fs.write = vec!["/srv/data/project".to_owned()];
         let p = substitute(&p, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let view = plan.view.as_ref().expect("view");
 
         let project: Vec<&BindMount> = view
@@ -1682,7 +1707,13 @@ mod tests {
                 source: "~/stores/acme/cred.json".to_owned(),
             });
         let p = substitute(&p, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let view = plan.view.as_ref().expect("view");
         let bind = view
             .binds
@@ -1711,7 +1742,13 @@ mod tests {
         p.effective_policy.fs.read = vec!["/srv/a/b/c".to_owned(), "/srv".to_owned()];
         p.effective_policy.fs.write = vec!["/srv/a".to_owned()];
         let p = substitute(&p, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let view = plan.view.as_ref().expect("view");
         // The three fs grants, in the order they appear among the binds, are length-ascending.
         let order: Vec<usize> = view
@@ -1741,7 +1778,13 @@ mod tests {
         p.effective_policy.exec.loaders = vec![];
         // subst() has home = /home/dev (the operator's real home).
         let p = substitute(&p, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
 
         // The fs grant binds the real source to the persona target.
         let view = plan.view.as_ref().expect("view");
@@ -1813,7 +1856,13 @@ mod tests {
         );
         // And the matching exec.allow grant lands on the same persona path (Landlock execute),
         // so the shell the workload runs is the one it's allowed to run.
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         assert!(
             plan.landlock_fs.iter().any(|(path, a)| path
                 == Path::new("/home/kennel/.local/bin/myshell")
@@ -1848,7 +1897,13 @@ mod tests {
             .limits
             .insert("nproc".to_owned(), "256 512".to_owned());
         let p = substitute(&p, &subst()).expect("substitute");
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let find = |r: Resource| plan.ulimits.iter().find(|(res, _, _)| *res == r).copied();
         assert_eq!(
             find(Resource::RLIMIT_NOFILE),
@@ -1870,7 +1925,13 @@ mod tests {
         // The resolved loaders (each binary's PT_INTERP, settled at compile) carry EXECUTE
         // alongside the binaries; libraries do NOT (07-3-exec). Seed one to exercise it.
         p.effective_policy.exec.loaders = vec!["/lib64/ld-linux-x86-64.so.2".to_owned()];
-        let plan = Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
 
         // Namespaces at the plan level: user (the unprivileged foundation) + mount/pid/ipc, plus
         // the per-kennel net-ns (Namespaces::NET) for every mode except `open`. The test policy is
@@ -2001,7 +2062,7 @@ mod tests {
         p.effective_policy.exec.allow.clear();
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2022,7 +2083,7 @@ mod tests {
         p.effective_policy.exec.allow = vec!["**".to_owned()];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2045,7 +2106,7 @@ mod tests {
             .push("/run/kennel/<kennel>/home/evil".to_owned());
         let err = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2063,7 +2124,7 @@ mod tests {
         p.effective_policy.fs.dev.allow = vec!["/dev/pts/**".to_owned()];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2105,7 +2166,7 @@ mod tests {
         p.effective_policy.fs.read.push("/etc/ssl".to_owned());
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2159,7 +2220,7 @@ mod tests {
             .extend(reads.iter().map(|s| (*s).to_owned()));
         Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2269,7 +2330,7 @@ mod tests {
         edit(&mut p.effective_policy.net);
         Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2421,7 +2482,7 @@ mod tests {
             p.effective_policy.fs.tmp.mmap_exec = on;
             let plan = Plan::from_policy(
                 &substitute(&p, &subst()).expect("subst"),
-                7,
+                Ctx::new(7).expect("a non-zero ctx"),
                 "kennel-dev",
                 Path::new("/home/dev"),
             )
@@ -2439,7 +2500,7 @@ mod tests {
         p.effective_policy.fs.write_mmap_exec = vec!["/srv/proj/**".to_owned()];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2480,8 +2541,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             "substituted identically to its fs.write grant"
         );
-        let plan =
-            Plan::from_policy(&substituted, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
+        let plan = Plan::from_policy(
+            &substituted,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan");
         let view = plan.view.as_ref().expect("view");
         let marked: Vec<_> = view
             .binds
@@ -2503,7 +2569,7 @@ mod tests {
         // ioctls work on them), not merely made visible in the constructed /dev.
         let plan = Plan::from_policy(
             &substitute(&policy_with_placeholders(), &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2530,7 +2596,7 @@ mod tests {
             .push("<home>/projects/foo".to_owned());
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2556,7 +2622,7 @@ mod tests {
             p.effective_policy.fs.dev.allow = vec![bad.to_owned()];
             let err = Plan::from_policy(
                 &substitute(&p, &subst()).expect("subst"),
-                7,
+                Ctx::new(7).expect("a non-zero ctx"),
                 "kennel-dev",
                 Path::new("/home/dev"),
             )
@@ -2583,7 +2649,7 @@ mod tests {
         });
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2625,7 +2691,7 @@ mod tests {
         });
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2674,7 +2740,7 @@ mod tests {
         }];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
-            7,
+            Ctx::new(7).expect("a non-zero ctx"),
             "kennel-dev",
             Path::new("/home/dev"),
         )
@@ -2753,7 +2819,13 @@ mod tests {
     /// A plan with two v4 allow rules and one deny, from the shared fixture.
     fn fixture_plan() -> Plan {
         let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
-        Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan")
+        Plan::from_policy(
+            &p,
+            Ctx::new(7).expect("a non-zero ctx"),
+            "kennel-dev",
+            Path::new("/home/dev"),
+        )
+        .expect("plan")
     }
 
     #[test]

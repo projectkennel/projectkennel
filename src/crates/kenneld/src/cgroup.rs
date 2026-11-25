@@ -11,6 +11,7 @@
 //! `kennel_lib_spawn`). Reading the *own* cgroup keeps this distro-agnostic: no
 //! parsing for systemd-specific slice names.
 
+use kennel_lib_spawn::Ctx;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -116,7 +117,7 @@ fn parse_self_cgroup(content: &str) -> Option<PathBuf> {
 /// The cgroup path for kennel `ctx`, as a child of `base` (kenneld's own cgroup
 /// from [`self_cgroup`]).
 #[must_use]
-pub fn kennel_cgroup(base: &Path, ctx: u16) -> PathBuf {
+pub fn kennel_cgroup(base: &Path, ctx: Ctx) -> PathBuf {
     base.join(format!("{KENNEL_PREFIX}{ctx}"))
 }
 
@@ -253,7 +254,10 @@ mod tests {
     #[test]
     fn kennel_cgroup_is_a_child_named_by_ctx() {
         let base = PathBuf::from("/sys/fs/cgroup/user.slice/user@1000.service/kenneld.service");
-        assert_eq!(kennel_cgroup(&base, 7), base.join("kennel-7"));
+        assert_eq!(
+            kennel_cgroup(&base, Ctx::new(7).expect("a non-zero ctx")),
+            base.join("kennel-7")
+        );
     }
 
     #[test]

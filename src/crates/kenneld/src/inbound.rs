@@ -21,6 +21,7 @@
 //! [`verb::REGISTER_MIRROR`]: kennel_lib_binder::service::verb::REGISTER_MIRROR
 //! [`verb::DELIVER_INET`]: kennel_lib_binder::service::verb::DELIVER_INET
 
+use kennel_lib_spawn::Ctx;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::IpAddr;
@@ -112,8 +113,8 @@ impl InboundRuntime {
 
     /// Attach the audit writer inbound connections are recorded through, and the kennel's ctx
     /// (idempotent; the first wins).
-    pub fn attach_audit(&self, writer: Arc<Writer>, ctx: u16) {
-        let _ = self.audit.set((writer, ctx));
+    pub fn attach_audit(&self, writer: Arc<Writer>, ctx: Ctx) {
+        let _ = self.audit.set((writer, ctx.get()));
     }
 
     /// Whether `port` is in the policy mirror set (the registration gate).

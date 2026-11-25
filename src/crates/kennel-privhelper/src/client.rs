@@ -331,14 +331,14 @@ fn exchange(helper: &Path, bytes: &[u8]) -> Result<Response, ClientError> {
 /// As [`invoke`].
 pub fn del_address(
     helper: &Path,
-    ctx: u16,
+    ctx: kennel_lib_spawn::Ctx,
     interface: &str,
     addr: IpAddr,
     prefix: u8,
 ) -> Result<Response, ClientError> {
     invoke(
         helper,
-        &addr_request(Op::DelAddr, ctx, interface, addr, prefix),
+        &addr_request(Op::DelAddr, ctx.get(), interface, addr, prefix),
     )
 }
 

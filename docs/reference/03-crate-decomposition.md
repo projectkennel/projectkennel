@@ -21,13 +21,13 @@ the code whose compromise would break confinement.
 
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
-| `kenneld` | 9475 | — | **yes** | *(2 bins)* | serde |
+| `kenneld` | 9488 | — | **yes** | *(2 bins)* | serde |
 | `kennel-lib-compile` | 5946 | — | — | cli, compose | serde |
 | `kennel-cli` | 5742 | — | — | *(binary)* | lexopt, serde, serde_json |
-| `kennel-lib-spawn` | 3215 | — | **yes** | bin-init, kenneld, privhelper | — |
+| `kennel-lib-spawn` | 3246 | — | **yes** | bin-init, kenneld, privhelper | — |
 | `kennel-lib-policy` | 3151 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, object, serde |
 | `kennel-lib-toml` | 2734 | — | **yes** | compile, compose, config, kenneld, policy | serde |
-| `kennel-privhelper` | 2310 | — | **yes** | kenneld | — |
+| `kennel-privhelper` | 2320 | — | **yes** | kenneld | — |
 | `kennel-lib-binder` | 2185 | **yes** | **yes** | bin-init, dbus, dbus-broker, facade, kenneld, spawn, tun-broker | libc |
 | `kennel-lib-syscall` | 1732 | **yes** | **yes** | bin-init, binder, bpf, cli, control, facade, kenneld, manifest, privhelper, spawn, tun-broker | bitflags, libc, nix, seccompiler |
 | `kennel-facade` | 1621 | — | — | *(11 bins)* | — |
@@ -77,7 +77,7 @@ the code whose compromise would break confinement.
 - `kennel-tun-broker` → host-delegate, binder, policy, scm, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, toml, privhelper
 
-**Totals.** 32 crates, **48746 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 18 crates, **30492 SLOC**; the remaining 14 crates (18254 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 32 crates, **48800 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 18 crates, **30546 SLOC**; the remaining 14 crates (18254 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 

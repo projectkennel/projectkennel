@@ -552,7 +552,7 @@ mod tests {
 
     fn subst() -> RuntimeSubstitutions {
         RuntimeSubstitutions {
-            ctx: 1,
+            ctx: kennel_lib_spawn::Ctx::new(1).expect("a non-zero ctx"),
             uid: 1000,
             kennel: "t".to_owned(),
             home: PathBuf::from("/home/dev"),

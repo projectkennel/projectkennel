@@ -21,6 +21,7 @@ const fn refusal_code(r: &Refusal) -> u8 {
         Refusal::AddrOutOfScope => 2,
         Refusal::InterfaceNotAllowed => 3,
         Refusal::InterfaceNameTooLong => 4,
+        Refusal::DefaultContext => 5,
     }
 }
 

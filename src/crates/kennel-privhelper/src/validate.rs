@@ -100,7 +100,7 @@ pub struct AddrRequest {
 /// to the sub-helper that does, cannot be given one nobody checked (CODING-STANDARDS.md §11.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedAddr {
-    ctx: u16,
+    ctx: kennel_lib_spawn::Ctx,
     interface: String,
     addr: Ipv6Addr,
 }
@@ -108,7 +108,7 @@ pub struct ScopedAddr {
 impl ScopedAddr {
     /// The kennel context the address belongs to.
     #[must_use]
-    pub const fn ctx(&self) -> u16 {
+    pub const fn ctx(&self) -> kennel_lib_spawn::Ctx {
         self.ctx
     }
 
@@ -148,6 +148,8 @@ pub enum Refusal {
     InterfaceNotAllowed,
     /// The interface name exceeds the kernel's 15-character limit.
     InterfaceNameTooLong,
+    /// The context is 0: the operator's own, never a kennel's.
+    DefaultContext,
 }
 
 impl std::fmt::Display for Refusal {
@@ -167,6 +169,9 @@ impl std::fmt::Display for Refusal {
                     f,
                     "interface must be `lo` or a `kennel-<id>` dummy interface"
                 )
+            }
+            Self::DefaultContext => {
+                write!(f, "context 0 is the operator's own, not a kennel's")
             }
             Self::InterfaceNameTooLong => {
                 write!(
@@ -197,6 +202,8 @@ pub fn reserved_prefix(scope: &ReservedScope) -> [u8; 6] {
 /// 64, the address falls outside the caller's per-kennel
 /// `fd6b:6e00:<uid_subnet>:<ctx>::/64`, or the interface name is not permitted.
 pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<ScopedAddr, Refusal> {
+    // Context 0 is the operator's own. Its subnet is not a kennel's to add to or remove from.
+    let ctx = kennel_lib_spawn::Ctx::new(req.ctx).ok_or(Refusal::DefaultContext)?;
     validate_interface(&req.interface)?;
     let IpAddr::V6(v6) = req.addr else {
         // IPv4 loopback addressing was retired; only v6 ULA is in scope.
@@ -217,7 +224,7 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<ScopedA
         && addr_ctx == req.ctx
     {
         Ok(ScopedAddr {
-            ctx: req.ctx,
+            ctx,
             interface: req.interface.clone(),
             addr: v6,
         })
@@ -279,6 +286,17 @@ mod tests {
         assert!(validate_addr(&addr_req(5, "lo", a, 64), &scope()).is_ok());
     }
 
+    /// Context 0 is the operator's own address block: the helper never adds or
+    /// removes an address there, even one that is otherwise in scope.
+    #[test]
+    fn context_zero_is_refused() {
+        let a = IpAddr::V6(loopback_v6(UID, 0, 1));
+        assert_eq!(
+            validate_addr(&addr_req(0, "lo", a, 64), &scope()).err(),
+            Some(Refusal::DefaultContext)
+        );
+    }
+
     #[test]
     fn v6_in_scope_on_kennel_dummy_is_ok() {
         let a = IpAddr::V6(loopback_v6(UID, 5, 1));
@@ -295,7 +313,10 @@ mod tests {
     fn a_validated_address_carries_what_was_checked() {
         let a = loopback_v6(UID, 5, 1);
         let scoped = validate_addr(&addr_req(5, "lo", IpAddr::V6(a), 64), &scope()).expect("ok");
-        assert_eq!(scoped.ctx(), 5);
+        assert_eq!(
+            scoped.ctx(),
+            kennel_lib_spawn::Ctx::new(5).expect("a non-zero ctx")
+        );
         assert_eq!(scoped.interface(), "lo");
         assert_eq!(scoped.addr(), a);
         assert_eq!(scoped.prefix(), 64);
