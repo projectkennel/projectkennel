@@ -142,6 +142,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **`Plan::from_policy` is split into its stages.** It was one 427-line function with a
+  length exemption. The stages are now functions (`namespaces_for`, `fs_grants`,
+  `exec_rules`, `dev_allowlist`, `fixed_fs_rules`, `mask_paths`, `etc_overlays`,
+  `image_root`), called in the same order, and the exemption is gone. No behaviour change:
+  the Landlock rules and binds are produced in the order they were before.
 - **The factory's `construct` is split into its stages.** It was one 399-line function. The
   stages are now functions (`receive_request`, `provision_host_network`,
   `open_trusted_init`, `construction_child`, `write_maps_and_release`,
