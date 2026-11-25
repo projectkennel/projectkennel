@@ -51,7 +51,7 @@ pub use plan::{
     AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan, ProcView,
     ProxyEndpoint, ShimView, Supervision,
 };
-pub use view_path::{ViewPath, ViewPathError};
+pub use view_path::{BindPathError, HostPath, HostPathError, ViewPath, ViewPathError};
 
 /// Why a Landlock ruleset could not be built.
 #[derive(Debug)]
@@ -1206,7 +1206,7 @@ fn materialize_binds(
                 None
             };
             let source = magic_guard.as_ref().map_or_else(
-                || b.source.clone(),
+                || b.source.to_path_buf(),
                 |fd| PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd())),
             );
             mount::bind(&source, &dest, true).map_err(|e| {
@@ -1345,6 +1345,10 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn proxy_port(port: u16) -> kennel_lib_policy::variant::Port {
+        kennel_lib_policy::variant::Port::new(port).expect("a non-zero port")
+    }
 
     #[test]
     fn a_landlock_rule_that_fails_names_its_path() {
@@ -2714,7 +2718,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some(v4),
             v6: std::net::Ipv6Addr::LOCALHOST,
-            port: 1080,
+            port: proxy_port(1080),
         });
         // Exactly one new bind-allow entry: a /28 on the proxy endpoint's v4 (the loopback subnet).
         assert_eq!(
@@ -2760,7 +2764,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some(v4),
             v6,
-            port: 1080,
+            port: proxy_port(1080),
         });
 
         // proxy_addr_v4 @8 (network order = the octets).
@@ -2785,7 +2789,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some(v4),
             v6,
-            port: 1080,
+            port: proxy_port(1080),
         });
 
         // One entry appended to each connect trie: a single /32 (v4) / /128 (v6) on the kennel's
@@ -2835,7 +2839,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some("127.0.144.1".parse().expect("v4")),
             v6: "fd00:0:0:42::1".parse().expect("v6"),
-            port: 1080,
+            port: proxy_port(1080),
         });
         assert!(
             plan.landlock_net.contains(&(1080, AccessNet::CONNECT_TCP)),
@@ -2845,7 +2849,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some("127.0.144.1".parse().expect("v4")),
             v6: "fd00:0:0:42::1".parse().expect("v6"),
-            port: 1080,
+            port: proxy_port(1080),
         });
         assert_eq!(
             plan.landlock_net.iter().filter(|(p, _)| *p == 1080).count(),
@@ -2862,7 +2866,7 @@ mod tests {
         plan.stamp_proxy(&ProxyEndpoint {
             v4: None,
             v6,
-            port: 1080,
+            port: proxy_port(1080),
         });
 
         // No v4 entry added, and proxy_addr_v4 in meta stays zero.

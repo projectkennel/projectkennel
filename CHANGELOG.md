@@ -6,6 +6,19 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+### Internal / supply chain
+
+- **A bind's host source and the proxy's port are types** (CODING-STANDARDS.md §11.1).
+  - `HostPath` (`kennel-lib-spawn`): the host path a bind takes its content from, absolute
+    and free of `..`. `BindMount::source` is one. The plan builder, the daemon and the plan
+    decoder parse into it, so the factory refuses a plan whose bind source is relative or
+    climbs (`PlanWireError::BadHostPath`) before anything is opened. The bytes of the plan on
+    the wire are unchanged.
+  - `ProxyEndpoint::port` is a `Port`, never 0. A proxied kennel whose signed `net.proxy.port`
+    is 0 is refused at bring-up; before, the proxy entry was stamped with port 0.
+  - `BindPathError` says which side of a bind broke its rule, the in-view target or the host
+    source. It replaces `ViewPathError` in the daemon's bring-up errors.
+
 ## [0.8.2] — 2026-11-25
 
 **A hardening release: the follow-up to the reference-monitor review.** 0.8.1 fixed what the

@@ -1967,7 +1967,7 @@ fn exclusive_sources_of(plan: &Plan) -> Vec<PathBuf> {
         v.binds
             .iter()
             .filter(|b| b.exclusive)
-            .map(|b| b.source.clone())
+            .map(|b| b.source.to_path_buf())
             .collect()
     })
 }
@@ -2953,8 +2953,15 @@ fn provider_rendezvous<P, L>(
                     );
                     continue;
                 };
+                let Ok(source) = kennel_lib_spawn::HostPath::parse(host_dir) else {
+                    eprintln!(
+                        "kenneld: provider `{kname}`: capability `{}` has no usable rendezvous dir",
+                        p.name
+                    );
+                    continue;
+                };
                 view.binds.push(kennel_lib_spawn::plan::BindMount {
-                    source: host_dir,
+                    source,
                     target,
                     writable: true,
                     exclusive: false,

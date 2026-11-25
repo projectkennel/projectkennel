@@ -365,6 +365,12 @@ impl Port {
             .ok_or(DestFault::PortZero)
     }
 
+    /// A port from its number; `None` for 0.
+    #[must_use]
+    pub fn new(port: u16) -> Option<Self> {
+        std::num::NonZeroU16::new(port).map(Self)
+    }
+
     /// The port number.
     #[must_use]
     pub const fn get(self) -> u16 {
