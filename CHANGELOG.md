@@ -13,6 +13,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Policy schema changes
 
+- **A policy that uses `fs.redirect` and `fs.write_mmap_exec` together can now be compiled.**
+  It could not: the settled policy declared the plain `write_mmap_exec` list after the
+  `redirect` tables, the canonical TOML writer refuses a plain value after a table, and
+  `kennel policy compile` failed with "values must be emitted before tables". The two fields
+  are declared the other way round. A policy that used one of them, or neither, serialises to
+  the same bytes as before, so existing signatures are unaffected. Found by the new
+  every-field golden test below.
 - **`[[unix.allow]]` is stricter.** A policy is now refused if a grant's `real` is anywhere in
   `$XDG_RUNTIME_DIR/kennel/` (it was only `control.sock`), if `real` lies in `fs.write`,
   `fs.exclusive` or a persisted home path, or if `shim` is not rooted at `/`, `~/`, `$HOME/`
@@ -142,6 +149,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Three test gaps are closed.**
+  - *A fully populated policy.* The golden-bytes test for the canonical form covered only the
+    sample policy, which leaves most optional sections empty. `every-field.canonical` is the
+    canonical form of a fixture with every field set. The fixture writes every struct out in
+    full, so a field added to the settled policy stops it compiling until a value is chosen.
+  - *An interactive run.* Suite case `interactive-pty` runs `kennel run` under a
+    pseudo-terminal. The suite redirected stdin for every case, so the daemon's interactive
+    path (the pty master hand-back and the pty pump) was never taken.
+  - *Kennels reaching one mesh bus at once.* Suite case `mesh-bus-concurrent` starts four
+    consumers of the same bus at the same moment, three rounds over. Every other mesh case
+    starts one consumer and waits for it.
 - **Leftovers from the quality assessment.**
   - *Fuzz.* The seeded mutations were single-byte only. They now also remove and double each
     byte, and overwrite every four-byte window with a boundary length (zero, one, one past the

@@ -1,0 +1,259 @@
+settled_schema_version = 6
+name = "every-field"
+deferred_substitutions = ["<ctx>", "<uid>"]
+framework_invariants_asserted = ["cap.no_new_privs"]
+[effective_policy.net]
+mode = "host"
+udp = true
+bind_port_min = 1024
+bind_allowed_ports = [8080, 8081]
+
+[effective_policy.net.proxy]
+offset = 3
+port = 1081
+
+[[effective_policy.net.allow]]
+cidr = "93.184.216.0"
+prefix_len = 24
+port_min = 443
+port_max = 444
+protocol = "tcp"
+
+[[effective_policy.net.allow_names]]
+name = "example.org"
+ports = [443, 8443]
+protocol = "tcp"
+
+[[effective_policy.net.udp_allow_names]]
+name = "dns.example.org"
+ports = [443, 8443]
+protocol = "udp"
+
+[[effective_policy.net.deny_invariant]]
+cidr = "169.254.169.254"
+prefix_len = 32
+port_min = 80
+port_max = 81
+protocol = "any"
+
+[[effective_policy.net.deny_author]]
+cidr = "10.0.0.0"
+prefix_len = 8
+port_min = 22
+port_max = 23
+protocol = "tcp"
+
+[[effective_policy.net.bpf_connect_allow]]
+cidr = "192.0.2.0"
+prefix_len = 24
+port_min = 443
+port_max = 444
+protocol = "tcp"
+
+[[effective_policy.net.bpf_connect_deny]]
+cidr = "198.51.100.0"
+prefix_len = 24
+port_min = 25
+port_max = 26
+protocol = "tcp"
+
+[[effective_policy.net.bpf_bind_allow]]
+cidr = "127.0.0.1"
+prefix_len = 32
+port_min = 8080
+port_max = 8081
+protocol = "tcp"
+
+[[effective_policy.net.bpf_bind_deny]]
+cidr = "0.0.0.0"
+prefix_len = 0
+port_min = 9
+port_max = 10
+protocol = "udp"
+
+[effective_policy.fs]
+home_shadow = true
+read = ["/usr", "/etc/ssl/certs"]
+write = ["/home/op/project", "/home/op/shared"]
+exclusive = ["/home/op/shared"]
+home_persist = [".cache/tool"]
+home_readonly = true
+write_mmap_exec = ["/home/op/project"]
+
+[[effective_policy.fs.redirect]]
+path = "/etc/tool"
+source = "/etc/kennel/config/tool"
+
+[effective_policy.fs.cwd]
+grant = "write"
+required = [".git", ".agent/"]
+
+[effective_policy.fs.tmp]
+writable = true
+size_mib = 256
+mmap_exec = true
+
+[effective_policy.fs.dev]
+allow = ["/dev/dri/renderD128"]
+
+[effective_policy.exec]
+deny_setuid = true
+deny_setgid = true
+deny_setcap = true
+deny_writable = true
+allow = ["/bin/sh", "/usr/bin/git"]
+deny = ["/usr/bin/sudo"]
+path = ["/usr/bin", "/bin"]
+loaders = ["/lib64/ld-linux-x86-64.so.2"]
+
+[effective_policy.proc]
+hidepid = true
+
+[effective_policy.cap]
+no_new_privs = true
+
+[effective_policy.seccomp]
+deny_action = "kill_process"
+deny = ["ptrace", "mount"]
+
+[effective_policy.lifecycle]
+ttl_seconds = 3600
+ttl_action = "renew"
+
+[effective_policy.tty]
+filter_terminal_escapes = true
+
+[effective_policy.trust]
+manifest = true
+on_change = "kill"
+
+[provenance]
+compiler_version = "0.0.0"
+schema_version = 6
+threat_catalogue_version = "0.1"
+
+[[provenance.resolved_artifacts]]
+name = "base-confined"
+signing_key_id = "maint-2026"
+signature = "c2lnbmF0dXJl"
+
+[ssh]
+allow_headless = true
+
+[[ssh.grants]]
+dest = "git@example.org"
+options = ["no-pty", "no-port-forwarding"]
+public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA every-field"
+key_file = "example-org.key"
+[[unix.sockets]]
+name = "wayland"
+real = "/run/user/<uid>/wayland-0"
+shim = "~/.wayland-0"
+env = "WAYLAND_DISPLAY"
+
+[identity]
+user = "agent"
+group = "agents"
+groups = ["video", "render"]
+hostname = "every-field"
+[[mesh.provides]]
+name = "org.example.provided"
+shape = "binder-connector"
+endpoint = "/run/mesh/provided/binder"
+key = "provided-key"
+
+[[mesh.consumes]]
+name = "org.example.consumed"
+shape = "dbus-name"
+at = "/run/mesh/consumed/binder"
+env = ["CONSUMED_SOCKET"]
+key = "consumed-key"
+required = true
+
+[service]
+restart = "on-failure"
+backoff_ms = 2500
+max_attempts = 7
+
+[dbus]
+audit_level = "full"
+
+[dbus.session]
+talk = ["org.example.session.Talk"]
+call = ["org.example.session.Call=org.example.Iface.Method@/org/example"]
+broadcast = ["org.example.session.Broadcast=org.example.Iface.Signal@/*"]
+own = ["org.example.session.Own"]
+deny_talk = ["org.example.session.Denied"]
+
+[dbus.system]
+talk = ["org.example.system.Talk"]
+call = ["org.example.system.Call=org.example.Iface.Method@/org/example"]
+broadcast = ["org.example.system.Broadcast=org.example.Iface.Signal@/*"]
+own = ["org.example.system.Own"]
+deny_talk = ["org.example.system.Denied"]
+
+[audit]
+sinks = ["file", "journald", "syslog", "stdout"]
+network_level = "full"
+filesystem_level = "summary"
+exec_level = "denies-only"
+unix_level = "off"
+dbus_level = "full"
+syslog_facility = "local3"
+
+[audit.file]
+dir = "/var/log/kennel"
+rotate_at_bytes = 1048576
+compress_after_seconds = 86400
+retain_count = 14
+[env.vars]
+EDITOR = "vi"
+LANG = "C.UTF-8"
+[ulimits.limits]
+nofile = "1024:4096"
+nproc = "512"
+
+[workload]
+argv = ["/usr/bin/git", "status"]
+cwd = "~/project"
+pinned = true
+allowed_args = true
+sha256 = ["0000000000000000000000000000000000000000000000000000000000000000"]
+
+[rootfs]
+path = "/var/lib/kennel/oci/tool/rootfs"
+image = "example.org/tool@sha256:1111"
+persistence = "persist"
+readonly = ["/usr/**"]
+writable = ["/var/lib/tool/**"]
+
+[spawn]
+max_instances = 4
+
+[[spawn.allow]]
+template = "net-fetch"
+signing_key_id = "maint-2026"
+signature = "dGVtcGxhdGU="
+mutable_narrow = ["net.proxy.allow"]
+
+[[manifest]]
+field = "exec.shell"
+one_of = ["a", "b"]
+
+[[manifest]]
+field = "fs.write"
+pool = ["/w/one", "/w/two"]
+pool_max = 2
+
+[[manifest]]
+field = "net.proxy.allow"
+pattern = ["*.example.org:443"]
+
+[[manifest]]
+field = "fs.read"
+relpath_under = "/srv/data"
+
+[[manifest]]
+field = "env.BRANCH"
+freeform = true
+reason = "the operator names the branch"
