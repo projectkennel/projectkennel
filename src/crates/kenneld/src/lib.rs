@@ -640,10 +640,6 @@ struct Provision {
     inetd: Option<Child>,
     view_root: Option<PathBuf>,
     binder: Option<crate::binder::Manager>,
-    /// The kennel was built by the privhelper factory (the returned `Child` is the
-    /// factory supervisor, not an in-process spawn). Records which path ran, for unwind
-    /// and diagnostics.
-    factory: bool,
 }
 
 /// Bring a kennel up. On any error the partial bring-up is unwound, so no
@@ -981,7 +977,6 @@ fn construct_and_start<P: Privileged + Sync>(
         tun,
         &egress_bytes,
         tracer.level_u8(),
-        state,
     )?;
     let kennel_privhelper::client::Constructed {
         mut child,
@@ -1218,7 +1213,6 @@ fn grant_read_on_parents(
 
 /// The egress BPF payload the factory attaches to the kennel cgroup; empty when the cgroup BPF
 /// is not the egress gate.
-///
 // Egress BPF. The factory attaches it (folded into the one construct op); here we just
 // build and encode the payload to ride the construction datagram. The helper pins this
 // kennel's maps under the owner's `/run/user/<uid>/kennel/bpf/<id>/` so kenneld can
@@ -1247,7 +1241,6 @@ fn egress_payload(plan: &Plan, id: &str, bpf_egress: bool) -> Vec<u8> {
 }
 
 /// The dial delegate's command socket (proxied modes only) and the daemon's decision runtime.
-///
 // The per-kennel egress: the dial delegate's command socket + kenneld's decision runtime.
 // The delegate launch is deferred to *after* construct (below); here we only fix the socket
 // path and build the in-process decision runtime from the signed policy. ONLY the proxied
@@ -1281,7 +1274,6 @@ fn net_runtime_for(
 
 /// Render the synthetic `/etc`, the home dotfiles and the synthetic `~/.ssh`, and add them to
 /// the plan as file binds with the Landlock read rules they need.
-///
 // Render the synthetic /etc (the libc/NSS files) and hand the spawn the
 // binds that shadow them over the kennel's view. Built here because it
 // needs the kennel's just-computed primary addresses.
@@ -1356,7 +1348,6 @@ fn wire_file_binds(
 }
 
 /// Wire the constructed view: the framework's own binds, `HOME`, and the staging root.
-///
 // Constructed-view wiring (§7.4.5). When the plan carries a shim view and
 // the daemon gave us a staging mountpoint: point HOME at the shim root,
 // add the vanilla TLS/linker /etc subtrees the synthetic /etc omits (bound
@@ -1448,7 +1439,6 @@ fn wire_view(
 }
 
 /// Wait for `kennel-bin-init` to announce it has execed.
-///
 // Boot-sync (07-2 §7.2.1a): wait for kennel-bin-init to announce it has execed and is blocked
 // waiting for the bus. This is what lets node 0 be claimed deterministically, before the pull. A failure here leaves the kennel up but
 // binder-less; the workload (which it gates) will not start, so surface it. The construction child
@@ -1473,7 +1463,6 @@ fn await_boot_sync(
 }
 
 /// Start the egress dial delegate and, for mirrored ports, the inbound bind delegate.
-///
 // Launch the egress dial delegate *before* releasing the binder pull (which is what lets
 // kennel-bin-init start the workload), so its command socket is bound before the first INet request.
 fn start_delegates(
@@ -1528,7 +1517,6 @@ fn start_delegates(
 }
 
 /// Send `kennel-bin-init` the mesh rendezvous message.
-///
 // Mesh rendezvous (§7.13.4a): hand kennel-bin-init the detached binderfs clones to place, as one
 // datagram on the boot-sync socket right after GO. The init reads it after pulling its plan and
 // `move_mount`s each fd into its target before forking the workload. Always sent (a count-0
@@ -1594,7 +1582,6 @@ fn construct_via_factory<P: Privileged + Sync>(
     tun: bool,
     egress_bytes: &[u8],
     log_level: u8,
-    state: &mut Provision,
 ) -> Result<(kennel_privhelper::client::Constructed, Vec<u8>), Error> {
     let drop_uid = kennel_lib_syscall::unistd::real_uid();
     let drop_gid = kennel_lib_syscall::unistd::real_gid();
@@ -1620,7 +1607,6 @@ fn construct_via_factory<P: Privileged + Sync>(
         plan.workload_fd,
         plan.stdio_fds,
     )?;
-    state.factory = true;
 
     Ok((built, supervision_bytes))
 }

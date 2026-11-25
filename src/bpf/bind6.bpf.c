@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/bind6
  * Purpose: IPv6 counterpart of bind4. A bind to in6addr_any (::) is rewritten to

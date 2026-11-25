@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup_skb/ingress
  * Purpose: The inbound half of the bind policy. The bind hooks judge a bind()

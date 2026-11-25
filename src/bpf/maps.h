@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Project Kennel BPF map ABI — single source of truth for map layouts.
  *

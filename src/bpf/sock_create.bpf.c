@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/sock_create
  * Purpose: Socket allowlist. The workload may create TCP and UDP sockets in

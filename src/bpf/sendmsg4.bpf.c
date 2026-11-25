@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/sendmsg4
  * Purpose: Apply the egress policy to connectionless IPv4 datagrams

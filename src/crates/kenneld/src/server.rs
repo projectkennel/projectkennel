@@ -1726,7 +1726,6 @@ fn run_attach<P, L>(
 
 /// Admit a start: refuse a reserved name, then reserve the name and a context. On refusal the
 /// client has been answered and the refusal audited, and `None` is returned.
-///
 // `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
 // kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
 // a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
@@ -1783,7 +1782,6 @@ struct Facades {
 }
 
 /// Prepare the SSH egress, the `AF_UNIX` shims and the D-Bus mediation of a kennel.
-///
 // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
 // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
 // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
@@ -2149,7 +2147,6 @@ impl Refused {
 
 /// Load the policy this start runs: the pre-built spawn instance, or the signed policy at the
 /// request's path. Refuses a policy that depends on Landlock scoping on a kernel without it.
-///
 // A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
 // normal run loads and verifies the signed policy from disk. Either way `subst` is now applied.
 fn load_for_start<P, L>(
@@ -2194,7 +2191,6 @@ where
 }
 
 /// Settle the argv and cwd to run, and the OCI launcher inputs if the policy has a `[rootfs]`.
-///
 // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
 // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
 // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
@@ -2252,7 +2248,6 @@ where
 }
 
 /// Materialise the invocation cwd into the view for a policy with an `[fs.cwd]` grant.
-///
 // `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
 // declared the slot; here — host-side, in operator context, before the kennel exists —
 // we resolve `req.cwd` under the framework floor and add the bind/Landlock grant. A
@@ -2307,7 +2302,6 @@ fn grant_invocation_cwd(
 }
 
 /// Create the managed overlay upper for a persist-mode OCI image root.
-///
 // Persist-mode rootfs (§7.11.4a): the managed overlay upper lives under the store entry
 // (the `config.json`'s dir). Create `upper/` + `work/` and fill them into the plan so the
 // construction child mounts the overlay with a persisted upper. The store fs must carry
@@ -2353,7 +2347,6 @@ fn prepare_persistent_upper(
 
 /// Verify a sha256-pinned workload and record its descriptor in the plan. Returns the open
 /// descriptor, which the caller holds until the kennel has been constructed.
-///
 // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
 // decision made here, on the host, before the kennel is built: kennel-bin-init is a
 // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
@@ -2392,7 +2385,6 @@ struct WorkloadIo {
 }
 
 /// Build the workload command and sort the request's descriptors by the kind of run.
-///
 // Interactive runs pass ONE connected socket — the CLI's proxied-terminal end
 // (`client_sock`). KENNELD owns the workload's pty master now (not the CLI): we
 // mint our OWN socketpair, hand the seal its `master_send` end (over which the
@@ -2456,7 +2448,6 @@ struct BinderParts {
 }
 
 /// Build what the kennel's binder node 0 is served with.
-///
 // Every kennel runs the privhelper factory + a per-kennel binder bus: binder is the
 // universal control plane (`kennel-bin-init` pulls its supervision-half over node 0), not an
 // opt-in for [binder]/[unix] kennels (`07-1`/`07-2`). So always wire the daemon-side
@@ -2557,7 +2548,6 @@ where
 
 /// For an interactive kennel, receive the pty master from the seal and start the broker that
 /// pumps it; `None` for a non-interactive kennel, or if no master came back.
-///
 // For an interactive kennel, kenneld now owns the master: receive it from the
 // seal over `master_recv`, build the PtyBroker (running the workload's output
 // through the [tty] escape filter), register it so a later `kennel attach` reaches
@@ -2780,7 +2770,6 @@ fn supervise<P, L>(
 }
 
 /// Add the consumes a mediated section implies, where the policy did not write them.
-///
 // A mediated section IS the brokered path: each enabled section implies its capability
 // consume, synthesized when the policy does not spell it out — so a section-only policy
 // (including any pre-W4 v3 artefact) routes identically to one that declares the
@@ -2824,7 +2813,6 @@ fn imply_mediated_consumes(loaded: &mut Loaded) {
 }
 
 /// Warn about a policy that shims an SSH or GPG agent socket into the kennel.
-///
 // Re-derive the compile-time footgun warning at spawn (§7.10.1): a policy may shim a
 // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
 // loudly about — an exposed agent is a destination-blind signing oracle. An operator
@@ -3004,7 +2992,6 @@ fn provider_rendezvous<P, L>(
 }
 
 /// A consumer's side of the mesh: ensure the bus of each binder-connector capability it consumes.
-///
 // Consumer mesh-bus bind-mounts (§7.13.4a): for each binder-connector `[[consumes]]` with an
 // `at`, resolve the provider's tier from the catalogue, ensure the mesh bus, and bind-mount
 // its binder device at the consumer's `at` path. The consumer opens this device, transacts
@@ -3057,7 +3044,6 @@ fn consumer_mesh_buses<P, L>(
 }
 
 /// The D-Bus broker's bus, for a kennel that grants `[dbus]` and consumes a bus name.
-///
 // Brokered D-Bus consumer (§7.7): such a kennel reaches the standing dbus-broker over the
 // connector mesh bus, so its `facade-dbus` opens the mesh device directly (the per-kennel
 // `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view — the dbus-name
@@ -3122,7 +3108,6 @@ fn dbus_broker_bus<P, L>(
 }
 
 /// Synthesise the workload's environment from policy.
-///
 // Synthesise the workload environment from policy (§7.9.2): clear the inherited
 // environment and build it from scratch. `PATH` (from `[exec].path`),
 // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
@@ -3236,15 +3221,6 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
     PathBuf::from(s)
 }
 
-/// Resolve the effective workload argv + cwd from the request and the policy's embedded
-/// `[workload]` (§7.4). The request's `--` argv overrides the policy's by default; a
-/// `pinned` policy refuses the override unless `req.force`. With no request argv the
-/// policy's argv (and its `cwd`, if any) drive the run.
-///
-/// # Errors
-///
-/// A human-readable reason when neither the request nor the policy supplies an argv, or
-/// when a non-empty request argv would override a pinned policy workload without `--force`.
 /// Resolve and floor-check the invocation cwd for a `[fs.cwd]` grant (§7.9).
 ///
 /// Returns the canonical host directory to bind, or a refusal reason. The framework floor is
@@ -3398,6 +3374,16 @@ const fn runs_policy_program(
     req.argv.is_empty() || (workload.pinned && workload.allowed_args)
 }
 
+/// Resolve the effective workload argv + cwd from the request and the policy's embedded
+/// `[workload]` (§7.4). The request's `--` argv overrides the policy's by default; a
+/// `pinned` policy refuses the override unless `req.force`. With no request argv the
+/// policy's argv (and its `cwd`, if any) drive the run.
+///
+/// # Errors
+///
+/// [`WorkloadError::NoWorkload`] when neither the request nor the policy supplies an argv, or
+/// [`WorkloadError::PinnedOverride`] when a request argv would replace a pinned policy
+/// workload without `--force`.
 fn effective_workload(
     req: &StartRequest,
     workload: &kennel_lib_policy::WorkloadRuntime,

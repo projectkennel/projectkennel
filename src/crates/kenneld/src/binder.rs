@@ -933,6 +933,12 @@ fn connect_granted_socket(
         .map_err(|_| GrantedConnect::Unreachable)
 }
 
+/// Serve a `CONNECT_AFUNIX` request: connect to the host socket the policy grants under the
+/// name the facade asks for, and hand the connection back as a descriptor.
+///
+/// A name the policy does not grant is denied. A granted name whose socket is one of the
+/// daemon's own is denied too, and one with nothing connectable behind it is reported as not
+/// found. Every outcome is audited.
 fn af_unix_connect(unix: &UnixRuntime, incoming: &Incoming, ctx: u16, writer: &Writer) -> Reply {
     let requested = decode_name(&incoming.data);
     let target = requested

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/setsockopt
  * Purpose: Force IPV6_V6ONLY = 1. A dual-stack socket (V6ONLY=0) accepts IPv4

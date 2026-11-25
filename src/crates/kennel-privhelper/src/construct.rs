@@ -289,7 +289,6 @@ struct Received {
 }
 
 /// Step 1: receive and decode the construction datagram, and check what it asks for.
-///
 // Receive the construction datagram. Framing: `[u32 ch_len][construction-half][egress]`
 // — the fixed construction-half (length-prefixed so its decoder gets exactly its bytes)
 // followed by the optional egress payload tail. For an interactive run the datagram also
@@ -351,7 +350,6 @@ fn receive_request(
 }
 
 /// Step 1a: put the kennel's host-side network resources in place, through the sub-helpers.
-///
 // Provision the kennel's host-side network resources by delegating to the capability-split
 // sub-helpers — the factory itself holds no `cap_net_admin` or BPF caps. Runs as the
 // operator, before any privilege change, in the **host** net namespace. This adds the
@@ -407,7 +405,6 @@ fn provision_host_network(
 }
 
 /// Step 1b: open the trusted `kennel-bin-init` the construction child will execute.
-///
 // Resolve and open the trusted `kennel-bin-init` from the **root-owned** deployment
 // cascade (`/usr/lib/kennel` → `/etc/kennel`; never a user-writable dir or the
 // environment — `kennel_lib_config::Deployment::load`). The operator (`kenneld`) does not

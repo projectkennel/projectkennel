@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Project Kennel BPF audit-event ABI (architecture/02-7-bpf-abi.md).
  *

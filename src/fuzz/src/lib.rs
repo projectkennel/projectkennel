@@ -284,7 +284,14 @@ pub fn run(seed: &[u8]) {
 }
 
 /// Feed `f` a valid input and everything one step away from it: `seed` itself, every
-/// truncation, and every single-byte change against a spread of bit patterns.
+/// truncation, every single-byte change against a spread of bit patterns, every byte removed
+/// or doubled, and every four-byte window overwritten with a boundary value.
+///
+/// The four-byte overwrites are aimed at length and count fields. A single flipped byte moves a
+/// 32-bit length by one power of 256 and leaves the other three bytes plausible; a whole field
+/// set to zero, to all ones, or to a value just past the buffer is the input a decoder's bounds
+/// check exists for. Removing or doubling a byte shifts everything after it, so every later
+/// field is read from the wrong offset.
 ///
 /// Random bytes almost never get past a decoder's first length or tag check, so they exercise
 /// its first branch and little else. Starting from a frame the decoder accepts puts each
@@ -302,6 +309,28 @@ pub fn mutations(seed: &[u8], mut f: impl FnMut(&[u8])) {
             f(&m);
         }
         m[i] = seed[i];
+    }
+    // One byte removed, and one byte doubled.
+    for i in 0..seed.len() {
+        let mut shorter = seed.to_vec();
+        shorter.remove(i);
+        f(&shorter);
+        let mut longer = seed.to_vec();
+        longer.insert(i, seed[i]);
+        f(&longer);
+    }
+    // Every four-byte window as a boundary length, in both byte orders.
+    let past_end = u32::try_from(seed.len())
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    for i in 0..seed.len().saturating_sub(3) {
+        for value in [0u32, 1, past_end, 0x7fff_ffff, 0x8000_0000, u32::MAX] {
+            for bytes in [value.to_le_bytes(), value.to_be_bytes()] {
+                let mut m = seed.to_vec();
+                m[i..i + 4].copy_from_slice(&bytes);
+                f(&m);
+            }
+        }
     }
 }
 

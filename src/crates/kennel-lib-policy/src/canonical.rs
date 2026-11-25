@@ -65,3 +65,33 @@ fn uncovered_sections(policy: &SettledPolicy, covered: &SettledPolicy) -> String
         format!(" (in {})", names.join(", "))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_bytes;
+    use crate::settled::sample_settled;
+
+    /// The canonical form is what a signature covers. If these bytes change, every policy signed
+    /// before the change stops verifying, so a change has to be a decision and not a side effect
+    /// of touching the serialiser or the policy struct.
+    ///
+    /// The golden file is the canonical form of [`sample_settled`]. To accept a deliberate
+    /// change, run this test once with `KENNEL_BLESS=1` and commit the file.
+    #[test]
+    fn the_canonical_form_of_the_sample_policy_is_the_committed_bytes() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/golden/sample-settled.canonical"
+        );
+        let bytes = canonical_bytes(&sample_settled()).expect("canonical form");
+        if std::env::var_os("KENNEL_BLESS").is_some() {
+            std::fs::write(path, &bytes).expect("write the golden file");
+        }
+        let golden = std::fs::read(path).expect("read the golden file (KENNEL_BLESS=1 writes it)");
+        assert!(
+            bytes == golden,
+            "the canonical form of the sample policy changed; signatures made before this change \
+             will not verify. If that is intended, re-run with KENNEL_BLESS=1 and commit {path}"
+        );
+    }
+}

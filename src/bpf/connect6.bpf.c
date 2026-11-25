@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/connect6
  * Purpose: IPv6 counterpart of connect4. Deny-first against deny_v6, then
