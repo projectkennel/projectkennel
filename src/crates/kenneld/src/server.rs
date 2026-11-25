@@ -1450,9 +1450,12 @@ fn ssh_host_alias(dest: &str) -> &str {
 /// This is the production per-kennel path the daemon's [`serve`] loop calls — and the entry
 /// point the self-hosting e2e drives directly (real privhelper + a real [`crate::policy::TrustStoreLoader`]),
 /// so the test exercises the same wiring production does, not a hand-built replica.
-// allow: one linear request lifecycle (reserve, load, ssh/unix/audit prep, spawn,
-// block, tear down); splitting it would scatter the shared `ctx`/`state_dir`/uuid.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+// One request lifecycle in four phases, each a function below: `admit` (the name and a
+// context), `settle` (the policy and the command), `assemble` (the spec), then bring-up and
+// `supervise` (serve until the workload exits, then tear down).
+// allow(too_many_arguments): the entry point the serve loop, the supervisor and the e2e tests
+// all call; its parameters are the request and its transport.
+#[allow(clippy::too_many_arguments)]
 pub fn run_kennel<P, L>(
     shared: &Arc<Shared<P, L>>,
     kname: &KennelName,
@@ -1472,11 +1475,186 @@ pub fn run_kennel<P, L>(
 {
     let tr = shared.identity.tracer;
     tr.step(&format!("run_kennel: starting `{kname}`"));
-    // `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
-    // kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
-    // a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
-    // operator's kennel or a provider with such a name would be reaped as some kennel's child.
-    if preloaded.is_none() && is_reserved_kennel_name(kname) {
+    // Admit the start: the name is not one of the daemon's own, and a context is free.
+    let Some(ctx) = admit(shared, kname, preloaded.is_some(), conn) else {
+        return;
+    };
+    let mut mesh_bus_guard = MeshBusGuard::new(shared);
+    tr.step(&format!("run_kennel: reserved ctx {ctx} for `{kname}`"));
+
+    // Settle what runs: load the policy, fix the command and its descriptors, and apply the
+    // grants that depend on this invocation.
+    let settled = match settle(shared, kname, req, fds, preloaded, ctx) {
+        Ok(v) => v,
+        Err(refused) => return fail(shared, kname, ctx, conn, refused.stage, refused.reason),
+    };
+    // Assemble the kennel's spec: the facades, the mesh, the synthetic `/etc`, the environment.
+    let Assembled {
+        mut spec,
+        mut command,
+        subst,
+        binder_parts,
+        audit_runtime,
+        state_dir,
+        kennel_uuid,
+        exclusive_sources,
+        loaded_tty_filter,
+        on_change,
+        master_recv,
+        client_sock,
+        // Held open until the kennel is constructed: the plan refers to these by number.
+        held: _held,
+    } = match assemble(
+        shared,
+        kname,
+        req,
+        provider_tier,
+        ctx,
+        &mut mesh_bus_guard,
+        settled,
+    ) {
+        Ok(v) => v,
+        Err(refused) => return fail(shared, kname, ctx, conn, refused.stage, refused.reason),
+    };
+    // Construct the per-kennel audit writer *before* start so the privileged
+    // operations during bring-up (and any refusal) are recorded as `priv.*`
+    // events through the same writer; it shares the run's `kennel_uuid` with the
+    // proxy. With no state dir configured, audit is simply not recorded and the
+    // decorator is a transparent pass-through.
+    let audit = state_dir.as_ref().map(|dir| {
+        Arc::new(crate::audit::build_writer(
+            kname,
+            dir,
+            &audit_runtime,
+            kennel_uuid.clone(),
+        ))
+    });
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
+
+    // Binder is the control plane of every kennel: what node 0 is served with.
+    let writer = audit
+        .clone()
+        .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(kname, kennel_uuid.clone())));
+    spec.binder = Some(binder_prep(
+        shared,
+        req,
+        conn,
+        constructor,
+        &subst,
+        binder_parts,
+        writer,
+    ));
+    tr.step("run_kennel: bring-up — building view, egress, factory construct, boot-sync");
+    let kennel = match start(&audited, spec, &mut command) {
+        Ok(kennel) => kennel,
+        Err(e) => {
+            // A bring-up failure after the egress step may have left BPF pins behind
+            // (the teardown removes the cgroup, which detaches the programs, but the
+            // pins outlive the helper). Clean them up best-effort.
+            crate::bpf_audit::cleanup_pins(kname);
+            return fail(shared, kname, ctx, conn, StartStage::SpawnWorkload, e);
+        }
+    };
+    supervise(
+        shared,
+        kname,
+        req,
+        conn,
+        ctx,
+        parent_alive,
+        Running {
+            kennel,
+            audit,
+            exclusive_sources,
+            tty_filter: loaded_tty_filter,
+            on_change,
+            kennel_uuid,
+            master_recv,
+            client_sock,
+        },
+    );
+}
+
+/// Handle a `kennel attach`: hand the connection's terminal socket to the running
+/// kennel's PTY broker (taking over any current client) and block until this client's
+/// session ends — `Exited` if the workload exits, `Detached` if a later attach takes
+/// over. No workload lifecycle here: the broker (and the kennel's own `run_kennel`
+/// thread) own that; attach is a pure subscriber.
+fn run_attach<P, L>(
+    shared: &Shared<P, L>,
+    kennel: &KennelName,
+    fds: Vec<OwnedFd>,
+    conn: &mut UnixStream,
+) where
+    P: Privileged + Clone + Sync,
+    L: PolicyLoader,
+{
+    let Some(broker) = shared.broker_for(kennel) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!(
+                "kennel `{kennel}` is not attachable (unknown, not interactive, or still starting)"
+            )),
+        );
+        return;
+    };
+    let Some(client_sock) = fds.into_iter().next() else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error("attach passed no terminal socket".to_owned()),
+        );
+        return;
+    };
+    let Some((ctx, pid)) = shared.ctx_pid(kennel) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!("no kennel named `{kennel}`")),
+        );
+        return;
+    };
+    let Some(generation) = broker.attach(client_sock) else {
+        let _ = control::send_response(
+            conn,
+            &Response::Error(format!("kennel `{kennel}` has already exited")),
+        );
+        return;
+    };
+    let _ = control::send_response(
+        conn,
+        &Response::Attached {
+            ctx,
+            pid,
+            filter_escapes: broker.filter_escapes(),
+        },
+    );
+    // Block until this client's session ends; report why.
+    let response = match broker.wait_for_outcome(generation) {
+        crate::pty_broker::AttachOutcome::WorkloadExited => Response::Exited { code: 0 },
+        crate::pty_broker::AttachOutcome::TakenOver => Response::Detached {
+            reason: "another client attached".to_owned(),
+        },
+    };
+    let _ = control::send_response(conn, &response);
+}
+
+/// Admit a start: refuse a reserved name, then reserve the name and a context. On refusal the
+/// client has been answered and the refusal audited, and `None` is returned.
+///
+// `spawn-<ctx>-<id>` names belong to the daemon: parentage is read back from them (the hard reaper
+// kills `spawn-<ctx>-*` with ctx's kennel, and those kennels share an audit directory). Only
+// a spawned instance, which arrives preloaded with a name the daemon made, may carry one. An
+// operator's kennel or a provider with such a name would be reaped as some kennel's child.
+fn admit<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    spawned: bool,
+    conn: &mut UnixStream,
+) -> Option<u16>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    if !spawned && is_reserved_kennel_name(kname) {
         let msg = format!(
             "kennel name `{kname}` is reserved: `spawn-<number>-…` is how the daemon names the \
              kennels it spawns"
@@ -1488,9 +1666,8 @@ pub fn run_kennel<P, L>(
             &msg,
         ));
         let _ = control::send_response(conn, &Response::Error(msg));
-        return;
+        return None;
     }
-    let mut mesh_bus_guard = MeshBusGuard::new(shared);
     let ctx = match shared.reserve(kname) {
         Ok(ctx) => ctx,
         Err(resp) => {
@@ -1503,298 +1680,39 @@ pub fn run_kennel<P, L>(
                 ));
             }
             let _ = control::send_response(conn, &resp);
-            return;
+            return None;
         }
     };
-    tr.step(&format!("run_kennel: reserved ctx {ctx} for `{kname}`"));
+    Some(ctx)
+}
 
-    let subst = RuntimeSubstitutions {
-        ctx,
-        uid: shared.identity.uid,
-        kennel: kname.to_string(),
-        home: shared.identity.home.clone(),
-        namespace: shared.identity.scope.namespace(),
-    };
+/// The host-side preparation of a kennel's facades.
+struct Facades {
+    /// The kennel's in-view `$HOME`.
+    shim_root: PathBuf,
+    ssh: crate::SshPrep,
+    unix: crate::UnixPrep,
+    dbus: crate::DbusPrep,
+}
 
-    // A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
-    // normal run loads and verifies the signed policy from disk. Either way `subst` is now applied.
-    let mut loaded = if let Some(instance) = preloaded {
-        match crate::policy::loaded_from_settled(&instance, &subst) {
-            Ok(loaded) => loaded,
-            Err(reason) => {
-                return fail(
-                    shared,
-                    kname,
-                    ctx,
-                    conn,
-                    StartStage::SpawnInstance,
-                    reason.to_string(),
-                )
-            }
-        }
-    } else {
-        tr.step(&format!(
-            "run_kennel: loading policy {}",
-            req.policy.display()
-        ));
-        match shared.loader.load(&req.policy, &subst) {
-            Ok(loaded) => loaded,
-            Err(reason) => {
-                return fail(
-                    shared,
-                    kname,
-                    ctx,
-                    conn,
-                    StartStage::LoadPolicy,
-                    reason.to_string(),
-                )
-            }
-        }
-    };
-    if tr.on() {
-        tr.step(&format!(
-            "run_kennel: policy loaded — net.mode={:?}, account={}, ssh grants={}, unix sockets={}",
-            loaded.net.mode,
-            loaded.account,
-            loaded.ssh.grants.len(),
-            loaded.unix.sockets.len()
-        ));
-    }
-    // A policy that depends on Landlock scoping is refused on a kernel that cannot scope, before
-    // anything is built: the kennel would otherwise start with that control silently absent.
-    if let Err(reason) =
-        check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
-    {
-        return fail(shared, kname, ctx, conn, StartStage::Landlock, reason);
-    }
-    // OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
-    // `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
-    // launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
-    // binds both into the view; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override
-    // the launcher applies (keeping the image Entrypoint + Env), no policy impact.
-    let oci_image = loaded.plan.view.as_ref().is_some_and(|v| v.image.is_some());
-    let mut oci_prep = crate::OciPrep::default();
-    // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
-    // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
-    // only here is the policy's workload known. The request wins unless the policy pins it.
-    let (argv, cwd) = if oci_image {
-        let Some(launcher) = shared.identity.oci_entry_bin.clone() else {
-            return fail(
-                shared,
-                kname,
-                ctx,
-                conn,
-                StartStage::OciLauncher,
-                "policy declares [rootfs] but no OCI launcher (kennel-bin-oci-entry) is configured"
-                    .to_owned(),
-            );
-        };
-        if req.oci_config.is_none() {
-            return fail(
-                shared,
-                kname,
-                ctx,
-                conn,
-                StartStage::OciLauncher,
-                "OCI run reached the daemon without a config.json path (use `kennel oci run`)"
-                    .to_owned(),
-            );
-        }
-        let mut argv = vec![
-            launcher.to_string_lossy().into_owned(),
-            crate::OCI_CONFIG_VIEW_PATH.to_owned(),
-        ];
-        // The `-- <cmd>` override tokens (if any), passed through as the launcher's Cmd override.
-        argv.extend(req.argv.iter().cloned());
-        oci_prep = crate::OciPrep {
-            launcher_bin: Some(launcher),
-            config_src: req.oci_config.clone(),
-        };
-        // The launcher chdirs to the image's WorkingDir itself; give it the request cwd as the
-        // fallback the kernel starts it in.
-        (argv, req.cwd.clone())
-    } else {
-        match effective_workload(req, &loaded.workload) {
-            Ok(pair) => pair,
-            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::Workload, reason),
-        }
-    };
-    // `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
-    // declared the slot; here — host-side, in operator context, before the kennel exists —
-    // we resolve `req.cwd` under the framework floor and add the bind/Landlock grant. A
-    // floor or marker failure REFUSES the run (never a silent no-grant).
-    if !loaded.cwd.grant.is_none() {
-        match resolve_cwd_grant(&req.cwd, &loaded.cwd.required) {
-            Ok(resolved) => {
-                let writable = matches!(
-                    loaded.cwd.grant,
-                    kennel_lib_policy::settled::CwdGrant::Write
-                );
-                // The redirect floor's runtime half (W15): settle intersected every redirect
-                // `source` against the policy's own write set, but the cwd grant is a slot the
-                // invocation fills — the one workload-writable surface settle cannot see. A
-                // resolved *writable* cwd that covers (or sits inside) a redirect source would
-                // hand the workload write access to the tree the redirect asserts is
-                // operator-held. A read grant adds no write, so it needs no refusal.
-                if writable {
-                    if let Some(src) = loaded.plan.redirected_source_within(&resolved) {
-                        return fail(
-                            shared,
-                            kname,
-                            ctx,
-                            conn,
-                            StartStage::FsCwd,
-                            format!(
-                                "invocation cwd {} intersects the fs.redirect source {} — a \
-                                 cwd-writable redirect source is a confused-deputy hole; run \
-                                 from outside the redirected store",
-                                resolved.display(),
-                                src.display()
-                            ),
-                        );
-                    }
-                }
-                tr.detail(&format!(
-                    "run_kennel: [fs.cwd] grant {:?} materialised at {} (writable={writable})",
-                    loaded.cwd.grant,
-                    resolved.display()
-                ));
-                let mask_manifest = loaded.settled.effective_policy.trust.manifest;
-                if let Err(reason) = loaded.plan.grant_cwd(resolved, writable, mask_manifest) {
-                    return fail(shared, kname, ctx, conn, StartStage::FsCwd, reason);
-                }
-            }
-            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::FsCwd, reason),
-        }
-    }
-    tr.detail(&format!(
-        "run_kennel: effective workload argv={argv:?} cwd={}",
-        cwd.display()
-    ));
-    // Persist-mode rootfs (§7.11.4a): the managed overlay upper lives under the store entry
-    // (the `config.json`'s dir). Create `upper/` + `work/` and fill them into the plan so the
-    // construction child mounts the overlay with a persisted upper. The store fs must carry
-    // `user.*` xattrs for the userxattr whiteouts — if it does not, the overlay mount in the
-    // construction child fails with a clear error (the refusal the spec calls for).
-    if oci_image {
-        if let Some(img) = loaded
-            .plan
-            .view
-            .as_mut()
-            .and_then(|v| v.image.as_mut())
-            .filter(|i| i.persistence == kennel_lib_spawn::Persistence::Persist)
-        {
-            let Some(entry) = req.oci_config.as_deref().and_then(std::path::Path::parent) else {
-                return fail(
-                    shared,
-                    kname,
-                    ctx,
-                    conn,
-                    StartStage::OciPersist,
-                    "persistence = persist needs the store entry path (config.json)".to_owned(),
-                );
-            };
-            let upper = entry.join("upper");
-            let work = entry.join("work");
-            if let Err(e) =
-                std::fs::create_dir_all(&upper).and_then(|()| std::fs::create_dir_all(&work))
-            {
-                return fail(
-                    shared,
-                    kname,
-                    ctx,
-                    conn,
-                    StartStage::OciPersist,
-                    format!(
-                        "creating the managed overlay upper under {}: {e}",
-                        entry.display()
-                    ),
-                );
-            }
-            img.store_upper = Some((upper, work));
-        }
-    }
-    // Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
-    // decision made here, on the host, before the kennel is built: kennel-bin-init is a
-    // dumb executor and gets no say. Applies only when the policy embedded a pin AND we
-    // are running the policy's own program — with or without arguments appended under
-    // `allowed_args` (an unpinned `--` override is a different command the pin does not
-    // cover). On success it returns the OPEN fd of the verified
-    // binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
-    // `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
-    // construction, so it stays in scope until the end of bring-up.
-    // Held only to keep the fd open (its raw value is what's used, via the plan); never read.
-    #[allow(clippy::collection_is_never_read)]
-    let _workload_fd;
-    if !loaded.workload.sha256.is_empty() && runs_policy_program(req, &loaded.workload) {
-        match verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256) {
-            Ok(fd) => {
-                loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
-                _workload_fd = Some(fd);
-            }
-            Err(reason) => {
-                return fail(shared, kname, ctx, conn, StartStage::WorkloadSha256, reason)
-            }
-        }
-    } else {
-        _workload_fd = None;
-    }
-    // Interactive runs pass ONE connected socket — the CLI's proxied-terminal end
-    // (`client_sock`). KENNELD owns the workload's pty master now (not the CLI): we
-    // mint our OWN socketpair, hand the seal its `master_send` end (over which the
-    // seal returns the master during pre-exec), and keep `master_recv`. The master
-    // then lands in kenneld's PtyBroker, which fans filtered output to whichever
-    // client is attached and survives the client detaching (§05). Non-interactive
-    // runs pass the three stdio fds, unchanged. `master_send` must outlive the spawn
-    // so the forked child inherits it during the pre-exec seal.
-    let mut return_sock: Option<OwnedFd> = None;
-    let mut client_sock: Option<OwnedFd> = None;
-    let mut master_recv: Option<OwnedFd> = None;
-    // A non-interactive run injects the three workload stdio fds (a piped `kennel run`'s controller
-    // fds, or a SPAWN channel's spawned ends) onto the workload's 0/1/2 — the raw-channel sibling of
-    // the interactive pty path. The fds stay alive in `command` (as its stdin/stdout/stderr) through
-    // construction, so these raw numbers are valid when the factory sends them.
-    let mut stdio_raw: Option<[std::os::fd::RawFd; 3]> = None;
-    let mut command = if req.interactive {
-        client_sock = fds.into_iter().next();
-        match UnixStream::pair() {
-            Ok((recv, send)) => {
-                master_recv = Some(OwnedFd::from(recv));
-                return_sock = Some(OwnedFd::from(send));
-            }
-            Err(e) => {
-                return fail(
-                    shared,
-                    kname,
-                    ctx,
-                    conn,
-                    StartStage::PtyMasterSocketpair,
-                    e.to_string(),
-                )
-            }
-        }
-        match command_for_interactive(&argv, &cwd) {
-            Ok(command) => command,
-            Err(reason) => {
-                return fail(shared, kname, ctx, conn, StartStage::PrepareCommand, reason)
-            }
-        }
-    } else {
-        if let [stdin, stdout, stderr, ..] = fds.as_slice() {
-            stdio_raw = Some([stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()]);
-        }
-        match command_for(&argv, &cwd, fds) {
-            Ok(command) => command,
-            Err(reason) => {
-                return fail(shared, kname, ctx, conn, StartStage::PrepareCommand, reason)
-            }
-        }
-    };
-    loaded.plan.stdio_fds = stdio_raw;
-    // Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
-    // edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
-    // ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
-    // one; the persisted keypairs live in `<policy-dir>/ssh/` beside the settled artefact.
+/// Prepare the SSH egress, the `AF_UNIX` shims and the D-Bus mediation of a kennel.
+///
+// Prepare SSH egress (§7.10): stage the compile-time synthetic keys, register the
+// edges with the per-user bastion, and build the synthetic ~/.ssh for the view. The
+// ~/.ssh is rooted at the constructed-view HOME (the plan's shim root) when there is
+// one; the persisted keypairs live in `<policy-dir>/ssh/` beside the settled artefact.
+fn prepare_facades<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    req: &StartRequest,
+    loaded: &mut Loaded,
+    subst: &RuntimeSubstitutions,
+) -> Result<Facades, Refused>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let tr = shared.identity.tracer;
     let shim_root = loaded
         .plan
         .view
@@ -1814,59 +1732,13 @@ pub fn run_kennel<P, L>(
     let ssh = match shared.register_ssh(kname, &loaded.ssh, &shim_root, &policy_ssh_dir) {
         Ok(ssh) => ssh,
         // `fail` deregisters any edges registered before the failure.
-        Err(reason) => {
-            return fail(
-                shared,
-                kname,
-                ctx,
-                conn,
-                StartStage::RegisterSshEgress,
-                reason,
-            )
-        }
+        Err(reason) => return Err(Refused::new(StartStage::RegisterSshEgress, reason)),
     };
-    // A mediated section IS the brokered path: each enabled section implies its capability
-    // consume, synthesized when the policy does not spell it out — so a section-only policy
-    // (including any pre-W4 v3 artefact) routes identically to one that declares the
-    // `[[consumes]]`. `[dbus.session]`/`[dbus.system]` imply the per-bus `dbus-name`
-    // capabilities (W4, one mediation home: the standing dbus-broker); `[net.udp]` implies the
-    // tun-broker's af-unix capability (§8 / W2 — and a future `[net.tcp]` slow-lane implies its
-    // transport capability the same way). Synthesized before the census below, so an ondemand
-    // provider is kept alive while this kennel runs, like any declared consume.
-    {
-        use kennel_lib_binder::service::{dbus as dbus_caps, tun_broker};
-        use kennel_lib_policy::settled::Shape;
-        let implied = [
-            (
-                loaded.dbus.session.is_some(),
-                dbus_caps::CAPABILITY_SESSION,
-                Shape::DbusName,
-            ),
-            (
-                loaded.dbus.system.is_some(),
-                dbus_caps::CAPABILITY_SYSTEM,
-                Shape::DbusName,
-            ),
-            (loaded.net.udp, tun_broker::CAPABILITY, Shape::AfUnix),
-        ];
-        for (enabled, capability, shape) in implied {
-            if enabled && !loaded.consumes.iter().any(|c| c.name == capability) {
-                loaded
-                    .consumes
-                    .push(kennel_lib_policy::settled::ConsumeRuntime {
-                        name: capability.to_owned(),
-                        shape,
-                        at: None,
-                        env: Vec::new(),
-                        key: None,
-                        required: true,
-                    });
-            }
-        }
-    }
+    // A mediated section implies the capability it is brokered through.
+    imply_mediated_consumes(loaded);
     // Prepare the AF_UNIX socket shims (§7.6): resolve each granted socket's host
     // and in-view paths. Stateless (no daemon to register with), so no teardown hook.
-    let unix = shared.prepare_unix(&loaded.unix, &loaded.consumes, &subst, &shim_root);
+    let unix = shared.prepare_unix(&loaded.unix, &loaded.consumes, subst, &shim_root);
     // Record this kennel's consumed capabilities for the W6 idle-reap census (§7.13.6): while this
     // kennel runs, any ondemand provider it consumes is kept alive.
     shared.note_consumes(
@@ -1884,67 +1756,25 @@ pub fn run_kennel<P, L>(
     // Prepare D-Bus mediation (§7.7): pair each enabled bus's compiled table with the real bus
     // address and the in-view socket the facade presents. Stateless, like the unix shims.
     let dbus = shared.prepare_dbus(&loaded.dbus, &shim_root);
-    // Re-derive the compile-time footgun warning at spawn (§7.10.1): a policy may shim a
-    // real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
-    // loudly about — an exposed agent is a destination-blind signing oracle. An operator
-    // who ran a pre-compiled artefact never saw the `kennel compile` warning, so emit it
-    // here too. Warned, not refused — footguns are loud, not amputated.
-    for sock in &loaded.unix.sockets {
-        let shims_ssh_agent = sock.name.eq_ignore_ascii_case("ssh-agent")
-            || sock.env.as_deref() == Some("SSH_AUTH_SOCK");
-        if shims_ssh_agent {
-            eprintln!(
-                "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
-                 destination-blind signing oracle (§7.10.1) — any code in the kennel can sign for \
-                 any destination. The [ssh] re-origination bastion is the intended path.",
-                kname, sock.name
-            );
-        }
-        let shims_gpg_agent = sock.name.eq_ignore_ascii_case("gpg-agent")
-            || sock.env.as_deref() == Some("GPG_AGENT_INFO");
-        if shims_gpg_agent {
-            eprintln!(
-                "kenneld: warning: kennel `{}` shims a GPG agent (`{}`): an exposed agent is a \
-                 destination-blind signing oracle — worse than ssh-agent, a signature stamps your \
-                 identity onto whatever the kennel signs (malware, releases, forged commits). There \
-                 is no bastion equivalent (design §11.1); the safe default is to sign on the host.",
-                kname, sock.name
-            );
-        }
-    }
-    // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
-    // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
-    // ~/.config < policy). Captured before `loaded` is consumed below.
-    let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
-    // The PTY escape-filter decision (§7.9.5), captured before `loaded` is consumed.
-    let loaded_tty_filter = loaded.tty_filter;
-    // The live trigger-tripwire disposition (§2.5), captured before `loaded` is consumed.
-    let on_change = loaded.on_change;
-    // The host sources of the exclusive binds (§2.7), captured before the plan moves into the
-    // spec: released (unmounted) at teardown so the operator's path is not left shadowed.
-    let exclusive_sources: Vec<PathBuf> = loaded.plan.view.as_ref().map_or_else(Vec::new, |v| {
-        v.binds
-            .iter()
-            .filter(|b| b.exclusive)
-            .map(|b| b.source.clone())
-            .collect()
-    });
-    // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
-    // egress proxy's writer so their events correlate. The per-kennel state dir is
-    // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
-    let kennel_uuid = crate::audit::kennel_uuid();
-    let state_dir = shared
-        .identity
-        .audit_base
-        .as_ref()
-        .map(|base| base.join(audit_dir_name(kname)));
-    // Hand the seal the interactive return socket's raw fd (it sends the pty master
-    // back over it during pre-exec). `return_sock` keeps the fd open until after the
-    // spawn returns, so the forked child still has it.
-    loaded.plan.interactive_return_fd = return_sock.as_ref().map(AsRawFd::as_raw_fd);
+    // Warn, again at spawn, about a shimmed signing agent (§7.10.1).
+    warn_agent_shims(kname, &loaded.unix);
+    Ok(Facades {
+        shim_root,
+        ssh,
+        unix,
+        dbus,
+    })
+}
 
-    let id = &shared.identity;
-    let etc = id.etc_base.as_ref().map(|base| crate::EtcSetup {
+/// What the synthetic `/etc` of this kennel is rendered from, if the daemon stages one.
+fn etc_setup(
+    id: &Identity,
+    kname: &KennelName,
+    ctx: u16,
+    loaded: &Loaded,
+    shim_root: &Path,
+) -> Option<crate::EtcSetup> {
+    id.etc_base.as_ref().map(|base| crate::EtcSetup {
         staging_dir: base.join(format!("etc-{ctx}")),
         account: loaded.account.clone(),
         account_group: loaded.account_group.clone(),
@@ -1960,7 +1790,7 @@ pub fn run_kennel<P, L>(
         gid: id.gid,
         // The synthetic /etc/passwd home is the in-kennel shim $HOME, not the
         // operator's real home (which would re-leak the masked identity, §7.4.x).
-        home: shim_root.clone(),
+        home: shim_root.to_path_buf(),
         // The resolved supplementary groups, named in /etc/group (§7.4). The loader
         // already set plan.supplementary_groups to their gids (what the seal drops to).
         groups: loaded.groups.clone(),
@@ -1968,140 +1798,172 @@ pub fn run_kennel<P, L>(
         shell: loaded.shell.clone(),
         // Home-relative paths exempt from dotfile reconstruction (§7.9.2a).
         home_persist: loaded.home_persist.clone(),
-    });
-    // Binder-connector mesh mounts to place in the view via the rendezvous (§7.13.4a): each is a
-    // detached binderfs clone fd + its in-view target directory. `kennel-bin-init` `move_mount`s them
-    // before forking the workload (and Landlock-grants the device). Collected across the provider and
-    // consumer passes below, then handed to `bring_up` on the `Spec`.
-    let mut mesh_mounts: Vec<(std::os::fd::OwnedFd, std::path::PathBuf)> = Vec::new();
-    // Provider rendezvous points (§7.13.4b): for each af-unix `[[provides]]`, bind the host
-    // rendezvous directory `<runtime>/mesh/<tier>/<name>[.key]/` at the in-view `dirname(endpoint)`,
-    // so the socket the provider binds at its policy `endpoint` is the inode the broker connects
-    // host-side. Built for a supervised mesh provider (`provider_tier`), before the view's binds move
-    // into the `Spec`.
-    if let Some(tier) = provider_tier {
-        if let Some(view) = loaded.plan.view.as_mut() {
-            for p in &loaded.provides {
-                if p.shape != kennel_lib_policy::settled::Shape::AfUnix {
-                    continue;
-                }
-                let Some((cap_name, cap_key)) = crate::mesh::capability(&p.name, p.key.as_deref())
-                else {
-                    eprintln!(
-                        "kenneld: provider `{kname}`: capability `{}` has a malformed name or key",
-                        p.name
-                    );
-                    continue;
-                };
-                let key = cap_key.as_ref();
-                let host_dir = crate::mesh::host_rp_dir(tier, &cap_name, key);
-                // kenneld owns the rendezvous directory; create it (0700) and clear any stale socket
-                // before construction binds it in and the provider binds afresh at its endpoint.
-                if let Err(e) = std::fs::create_dir_all(&host_dir) {
-                    eprintln!(
-                        "kenneld: provider `{}`: mesh rendezvous dir {}: {e}",
-                        kname,
-                        host_dir.display()
-                    );
-                    continue;
-                }
-                let _ = std::fs::set_permissions(
-                    &host_dir,
-                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
-                );
-                let _ = std::fs::remove_file(crate::mesh::host_rp_socket(
-                    tier,
-                    &cap_name,
-                    key,
-                    &p.endpoint,
-                ));
-                // Bind the host directory at the in-view parent of the policy endpoint.
-                let Some(target) = std::path::Path::new(&p.endpoint).parent() else {
-                    continue;
-                };
-                let Ok(target) = kennel_lib_spawn::ViewPath::parse(target) else {
-                    eprintln!(
-                        "kenneld: provider `{kname}`: endpoint `{}` is not an in-view path",
-                        p.endpoint
-                    );
-                    continue;
-                };
-                view.binds.push(kennel_lib_spawn::plan::BindMount {
-                    source: host_dir,
-                    target,
-                    writable: true,
-                    exclusive: false,
-                    redirected: false,
-                    mmap_exec: false,
-                });
-            }
-            // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability
-            // and request a movable clone of its binderfs to place at the provider's `endpoint`. The
-            // clone rides the mesh rendezvous; `kennel-bin-init` `move_mount`s it into the view, where
-            // the provider opens `<endpoint>` (= `<mount-dir>/binder`), `ADD_SERVICE`s, and serves.
-            for p in &loaded.provides {
-                if p.shape != kennel_lib_policy::settled::Shape::BinderConnector {
-                    continue;
-                }
-                let Some(target_dir) = std::path::Path::new(&p.endpoint).parent() else {
-                    continue;
-                };
-                let key = p.key.as_deref();
-                match shared.ensure_mesh_bus(tier, &p.name, key) {
-                    Ok(clone_fd) => {
-                        mesh_bus_guard.push(tier, p.name.clone(), p.key.clone());
-                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "kenneld: provider `{}`: mesh bus for `{}`: {e}",
-                            kname, p.name
-                        );
-                    }
-                }
-            }
-        }
-    }
-    // Consumer mesh-bus bind-mounts (§7.13.4a): for each binder-connector `[[consumes]]` with an
-    // `at`, resolve the provider's tier from the catalogue, ensure the mesh bus, and bind-mount
-    // its binder device at the consumer's `at` path. The consumer opens this device, transacts
-    // `SVC_CONNECT` on the mesh bus to get the provider's handle, then transacts directly.
-    //
-    // Two-phase: collect (tier, name, key, at) under the catalogue lock, then drop it before
-    // taking the mesh_buses lock (ensure_mesh_bus), preventing lock-order inversion.
-    {
-        let mesh_consumer_binds: Vec<(crate::catalogue::Tier, String, Option<String>, String)> = {
-            let cat = shared
-                .catalogue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            loaded
-                .consumes
-                .iter()
-                .filter(|c| c.shape == kennel_lib_policy::settled::Shape::BinderConnector)
-                .filter_map(|c| {
-                    let at = c.at.as_ref()?;
-                    let candidate = cat.resolve(&c.name).into_iter().next()?;
-                    Some((candidate.tier, c.name.clone(), c.key.clone(), at.clone()))
-                })
-                .collect()
-        }; // catalogue lock dropped
-        for (tier, name, key, at) in &mesh_consumer_binds {
-            let Some(target_dir) = std::path::Path::new(at).parent() else {
-                continue;
-            };
-            match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
-                Ok(clone_fd) => {
-                    mesh_bus_guard.push(*tier, name.clone(), key.clone());
-                    mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
-                }
-                Err(e) => {
-                    eprintln!("kenneld: consumer `{kname}`: mesh bus for `{name}`: {e}");
-                }
-            }
-        }
-    }
+    })
+}
 
+/// A start whose policy is loaded and whose command is fixed.
+struct Settled {
+    subst: RuntimeSubstitutions,
+    loaded: Loaded,
+    oci_prep: crate::OciPrep,
+    command: Command,
+    return_sock: Option<OwnedFd>,
+    client_sock: Option<OwnedFd>,
+    master_recv: Option<OwnedFd>,
+    /// The verified workload's descriptor, for a sha256-pinned workload. The plan carries its
+    /// number, so it must stay open until the kennel has been constructed.
+    workload_fd: Option<OwnedFd>,
+}
+
+/// The first phase of a start: load the policy, settle the command and its descriptors, and
+/// apply the grants that depend on this invocation (the cwd, a persisted image upper, the
+/// workload's digest pin). Nothing is constructed yet.
+fn settle<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    req: &StartRequest,
+    fds: Vec<OwnedFd>,
+    preloaded: Option<kennel_lib_policy::SettledPolicy>,
+    ctx: u16,
+) -> Result<Settled, Refused>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let tr = shared.identity.tracer;
+    let subst = RuntimeSubstitutions {
+        ctx,
+        uid: shared.identity.uid,
+        kennel: kname.to_string(),
+        home: shared.identity.home.clone(),
+        namespace: shared.identity.scope.namespace(),
+    };
+
+    // Load and verify the policy (or take a spawn instance), and check the Landlock floor.
+    let mut loaded = load_for_start(shared, req, preloaded, &subst, tr)?;
+    // The command to run: the image launcher for an OCI policy, else the merged workload.
+    let oci_image = loaded.plan.view.as_ref().is_some_and(|v| v.image.is_some());
+    let (argv, cwd, oci_prep) = settle_command(shared, req, &loaded)?;
+    // `[fs.cwd]`: grant the invocation cwd into the view, under the framework floor.
+    grant_invocation_cwd(req, &mut loaded, tr)?;
+    tr.detail(&format!(
+        "run_kennel: effective workload argv={argv:?} cwd={}",
+        cwd.display()
+    ));
+    // A persist-mode image root gets its managed overlay upper under the store entry.
+    prepare_persistent_upper(req, &mut loaded, oci_image)?;
+    // The sha256 pin: verify the workload and hold its fd open for the fd-pin.
+    let workload_fd = pin_workload(req, &mut loaded, &argv)?;
+    // The workload command and the descriptors that go with it.
+    let WorkloadIo {
+        command,
+        return_sock,
+        client_sock,
+        master_recv,
+        stdio_raw,
+    } = prepare_command(req, fds, &argv, &cwd)?;
+    loaded.plan.stdio_fds = stdio_raw;
+    Ok(Settled {
+        subst,
+        loaded,
+        oci_prep,
+        command,
+        return_sock,
+        client_sock,
+        master_recv,
+        workload_fd,
+    })
+}
+
+/// The host sources of a plan's exclusive binds, released at teardown so the operator's path is
+/// not left shadowed.
+fn exclusive_sources_of(plan: &Plan) -> Vec<PathBuf> {
+    plan.view.as_ref().map_or_else(Vec::new, |v| {
+        v.binds
+            .iter()
+            .filter(|b| b.exclusive)
+            .map(|b| b.source.clone())
+            .collect()
+    })
+}
+
+/// A start assembled into a [`crate::Spec`], with what the rest of the run needs.
+struct Assembled {
+    spec: crate::Spec,
+    command: Command,
+    subst: RuntimeSubstitutions,
+    binder_parts: BinderParts,
+    audit_runtime: kennel_lib_policy::AuditRuntime,
+    state_dir: Option<PathBuf>,
+    kennel_uuid: String,
+    exclusive_sources: Vec<PathBuf>,
+    loaded_tty_filter: bool,
+    on_change: kennel_lib_policy::OnChangeAction,
+    master_recv: Option<OwnedFd>,
+    client_sock: Option<OwnedFd>,
+    /// Descriptors the plan refers to by number: the pty return socket and a pinned workload.
+    held: (Option<OwnedFd>, Option<OwnedFd>),
+}
+
+/// The second phase of a start: prepare the facades and the mesh, and assemble the spec the
+/// kennel is brought up from. Nothing is constructed yet.
+fn assemble<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    req: &StartRequest,
+    provider_tier: Option<crate::catalogue::Tier>,
+    ctx: u16,
+    mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
+    settled: Settled,
+) -> Result<Assembled, Refused>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let Settled {
+        subst,
+        mut loaded,
+        oci_prep,
+        mut command,
+        return_sock,
+        client_sock,
+        master_recv,
+        workload_fd,
+    } = settled;
+    // The egress and socket facades: SSH, AF_UNIX and D-Bus, prepared host-side.
+    let Facades {
+        shim_root,
+        ssh,
+        unix,
+        dbus,
+    } = prepare_facades(shared, kname, req, &mut loaded, &subst)?;
+    // The audit runtime (§02-3): the installation/per-user `audit.toml` defaults
+    // (§8.1) overlaid by the per-kennel policy `[audit]` (built-in < /etc/kennel <
+    // ~/.config < policy). Captured before `loaded` is consumed below.
+    let audit_runtime = crate::audit::load_audit_defaults().overlay(&loaded.audit);
+    // The PTY escape-filter decision (§7.9.5), captured before `loaded` is consumed.
+    let loaded_tty_filter = loaded.tty_filter;
+    // The live trigger-tripwire disposition (§2.5), captured before `loaded` is consumed.
+    let on_change = loaded.on_change;
+    // The host sources of the exclusive binds (§2.7), captured before the plan moves into the
+    // spec: released (unmounted) at teardown so the operator's path is not left shadowed.
+    let exclusive_sources = exclusive_sources_of(&loaded.plan);
+    // One `kennel_uuid` for this run, shared by kenneld's lifecycle writer and the
+    // egress proxy's writer so their events correlate. The per-kennel state dir is
+    // where both `lifecycle.jsonl` (kenneld) and `network.jsonl` (proxy) land.
+    let kennel_uuid = crate::audit::kennel_uuid();
+    let state_dir = shared
+        .identity
+        .audit_base
+        .as_ref()
+        .map(|base| base.join(audit_dir_name(kname)));
+    // Hand the seal the interactive return socket's raw fd (it sends the pty master
+    // back over it during pre-exec). `return_sock` keeps the fd open until after the
+    // spawn returns, so the forked child still has it.
+    loaded.plan.interactive_return_fd = return_sock.as_ref().map(AsRawFd::as_raw_fd);
+
+    let id = &shared.identity;
+    let etc = etc_setup(id, kname, ctx, &loaded, &shim_root);
     // D-Bus is mesh-brokered, full stop (W4): the standing dbus-broker is the one mediation
     // home. The synthesis above guarantees every `[dbus]` kennel carries a `dbus-name` consume.
     let consumes_dbus_name = loaded
@@ -2109,56 +1971,16 @@ pub fn run_kennel<P, L>(
         .iter()
         .any(|c| c.shape == kennel_lib_policy::settled::Shape::DbusName);
 
-    // Brokered D-Bus consumer (§7.7): such a kennel reaches the standing dbus-broker over the
-    // connector mesh bus, so its `facade-dbus` opens the mesh device directly (the per-kennel
-    // `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view — the dbus-name
-    // consume is served by the facade, not the binder-connector consumer loop above, so nothing
-    // else mounts it.
-    {
-        let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
-        // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
-        // registers its control node on the mesh bus keyed by its *policy-derived* tier (the
-        // supervisor activates it with the catalogue candidate's tier); a user-enabled broker is
-        // `User`, not `Host`. Keying this consumer's mesh bus by the same resolved tier is what puts
-        // both on one binderfs instance — mismatch them and the broker's control node is on a
-        // different bus, so `ACCEPT_SESSION` fails closed with no provider found.
-        let broker_tier = {
-            let cat = shared
-                .catalogue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            cat.resolve("org.projectkennel.dbus-broker")
-                .into_iter()
-                .next()
-                .map(|c| c.tier)
-        };
-        if let (true, true, Some(tier)) = (dbus_enabled, consumes_dbus_name, broker_tier) {
-            match shared.ensure_mesh_bus(tier, "org.projectkennel.dbus-broker", None) {
-                Ok(clone_fd) => {
-                    mesh_bus_guard.push(tier, "org.projectkennel.dbus-broker".to_owned(), None);
-                    // The device lands at `MESH_DBUS_DEVICE` (`/dev/binderfs-mesh/binder`); its
-                    // mount dir is the parent. `facade-dbus` opens that path (the `SVC_CONNECT(dbus)`
-                    // reply names it).
-                    if let Some(target_dir) =
-                        std::path::Path::new(crate::binder::MESH_DBUS_DEVICE).parent()
-                    {
-                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
-                    }
-                }
-                Err(e) => {
-                    eprintln!("kenneld: consumer `{kname}`: dbus mesh bus: {e}");
-                }
-            }
-        } else if dbus_enabled && broker_tier.is_none() {
-            // Fail-closed, loudly: with the legacy delegate retired there is no fallback — the
-            // bus(es) stay unserved until the shipped broker provider is enabled.
-            eprintln!(
-                "kenneld: kennel `{kname}` grants [dbus] but no `dbus-broker` provider is enabled — \
-                 the bus(es) will be unserved. install.sh enables the shipped provider at \
-                 /etc/kennel/ondemand/dbus-broker; after adding a link, run `kennel daemon-reload`."
-            );
-        }
-    }
+    // The binder-connector mesh mounts: provider rendezvous points, consumer buses, the D-Bus
+    // broker's bus. Handed to `bring_up` on the `Spec`.
+    let mesh_mounts = mesh_mounts_for(
+        shared,
+        kname,
+        &mut loaded,
+        provider_tier,
+        consumes_dbus_name,
+        mesh_bus_guard,
+    );
 
     // Retain the verified settled struct on the kennel's record, so a mediation broker it consumes
     // (dbus, tun) can pull the section it needs to police the session — kenneld selects it by the
@@ -2170,11 +1992,21 @@ pub fn run_kennel<P, L>(
         shared.set_provider_tier(kname, tier);
     }
 
+    // The workload's environment, synthesised from policy (§7.9.2), while `loaded` is whole.
+    workload_env(&mut command, &loaded, &shim_root, &req.term);
+    // What binder node 0 is served with, taken out of `loaded` before the plan moves.
+    let binder_parts = BinderParts {
+        unix: loaded.unix,
+        spawn: loaded.spawn,
+        consumes: loaded.consumes,
+        settled: std::sync::Arc::clone(&loaded.settled),
+        consumes_dbus_name,
+    };
     // TTL is enforced inside the kennel now (§9.7): `kennel-bin-init` runs the timer and, at
     // expiry, makes the blocking `NOTIFY_TTL_EXPIRED` call that the node-0 handler services
     // (freeze + decide). The ttl_seconds + ttl_action ride the Plan (→ supervision-half /
     // binder Lifecycle), so kenneld no longer polls from out here.
-    let mut spec = crate::Spec {
+    let spec = crate::Spec {
         id: kname.to_string(),
         cgroup: cgroup::kennel_cgroup(&id.cgroup_base, ctx),
         ctx,
@@ -2194,155 +2026,539 @@ pub fn run_kennel<P, L>(
         binder: None,
         oci: oci_prep,
         mesh_mounts,
-        tracer: tr,
+        tracer: shared.identity.tracer,
     };
+    Ok(Assembled {
+        spec,
+        command,
+        subst,
+        binder_parts,
+        audit_runtime,
+        state_dir,
+        kennel_uuid,
+        exclusive_sources,
+        loaded_tty_filter,
+        on_change,
+        master_recv,
+        client_sock,
+        held: (return_sock, workload_fd),
+    })
+}
 
-    // Construct the per-kennel audit writer *before* start so the privileged
-    // operations during bring-up (and any refusal) are recorded as `priv.*`
-    // events through the same writer; it shares the run's `kennel_uuid` with the
-    // proxy. With no state dir configured, audit is simply not recorded and the
-    // decorator is a transparent pass-through.
-    let audit = state_dir.as_ref().map(|dir| {
-        Arc::new(crate::audit::build_writer(
-            kname,
-            dir,
-            &audit_runtime,
-            kennel_uuid.clone(),
-        ))
-    });
-    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
+/// A start refused at `stage`, before the kennel is constructed.
+struct Refused {
+    stage: StartStage,
+    reason: String,
+}
 
-    // Every kennel runs the privhelper factory + a per-kennel binder bus: binder is the
-    // universal control plane (`kennel-bin-init` pulls its supervision-half over node 0), not an
-    // opt-in for [binder]/[unix] kennels (`07-1`/`07-2`). So always wire the daemon-side
-    // context manager — it takes node 0, serves the lifecycle pull, and answers any facade.
-    // The registry's policy/facade sets are simply empty for a kennel that grants no IPC.
-    {
-        // The facade connects to the real host socket, so resolve each `real` path's
-        // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
-        // shim path the proxy listens at was already resolved in `prepare_unix`).
-        let facade_unix = kennel_lib_policy::UnixRuntime {
-            sockets: loaded
-                .unix
-                .sockets
-                .iter()
-                .map(|s| kennel_lib_policy::UnixSocket {
-                    real: resolve_path(&s.real, &subst, &shared.identity.home)
-                        .to_string_lossy()
-                        .into_owned(),
-                    ..s.clone()
-                })
-                .collect(),
-        };
-        // The registry records every decision (§7.1.4). With no audit state dir, a sink-less
-        // writer keeps the bus running without recording.
-        let writer = audit
-            .clone()
-            .unwrap_or_else(|| Arc::new(crate::audit::noop_writer(kname, kennel_uuid.clone())));
-        // The operator-prompt channel for the TTL `renew` action (§9.7): a clone of this
-        // control connection. Installed only for an interactive run — a non-interactive caller
-        // has no terminal to surface the prompt on, so `renew` there falls back to a warn.
-        let prompt = if req.interactive {
-            crate::prompt::from_conn(&*conn).ok()
-        } else {
-            None
-        };
-        // The [spawn] runtime (§7.12): pair the grant with a trust-key snapshot (to verify a
-        // re-resolved template against) and the template cascade kenneld resolves `name@version`
-        // from. Built only for a kennel that carries a grant; a SPAWN from any other is denied.
-        let spawn = loaded.spawn.map(|grant| {
-            std::sync::Arc::new(crate::spawn::SpawnRuntime::new(
-                grant,
-                shared.loader.trust_keys(),
-                kennel_lib_config::User::load()
-                    .unwrap_or_default()
-                    .template_dirs(),
-                std::sync::Arc::clone(constructor),
-                shared.identity.tracer,
-            ))
-        });
-        spec.binder = Some(crate::BinderPrep {
-            unix: facade_unix,
-            writer,
-            init_bin: shared.identity.init_bin.clone(),
-            prompt,
-            spawn,
-            consumes: loaded.consumes,
-            catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
-            activator: shared.activator(),
-            brokered_dbus: {
-                // The `dbus-name` consume (declared or implied by `[dbus]`, above) plus an
-                // enabled broker in the catalogue. There is no other mediation home: when this
-                // is false the SVC_CONNECT locator refuses and the bus goes unserved.
-                // No per-ctx filter is recorded: the mesh bus pulls this kennel's `[dbus]` from its
-                // retained settled struct (`set_settled` above) when the broker asks.
-                consumes_dbus_name && {
-                    let cat = shared
-                        .catalogue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    !cat.resolve("org.projectkennel.dbus-broker").is_empty()
-                }
-            },
-            // The one daemon-global tun-egress sink (§8 / W2): the tun-broker's manager registers into
-            // it, and each `[net.udp]` consumer's manager delivers a session through it.
-            tun_sink: shared.tun_sink.clone(),
-            // Only a kennel whose SIGNED policy provides the tun capability may register that
-            // sink. The name is in the reserved namespace, so the compiler admitted the provide
-            // only through a template signed at the tier the name requires, and that verdict is
-            // sealed in the settled signature the daemon just verified. (Not "supervised only":
-            // an operator may run the broker by hand.)
-            tun_provider: loaded
-                .settled
-                .mesh
-                .provides
-                .iter()
-                .any(|p| p.name == kennel_lib_binder::service::tun_broker::CAPABILITY),
-        });
+impl Refused {
+    fn new(stage: StartStage, reason: impl std::fmt::Display) -> Self {
+        Self {
+            stage,
+            reason: reason.to_string(),
+        }
     }
+}
 
-    // Synthesise the workload environment from policy (§7.9.2): clear the inherited
-    // environment and build it from scratch. `PATH` (from `[exec].path`),
-    // `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
-    // (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
-    // parent's environment is never a source — a secret policy did not name cannot
-    // reach the workload. (`bring_up` adds the workload's proxy env and any unix-shim
-    // vars on top of this cleared base.)
-    command.env_clear();
-    if !loaded.exec_path.is_empty() {
-        command.env("PATH", loaded.exec_path.join(":"));
-    }
-    command.env("USER", &loaded.account);
-    command.env("LOGNAME", &loaded.account);
-    command.env("SHELL", &loaded.shell);
-    command.env("HOME", &shim_root);
-    // Forward the caller's TERM (the one host var an interactive workload genuinely
-    // needs and cannot be synthesised); everything else is policy [env].set below.
-    if !req.term.is_empty() {
-        command.env("TERM", &req.term);
-    }
-    for (key, value) in &loaded.env.vars {
-        command.env(key, value);
-    }
-
-    tr.step("run_kennel: bring-up — building view, egress, factory construct, boot-sync");
-    let mut kennel = match start(&audited, spec, &mut command) {
-        Ok(kennel) => kennel,
-        Err(e) => {
-            // A bring-up failure after the egress step may have left BPF pins behind
-            // (the teardown removes the cgroup, which detaches the programs, but the
-            // pins outlive the helper). Clean them up best-effort.
-            crate::bpf_audit::cleanup_pins(kname);
-            return fail(
-                shared,
-                kname,
-                ctx,
-                conn,
-                StartStage::SpawnWorkload,
-                e.to_string(),
-            );
+/// Load the policy this start runs: the pre-built spawn instance, or the signed policy at the
+/// request's path. Refuses a policy that depends on Landlock scoping on a kernel without it.
+///
+// A dynamic-spawn instance arrives pre-built in memory (patched, never signed — §7.12.6); a
+// normal run loads and verifies the signed policy from disk. Either way `subst` is now applied.
+fn load_for_start<P, L>(
+    shared: &Shared<P, L>,
+    req: &StartRequest,
+    preloaded: Option<kennel_lib_policy::SettledPolicy>,
+    subst: &RuntimeSubstitutions,
+    tr: kennel_lib_config::Tracer,
+) -> Result<Loaded, Refused>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let loaded = if let Some(instance) = preloaded {
+        match crate::policy::loaded_from_settled(&instance, subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return Err(Refused::new(StartStage::SpawnInstance, reason.to_string())),
+        }
+    } else {
+        tr.step(&format!(
+            "run_kennel: loading policy {}",
+            req.policy.display()
+        ));
+        match shared.loader.load(&req.policy, subst) {
+            Ok(loaded) => loaded,
+            Err(reason) => return Err(Refused::new(StartStage::LoadPolicy, reason.to_string())),
         }
     };
+    if tr.on() {
+        tr.step(&format!(
+            "run_kennel: policy loaded — net.mode={:?}, ssh grants={}, unix sockets={}",
+            loaded.net.mode,
+            loaded.ssh.grants.len(),
+            loaded.unix.sockets.len()
+        ));
+    }
+    // A policy that depends on Landlock scoping is refused on a kernel that cannot scope, before
+    // anything is built: the kennel would otherwise start with that control silently absent.
+    check_landlock_floor(loaded.net.mode, kennel_lib_syscall::landlock::abi_version())
+        .map_err(|reason| Refused::new(StartStage::Landlock, reason))?;
+    Ok(loaded)
+}
+
+/// Settle the argv and cwd to run, and the OCI launcher inputs if the policy has a `[rootfs]`.
+///
+// OCI substrate (§7.11): an `[rootfs]` policy is ALWAYS launcher-driven — `[rootfs]` and
+// `[workload]` are mutually exclusive, so the image entrypoint runs via the workload-side
+// launcher (`kennel-bin-oci-entry`). kenneld makes it argv[0] (config.json as argv[1]) and
+// binds both into the view; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override
+// the launcher applies (keeping the image Entrypoint + Env), no policy impact.
+fn settle_command<P, L>(
+    shared: &Shared<P, L>,
+    req: &StartRequest,
+    loaded: &Loaded,
+) -> Result<(Vec<String>, PathBuf, crate::OciPrep), Refused>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let oci_image = loaded.plan.view.as_ref().is_some_and(|v| v.image.is_some());
+    let mut oci_prep = crate::OciPrep::default();
+    // Merge the request argv/cwd with the policy's embedded [workload] (§7.4). The merge
+    // is the DAEMON's job — the request reaches it before the signed policy is loaded, so
+    // only here is the policy's workload known. The request wins unless the policy pins it.
+    let (argv, cwd) = if oci_image {
+        let Some(launcher) = shared.identity.oci_entry_bin.clone() else {
+            return Err(Refused::new(
+                StartStage::OciLauncher,
+                "policy declares [rootfs] but no OCI launcher (kennel-bin-oci-entry) is configured"
+                    .to_owned(),
+            ));
+        };
+        if req.oci_config.is_none() {
+            return Err(Refused::new(
+                StartStage::OciLauncher,
+                "OCI run reached the daemon without a config.json path (use `kennel oci run`)"
+                    .to_owned(),
+            ));
+        }
+        let mut argv = vec![
+            launcher.to_string_lossy().into_owned(),
+            crate::OCI_CONFIG_VIEW_PATH.to_owned(),
+        ];
+        // The `-- <cmd>` override tokens (if any), passed through as the launcher's Cmd override.
+        argv.extend(req.argv.iter().cloned());
+        oci_prep = crate::OciPrep {
+            launcher_bin: Some(launcher),
+            config_src: req.oci_config.clone(),
+        };
+        // The launcher chdirs to the image's WorkingDir itself; give it the request cwd as the
+        // fallback the kernel starts it in.
+        (argv, req.cwd.clone())
+    } else {
+        match effective_workload(req, &loaded.workload) {
+            Ok(pair) => pair,
+            Err(reason) => return Err(Refused::new(StartStage::Workload, reason)),
+        }
+    };
+    Ok((argv, cwd, oci_prep))
+}
+
+/// Materialise the invocation cwd into the view for a policy with an `[fs.cwd]` grant.
+///
+// `[fs.cwd]` (§7.9): materialise the invocation cwd into the view. The signed policy
+// declared the slot; here — host-side, in operator context, before the kennel exists —
+// we resolve `req.cwd` under the framework floor and add the bind/Landlock grant. A
+// floor or marker failure REFUSES the run (never a silent no-grant).
+fn grant_invocation_cwd(
+    req: &StartRequest,
+    loaded: &mut Loaded,
+    tr: kennel_lib_config::Tracer,
+) -> Result<(), Refused> {
+    if !loaded.cwd.grant.is_none() {
+        match resolve_cwd_grant(&req.cwd, &loaded.cwd.required) {
+            Ok(resolved) => {
+                let writable = matches!(
+                    loaded.cwd.grant,
+                    kennel_lib_policy::settled::CwdGrant::Write
+                );
+                // The redirect floor's runtime half (W15): settle intersected every redirect
+                // `source` against the policy's own write set, but the cwd grant is a slot the
+                // invocation fills — the one workload-writable surface settle cannot see. A
+                // resolved *writable* cwd that covers (or sits inside) a redirect source would
+                // hand the workload write access to the tree the redirect asserts is
+                // operator-held. A read grant adds no write, so it needs no refusal.
+                if writable {
+                    if let Some(src) = loaded.plan.redirected_source_within(&resolved) {
+                        return Err(Refused::new(
+                            StartStage::FsCwd,
+                            format!(
+                                "invocation cwd {} intersects the fs.redirect source {} — a \
+                                 cwd-writable redirect source is a confused-deputy hole; run \
+                                 from outside the redirected store",
+                                resolved.display(),
+                                src.display()
+                            ),
+                        ));
+                    }
+                }
+                tr.detail(&format!(
+                    "run_kennel: [fs.cwd] grant {:?} materialised at {} (writable={writable})",
+                    loaded.cwd.grant,
+                    resolved.display()
+                ));
+                let mask_manifest = loaded.settled.effective_policy.trust.manifest;
+                loaded
+                    .plan
+                    .grant_cwd(resolved, writable, mask_manifest)
+                    .map_err(|reason| Refused::new(StartStage::FsCwd, reason))?;
+            }
+            Err(reason) => return Err(Refused::new(StartStage::FsCwd, reason)),
+        }
+    }
+    Ok(())
+}
+
+/// Create the managed overlay upper for a persist-mode OCI image root.
+///
+// Persist-mode rootfs (§7.11.4a): the managed overlay upper lives under the store entry
+// (the `config.json`'s dir). Create `upper/` + `work/` and fill them into the plan so the
+// construction child mounts the overlay with a persisted upper. The store fs must carry
+// `user.*` xattrs for the userxattr whiteouts — if it does not, the overlay mount in the
+// construction child fails with a clear error (the refusal the spec calls for).
+fn prepare_persistent_upper(
+    req: &StartRequest,
+    loaded: &mut Loaded,
+    oci_image: bool,
+) -> Result<(), Refused> {
+    if oci_image {
+        if let Some(img) = loaded
+            .plan
+            .view
+            .as_mut()
+            .and_then(|v| v.image.as_mut())
+            .filter(|i| i.persistence == kennel_lib_spawn::Persistence::Persist)
+        {
+            let Some(entry) = req.oci_config.as_deref().and_then(std::path::Path::parent) else {
+                return Err(Refused::new(
+                    StartStage::OciPersist,
+                    "persistence = persist needs the store entry path (config.json)".to_owned(),
+                ));
+            };
+            let upper = entry.join("upper");
+            let work = entry.join("work");
+            if let Err(e) =
+                std::fs::create_dir_all(&upper).and_then(|()| std::fs::create_dir_all(&work))
+            {
+                return Err(Refused::new(
+                    StartStage::OciPersist,
+                    format!(
+                        "creating the managed overlay upper under {}: {e}",
+                        entry.display()
+                    ),
+                ));
+            }
+            img.store_upper = Some((upper, work));
+        }
+    }
+    Ok(())
+}
+
+/// Verify a sha256-pinned workload and record its descriptor in the plan. Returns the open
+/// descriptor, which the caller holds until the kennel has been constructed.
+///
+// Verify the workload binary against the policy's sha256 pin (§7.4) — a KENNELD
+// decision made here, on the host, before the kennel is built: kennel-bin-init is a
+// dumb executor and gets no say. Applies only when the policy embedded a pin AND we
+// are running the policy's own program — with or without arguments appended under
+// `allowed_args` (an unpinned `--` override is a different command the pin does not
+// cover). On success it returns the OPEN fd of the verified
+// binary, which we pin into the plan: the factory places it at WORKLOAD_FD and init
+// `fexecve`s it (no path relookup → TOCTOU-free). `_workload_fd` must outlive the
+// construction, so it stays in scope until the end of bring-up.
+// Held only to keep the fd open (its raw value is what's used, via the plan); never read.
+fn pin_workload(
+    req: &StartRequest,
+    loaded: &mut Loaded,
+    argv: &[String],
+) -> Result<Option<OwnedFd>, Refused> {
+    if loaded.workload.sha256.is_empty() || !runs_policy_program(req, &loaded.workload) {
+        return Ok(None);
+    }
+    let fd = verify_workload_digest(argv.first(), &loaded.exec_path, &loaded.workload.sha256)
+        .map_err(|reason| Refused::new(StartStage::WorkloadSha256, reason))?;
+    loaded.plan.workload_fd = Some(std::os::fd::AsRawFd::as_raw_fd(&fd));
+    Ok(Some(fd))
+}
+
+/// The workload command and the descriptors a run carries.
+struct WorkloadIo {
+    command: Command,
+    /// Interactive: the seal's end of the socketpair it returns the pty master over.
+    return_sock: Option<OwnedFd>,
+    /// Interactive: the CLI's proxied-terminal socket.
+    client_sock: Option<OwnedFd>,
+    /// Interactive: the daemon's end of the pty-master socketpair.
+    master_recv: Option<OwnedFd>,
+    /// Non-interactive: the three stdio descriptors to inject.
+    stdio_raw: Option<[std::os::fd::RawFd; 3]>,
+}
+
+/// Build the workload command and sort the request's descriptors by the kind of run.
+///
+// Interactive runs pass ONE connected socket — the CLI's proxied-terminal end
+// (`client_sock`). KENNELD owns the workload's pty master now (not the CLI): we
+// mint our OWN socketpair, hand the seal its `master_send` end (over which the
+// seal returns the master during pre-exec), and keep `master_recv`. The master
+// then lands in kenneld's PtyBroker, which fans filtered output to whichever
+// client is attached and survives the client detaching (§05). Non-interactive
+// runs pass the three stdio fds, unchanged. `master_send` must outlive the spawn
+// so the forked child inherits it during the pre-exec seal.
+fn prepare_command(
+    req: &StartRequest,
+    fds: Vec<OwnedFd>,
+    argv: &[String],
+    cwd: &Path,
+) -> Result<WorkloadIo, Refused> {
+    let mut return_sock: Option<OwnedFd> = None;
+    let mut client_sock: Option<OwnedFd> = None;
+    let mut master_recv: Option<OwnedFd> = None;
+    // A non-interactive run injects the three workload stdio fds (a piped `kennel run`'s controller
+    // fds, or a SPAWN channel's spawned ends) onto the workload's 0/1/2 — the raw-channel sibling of
+    // the interactive pty path. The fds stay alive in `command` (as its stdin/stdout/stderr) through
+    // construction, so these raw numbers are valid when the factory sends them.
+    let mut stdio_raw: Option<[std::os::fd::RawFd; 3]> = None;
+    let command = if req.interactive {
+        client_sock = fds.into_iter().next();
+        match UnixStream::pair() {
+            Ok((recv, send)) => {
+                master_recv = Some(OwnedFd::from(recv));
+                return_sock = Some(OwnedFd::from(send));
+            }
+            Err(e) => return Err(Refused::new(StartStage::PtyMasterSocketpair, e.to_string())),
+        }
+        match command_for_interactive(argv, cwd) {
+            Ok(command) => command,
+            Err(reason) => return Err(Refused::new(StartStage::PrepareCommand, reason)),
+        }
+    } else {
+        if let [stdin, stdout, stderr, ..] = fds.as_slice() {
+            stdio_raw = Some([stdin.as_raw_fd(), stdout.as_raw_fd(), stderr.as_raw_fd()]);
+        }
+        match command_for(argv, cwd, fds) {
+            Ok(command) => command,
+            Err(reason) => return Err(Refused::new(StartStage::PrepareCommand, reason)),
+        }
+    };
+    Ok(WorkloadIo {
+        command,
+        return_sock,
+        client_sock,
+        master_recv,
+        stdio_raw,
+    })
+}
+
+/// The parts of the loaded policy [`binder_prep`] takes.
+struct BinderParts {
+    unix: kennel_lib_policy::UnixRuntime,
+    spawn: Option<kennel_lib_policy::SpawnGrant>,
+    consumes: Vec<kennel_lib_policy::ConsumeRuntime>,
+    settled: Arc<kennel_lib_policy::SettledPolicy>,
+    consumes_dbus_name: bool,
+}
+
+/// Build what the kennel's binder node 0 is served with.
+///
+// Every kennel runs the privhelper factory + a per-kennel binder bus: binder is the
+// universal control plane (`kennel-bin-init` pulls its supervision-half over node 0), not an
+// opt-in for [binder]/[unix] kennels (`07-1`/`07-2`). So always wire the daemon-side
+// context manager — it takes node 0, serves the lifecycle pull, and answers any facade.
+// The registry's policy/facade sets are simply empty for a kennel that grants no IPC.
+fn binder_prep<P, L>(
+    shared: &Shared<P, L>,
+    req: &StartRequest,
+    conn: &UnixStream,
+    constructor: &Arc<dyn crate::spawn::SpawnConstructor>,
+    subst: &RuntimeSubstitutions,
+    parts: BinderParts,
+    writer: Arc<kennel_lib_audit::Writer>,
+) -> crate::BinderPrep
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    // The facade connects to the real host socket, so resolve each `real` path's
+    // `~`/`$XDG_RUNTIME_DIR`/placeholders against the daemon's own home now (the
+    // shim path the proxy listens at was already resolved in `prepare_unix`).
+    let facade_unix = kennel_lib_policy::UnixRuntime {
+        sockets: parts
+            .unix
+            .sockets
+            .iter()
+            .map(|s| kennel_lib_policy::UnixSocket {
+                real: resolve_path(&s.real, subst, &shared.identity.home)
+                    .to_string_lossy()
+                    .into_owned(),
+                ..s.clone()
+            })
+            .collect(),
+    };
+    // The registry records every decision (§7.1.4). With no audit state dir, a sink-less
+    // writer keeps the bus running without recording.
+    // The operator-prompt channel for the TTL `renew` action (§9.7): a clone of this
+    // control connection. Installed only for an interactive run — a non-interactive caller
+    // has no terminal to surface the prompt on, so `renew` there falls back to a warn.
+    let prompt = if req.interactive {
+        crate::prompt::from_conn(conn).ok()
+    } else {
+        None
+    };
+    // The [spawn] runtime (§7.12): pair the grant with a trust-key snapshot (to verify a
+    // re-resolved template against) and the template cascade kenneld resolves `name@version`
+    // from. Built only for a kennel that carries a grant; a SPAWN from any other is denied.
+    let spawn = parts.spawn.map(|grant| {
+        std::sync::Arc::new(crate::spawn::SpawnRuntime::new(
+            grant,
+            shared.loader.trust_keys(),
+            kennel_lib_config::User::load()
+                .unwrap_or_default()
+                .template_dirs(),
+            std::sync::Arc::clone(constructor),
+            shared.identity.tracer,
+        ))
+    });
+    crate::BinderPrep {
+        unix: facade_unix,
+        writer,
+        init_bin: shared.identity.init_bin.clone(),
+        prompt,
+        spawn,
+        consumes: parts.consumes,
+        catalogue: Some(std::sync::Arc::clone(&shared.catalogue)),
+        activator: shared.activator(),
+        brokered_dbus: {
+            // The `dbus-name` consume (declared or implied by `[dbus]`, above) plus an
+            // enabled broker in the catalogue. There is no other mediation home: when this
+            // is false the SVC_CONNECT locator refuses and the bus goes unserved.
+            // No per-ctx filter is recorded: the mesh bus pulls this kennel's `[dbus]` from its
+            // retained settled struct (`set_settled` above) when the broker asks.
+            parts.consumes_dbus_name && {
+                let cat = shared
+                    .catalogue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                !cat.resolve("org.projectkennel.dbus-broker").is_empty()
+            }
+        },
+        // The one daemon-global tun-egress sink (§8 / W2): the tun-broker's manager registers into
+        // it, and each `[net.udp]` consumer's manager delivers a session through it.
+        tun_sink: shared.tun_sink.clone(),
+        // Only a kennel whose SIGNED policy provides the tun capability may register that
+        // sink. The name is in the reserved namespace, so the compiler admitted the provide
+        // only through a template signed at the tier the name requires, and that verdict is
+        // sealed in the settled signature the daemon just verified. (Not "supervised only":
+        // an operator may run the broker by hand.)
+        tun_provider: parts
+            .settled
+            .mesh
+            .provides
+            .iter()
+            .any(|p| p.name == kennel_lib_binder::service::tun_broker::CAPABILITY),
+    }
+}
+
+/// For an interactive kennel, receive the pty master from the seal and start the broker that
+/// pumps it; `None` for a non-interactive kennel, or if no master came back.
+///
+// For an interactive kennel, kenneld now owns the master: receive it from the
+// seal over `master_recv`, build the PtyBroker (running the workload's output
+// through the [tty] escape filter), register it so a later `kennel attach` reaches
+// this running kennel, and make the `Start` connection's passed socket the first
+// attached client. The broker outlives this connection — detaching the client does
+// not end the workload. `broker` (a registry clone) is shut down on workload exit.
+fn start_pty_broker<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    req: &StartRequest,
+    master_recv: Option<&OwnedFd>,
+    client_sock: &mut Option<OwnedFd>,
+    loaded_tty_filter: bool,
+) -> Option<crate::pty_broker::PtyBroker>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let tr = shared.identity.tracer;
+    if req.interactive {
+        master_recv
+            .and_then(|sock| recv_pty_master(sock).ok())
+            .map_or_else(
+                || {
+                    tr.step(
+                        "run_kennel: interactive kennel returned no pty master (filter inactive)",
+                    );
+                    None
+                },
+                |master| {
+                    // The broker is a raw-byte router; it carries the [tty] filter
+                    // decision for the client (which owns the filter, §4.8) but does not
+                    // apply it.
+                    let b = crate::pty_broker::PtyBroker::start(
+                        master,
+                        loaded_tty_filter,
+                        client_sock.take(),
+                    );
+                    shared.set_broker(kname, b.clone());
+                    Some(b)
+                },
+            )
+    } else {
+        None
+    }
+}
+
+/// A constructed kennel and what the daemon holds for it while it runs.
+struct Running {
+    kennel: crate::Kennel,
+    audit: Option<Arc<kennel_lib_audit::Writer>>,
+    /// The host sources of the exclusive binds, to release at teardown.
+    exclusive_sources: Vec<PathBuf>,
+    tty_filter: bool,
+    on_change: kennel_lib_policy::OnChangeAction,
+    kennel_uuid: String,
+    /// Interactive: the daemon's end of the pty-master socketpair.
+    master_recv: Option<OwnedFd>,
+    /// Interactive: the CLI's proxied-terminal socket.
+    client_sock: Option<OwnedFd>,
+}
+
+/// The running half of a start: report `Started`, serve the kennel until its workload exits,
+/// tear it down, and report `Exited`.
+fn supervise<P, L>(
+    shared: &Arc<Shared<P, L>>,
+    kname: &KennelName,
+    req: &StartRequest,
+    conn: &mut UnixStream,
+    ctx: u16,
+    parent_alive: Option<&std::sync::atomic::AtomicBool>,
+    running: Running,
+) where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    let Running {
+        mut kennel,
+        audit,
+        exclusive_sources,
+        tty_filter: loaded_tty_filter,
+        on_change,
+        kennel_uuid,
+        master_recv,
+        mut client_sock,
+    } = running;
+    let tr = shared.identity.tracer;
+    let audited = crate::audit::AuditedPrivileged::new(&shared.privileged, audit.as_deref());
     let pid = kennel.id();
     tr.step(&format!("run_kennel: workload running, pid={pid}"));
     shared.set_pid(kname, pid);
@@ -2378,39 +2594,15 @@ pub fn run_kennel<P, L>(
             Arc::clone(writer),
         )
     });
-    // For an interactive kennel, kenneld now owns the master: receive it from the
-    // seal over `master_recv`, build the PtyBroker (running the workload's output
-    // through the [tty] escape filter), register it so a later `kennel attach` reaches
-    // this running kennel, and make the `Start` connection's passed socket the first
-    // attached client. The broker outlives this connection — detaching the client does
-    // not end the workload. `broker` (a registry clone) is shut down on workload exit.
-    let broker = if req.interactive {
-        master_recv
-            .as_ref()
-            .and_then(|sock| recv_pty_master(sock).ok())
-            .map_or_else(
-                || {
-                    tr.step(
-                        "run_kennel: interactive kennel returned no pty master (filter inactive)",
-                    );
-                    None
-                },
-                |master| {
-                    // The broker is a raw-byte router; it carries the [tty] filter
-                    // decision for the client (which owns the filter, §4.8) but does not
-                    // apply it.
-                    let b = crate::pty_broker::PtyBroker::start(
-                        master,
-                        loaded_tty_filter,
-                        client_sock.take(),
-                    );
-                    shared.set_broker(kname, b.clone());
-                    Some(b)
-                },
-            )
-    } else {
-        None
-    };
+    // An interactive kennel: take the pty master from the seal and start its broker.
+    let broker = start_pty_broker(
+        shared,
+        kname,
+        req,
+        master_recv.as_ref(),
+        &mut client_sock,
+        loaded_tty_filter,
+    );
     // Convey the [tty] escape-filter decision so the attached CLI filters client-side
     // (§4.8). False for a non-interactive launch — it has no proxied terminal.
     let _ = control::send_response(
@@ -2500,66 +2692,374 @@ pub fn run_kennel<P, L>(
     );
 }
 
-/// Handle a `kennel attach`: hand the connection's terminal socket to the running
-/// kennel's PTY broker (taking over any current client) and block until this client's
-/// session ends — `Exited` if the workload exits, `Detached` if a later attach takes
-/// over. No workload lifecycle here: the broker (and the kennel's own `run_kennel`
-/// thread) own that; attach is a pure subscriber.
-fn run_attach<P, L>(
+/// Add the consumes a mediated section implies, where the policy did not write them.
+///
+// A mediated section IS the brokered path: each enabled section implies its capability
+// consume, synthesized when the policy does not spell it out — so a section-only policy
+// (including any pre-W4 v3 artefact) routes identically to one that declares the
+// `[[consumes]]`. `[dbus.session]`/`[dbus.system]` imply the per-bus `dbus-name`
+// capabilities (W4, one mediation home: the standing dbus-broker); `[net.udp]` implies the
+// tun-broker's af-unix capability (§8 / W2 — and a future `[net.tcp]` slow-lane implies its
+// transport capability the same way). Synthesized before the census below, so an ondemand
+// provider is kept alive while this kennel runs, like any declared consume.
+fn imply_mediated_consumes(loaded: &mut Loaded) {
+    {
+        use kennel_lib_binder::service::{dbus as dbus_caps, tun_broker};
+        use kennel_lib_policy::settled::Shape;
+        let implied = [
+            (
+                loaded.dbus.session.is_some(),
+                dbus_caps::CAPABILITY_SESSION,
+                Shape::DbusName,
+            ),
+            (
+                loaded.dbus.system.is_some(),
+                dbus_caps::CAPABILITY_SYSTEM,
+                Shape::DbusName,
+            ),
+            (loaded.net.udp, tun_broker::CAPABILITY, Shape::AfUnix),
+        ];
+        for (enabled, capability, shape) in implied {
+            if enabled && !loaded.consumes.iter().any(|c| c.name == capability) {
+                loaded
+                    .consumes
+                    .push(kennel_lib_policy::settled::ConsumeRuntime {
+                        name: capability.to_owned(),
+                        shape,
+                        at: None,
+                        env: Vec::new(),
+                        key: None,
+                        required: true,
+                    });
+            }
+        }
+    }
+}
+
+/// Warn about a policy that shims an SSH or GPG agent socket into the kennel.
+///
+// Re-derive the compile-time footgun warning at spawn (§7.10.1): a policy may shim a
+// real ssh-agent socket via `[[unix.allow]]`, which the framework permits but warns
+// loudly about — an exposed agent is a destination-blind signing oracle. An operator
+// who ran a pre-compiled artefact never saw the `kennel compile` warning, so emit it
+// here too. Warned, not refused — footguns are loud, not amputated.
+fn warn_agent_shims(kname: &KennelName, unix: &kennel_lib_policy::UnixRuntime) {
+    for sock in &unix.sockets {
+        let shims_ssh_agent = sock.name.eq_ignore_ascii_case("ssh-agent")
+            || sock.env.as_deref() == Some("SSH_AUTH_SOCK");
+        if shims_ssh_agent {
+            eprintln!(
+                "kenneld: warning: kennel `{}` shims an SSH agent (`{}`): an exposed agent is a \
+                 destination-blind signing oracle (§7.10.1) — any code in the kennel can sign for \
+                 any destination. The [ssh] re-origination bastion is the intended path.",
+                kname, sock.name
+            );
+        }
+        let shims_gpg_agent = sock.name.eq_ignore_ascii_case("gpg-agent")
+            || sock.env.as_deref() == Some("GPG_AGENT_INFO");
+        if shims_gpg_agent {
+            eprintln!(
+                "kenneld: warning: kennel `{}` shims a GPG agent (`{}`): an exposed agent is a \
+                 destination-blind signing oracle — worse than ssh-agent, a signature stamps your \
+                 identity onto whatever the kennel signs (malware, releases, forged commits). There \
+                 is no bastion equivalent (design §11.1); the safe default is to sign on the host.",
+                kname, sock.name
+            );
+        }
+    }
+}
+
+/// Collect the binder-connector mesh mounts for this kennel, and bind a provider's af-unix
+/// rendezvous directories into its view.
+///
+/// Each mount is a detached binderfs clone and the in-view directory to place it at. Every bus
+/// ensured here is recorded on `mesh_bus_guard`, which releases it when the kennel ends. A
+/// capability that cannot be set up is logged and skipped; it does not fail the start.
+fn mesh_mounts_for<P, L>(
     shared: &Shared<P, L>,
-    kennel: &KennelName,
-    fds: Vec<OwnedFd>,
-    conn: &mut UnixStream,
-) where
-    P: Privileged + Clone + Sync,
-    L: PolicyLoader,
+    kname: &KennelName,
+    loaded: &mut Loaded,
+    provider_tier: Option<crate::catalogue::Tier>,
+    consumes_dbus_name: bool,
+    mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
+) -> Vec<(OwnedFd, PathBuf)>
+where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
 {
-    let Some(broker) = shared.broker_for(kennel) else {
-        let _ = control::send_response(
-            conn,
-            &Response::Error(format!(
-                "kennel `{kennel}` is not attachable (unknown, not interactive, or still starting)"
-            )),
-        );
-        return;
-    };
-    let Some(client_sock) = fds.into_iter().next() else {
-        let _ = control::send_response(
-            conn,
-            &Response::Error("attach passed no terminal socket".to_owned()),
-        );
-        return;
-    };
-    let Some((ctx, pid)) = shared.ctx_pid(kennel) else {
-        let _ = control::send_response(
-            conn,
-            &Response::Error(format!("no kennel named `{kennel}`")),
-        );
-        return;
-    };
-    let Some(generation) = broker.attach(client_sock) else {
-        let _ = control::send_response(
-            conn,
-            &Response::Error(format!("kennel `{kennel}` has already exited")),
-        );
-        return;
-    };
-    let _ = control::send_response(
-        conn,
-        &Response::Attached {
-            ctx,
-            pid,
-            filter_escapes: broker.filter_escapes(),
-        },
+    // Binder-connector mesh mounts to place in the view via the rendezvous (§7.13.4a): each is a
+    // detached binderfs clone fd + its in-view target directory. `kennel-bin-init` `move_mount`s them
+    // before forking the workload (and Landlock-grants the device). Collected across the provider and
+    // consumer passes below, then handed to `bring_up` on the `Spec`.
+    let mut mesh_mounts: Vec<(std::os::fd::OwnedFd, std::path::PathBuf)> = Vec::new();
+    // Provider rendezvous points (§7.13.4b): for each af-unix `[[provides]]`, bind the host
+    // rendezvous directory `<runtime>/mesh/<tier>/<name>[.key]/` at the in-view `dirname(endpoint)`,
+    // so the socket the provider binds at its policy `endpoint` is the inode the broker connects
+    // host-side. Built for a supervised mesh provider (`provider_tier`), before the view's binds move
+    // into the `Spec`.
+    provider_rendezvous(
+        shared,
+        kname,
+        loaded,
+        provider_tier,
+        mesh_bus_guard,
+        &mut mesh_mounts,
     );
-    // Block until this client's session ends; report why.
-    let response = match broker.wait_for_outcome(generation) {
-        crate::pty_broker::AttachOutcome::WorkloadExited => Response::Exited { code: 0 },
-        crate::pty_broker::AttachOutcome::TakenOver => Response::Detached {
-            reason: "another client attached".to_owned(),
-        },
-    };
-    let _ = control::send_response(conn, &response);
+    consumer_mesh_buses(shared, kname, loaded, mesh_bus_guard, &mut mesh_mounts);
+    dbus_broker_bus(
+        shared,
+        kname,
+        loaded,
+        consumes_dbus_name,
+        mesh_bus_guard,
+        &mut mesh_mounts,
+    );
+
+    mesh_mounts
+}
+
+/// A provider's side of the mesh: bind each af-unix rendezvous directory into its view, and
+/// ensure the bus of each binder-connector capability it provides.
+fn provider_rendezvous<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    loaded: &mut Loaded,
+    provider_tier: Option<crate::catalogue::Tier>,
+    mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
+    mesh_mounts: &mut Vec<(OwnedFd, PathBuf)>,
+) where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    if let Some(tier) = provider_tier {
+        if let Some(view) = loaded.plan.view.as_mut() {
+            for p in &loaded.provides {
+                if p.shape != kennel_lib_policy::settled::Shape::AfUnix {
+                    continue;
+                }
+                let Some((cap_name, cap_key)) = crate::mesh::capability(&p.name, p.key.as_deref())
+                else {
+                    eprintln!(
+                        "kenneld: provider `{kname}`: capability `{}` has a malformed name or key",
+                        p.name
+                    );
+                    continue;
+                };
+                let key = cap_key.as_ref();
+                let host_dir = crate::mesh::host_rp_dir(tier, &cap_name, key);
+                // kenneld owns the rendezvous directory; create it (0700) and clear any stale socket
+                // before construction binds it in and the provider binds afresh at its endpoint.
+                if let Err(e) = std::fs::create_dir_all(&host_dir) {
+                    eprintln!(
+                        "kenneld: provider `{}`: mesh rendezvous dir {}: {e}",
+                        kname,
+                        host_dir.display()
+                    );
+                    continue;
+                }
+                let _ = std::fs::set_permissions(
+                    &host_dir,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                );
+                let _ = std::fs::remove_file(crate::mesh::host_rp_socket(
+                    tier,
+                    &cap_name,
+                    key,
+                    &p.endpoint,
+                ));
+                // Bind the host directory at the in-view parent of the policy endpoint.
+                let Some(target) = std::path::Path::new(&p.endpoint).parent() else {
+                    continue;
+                };
+                let Ok(target) = kennel_lib_spawn::ViewPath::parse(target) else {
+                    eprintln!(
+                        "kenneld: provider `{kname}`: endpoint `{}` is not an in-view path",
+                        p.endpoint
+                    );
+                    continue;
+                };
+                view.binds.push(kennel_lib_spawn::plan::BindMount {
+                    source: host_dir,
+                    target,
+                    writable: true,
+                    exclusive: false,
+                    redirected: false,
+                    mmap_exec: false,
+                });
+            }
+            // Binder-connector `[[provides]]` (§7.13.4a): ensure the mesh bus for this capability
+            // and request a movable clone of its binderfs to place at the provider's `endpoint`. The
+            // clone rides the mesh rendezvous; `kennel-bin-init` `move_mount`s it into the view, where
+            // the provider opens `<endpoint>` (= `<mount-dir>/binder`), `ADD_SERVICE`s, and serves.
+            for p in &loaded.provides {
+                if p.shape != kennel_lib_policy::settled::Shape::BinderConnector {
+                    continue;
+                }
+                let Some(target_dir) = std::path::Path::new(&p.endpoint).parent() else {
+                    continue;
+                };
+                let key = p.key.as_deref();
+                match shared.ensure_mesh_bus(tier, &p.name, key) {
+                    Ok(clone_fd) => {
+                        mesh_bus_guard.push(tier, p.name.clone(), p.key.clone());
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "kenneld: provider `{}`: mesh bus for `{}`: {e}",
+                            kname, p.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A consumer's side of the mesh: ensure the bus of each binder-connector capability it consumes.
+///
+// Consumer mesh-bus bind-mounts (§7.13.4a): for each binder-connector `[[consumes]]` with an
+// `at`, resolve the provider's tier from the catalogue, ensure the mesh bus, and bind-mount
+// its binder device at the consumer's `at` path. The consumer opens this device, transacts
+// `SVC_CONNECT` on the mesh bus to get the provider's handle, then transacts directly.
+//
+// Two-phase: collect (tier, name, key, at) under the catalogue lock, then drop it before
+// taking the mesh_buses lock (ensure_mesh_bus), preventing lock-order inversion.
+fn consumer_mesh_buses<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    loaded: &Loaded,
+    mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
+    mesh_mounts: &mut Vec<(OwnedFd, PathBuf)>,
+) where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    {
+        let mesh_consumer_binds: Vec<(crate::catalogue::Tier, String, Option<String>, String)> = {
+            let cat = shared
+                .catalogue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            loaded
+                .consumes
+                .iter()
+                .filter(|c| c.shape == kennel_lib_policy::settled::Shape::BinderConnector)
+                .filter_map(|c| {
+                    let at = c.at.as_ref()?;
+                    let candidate = cat.resolve(&c.name).into_iter().next()?;
+                    Some((candidate.tier, c.name.clone(), c.key.clone(), at.clone()))
+                })
+                .collect()
+        }; // catalogue lock dropped
+        for (tier, name, key, at) in &mesh_consumer_binds {
+            let Some(target_dir) = std::path::Path::new(at).parent() else {
+                continue;
+            };
+            match shared.ensure_mesh_bus(*tier, name, key.as_deref()) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(*tier, name.clone(), key.clone());
+                    mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                }
+                Err(e) => {
+                    eprintln!("kenneld: consumer `{kname}`: mesh bus for `{name}`: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// The D-Bus broker's bus, for a kennel that grants `[dbus]` and consumes a bus name.
+///
+// Brokered D-Bus consumer (§7.7): such a kennel reaches the standing dbus-broker over the
+// connector mesh bus, so its `facade-dbus` opens the mesh device directly (the per-kennel
+// `SVC_CONNECT(dbus)` hands it this same path). Bind the device into the view — the dbus-name
+// consume is served by the facade, not the binder-connector consumer loop above, so nothing
+// else mounts it.
+fn dbus_broker_bus<P, L>(
+    shared: &Shared<P, L>,
+    kname: &KennelName,
+    loaded: &Loaded,
+    consumes_dbus_name: bool,
+    mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
+    mesh_mounts: &mut Vec<(OwnedFd, PathBuf)>,
+) where
+    P: Privileged + Clone + Send + Sync + 'static,
+    L: PolicyLoader + Send + Sync + 'static,
+{
+    {
+        let dbus_enabled = loaded.dbus.session.is_some() || loaded.dbus.system.is_some();
+        // Resolve the broker's tier from the catalogue — NOT a hardcoded `Host`. The broker
+        // registers its control node on the mesh bus keyed by its *policy-derived* tier (the
+        // supervisor activates it with the catalogue candidate's tier); a user-enabled broker is
+        // `User`, not `Host`. Keying this consumer's mesh bus by the same resolved tier is what puts
+        // both on one binderfs instance — mismatch them and the broker's control node is on a
+        // different bus, so `ACCEPT_SESSION` fails closed with no provider found.
+        let broker_tier = {
+            let cat = shared
+                .catalogue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            cat.resolve("org.projectkennel.dbus-broker")
+                .into_iter()
+                .next()
+                .map(|c| c.tier)
+        };
+        if let (true, true, Some(tier)) = (dbus_enabled, consumes_dbus_name, broker_tier) {
+            match shared.ensure_mesh_bus(tier, "org.projectkennel.dbus-broker", None) {
+                Ok(clone_fd) => {
+                    mesh_bus_guard.push(tier, "org.projectkennel.dbus-broker".to_owned(), None);
+                    // The device lands at `MESH_DBUS_DEVICE` (`/dev/binderfs-mesh/binder`); its
+                    // mount dir is the parent. `facade-dbus` opens that path (the `SVC_CONNECT(dbus)`
+                    // reply names it).
+                    if let Some(target_dir) =
+                        std::path::Path::new(crate::binder::MESH_DBUS_DEVICE).parent()
+                    {
+                        mesh_mounts.push((clone_fd, target_dir.to_path_buf()));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("kenneld: consumer `{kname}`: dbus mesh bus: {e}");
+                }
+            }
+        } else if dbus_enabled && broker_tier.is_none() {
+            // Fail-closed, loudly: with the legacy delegate retired there is no fallback — the
+            // bus(es) stay unserved until the shipped broker provider is enabled.
+            eprintln!(
+                "kenneld: kennel `{kname}` grants [dbus] but no `dbus-broker` provider is enabled — \
+                 the bus(es) will be unserved. install.sh enables the shipped provider at \
+                 /etc/kennel/ondemand/dbus-broker; after adding a link, run `kennel daemon-reload`."
+            );
+        }
+    }
+}
+
+/// Synthesise the workload's environment from policy.
+///
+// Synthesise the workload environment from policy (§7.9.2): clear the inherited
+// environment and build it from scratch. `PATH` (from `[exec].path`),
+// `USER`/`LOGNAME` (the masked account), `SHELL` (`[exec].shell`), and `HOME`
+// (the kennel's shim home) are synthesised; `[env].set` is layered on top. The
+// parent's environment is never a source — a secret policy did not name cannot
+// reach the workload. (`bring_up` adds the workload's proxy env and any unix-shim
+// vars on top of this cleared base.)
+fn workload_env(command: &mut Command, loaded: &Loaded, home: &Path, term: &str) {
+    command.env_clear();
+    if !loaded.exec_path.is_empty() {
+        command.env("PATH", loaded.exec_path.join(":"));
+    }
+    command.env("USER", &loaded.account);
+    command.env("LOGNAME", &loaded.account);
+    command.env("SHELL", &loaded.shell);
+    command.env("HOME", home);
+    // Forward the caller's TERM (the one host var an interactive workload genuinely
+    // needs and cannot be synthesised); everything else is policy [env].set below.
+    if !term.is_empty() {
+        command.env("TERM", term);
+    }
+    for (key, value) in &loaded.env.vars {
+        command.env(key, value);
+    }
 }
 
 /// Release the reservation, **log the reason**, and report it (a bring-up step

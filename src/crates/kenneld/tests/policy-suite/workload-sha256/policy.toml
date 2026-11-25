@@ -1,0 +1,30 @@
+# ============================================================================
+# Suite case: workload-sha256 — the workload is pinned by digest (§7.4).
+#
+# The policy names the workload binary and the SHA-256 it must have. The daemon opens the
+# binary once, hashes that descriptor, and the kennel executes the same descriptor: the bytes
+# checked are the bytes run. The descriptor has to stay open from the check until the kennel is
+# constructed, so this case fails if anything between the two closes it.
+#
+# setup.sh fills in the binary's real path and its digest on this host. Exit 0 ⇒ the pinned
+# binary ran.
+# ============================================================================
+
+template_name = "workload-sha256"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+# The shell has to be allowed for the policy to compile; the workload is the pinned binary.
+allow = ["/bin/sh", "/bin/dash", "__BINARY__"]
+
+[workload]
+argv = ["__BINARY__"]
+pinned = true
+sha256 = ["__DIGEST__"]
