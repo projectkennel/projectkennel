@@ -1,8 +1,8 @@
 {
   "crate_count": 32,
-  "total_sloc": 47713,
+  "total_sloc": 47834,
   "tcb_crate_count": 18,
-  "tcb_sloc": 29459,
+  "tcb_sloc": 29580,
   "crates": [
     {
       "name": "kenneld",
@@ -65,6 +65,16 @@
       "external_deps": ["serde"]
     },
     {
+      "name": "kennel-privhelper",
+      "sloc": 2263,
+      "uses_unsafe": false,
+      "in_tcb": true,
+      "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
+      "consumers": ["kenneld"],
+      "first_party_deps": ["kennel-lib-config", "kennel-lib-spawn", "kennel-lib-syscall"],
+      "external_deps": []
+    },
+    {
       "name": "kennel-lib-binder",
       "sloc": 2185,
       "uses_unsafe": true,
@@ -73,16 +83,6 @@
       "consumers": ["bin-init", "dbus", "dbus-broker", "facade", "kenneld", "spawn", "tun-broker"],
       "first_party_deps": ["kennel-lib-bytes", "kennel-lib-syscall"],
       "external_deps": ["libc"]
-    },
-    {
-      "name": "kennel-privhelper",
-      "sloc": 2142,
-      "uses_unsafe": false,
-      "in_tcb": true,
-      "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
-      "consumers": ["kenneld"],
-      "first_party_deps": ["kennel-lib-config", "kennel-lib-spawn", "kennel-lib-syscall"],
-      "external_deps": []
     },
     {
       "name": "kennel-lib-syscall",

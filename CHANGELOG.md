@@ -142,6 +142,11 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The factory's `construct` is split into its stages.** It was one 399-line function. The
+  stages are now functions (`receive_request`, `provision_host_network`,
+  `open_trusted_init`, `construction_child`, `write_maps_and_release`,
+  `shadow_exclusive_sources`, `report_to_daemon`) and `construct` is the sequence that calls
+  them, in the same order. No behaviour change.
 - **Three more security-relevant values are types** (CODING-STANDARDS.md §11.1).
   - `ScopedAddr` (`kennel-privhelper`): a loopback address that lies inside the caller's
     reserved per-kennel subnet. Only `validate_addr` builds one, and the factory and the net
