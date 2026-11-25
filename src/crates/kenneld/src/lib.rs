@@ -795,8 +795,7 @@ fn prepare_plan(
     // 2. loopback addresses. The proxy's listen offset + port come from the signed
     //    policy (`net.proxy`); offset 1 / port 1080 by default. v4 only when ctx
     //    fits the 8-bit field it carries; a higher ctx is a v6-only kennel.
-    let offset = net.proxy.offset;
-    let port = net.proxy.port;
+    let offset = net.proxy.offset();
     // Compute the per-kennel loopback addresses — but only for the **proxied** modes, which
     // run a SOCKS facade on a per-kennel loopback alias. `none` (own empty netns, no
     // interfaces) and `open` (host netns, direct egress, no proxy) get no alias. The factory
@@ -851,11 +850,7 @@ fn prepare_plan(
     if proxy.is_some() && proxied {
         // The facade listens on the kennel's own loopback (`127.0.0.1`/`::1`), so the BPF must
         // permit the workload to reach it there — not a per-kennel address.
-        let port = kennel_lib_policy::variant::Port::new(port).ok_or_else(|| {
-            Error::Spawn(SpawnError::InvalidPolicy(
-                "net.proxy.port is 0; a proxied kennel needs a port for its proxy".to_owned(),
-            ))
-        })?;
+        let port = net.proxy.port().ok_or_else(no_proxy_listener)?;
         plan.stamp_proxy(&ProxyEndpoint {
             v4: Some(std::net::Ipv4Addr::LOCALHOST),
             v6: std::net::Ipv6Addr::LOCALHOST,
@@ -906,7 +901,7 @@ fn prepare_plan(
             net,
             scope,
             ctx,
-            port,
+            port: net.proxy.port(),
             mirror_ports: &mirror_ports,
             pivoting: view_root.is_some() && plan.view.is_some(),
             has_egress: command_socket.is_some(),
@@ -1058,6 +1053,13 @@ fn construct_and_start<P: Privileged + Sync>(
     Ok(init_pid)
 }
 
+/// The refusal for a proxied kennel whose signed policy carries the no-proxy marker.
+fn no_proxy_listener() -> Error {
+    Error::Spawn(SpawnError::InvalidPolicy(
+        "net.proxy is the no-proxy marker; a proxied kennel needs its proxy".to_owned(),
+    ))
+}
+
 /// What [`wire_facades`] reads: where each facade binary is, and which facades this kennel has.
 struct FacadeWiring<'a> {
     proxy: Option<&'a ProxySetup>,
@@ -1067,8 +1069,8 @@ struct FacadeWiring<'a> {
     net: &'a NetPolicy,
     scope: &'a ReservedScope,
     ctx: Ctx,
-    /// The port the SOCKS5 facade listens on.
-    port: u16,
+    /// The port the SOCKS5 facade listens on; `None` when the policy carries no proxy.
+    port: Option<kennel_lib_policy::variant::Port>,
     mirror_ports: &'a [u16],
     /// Whether the kennel has a constructed view to bind the facades into.
     pivoting: bool,
@@ -1106,6 +1108,7 @@ fn wire_facades(
         if let Some(setup) = proxy {
             // The facade listens on the kennel's own loopback: `127.0.0.1`, isolated by the
             // kennel's net-ns, needs no per-kennel address.
+            let port = port.ok_or_else(no_proxy_listener)?.get();
             let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
             apply_socks5(plan, &setup.socks5, listen, command)?;
             // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
@@ -1574,12 +1577,12 @@ fn mirror_bind_ports(net: &kennel_lib_policy::NetPolicy) -> Vec<u16> {
             ports.push(p);
         }
     };
-    for &p in &net.bind_allowed_ports {
+    for &p in net.bind_allowed_ports.iter() {
         push(p);
     }
     for rule in &net.bpf_bind_allow {
-        if rule.port_min == rule.port_max {
-            push(rule.port_min);
+        if rule.port_min() == rule.port_max() {
+            push(rule.port_min());
         }
     }
     ports

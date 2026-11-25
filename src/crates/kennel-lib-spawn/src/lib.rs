@@ -1400,37 +1400,28 @@ mod tests {
                     proxy: kennel_lib_policy::ProxyListen::default(),
                     allow: Vec::new(),
                     allow_names: Vec::new(),
-                    deny_invariant: vec![NetRule {
-                        cidr: "169.254.169.254".to_owned(),
-                        prefix_len: 32,
-                        port_min: 0,
-                        port_max: 65535,
-                        protocol: Protocol::Any,
-                    }],
+                    deny_invariant: vec![NetRule::new(
+                        "169.254.169.254",
+                        32,
+                        0,
+                        65535,
+                        Protocol::Any,
+                    )
+                    .expect("a valid rule")],
                     deny_author: Vec::new(),
                     // The kernel connect ACL (defence-in-depth in proxied modes; the gate in
                     // host). Two CIDR allows the BPF/Landlock encoding tests verify.
                     bpf_connect_allow: vec![
-                        NetRule {
-                            cidr: "93.184.216.0".to_owned(),
-                            prefix_len: 24,
-                            port_min: 443,
-                            port_max: 443,
-                            protocol: Protocol::Tcp,
-                        },
-                        NetRule {
-                            cidr: "10.1.0.0".to_owned(),
-                            prefix_len: 16,
-                            port_min: 1024,
-                            port_max: 2048,
-                            protocol: Protocol::Tcp,
-                        },
+                        NetRule::new("93.184.216.0", 24, 443, 443, Protocol::Tcp)
+                            .expect("a valid rule"),
+                        NetRule::new("10.1.0.0", 16, 1024, 2048, Protocol::Tcp)
+                            .expect("a valid rule"),
                     ],
                     bpf_connect_deny: Vec::new(),
                     bpf_bind_allow: Vec::new(),
                     bpf_bind_deny: Vec::new(),
                     bind_port_min: 0,
-                    bind_allowed_ports: Vec::new(),
+                    bind_allowed_ports: kennel_lib_policy::BindPorts::default(),
                 },
                 fs: FsPolicy {
                     home_shadow: true,
@@ -2338,13 +2329,7 @@ mod tests {
     }
 
     fn tcp_rule(cidr: &str, prefix_len: u8, port_min: u16, port_max: u16) -> NetRule {
-        NetRule {
-            cidr: cidr.to_owned(),
-            prefix_len,
-            port_min,
-            port_max,
-            protocol: Protocol::Tcp,
-        }
+        NetRule::new(cidr, prefix_len, port_min, port_max, Protocol::Tcp).expect("a valid rule")
     }
 
     /// #218: inside the kennel's OWN network namespace, loopback is the kennel's private `lo`, so
@@ -2640,13 +2625,9 @@ mod tests {
         // into the BPF allow maps (in proxied modes that base is empty — see plan_translates_policy).
         let mut p = policy_with_placeholders();
         p.effective_policy.net.mode = NetMode::Host;
-        p.effective_policy.net.bpf_connect_allow.push(NetRule {
-            cidr: "2606:2800:220::".to_owned(),
-            prefix_len: 48,
-            port_min: 443,
-            port_max: 443,
-            protocol: Protocol::Tcp,
-        });
+        p.effective_policy.net.bpf_connect_allow.push(
+            NetRule::new("2606:2800:220::", 48, 443, 443, Protocol::Tcp).expect("a valid rule"),
+        );
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
             Ctx::new(7).expect("a non-zero ctx"),
@@ -2682,13 +2663,10 @@ mod tests {
         p.effective_policy.net.mode = NetMode::Host;
         // allow *:443 already present in the fixture (93.184.216.0/24:443 single-port); add an
         // author deny for a CIDR to prove deny-first encoding.
-        p.effective_policy.net.bpf_connect_deny.push(NetRule {
-            cidr: "10.0.0.0".to_owned(),
-            prefix_len: 8,
-            port_min: 0,
-            port_max: 65535,
-            protocol: Protocol::Any,
-        });
+        p.effective_policy
+            .net
+            .bpf_connect_deny
+            .push(NetRule::new("10.0.0.0", 8, 0, 65535, Protocol::Any).expect("a valid rule"));
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
             Ctx::new(7).expect("a non-zero ctx"),
@@ -2724,20 +2702,10 @@ mod tests {
         // loopback address); that path is covered separately below.
         let mut p = policy_with_placeholders();
         // Author allows binding 0.0.0.0/0 on 8080 (any addr, that port) and denies one host.
-        p.effective_policy.net.bpf_bind_allow = vec![NetRule {
-            cidr: "0.0.0.0".to_owned(),
-            prefix_len: 0,
-            port_min: 8080,
-            port_max: 8080,
-            protocol: Protocol::Tcp,
-        }];
-        p.effective_policy.net.bpf_bind_deny = vec![NetRule {
-            cidr: "127.0.0.9".to_owned(),
-            prefix_len: 32,
-            port_min: 0,
-            port_max: 65535,
-            protocol: Protocol::Any,
-        }];
+        p.effective_policy.net.bpf_bind_allow =
+            vec![NetRule::new("0.0.0.0", 0, 8080, 8080, Protocol::Tcp).expect("a valid rule")];
+        p.effective_policy.net.bpf_bind_deny =
+            vec![NetRule::new("127.0.0.9", 32, 0, 65535, Protocol::Any).expect("a valid rule")];
         let plan = Plan::from_policy(
             &substitute(&p, &subst()).expect("subst"),
             Ctx::new(7).expect("a non-zero ctx"),

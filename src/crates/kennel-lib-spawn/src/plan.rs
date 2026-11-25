@@ -9,7 +9,7 @@
 //! attach, exec) consumes a `Plan`; that step is a separate increment because it
 //! needs a fork/exec primitive in `kennel-lib-syscall` (no `unsafe` lives here).
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::fd::RawFd;
 use std::path::{Component, Path, PathBuf};
 
@@ -135,25 +135,19 @@ fn lpm_v6_key(addr: [u8; 16], prefix_len: u8) -> [u8; 20] {
     ]
 }
 
-/// Partition `rules` into encoded IPv4 and IPv6 LPM entries. A CIDR that is
-/// neither a valid v4 nor v6 address is an error.
-fn encode(rules: &[NetRule]) -> Result<(Vec<LpmV4Entry>, Vec<LpmV6Entry>), SpawnError> {
+/// Partition `rules` into encoded IPv4 and IPv6 LPM entries. A [`NetRule`] always holds an
+/// address of one family or the other, so there is no rule to refuse here.
+fn encode(rules: &[NetRule]) -> (Vec<LpmV4Entry>, Vec<LpmV6Entry>) {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
     for r in rules {
-        let value = allow_entry(r.port_min, r.port_max, r.protocol, 0);
-        if let Ok(addr) = r.cidr.parse::<Ipv4Addr>() {
-            v4.push((lpm_v4_key(addr.octets(), r.prefix_len), value));
-        } else if let Ok(addr) = r.cidr.parse::<Ipv6Addr>() {
-            v6.push((lpm_v6_key(addr.octets(), r.prefix_len), value));
-        } else {
-            return Err(SpawnError::InvalidPolicy(format!(
-                "invalid CIDR address `{}`",
-                r.cidr
-            )));
+        let value = allow_entry(r.port_min(), r.port_max(), r.protocol(), 0);
+        match r.addr() {
+            IpAddr::V4(addr) => v4.push((lpm_v4_key(addr.octets(), r.prefix_len()), value)),
+            IpAddr::V6(addr) => v6.push((lpm_v6_key(addr.octets(), r.prefix_len()), value)),
         }
     }
-    Ok((v4, v6))
+    (v4, v6)
 }
 
 /// Deny rules as enforced: a deny on every port denies every protocol.
@@ -168,11 +162,12 @@ fn whole_address_denies(rules: &[NetRule]) -> Vec<NetRule> {
     rules
         .iter()
         .cloned()
-        .map(|mut rule| {
-            if rule.port_min == 0 && rule.port_max == u16::MAX {
-                rule.protocol = Protocol::Any;
+        .map(|rule| {
+            if rule.any_port() {
+                rule.with_protocol(Protocol::Any)
+            } else {
+                rule
             }
-            rule
         })
         .collect()
 }
@@ -198,19 +193,19 @@ impl BpfAcls {
     /// deny is enforced in every mode: the invariant floor + `[net.bpf].connect.deny` +
     /// `[net.proxy].deny.policy`. BIND allow/deny are the author's `[net.bpf].bind` rules; the
     /// kennel's own loopback `/28`-`/64` is seeded into bind-allow later by `stamp_proxy`.
-    fn from_policy(net: &NetPolicy) -> Result<Self, SpawnError> {
+    fn from_policy(net: &NetPolicy) -> Self {
         let connect_allow: &[NetRule] = if net.mode == NetMode::Host {
             &net.bpf_connect_allow
         } else {
             &[]
         };
-        let (allow_v4, allow_v6) = encode(connect_allow)?;
+        let (allow_v4, allow_v6) = encode(connect_allow);
         let mut deny_rules = net.deny_invariant.clone();
         deny_rules.extend(net.bpf_connect_deny.iter().cloned());
         deny_rules.extend(net.deny_author.iter().cloned());
-        let (deny_v4, deny_v6) = encode(&whole_address_denies(&deny_rules))?;
-        let (mut bind_allow_v4, mut bind_allow_v6) = encode(&net.bpf_bind_allow)?;
-        let (bind_deny_v4, bind_deny_v6) = encode(&whole_address_denies(&net.bpf_bind_deny))?;
+        let (deny_v4, deny_v6) = encode(&whole_address_denies(&deny_rules));
+        let (mut bind_allow_v4, mut bind_allow_v6) = encode(&net.bpf_bind_allow);
+        let (bind_deny_v4, bind_deny_v6) = encode(&whole_address_denies(&net.bpf_bind_deny));
         // The own-net-ns loopback, open by default in both directions (#218).
         let (lo_v4, lo_v6) = own_netns_loopback(net.mode);
         let (mut allow_v4, mut allow_v6) = (allow_v4, allow_v6);
@@ -218,7 +213,7 @@ impl BpfAcls {
         allow_v6.extend(lo_v6.iter().copied());
         bind_allow_v4.extend(lo_v4);
         bind_allow_v6.extend(lo_v6);
-        Ok(Self {
+        Self {
             allow_v4,
             allow_v6,
             deny_v4,
@@ -227,7 +222,7 @@ impl BpfAcls {
             bind_allow_v6,
             bind_deny_v4,
             bind_deny_v6,
-        })
+        }
     }
 }
 
@@ -253,8 +248,10 @@ fn resolve_ulimits(policy: &SettledPolicy) -> Result<Vec<(Resource, u64, u64)>, 
 fn single_port_tcp_grants(rules: &[NetRule], access: AccessNet) -> Vec<(u16, AccessNet)> {
     rules
         .iter()
-        .filter(|r| matches!(r.protocol, Protocol::Tcp | Protocol::Any) && r.port_min == r.port_max)
-        .map(|r| (r.port_min, access))
+        .filter(|r| {
+            matches!(r.protocol(), Protocol::Tcp | Protocol::Any) && r.port_min() == r.port_max()
+        })
+        .map(|r| (r.port_min(), access))
         .collect()
 }
 
@@ -302,7 +299,8 @@ pub(crate) fn landlock_net_handled(net: &NetPolicy) -> AccessNet {
         NetMode::Host => {
             let has_range = |rules: &[NetRule]| {
                 rules.iter().any(|r| {
-                    matches!(r.protocol, Protocol::Tcp | Protocol::Any) && r.port_min != r.port_max
+                    matches!(r.protocol(), Protocol::Tcp | Protocol::Any)
+                        && r.port_min() != r.port_max()
                 })
             };
             let mut handled = both;
@@ -1288,7 +1286,7 @@ impl Plan {
 
         // The cgroup-BPF connect + bind ACLs (§7.5.4/§7.5.7), default-deny + deny-first —
         // see `BpfAcls::from_policy` for the per-mode allow/deny composition.
-        let acls = BpfAcls::from_policy(&ep.net)?;
+        let acls = BpfAcls::from_policy(&ep.net);
         // A single-port TCP allow needs the matching Landlock grant or Landlock denies what the
         // BPF ACL permits. Connect grants only in `host` mode (proxied modes reach only the proxy
         // endpoint, granted by `stamp_proxy`); bind grants in every mode.
@@ -1328,7 +1326,7 @@ impl Plan {
             bpf_bind_allow_v6: acls.bind_allow_v6,
             bpf_bind_deny_v6: acls.bind_deny_v6,
             bpf_meta,
-            bind_allowed_ports: ep.net.bind_allowed_ports.clone(),
+            bind_allowed_ports: ep.net.bind_allowed_ports.to_vec(),
             file_binds: Vec::new(),
             supplementary_groups: None,
             ulimits,
@@ -1793,12 +1791,8 @@ mod tests {
 
     #[test]
     fn an_every_port_deny_covers_every_protocol() {
-        let rule = |port_min, port_max, protocol| NetRule {
-            cidr: "10.0.0.0".to_owned(),
-            prefix_len: 8,
-            port_min,
-            port_max,
-            protocol,
+        let rule = |port_min, port_max, protocol| {
+            NetRule::new("10.0.0.0", 8, port_min, port_max, protocol).expect("a valid rule")
         };
         // What an older compiler settled for a deny with no ports and no protocol: it must not
         // start letting UDP through now that denies match on protocol.
@@ -1807,7 +1801,7 @@ mod tests {
             rule(22, 22, Protocol::Tcp),
         ]);
         assert_eq!(
-            widened.iter().map(|r| r.protocol).collect::<Vec<_>>(),
+            widened.iter().map(NetRule::protocol).collect::<Vec<_>>(),
             [Protocol::Any, Protocol::Tcp],
             "the every-port deny is widened; the one-port deny is enforced as written"
         );

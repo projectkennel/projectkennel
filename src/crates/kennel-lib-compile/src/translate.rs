@@ -980,22 +980,7 @@ fn translate_net(
     // The bind floor: a workload bind below `min_port` is denied by the
     // bind4/bind6 BPF. Carried into the kennel_meta map; `0` (or absent) = no floor.
     let bind_port_min = net.bind.as_ref().and_then(|b| b.min_port).unwrap_or(0);
-    // The bind-port allowlist: when non-empty, only these ports may be bound.
-    // Capped at the bind_subnet array size; an over-long list is a translation error
-    // (a hard map limit, not a footgun), so the author learns it rather than having
-    // ports silently dropped.
-    let bind_allowed_ports = net
-        .bind
-        .as_ref()
-        .and_then(|b| b.allowed_ports.clone())
-        .unwrap_or_default();
-    if bind_allowed_ports.len() > kennel_lib_policy::settled::MAX_BIND_PORTS {
-        return Err(translation(format!(
-            "[net.bind].allowed_ports has {} entries; the maximum is {}",
-            bind_allowed_ports.len(),
-            kennel_lib_policy::settled::MAX_BIND_PORTS
-        )));
-    }
+    let bind_allowed_ports = bind_allowed_ports(net.bind.as_ref())?;
 
     // The cgroup-BPF LPM tries are fixed-capacity (src/bpf/maps.h): allow 1024, deny 256, PER
     // FAMILY. The deny set is the invariant floor + the author's [net.bpf].*.deny +
@@ -1103,22 +1088,10 @@ fn collect_net_allow(
             let (addr, prefix_len) = parse_cidr(cidr)?;
             let addr = subst(&addr, deferred);
             if entry.ports.is_empty() {
-                allow.push(NetRule {
-                    cidr: addr,
-                    prefix_len,
-                    port_min: 0,
-                    port_max: u16::MAX,
-                    protocol,
-                });
+                allow.push(net_rule(&addr, prefix_len, 0, u16::MAX, protocol)?);
             } else {
                 for &port in &entry.ports {
-                    allow.push(NetRule {
-                        cidr: addr.clone(),
-                        prefix_len,
-                        port_min: port,
-                        port_max: port,
-                        protocol,
-                    });
+                    allow.push(net_rule(&addr, prefix_len, port, port, protocol)?);
                 }
             }
         } else if let Some(name) = &entry.name {
@@ -1160,13 +1133,7 @@ fn translate_proxy(
     if let Some(deny) = &p.deny {
         let any_rule = |d: &crate::source::NetDenyRule| -> Result<NetRule, PolicyError> {
             let (addr, prefix_len) = parse_cidr(&d.cidr)?;
-            Ok(NetRule {
-                cidr: addr,
-                prefix_len,
-                port_min: 0,
-                port_max: u16::MAX,
-                protocol: Protocol::Any,
-            })
+            net_rule(&addr, prefix_len, 0, u16::MAX, Protocol::Any)
         };
         for d in &deny.invariant {
             deny_invariant.push(any_rule(d)?);
@@ -1224,22 +1191,10 @@ fn translate_bpf_rules(
         for (addr, prefix_len) in cidrs {
             let addr = subst(&addr, deferred);
             if rule.ports.is_empty() {
-                out.push(NetRule {
-                    cidr: addr,
-                    prefix_len,
-                    port_min: 0,
-                    port_max: u16::MAX,
-                    protocol,
-                });
+                out.push(net_rule(&addr, prefix_len, 0, u16::MAX, protocol)?);
             } else {
                 for &port in &rule.ports {
-                    out.push(NetRule {
-                        cidr: addr.clone(),
-                        prefix_len,
-                        port_min: port,
-                        port_max: port,
-                        protocol,
-                    });
+                    out.push(net_rule(&addr, prefix_len, port, port, protocol)?);
                 }
             }
         }
@@ -1260,9 +1215,9 @@ fn check_bpf_map_cap<'a>(
 ) -> Result<(), PolicyError> {
     let (mut v4, mut v6) = (0usize, 0usize);
     for r in rules {
-        if r.cidr.parse::<std::net::Ipv4Addr>().is_ok() {
+        if r.addr().is_ipv4() {
             v4 = v4.saturating_add(1);
-        } else if r.cidr.parse::<std::net::Ipv6Addr>().is_ok() {
+        } else {
             v6 = v6.saturating_add(1);
         }
     }
@@ -1274,6 +1229,37 @@ fn check_bpf_map_cap<'a>(
         )));
     }
     Ok(())
+}
+
+/// The bind-port allowlist: when non-empty, only these ports may be bound.
+///
+/// Capped at the `bind_subnet` array size; an over-long list is a translation error (a hard map
+/// limit, not a footgun), so the author learns it rather than having ports silently dropped.
+fn bind_allowed_ports(
+    bind: Option<&crate::source::NetBind>,
+) -> Result<kennel_lib_policy::settled::BindPorts, PolicyError> {
+    let ports = bind
+        .and_then(|b| b.allowed_ports.clone())
+        .unwrap_or_default();
+    kennel_lib_policy::settled::BindPorts::new(ports).map_err(|e| {
+        translation(format!(
+            "[net.bind].allowed_ports has {} entries; the maximum is {}",
+            e.count,
+            kennel_lib_policy::settled::MAX_BIND_PORTS
+        ))
+    })
+}
+
+/// A settled address rule from an address [`parse_cidr`] accepted.
+fn net_rule(
+    addr: &str,
+    prefix_len: u8,
+    port_min: u16,
+    port_max: u16,
+    protocol: Protocol,
+) -> Result<NetRule, PolicyError> {
+    NetRule::new(addr, prefix_len, port_min, port_max, protocol)
+        .map_err(|e| translation(e.to_string()))
 }
 
 /// Parse a `"offset:port"` proxy-listen address.
@@ -1289,7 +1275,7 @@ fn parse_proxy(addr: &str) -> Result<ProxyListen, PolicyError> {
         .trim()
         .parse::<u16>()
         .map_err(|_| translation(format!("proxy port `{port}` is not a u16")))?;
-    Ok(ProxyListen { offset, port })
+    ProxyListen::new(offset, port).map_err(|e| translation(format!("proxy address `{addr}`: {e}")))
 }
 
 fn parse_protocol(p: Option<&str>) -> Result<Protocol, PolicyError> {
@@ -2321,7 +2307,7 @@ mod tests {
         for m in ["constrained", "unconstrained"] {
             let net = translate_net(&net_with_mode(m), &mut d).expect("translate");
             assert!(!net.proxy.is_disabled(), "{m} should be proxied");
-            assert_eq!(net.proxy.offset, 2, "{m} honours proxy_listen");
+            assert_eq!(net.proxy.offset(), 2, "{m} honours proxy_listen");
         }
         // Non-proxied modes force the proxy OFF regardless of an inherited proxy_listen —
         // the engine-level fix for "mode=host but still proxied".
@@ -2456,7 +2442,7 @@ mod tests {
         assert!(names.is_empty());
         assert!(allow
             .iter()
-            .any(|r| r.protocol == Protocol::Udp && r.prefix_len == 8));
+            .any(|r| r.protocol() == Protocol::Udp && r.prefix_len() == 8));
         assert!(
             collect_net_allow("net.udp.allow", &list, false, Some(Protocol::Udp), &mut d).is_err(),
             "a CIDR is refused when the endpoint is hostname-only"
@@ -3157,12 +3143,12 @@ mod tests {
             .net
             .deny_invariant
             .iter()
-            .any(|r| r.cidr == "169.254.169.254" && r.prefix_len == 32));
+            .any(|r| r.addr_text() == "169.254.169.254" && r.prefix_len() == 32));
         assert!(ep
             .net
             .deny_invariant
             .iter()
-            .any(|r| r.cidr == "fd00:ec2::254" && r.prefix_len == 128));
+            .any(|r| r.addr_text() == "fd00:ec2::254" && r.prefix_len() == 128));
 
         assert!(ep.fs.home_shadow);
         assert_eq!(ep.fs.tmp.size_mib, 512);
@@ -3230,7 +3216,7 @@ mod tests {
         assert!(net
             .deny_invariant
             .iter()
-            .any(|r| r.cidr == "169.254.169.254" && r.prefix_len == 32));
+            .any(|r| r.addr_text() == "169.254.169.254" && r.prefix_len() == 32));
         // 2h TTL, "stop" (the backward-compat alias for exit).
         assert_eq!(t.effective_policy.lifecycle.ttl_seconds, Some(7_200));
         assert_eq!(t.effective_policy.lifecycle.ttl_action, TtlAction::Exit);
@@ -3275,7 +3261,8 @@ mod tests {
         assert_eq!(
             translate_net(&p, &mut BTreeSet::new())
                 .expect("translate")
-                .bind_allowed_ports,
+                .bind_allowed_ports
+                .to_vec(),
             vec![8080, 9090]
         );
         // More than MAX_BIND_PORTS entries is a hard translation error.
@@ -3365,7 +3352,7 @@ mod tests {
         let v4 = net
             .bpf_connect_deny
             .iter()
-            .filter(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok())
+            .filter(|r| r.addr_text().parse::<std::net::Ipv4Addr>().is_ok())
             .count();
         assert_eq!(v4, cap, "all {cap} v4 denies survive translation");
     }
@@ -3400,11 +3387,11 @@ mod tests {
         assert!(net
             .bpf_connect_allow
             .iter()
-            .any(|r| r.cidr.parse::<std::net::Ipv4Addr>().is_ok()));
+            .any(|r| r.addr_text().parse::<std::net::Ipv4Addr>().is_ok()));
         assert!(net
             .bpf_connect_allow
             .iter()
-            .any(|r| r.cidr.parse::<std::net::Ipv6Addr>().is_ok()));
+            .any(|r| r.addr_text().parse::<std::net::Ipv6Addr>().is_ok()));
     }
 
     #[test]

@@ -79,7 +79,6 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     if !ep.exec.deny_setcap {
         v.push(InvariantViolation::new("exec.deny_setcap", "must be true"));
     }
-    address_rule_violations(&ep.net, &mut v);
     // A UDP grant is name-only by design; a "name" that is an address would resolve to itself
     // and be dialled. The compiler refuses one; so does the loader.
     for rule in &ep.net.udp_allow_names {
@@ -118,11 +117,10 @@ pub fn validate(policy: &SettledPolicy) -> Result<(), Vec<InvariantViolation>> {
     // address but only one port would satisfy a check on the address alone and deny nothing
     // that matters.
     let metadata_denied = ep.net.deny_invariant.iter().any(|r| {
-        r.cidr == "169.254.169.254"
-            && r.prefix_len == 32
-            && r.port_min == 0
-            && r.port_max == u16::MAX
-            && r.protocol == crate::settled::Protocol::Any
+        r.addr() == std::net::IpAddr::V4(std::net::Ipv4Addr::new(169, 254, 169, 254))
+            && r.prefix_len() == 32
+            && r.any_port()
+            && r.protocol() == crate::settled::Protocol::Any
     });
     if !metadata_denied {
         v.push(InvariantViolation::new(
@@ -252,9 +250,7 @@ fn unix_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>)
 /// produces a policy the compiler never saw, so each rule is asserted again here with the same
 /// predicate the compiler uses.
 fn compiled_rule_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantViolation>) {
-    use crate::settled::{
-        account_name_ok, group_ref_ok, hostname_label_ok, sha256_hex_ok, MAX_BIND_PORTS,
-    };
+    use crate::settled::{account_name_ok, group_ref_ok, hostname_label_ok, sha256_hex_ok};
     let identity = &policy.identity;
     for (id, name) in [
         ("identity.user", &identity.user),
@@ -282,13 +278,6 @@ fn compiled_rule_violations_into(policy: &SettledPolicy, v: &mut Vec<InvariantVi
         v.push(InvariantViolation::new(
             "identity.hostname",
             "not a hostname label (1 to 63 letters, digits or hyphens)",
-        ));
-    }
-    let ports = policy.effective_policy.net.bind_allowed_ports.len();
-    if ports > MAX_BIND_PORTS {
-        v.push(InvariantViolation::new(
-            "net.bind.allowed_ports",
-            format!("{ports} ports; the bind map holds {MAX_BIND_PORTS}"),
         ));
     }
     if policy.workload.sha256.iter().any(|d| !sha256_hex_ok(d)) {
@@ -331,43 +320,6 @@ pub fn shim_path_ok(shim: &str) -> bool {
         count = count.saturating_add(1);
     }
     count >= least
-}
-
-/// Report every address rule the enforcement side could not match on.
-///
-/// The proxy and the BPF loader parse these literals; one that does not parse would be skipped
-/// there, and a deny that is skipped is a deny the author believes in and does not have. The
-/// compiler refuses such a rule; this re-asserts it for an artefact signed without passing
-/// through it.
-fn address_rule_violations(net: &crate::settled::NetPolicy, v: &mut Vec<InvariantViolation>) {
-    for (list, rules) in [
-        ("net.allow", &net.allow),
-        ("net.proxy.deny.invariant", &net.deny_invariant),
-        ("net.proxy.deny.policy", &net.deny_author),
-        ("net.bpf.connect.allow", &net.bpf_connect_allow),
-        ("net.bpf.connect.deny", &net.bpf_connect_deny),
-        ("net.bpf.bind.allow", &net.bpf_bind_allow),
-        ("net.bpf.bind.deny", &net.bpf_bind_deny),
-    ] {
-        for rule in rules {
-            if let Some(problem) = address_rule_problem(&rule.cidr, rule.prefix_len) {
-                v.push(InvariantViolation::new(
-                    list,
-                    format!("`{}/{}` {problem}", rule.cidr, rule.prefix_len),
-                ));
-            }
-        }
-    }
-}
-
-/// Why an address rule cannot be enforced, or `None` if it can: the address must be an IP literal
-/// and the prefix must fit its family.
-fn address_rule_problem(addr: &str, prefix_len: u8) -> Option<&'static str> {
-    let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
-        return Some("is not an IP address, so no rule can match on it");
-    };
-    let width: u8 = if ip.is_ipv4() { 32 } else { 128 };
-    (prefix_len > width).then_some("has a prefix longer than its address")
 }
 
 /// A grant path with any trailing `/**` / `/*` glob stripped — the real tree root the
@@ -551,12 +503,10 @@ mod tests {
     }
 
     #[test]
-    fn the_bind_port_cap_and_digest_form_are_checked_at_load() {
+    fn the_digest_form_is_checked_at_load() {
         let mut p = sample_settled();
-        p.effective_policy.net.bind_allowed_ports = (1..=9).map(|n| 8000 + n).collect();
         p.workload.sha256 = vec!["ABC".to_owned()];
         let ids = violation_ids(&p);
-        assert!(ids.contains(&"net.bind.allowed_ports"), "{ids:?}");
         assert!(ids.contains(&"workload.sha256"), "{ids:?}");
     }
 
@@ -564,41 +514,18 @@ mod tests {
     #[test]
     fn a_metadata_deny_limited_to_one_port_does_not_satisfy_the_floor() {
         let mut p = sample_settled();
-        for rule in &mut p.effective_policy.net.deny_invariant {
-            if rule.cidr == "169.254.169.254" {
-                rule.port_min = 81;
-                rule.port_max = 81;
-            }
-        }
+        p.effective_policy.net.deny_invariant = vec![crate::settled::NetRule::new(
+            "169.254.169.254",
+            32,
+            81,
+            81,
+            crate::settled::Protocol::Any,
+        )
+        .expect("a valid rule")];
         let violations = validate(&p).expect_err("refused");
         assert!(violations
             .iter()
             .any(|x| x.id == "net.proxy.deny.invariant"));
-    }
-
-    /// A deny whose address does not parse would be skipped by the proxy, so it is refused at
-    /// load instead of being honoured as a deny that matches nothing.
-    #[test]
-    fn an_address_rule_that_cannot_be_matched_is_refused() {
-        assert!(validate(&sample_settled()).is_ok(), "the fixture is valid");
-        for (cidr, prefix_len) in [("10.0.0/8", 8), ("metadata.internal", 32), ("10.0.0.0", 33)] {
-            let mut p = sample_settled();
-            let mut rule = p
-                .effective_policy
-                .net
-                .deny_invariant
-                .first()
-                .cloned()
-                .expect("the fixture carries the metadata deny");
-            cidr.clone_into(&mut rule.cidr);
-            rule.prefix_len = prefix_len;
-            p.effective_policy.net.deny_author.push(rule);
-            let violations = validate(&p).expect_err("refused");
-            assert!(
-                violations.iter().any(|x| x.id == "net.proxy.deny.policy"),
-                "`{cidr}/{prefix_len}` must be refused"
-            );
-        }
     }
 
     /// The host side of a writable redirect is writable: a read redirect served from inside it

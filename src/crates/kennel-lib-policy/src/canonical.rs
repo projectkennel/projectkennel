@@ -86,13 +86,8 @@ mod tests {
     }
 
     fn rule(cidr: &str, prefix_len: u8, port: u16, protocol: Protocol) -> NetRule {
-        NetRule {
-            cidr: cidr.to_owned(),
-            prefix_len,
-            port_min: port,
-            port_max: port.saturating_add(1),
-            protocol,
-        }
+        NetRule::new(cidr, prefix_len, port, port.saturating_add(1), protocol)
+            .expect("a valid rule")
     }
 
     fn name_rule(name: &str, protocol: Protocol) -> NameRule {
@@ -145,11 +140,9 @@ mod tests {
                     mode: NetMode::Host,
                     udp: true,
                     bind_port_min: 1024,
-                    bind_allowed_ports: vec![8080, 8081],
-                    proxy: ProxyListen {
-                        offset: 3,
-                        port: 1081,
-                    },
+                    bind_allowed_ports: crate::settled::BindPorts::new(vec![8080, 8081])
+                        .expect("two ports fit"),
+                    proxy: ProxyListen::new(3, 1081).expect("a listener"),
                     allow: vec![rule("93.184.216.0", 24, 443, Protocol::Tcp)],
                     allow_names: vec![name_rule("example.org", Protocol::Tcp)],
                     udp_allow_names: vec![name_rule("dns.example.org", Protocol::Udp)],
