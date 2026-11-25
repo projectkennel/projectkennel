@@ -6,6 +6,45 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-11-25
+
+**A hardening release: the follow-up to the reference-monitor review.** 0.8.1 fixed what the
+first review found. A second pass then covered the code that review had skipped (the OCI
+substrate, the UDP path, the inbound mirror, the unix and spawn grants, the policy parser) and
+assessed the quality of the trusted code itself. This release carries a fix for each of its
+24 findings, and the work the assessment asked for: typed errors and checked types in the
+privileged path, the four longest functions split into stages, two daemon locks narrowed, and
+tests where there were none. One of the new tests found a policy that could not be signed.
+Several fixes tighten behaviour, so read the upgrade notes. No schema change (settled schema
+stays v6, threat catalogue stays 0.6).
+
+### Upgrade notes
+
+- **Some policies that compiled no longer do.** A `[[unix.allow]]` grant whose `real` is in
+  the daemon's runtime directory or in the workload's write set, or whose `shim` is not rooted
+  at `/`, `~/`, `$HOME/` or `$XDG_RUNTIME_DIR/`; `[[spawn.allow]]` with `mutable = []`; a
+  supplementary group name containing `:`, `,`, `/` or a control character; and an IP literal
+  as a `[[net.udp.allow]]` `name`. Recompile leaf policies after upgrading to find these.
+- **A policy that uses `fs.redirect` and `fs.write_mmap_exec` together now compiles.** It
+  failed before.
+- **An OCI image root has to be one you could read yourself.** A root-owned image is accepted
+  only from a system location, read-only, and not with `persistence = "persist"`.
+- **`kennel run` refuses a name of the form `spawn-<number>-…`**; the daemon keeps that form.
+- **The network is narrower in three places.** A mirrored `[net.bind]` port listens on the
+  loopback interface only; egress refuses the host's own addresses; a kennel is held to two
+  UDP-egress sessions.
+- **If you read the audit stream:** there are new events (`net.inbound-connect`, and three
+  daemon-level `lifecycle.*` events in the journal); `lifecycle.kennel-exit` `reason` is now
+  `exited`, `stopped` or `reaped`, not always `stopped`; and `fs.mutation` and the
+  `binder.ttl-*` events can carry outcome `error`.
+- **If you read the journal:** a privhelper failure now names the step that failed, a Landlock
+  rule that cannot be added names its path, and two diagnostic lines no longer print the
+  effective uid or the kennel's account name.
+- **Upgrade every component together.** The factory now refuses a plan whose bind target is
+  relative or contains `..`, and a damaged mesh rendezvous message, or a binder context manager
+  that does not start, now stops the bring-up where it used to continue. The packages upgrade
+  the daemon, the helper and the in-kennel init as one.
+
 ### CLI changes
 
 - **`kennel run` refuses a kennel name of the form `spawn-<number>-…`.** That form is
@@ -51,7 +90,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   freeze, kill or thaw they report did not take effect. `fs.mutation` then has an `error`
   field with the OS error.
 
-### Security
+### Security fixes
 
 - **The OCI overlay mount refuses a layer path that would alter its options.** overlayfs takes
   its layers as one comma-separated string, and the privileged factory built that string from a

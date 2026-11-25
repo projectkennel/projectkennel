@@ -40,18 +40,18 @@ checksum = "9547879431a90e352a35863a54416d92898a787b9af09e6ae2e09a96bd78be80"
 
 [[package]]
 name = "gen-inventory"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "gen-man"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-cli",
 ]
 
 [[package]]
 name = "gen-schema"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-compile",
  "kennel-schema",
@@ -66,7 +66,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kennel-bin-init"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-config",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-bin-oci-entry"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-cli"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-audit",
  "kennel-lib-cli",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-compose"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-compile",
  "kennel-lib-config",
@@ -114,7 +114,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-dbus-broker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-dbus",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-facade"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-cli",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-host-delegate"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-os",
  "kennel-lib-scm",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-audit"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-syscall",
  "kennel-lib-text",
@@ -151,7 +151,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-binder"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-bytes",
  "kennel-lib-syscall",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-bpf"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-syscall",
  "libc",
@@ -169,15 +169,15 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-bytes"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "kennel-lib-cli"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "kennel-lib-compile"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "gen-schema",
  "kennel-lib-config",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-config"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-toml",
  "serde",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-control"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-bytes",
  "kennel-lib-syscall",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-dbus"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-binder",
  "mini-sansio-dbus",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-landlock"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "bitflags",
  "libc",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-manifest"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-syscall",
  "serde",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-os"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "libc",
  "nix",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-policy"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "ed25519-compact",
  "kennel-lib-bytes",
@@ -254,14 +254,14 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-scm"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "nix",
 ]
 
 [[package]]
 name = "kennel-lib-spawn"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-binder",
  "kennel-lib-bpf",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-syscall"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "bitflags",
  "kennel-lib-landlock",
@@ -285,18 +285,18 @@ dependencies = [
 
 [[package]]
 name = "kennel-lib-term"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "vte",
 ]
 
 [[package]]
 name = "kennel-lib-text"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "kennel-lib-toml"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "serde",
  "serde_derive",
@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "kennel-privhelper"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-lib-bpf",
  "kennel-lib-config",
@@ -315,11 +315,11 @@ dependencies = [
 
 [[package]]
 name = "kennel-schema"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "kennel-schema-derive"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -328,11 +328,11 @@ dependencies = [
 
 [[package]]
 name = "kennel-shim"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "kennel-tun-broker"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-host-delegate",
  "kennel-lib-binder",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "kenneld"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "kennel-host-delegate",
  "kennel-lib-audit",
