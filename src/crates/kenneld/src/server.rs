@@ -138,9 +138,13 @@ pub trait PolicyLoader {
     /// Load, verify, and substitute the policy at `path` into a [`Loaded`].
     ///
     /// # Errors
-    /// A human-readable reason if the policy cannot be loaded, fails
-    /// verification, or leaves a placeholder unresolved.
-    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String>;
+    /// The [`crate::policy::LoadError`] if the policy cannot be read, fails verification,
+    /// leaves a placeholder unresolved, or asks for something this host refuses.
+    fn load(
+        &self,
+        path: &Path,
+        subst: &RuntimeSubstitutions,
+    ) -> Result<Loaded, crate::policy::LoadError>;
 
     /// A snapshot of the current trust-store keys, for runtime template re-verification at `SPAWN`
     /// (§7.12.8) — `kenneld` re-resolves a named template and verifies its signature against these.
@@ -1520,7 +1524,14 @@ pub fn run_kennel<P, L>(
         match crate::policy::loaded_from_settled(&instance, &subst) {
             Ok(loaded) => loaded,
             Err(reason) => {
-                return fail(shared, kname, ctx, conn, StartStage::SpawnInstance, reason)
+                return fail(
+                    shared,
+                    kname,
+                    ctx,
+                    conn,
+                    StartStage::SpawnInstance,
+                    reason.to_string(),
+                )
             }
         }
     } else {
@@ -1530,7 +1541,16 @@ pub fn run_kennel<P, L>(
         ));
         match shared.loader.load(&req.policy, &subst) {
             Ok(loaded) => loaded,
-            Err(reason) => return fail(shared, kname, ctx, conn, StartStage::LoadPolicy, reason),
+            Err(reason) => {
+                return fail(
+                    shared,
+                    kname,
+                    ctx,
+                    conn,
+                    StartStage::LoadPolicy,
+                    reason.to_string(),
+                )
+            }
         }
     };
     if tr.on() {
@@ -3330,7 +3350,11 @@ mod tests {
 
     struct FakeLoader;
     impl PolicyLoader for FakeLoader {
-        fn load(&self, _: &Path, _: &RuntimeSubstitutions) -> Result<Loaded, String> {
+        fn load(
+            &self,
+            _: &Path,
+            _: &RuntimeSubstitutions,
+        ) -> Result<Loaded, crate::policy::LoadError> {
             let plan = Plan {
                 namespaces: Namespaces::empty(),
                 cgroup: PathBuf::new(),

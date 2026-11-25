@@ -21,7 +21,7 @@ the code whose compromise would break confinement.
 
 | Crate | SLOC | unsafe | TCB | Consumers | External deps |
 |---|--:|:--:|:--:|---|---|
-| `kenneld` | 8413 | — | **yes** | *(2 bins)* | serde |
+| `kenneld` | 8520 | — | **yes** | *(2 bins)* | serde |
 | `kennel-lib-compile` | 5929 | — | — | cli, compose | serde |
 | `kennel-cli` | 5502 | — | — | *(binary)* | lexopt, serde, serde_json |
 | `kennel-lib-policy` | 3037 | — | **yes** | cli, compile, compose, kenneld, spawn, tun-broker | ed25519-compact, object, serde |
@@ -40,7 +40,7 @@ the code whose compromise would break confinement.
 | `kennel-lib-manifest` | 617 | — | — | cli | serde, serde_json |
 | `kennel-dbus-broker` | 613 | — | — | *(binary)* | mini-sansio-dbus, nix |
 | `kennel-lib-config` | 596 | — | **yes** | bin-init, cli, compile, compose, kenneld, privhelper | serde |
-| `kennel-lib-os` | 491 | — | **yes** | host-delegate, syscall | libc, nix |
+| `kennel-lib-os` | 493 | — | **yes** | host-delegate, syscall | libc, nix |
 | `kennel-bin-init` | 457 | — | **yes** | *(binary)* | — |
 | `kennel-host-delegate` | 322 | — | **yes** | kenneld, tun-broker | — |
 | `kennel-lib-landlock` | 273 | **yes** | **yes** | syscall | bitflags, libc |
@@ -77,7 +77,7 @@ the code whose compromise would break confinement.
 - `kennel-tun-broker` → host-delegate, binder, policy, scm, syscall
 - `kenneld` → host-delegate, audit, binder, bpf, config, control, policy, spawn, syscall, toml, privhelper
 
-**Totals.** 32 crates, **46760 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 18 crates, **28833 SLOC**; the remaining 14 crates (17927 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
+**Totals.** 32 crates, **46869 SLOC** (excluding `#[cfg(test)]`). The runtime **TCB closure** (the first-party dependency graph of `kenneld` / `kennel-privhelper` / `kennel-bin-init`) is 18 crates, **28942 SLOC**; the remaining 14 crates (17927 SLOC) are outside it (the operator CLI and its deps, the in-kennel facades, and the out-of-TCB D-Bus mediation engine).
 
 <!-- END GENERATED: crate-inventory -->
 
