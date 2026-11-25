@@ -137,7 +137,13 @@ impl MeshBus {
         holder: (i32, std::os::fd::OwnedFd),
     ) -> io::Result<Self> {
         let (holder_pid, holder_sock) = holder;
-        let mount_dir = super::mesh::host_rp_dir(tier, name, key);
+        let (cap_name, cap_key) = super::mesh::capability(name, key).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mesh capability name or key is not well formed",
+            )
+        })?;
+        let mount_dir = super::mesh::host_rp_dir(tier, &cap_name, cap_key.as_ref());
         // The binderfs lives in the holder's mount namespace; reach it via `/proc/<pid>/root` (the
         // holder's userns is kenneld-owned, so this resolves for kenneld) to serve node 0 here.
         let device_dir = PathBuf::from(format!("/proc/{holder_pid}/root"))

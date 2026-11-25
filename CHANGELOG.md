@@ -142,6 +142,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **A mesh capability's name and key are types where the daemon builds host paths.**
+  `MeshName` and `MeshKey` (in `kennel-lib-policy`) can only be built by parsing against the
+  mesh token grammar, and the daemon's rendezvous path builder takes them. The builder used
+  to map a name that failed the grammar to a shared directory called `_invalid`; that
+  fallback is gone. A caller with a malformed name or key now refuses: creating a mesh bus
+  fails, a service connect answers "unavailable", and a provider's rendezvous for that
+  capability is skipped with a line in the journal. The compiler and the load-time
+  invariants already reject such names, so no policy that loads today is affected.
 - **More of the privileged path returns typed errors.** No behaviour change.
   - `kennel-lib-spawn`: the view build returns a `ViewError`. An OCI image the factory
     declines is an `ImageRefusal` value (cannot read, cannot search, foreign owner, root-owned
