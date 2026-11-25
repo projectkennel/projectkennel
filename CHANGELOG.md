@@ -238,11 +238,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Docs & tooling
 
-- **CodeQL analyses a language only when a pull request touches it.** GitHub's default setup
-  ran all three analyses on every pull request, about four minutes of Rust analysis for a
-  docs-only change. `.github/workflows/codeql.yml` replaces it: the same languages, query
-  suite and build mode, but scoped by the files changed, with superseded runs cancelled.
-  `main` is still analysed in full on every push and weekly. Default setup has to be
+- **CodeQL runs the Rust analysis only when a pull request touches Rust.** GitHub's default
+  setup ran all three analyses on every pull request, about four minutes of Rust analysis
+  for a docs-only change. `.github/workflows/codeql.yml` replaces it: the same languages,
+  query suite and build mode, with superseded runs cancelled. The workflow and C analyses
+  take under a minute each and run on every pull request; skipping them too made GitHub
+  report "configurations not found" on most pull requests. A pull request without Rust
+  changes still gets that note for the Rust analysis. `main` is still analysed in full on
+  every push and weekly. Default setup has to be
   switched off in the repository settings for the workflow to upload results.
 - **The fuzz job starts from valid inputs as well as random bytes.** Random bytes rarely get
   past a decoder's first length check. For the binder service requests, the D-Bus conduit

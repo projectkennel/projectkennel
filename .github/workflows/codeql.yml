@@ -5,8 +5,12 @@
 # changelog. Default setup has no path filters, so the only way to scope it is this file.
 #
 # What is different from default setup:
-#   - A language is analysed on a pull request only when the pull request touches files of
-#     that language (the `scope` job). A docs-only change runs nothing but `scope`.
+#   - Rust, the slow analysis, runs on a pull request only when the pull request touches
+#     Rust (the `scope` job). The workflow and C analyses take under a minute each and run
+#     on every pull request: GitHub compares a pull request's results with `main` per
+#     analysis, and reports "configurations not found" for each one that did not run, so
+#     skipping the cheap ones bought a warning on most pull requests for no real saving.
+#     A pull request without Rust changes still carries that warning for the Rust analysis.
 #   - A newer push to the same pull request cancels the analysis still running for the
 #     older one.
 #   - `main` is still analysed in full on every push, and weekly, so the baseline that pull
@@ -40,7 +44,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # Which languages does this change touch? On anything but a pull request: all of them.
+  # Does this change need the Rust analysis? On anything but a pull request: yes.
   scope:
     name: scope
     runs-on: ubuntu-latest
@@ -62,23 +66,18 @@ jobs:
             exit 0
           fi
           files=$(git diff --name-only "origin/$BASE...HEAD")
-          picked=""
-          add() { picked="${picked:+$picked,}\"$1\""; }
-          # The workflow or its config changed: analyse everything, so the change is tested.
-          if echo "$files" | grep -Eq '^\.github/(workflows/codeql\.yml|codeql/)'; then
-            echo "languages=$all" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Rust runs when Rust changed, or when this workflow or its config changed (so the
+          # change is tested against every language).
+          picked='["actions","c-cpp"]'
+          if echo "$files" | grep -Eq '\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^src/vendor/|^\.github/(workflows/codeql\.yml|codeql/)'; then
+            picked=$all
           fi
-          if echo "$files" | grep -Eq '^\.github/'; then add actions; fi
-          if echo "$files" | grep -Eq '\.(c|h)$'; then add c-cpp; fi
-          if echo "$files" | grep -Eq '\.rs$|(^|/)Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^\.cargo/|^src/vendor/'; then add rust; fi
-          echo "languages=[$picked]" >> "$GITHUB_OUTPUT"
-          echo "analysing: [$picked]"
+          echo "languages=$picked" >> "$GITHUB_OUTPUT"
+          echo "analysing: $picked"
 
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: scope
-    if: needs.scope.outputs.languages != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -86,9 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The job is skipped when nothing is picked; the fallback only keeps the matrix
-        # expression valid in that case.
-        language: ${{ fromJSON(needs.scope.outputs.languages == '[]' && '["rust"]' || needs.scope.outputs.languages) }}
+        language: ${{ fromJSON(needs.scope.outputs.languages) }}
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v4
