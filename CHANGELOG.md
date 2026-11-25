@@ -167,6 +167,8 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   be handed a string nobody checked. Two internal callers that started kennels without
   checking the name now do: a spawned child (`spawn-<ctx>-…`, made by the daemon) and a mesh
   provider (named by its enablement link). The control protocol's bytes are unchanged.
+  The registry map itself is keyed by `KennelName`, and every registry method takes one, so
+  nothing unparsed can be registered or looked up.
 - **The factory's construction failures are a typed error.** `kennel-privhelper`'s
   `construct` returned `io::Error`s carrying formatted text. `ConstructError` now separates a
   refusal (a malformed request, a granted gid that is not the caller's, an untrusted init

@@ -78,6 +78,14 @@ impl AsRef<str> for KennelName {
     }
 }
 
+// A map keyed by `KennelName` can be searched with a `&str`. The derived `Eq`, `Ord` and `Hash`
+// are those of the inner string, as `Borrow` requires.
+impl std::borrow::Borrow<str> for KennelName {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
 impl AsRef<std::path::Path> for KennelName {
     fn as_ref(&self) -> &std::path::Path {
         std::path::Path::new(&self.0)
@@ -132,6 +140,21 @@ mod tests {
                 Ok(ok)
             );
         }
+    }
+
+    #[test]
+    fn a_map_keyed_by_name_is_searched_by_text() {
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(KennelName::parse("b").expect("b"), 2);
+        map.insert(KennelName::parse("a").expect("a"), 1);
+        assert_eq!(map.get("a"), Some(&1));
+        assert_eq!(map.get("c"), None);
+        // The order is the order of the text.
+        let order: Vec<&str> = map.keys().map(KennelName::as_str).collect();
+        assert_eq!(order, ["a", "b"]);
+        let mut hashed = std::collections::HashSet::new();
+        hashed.insert(KennelName::parse("a").expect("a"));
+        assert!(hashed.contains("a"));
     }
 
     #[test]

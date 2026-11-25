@@ -293,7 +293,8 @@ struct ConsumedEntry {
 #[derive(Default)]
 struct Registry {
     ctx: CtxAllocator,
-    kennels: BTreeMap<String, KennelMeta>,
+    /// Keyed by the checked name, so nothing unparsed can be registered.
+    kennels: BTreeMap<KennelName, KennelMeta>,
 }
 
 /// Serve a mediation broker's `GET_SESSION_POLICY` pull: the policy artifact that lets the broker
@@ -818,7 +819,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             ));
         };
         reg.kennels.insert(
-            name.to_string(),
+            name.clone(),
             KennelMeta {
                 ctx,
                 pid: None,
@@ -835,7 +836,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Record the interactive kennel's PTY broker once kenneld owns the master, so a
     /// later `Attach` can reach this running kennel's pump.
-    fn set_broker(&self, name: &str, broker: crate::pty_broker::PtyBroker) {
+    fn set_broker(&self, name: &KennelName, broker: crate::pty_broker::PtyBroker) {
         let mut reg = self
             .registry
             .lock()
@@ -849,7 +850,11 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// mediation broker can pull the section it needs to police the kennel's session. Set after the
     /// policy loads; mirrors [`Self::set_broker`], and lives on the kennel's own record — not a
     /// parallel per-ctx filter map.
-    fn set_settled(&self, name: &str, settled: std::sync::Arc<kennel_lib_policy::SettledPolicy>) {
+    fn set_settled(
+        &self,
+        name: &KennelName,
+        settled: std::sync::Arc<kennel_lib_policy::SettledPolicy>,
+    ) {
         let mut reg = self
             .registry
             .lock()
@@ -860,7 +865,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// Record that the named kennel runs as a supervised mesh provider enabled at `tier`.
-    fn set_provider_tier(&self, name: &str, tier: crate::catalogue::Tier) {
+    fn set_provider_tier(&self, name: &KennelName, tier: crate::catalogue::Tier) {
         let mut reg = self
             .registry
             .lock()
@@ -883,7 +888,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// The `(ctx, pid)` of a started kennel, or `None` if unknown or still starting.
-    fn ctx_pid(&self, name: &str) -> Option<(u16, u32)> {
+    fn ctx_pid(&self, name: &KennelName) -> Option<(u16, u32)> {
         let reg = self
             .registry
             .lock()
@@ -894,7 +899,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// Record the workload's pid once it is spawned.
-    fn set_pid(&self, name: &str, pid: u32) {
+    fn set_pid(&self, name: &KennelName, pid: u32) {
         let mut reg = self
             .registry
             .lock()
@@ -906,7 +911,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Record the mesh capabilities this kennel consumes, once its policy is loaded. The
     /// idle-reap census (§7.13.6) and the consumer topology leg (`kennel list`) read this.
-    fn note_consumes(&self, name: &str, entries: Vec<ConsumedEntry>) {
+    fn note_consumes(&self, name: &KennelName, entries: Vec<ConsumedEntry>) {
         let mut reg = self
             .registry
             .lock()
@@ -958,7 +963,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Why the named kennel is ending, for its `lifecycle.kennel-exit` record: the reason the daemon
     /// killed it, or `"exited"` if its workload ended without the daemon's doing.
-    fn exit_reason(&self, name: &str) -> &'static str {
+    fn exit_reason(&self, name: &KennelName) -> &'static str {
         self.registry
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1076,7 +1081,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .kennels
             .iter()
             .map(|(name, meta)| KennelInfo {
-                kennel: name.clone(),
+                kennel: name.to_string(),
                 ctx: meta.ctx,
                 pid: meta.pid.unwrap_or(0),
                 running: meta.pid.is_some(),
@@ -3594,7 +3599,7 @@ mod tests {
         let s = shared();
         s.reserve(&kn("a")).expect("a");
         s.reserve(&kn("b")).expect("b");
-        s.set_pid("a", 4242);
+        s.set_pid(&kn("a"), 4242);
         let Response::Listing(mut kennels) = s.list() else {
             unreachable!("listing")
         };
