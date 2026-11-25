@@ -442,7 +442,8 @@ fn validate_and_mint(
 
     // 7. Apply the manifest patch (narrowed per requester) onto the resolved template, producing the
     //    in-memory instance construction runs (never written to disk — §7.12.6).
-    let entries = build_patch(pin, &patch_pairs).map_err(|e| deny(status::DENIED, e))?;
+    let entries =
+        build_patch(pin, &patch_pairs).map_err(|e| deny(status::DENIED, e.to_string()))?;
     let instance = kennel_lib_policy::patch::instantiate(&template, &entries)
         .map_err(|e| deny(status::DENIED, e.to_string()))?;
     tr.step("spawn: manifest patch applied");
@@ -466,18 +467,33 @@ fn resolve_template(dirs: &[PathBuf], reference: &str) -> Option<Vec<u8>> {
     })
 }
 
+/// A patch names a field this requester's narrowed manifest does not let it write (§7.12.3).
+#[derive(Debug, PartialEq, Eq)]
+struct OutsideNarrowedManifest(String);
+
+impl std::fmt::Display for OutsideNarrowedManifest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "field `{}` is outside this requester's narrowed manifest (§7.12.3)",
+            self.0
+        )
+    }
+}
+
 /// Build the typed patch from the request pairs, enforcing this requester's manifest narrowing.
 ///
 /// A non-empty `mutable_narrow` restricts the writable fields to a subset of the template's manifest
 /// (§7.12.3); an empty one defers wholly to [`patch::instantiate`](kennel_lib_policy::patch::instantiate),
 /// which enforces manifest membership. Narrowing never widens.
-fn build_patch(pin: &SpawnTemplate, pairs: &[(&str, &str)]) -> Result<Vec<PatchEntry>, String> {
+fn build_patch(
+    pin: &SpawnTemplate,
+    pairs: &[(&str, &str)],
+) -> Result<Vec<PatchEntry>, OutsideNarrowedManifest> {
     let mut entries = Vec::with_capacity(pairs.len());
     for (field, value) in pairs {
         if !pin.mutable_narrow.is_empty() && !pin.mutable_narrow.iter().any(|f| f == field) {
-            return Err(format!(
-                "field `{field}` is outside this requester's narrowed manifest (§7.12.3)"
-            ));
+            return Err(OutsideNarrowedManifest((*field).to_owned()));
         }
         entries.push(PatchEntry {
             field: (*field).to_owned(),
@@ -604,7 +620,11 @@ mod tests {
         let narrow = pin("net-fetch", &["net.proxy.allow"]);
         assert!(build_patch(&narrow, &[("net.proxy.allow", "h:443")]).is_ok());
         let err = build_patch(&narrow, &[("fs.write", "/w")]).expect_err("narrowed out");
-        assert!(err.contains("narrowed manifest"));
+        assert_eq!(err, OutsideNarrowedManifest("fs.write".to_owned()));
+        assert_eq!(
+            err.to_string(),
+            "field `fs.write` is outside this requester's narrowed manifest (§7.12.3)"
+        );
     }
 
     #[test]

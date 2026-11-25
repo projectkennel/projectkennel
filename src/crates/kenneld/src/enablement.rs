@@ -86,15 +86,33 @@ pub fn scan(
     out
 }
 
+/// Why an enabled link was not admitted as a provider.
+#[derive(Debug)]
+enum ProviderError {
+    /// The link's target could not be read.
+    Read(std::io::Error),
+    /// The policy did not verify against the trust store, or is malformed.
+    Verify(kennel_lib_policy::PolicyError),
+}
+
+impl std::fmt::Display for ProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(e) => write!(f, "cannot read: {e}"),
+            Self::Verify(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Read and verify one enabled link's settled policy, returning its signing key id and `[[provides]]`,
 /// or `Ok(None)` if it provides nothing.
 fn load_provider(
     link: &Path,
     keys: &KeySet,
-) -> Result<Option<(String, Vec<ProvideRuntime>, ServiceRuntime)>, String> {
-    let bytes = std::fs::read(link).map_err(|e| format!("cannot read: {e}"))?;
+) -> Result<Option<(String, Vec<ProvideRuntime>, ServiceRuntime)>, ProviderError> {
+    let bytes = std::fs::read(link).map_err(ProviderError::Read)?;
     let (settled, key_id) =
-        kennel_lib_policy::verify_settled_signed(&bytes, keys).map_err(|e| e.to_string())?;
+        kennel_lib_policy::verify_settled_signed(&bytes, keys).map_err(ProviderError::Verify)?;
     if settled.mesh.provides.is_empty() {
         return Ok(None);
     }
