@@ -376,10 +376,15 @@ fn provision_host_network(
         half.loopback.len(),
         half.ctx
     ));
-    // Diagnostic (trace): the effective uid + capability words at the host-side add, so an
-    // EPERM here is attributable to euid/caps rather than the netns or the address itself.
+    // Diagnostic (trace): whether we are root, and the capability words, at the host-side add,
+    // so an EPERM here is attributable to euid/caps rather than the netns or the address itself.
+    // What matters is root or not, so that is what is logged, not the uid.
     {
-        let euid = kennel_lib_syscall::unistd::effective_uid();
+        let euid = if kennel_lib_syscall::unistd::effective_uid() == 0 {
+            "root"
+        } else {
+            "operator"
+        };
         let caps = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
         let cap_eff = caps
             .lines()
