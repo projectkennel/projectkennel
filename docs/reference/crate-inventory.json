@@ -1,8 +1,8 @@
 {
   "crate_count": 32,
-  "total_sloc": 47830,
+  "total_sloc": 47834,
   "tcb_crate_count": 18,
-  "tcb_sloc": 29576,
+  "tcb_sloc": 29580,
   "crates": [
     {
       "name": "kenneld",
@@ -66,7 +66,7 @@
     },
     {
       "name": "kennel-privhelper",
-      "sloc": 2259,
+      "sloc": 2263,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": ["kennel-privhelper", "kennel-privhelper-bpf", "kennel-privhelper-mounts", "kennel-privhelper-net", "privhelper-bpf", "privhelper-mounts", "privhelper-net"],
