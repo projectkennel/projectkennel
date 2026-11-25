@@ -200,7 +200,7 @@ fn construct(chan: BorrowedFd<'_>) -> Result<i32, ConstructError> {
             v.binds
                 .iter()
                 .filter(|b| b.exclusive)
-                .map(|b| b.source.clone())
+                .map(|b| b.source.to_path_buf())
                 .collect()
         });
     // Captured before the child closure moves `half`: whether this kennel has a binderfs to hand

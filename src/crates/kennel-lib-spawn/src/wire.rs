@@ -51,6 +51,8 @@ pub enum PlanWireError {
     BadResource,
     /// A bind's in-view target is relative or has a `..` component.
     BadViewPath,
+    /// A bind's host source is relative or has a `..` component.
+    BadHostPath,
 }
 
 // ---- writer ---------------------------------------------------------------
@@ -661,7 +663,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     let shim_root = r.path()?;
     let mut binds = Vec::new();
     for _ in 0..r.count()? {
-        let source = r.path()?;
+        let source = crate::HostPath::parse(r.path()?).map_err(|_| PlanWireError::BadHostPath)?;
         let target = crate::ViewPath::parse(r.path()?).map_err(|_| PlanWireError::BadViewPath)?;
         let writable = r.bool()?;
         let exclusive = r.bool()?;
@@ -1145,7 +1147,7 @@ mod tests {
             shim_root: PathBuf::from("/home/kennel"),
             binds: vec![
                 BindMount {
-                    source: PathBuf::from("/usr"),
+                    source: crate::HostPath::parse("/usr").expect("host path"),
                     target: crate::ViewPath::parse("/usr").expect("view path"),
                     writable: false,
                     exclusive: false,
@@ -1153,7 +1155,8 @@ mod tests {
                     mmap_exec: false,
                 },
                 BindMount {
-                    source: PathBuf::from("/home/op/stores/acme/cred.json"),
+                    source: crate::HostPath::parse("/home/op/stores/acme/cred.json")
+                        .expect("host path"),
                     target: crate::ViewPath::parse("/home/kennel/.app/cred.json")
                         .expect("view path"),
                     writable: false,
@@ -1162,7 +1165,7 @@ mod tests {
                     mmap_exec: false,
                 },
                 BindMount {
-                    source: PathBuf::from("/home/op/work"),
+                    source: crate::HostPath::parse("/home/op/work").expect("host path"),
                     target: crate::ViewPath::parse("/home/kennel/work").expect("view path"),
                     writable: true,
                     exclusive: true,
@@ -1657,6 +1660,29 @@ mod tests {
                 .expect("target range")
                 .copy_from_slice(bad);
             assert_eq!(decode_plan(&bytes), Err(PlanWireError::BadViewPath));
+        }
+    }
+
+    #[test]
+    fn a_bind_source_that_is_not_a_host_path_is_refused_at_decode() {
+        // The same for a bind's host source: rewrite one in the encoded plan, same length.
+        let good = b"/home/op/stores/acme/cred.json";
+        for bad in [
+            &b"home/op/stores/acme/cred.jsonx"[..],
+            &b"/home/op/../etc/acme/cred.json"[..],
+        ] {
+            assert_eq!(good.len(), bad.len());
+            let mut bytes = encode_plan(&rich_plan());
+            let at = bytes
+                .windows(good.len())
+                .position(|w| w == good)
+                .expect("the encoded source is present");
+            let end = at + good.len();
+            bytes
+                .get_mut(at..end)
+                .expect("source range")
+                .copy_from_slice(bad);
+            assert_eq!(decode_plan(&bytes), Err(PlanWireError::BadHostPath));
         }
     }
 

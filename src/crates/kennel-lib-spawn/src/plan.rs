@@ -118,7 +118,7 @@ fn stamp_proxy_meta(meta: &mut [u8; 64], endpoint: &ProxyEndpoint) {
         slot.copy_from_slice(&v4);
     }
     if let Some(slot) = meta.get_mut(12..14) {
-        slot.copy_from_slice(&endpoint.port.to_be_bytes());
+        slot.copy_from_slice(&endpoint.port.get().to_be_bytes());
     }
     if let Some(slot) = meta.get_mut(16..32) {
         slot.copy_from_slice(&endpoint.v6.octets());
@@ -449,8 +449,8 @@ pub struct ProxyEndpoint {
     pub v4: Option<Ipv4Addr>,
     /// The proxy's IPv6 loopback address.
     pub v6: Ipv6Addr,
-    /// The TCP port the proxy listens on.
-    pub port: u16,
+    /// The TCP port the proxy listens on: never 0.
+    pub port: kennel_lib_policy::variant::Port,
 }
 
 /// One bind mount composing the constructed view.
@@ -469,7 +469,7 @@ pub struct ProxyEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindMount {
     /// The host path bound in.
-    pub source: PathBuf,
+    pub source: crate::HostPath,
     /// Where it appears inside the kennel (absolute, post-`pivot_root`).
     pub target: crate::ViewPath,
     /// Writable when true; read-only (bind, then RO remount) otherwise.
@@ -1162,30 +1162,28 @@ impl Plan {
     /// rewrite the integrity pins of the workspace it is working in (T2.8).
     ///
     /// # Errors
-    /// The [`crate::ViewPathError`] if `host_dir` is not an absolute path free of `..`. The
+    /// The [`crate::BindPathError`] if `host_dir` is not an absolute path free of `..`. The
     /// plan is unchanged in that case.
     pub fn grant_cwd(
         &mut self,
         host_dir: PathBuf,
         writable: bool,
         mask_manifest: bool,
-    ) -> Result<(), crate::ViewPathError> {
+    ) -> Result<(), crate::BindPathError> {
         let target = crate::ViewPath::parse(host_dir.clone())?;
+        let source = crate::HostPath::from(&target);
         let access = if writable {
             write_access()
         } else {
             read_access(false)
         };
-        // The Landlock rule references the post-pivot target; the cwd is bound at its own
-        // absolute path (not remapped), so target == source == host_dir.
-        self.landlock_fs.push((host_dir.clone(), access));
         if let Some(view) = self.view.as_mut() {
             if writable && mask_manifest {
                 view.mask_paths.push(host_dir.join(".trust-manifest.json"));
                 view.mask_dir_paths.push(host_dir.join(".trust-manifest.d"));
             }
             view.binds.push(BindMount {
-                source: host_dir,
+                source,
                 target,
                 writable,
                 exclusive: false,
@@ -1193,6 +1191,9 @@ impl Plan {
                 mmap_exec: false,
             });
         }
+        // The Landlock rule references the post-pivot target; the cwd is bound at its own
+        // absolute path (not remapped), so target == source == host_dir.
+        self.landlock_fs.push((host_dir, access));
         Ok(())
     }
 
@@ -1486,6 +1487,8 @@ impl Plan {
                     .map_or((granted, false), |src| (src.clone(), true));
                 let target = crate::ViewPath::parse(target)
                     .map_err(|e| SpawnError::InvalidPolicy(e.to_string()))?;
+                let source = crate::HostPath::parse(source)
+                    .map_err(|e| SpawnError::InvalidPolicy(e.to_string()))?;
                 binds.push(BindMount {
                     source,
                     target,
@@ -1751,9 +1754,13 @@ impl Plan {
         // Landlock always handles net; the workload reaches its proxy endpoint at the proxy port,
         // so grant CONNECT_TCP there (the per-mirror-port CONNECT_TCP grants are added by
         // apply_facade_client). Without it Landlock denies the connect the BPF ACL permits.
-        if !self.landlock_net.iter().any(|(p, _)| *p == endpoint.port) {
+        if !self
+            .landlock_net
+            .iter()
+            .any(|(p, _)| *p == endpoint.port.get())
+        {
             self.landlock_net
-                .push((endpoint.port, AccessNet::CONNECT_TCP));
+                .push((endpoint.port.get(), AccessNet::CONNECT_TCP));
         }
 
         // Seed the kennel's own loopback subnet (§7.5.6) into the inbound BIND ACL: a proxied
