@@ -142,6 +142,13 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The daemon's `bring_up` is split into its stages.** It was one 588-line function with a
+  length exemption. It is now two halves, `prepare_plan` (everything added to the plan before
+  the kennel exists) and `construct_and_start` (the factory call and what follows it), each a
+  sequence of stage functions: `egress_payload`, `net_runtime_for`, `wire_file_binds`,
+  `wire_facades`, `wire_view`, `await_boot_sync`, `start_delegates`, `serve_binder`,
+  `send_mesh_rendezvous`. Three copies of "grant read on the parents of these file binds"
+  are one function. The exemption is gone. No behaviour change.
 - **`Plan::from_policy` is split into its stages.** It was one 427-line function with a
   length exemption. The stages are now functions (`namespaces_for`, `fs_grants`,
   `exec_rules`, `dev_allowlist`, `fixed_fs_rules`, `mask_paths`, `etc_overlays`,
