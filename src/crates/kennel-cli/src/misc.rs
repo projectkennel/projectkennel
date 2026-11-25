@@ -4,6 +4,7 @@
 //!
 //! The smaller operator verbs that do not fit the run/policy/key/oci groups.
 
+use crate::CliError;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -23,11 +24,11 @@ use std::process::ExitCode;
 ///
 /// Returns a message only on unexpected arguments — every stack fact, including an
 /// unreachable or older daemon, is reported, not errored.
-pub fn version(args: &[String]) -> Result<ExitCode, String> {
+pub fn version(args: &[String]) -> Result<ExitCode, CliError> {
     if let Some(arg) = args.first() {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "unexpected argument `{arg}` — usage: kennel version"
-        ));
+        )));
     }
     let cli_build = env!("CARGO_PKG_VERSION");
     println!(
@@ -166,7 +167,7 @@ const AUDIT_STEMS: &[&str] = &[
 /// value, bad kennel name, unknown `--resource`, unparseable `--since`
 /// duration), the system clock is before the Unix epoch, or an audit log file
 /// cannot be read.
-pub fn audit(args: &[String]) -> Result<ExitCode, String> {
+pub fn audit(args: &[String]) -> Result<ExitCode, CliError> {
     let mut kennel: Option<&str> = None;
     let mut resource: Option<&str> = None;
     let mut since: Option<&str> = None;
@@ -176,24 +177,30 @@ pub fn audit(args: &[String]) -> Result<ExitCode, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--resource" => resource = Some(it.next().ok_or("--resource needs a value")?),
-            "--since" => since = Some(it.next().ok_or("--since needs a value")?),
+            "--resource" => {
+                resource = Some(crate::flag_value(&mut it, "--resource")?);
+            }
+            "--since" => {
+                since = Some(crate::flag_value(&mut it, "--since")?);
+            }
             "--novel-only" => novel_only = true,
             "--follow" => follow = true,
             "--print-journalctl-command" => journalctl = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if kennel.is_none() => kennel = Some(v),
-            _ => return Err("only one <name> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <name> may be given")),
         }
     }
-    let kennel = kennel.ok_or("usage: kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]")?;
+    let kennel = kennel.ok_or_else(|| CliError::usage("usage: kennel audit <name> [--resource CLASS] [--since DUR] [--novel-only] [--follow] [--print-journalctl-command]"))?;
     if kennel.is_empty() || kennel.contains('/') || kennel.contains("..") {
-        return Err(format!("invalid kennel name `{kennel}`"));
+        return Err(CliError::Usage(format!("invalid kennel name `{kennel}`")));
     }
     let stem = match resource {
         None => None,
         Some(tok) => Some(resource_stem(tok).ok_or_else(|| {
-            format!("unknown --resource `{tok}` (net/fs/exec/unix/dbus/priv/lifecycle)")
+            CliError::Usage(format!(
+                "unknown --resource `{tok}` (net/fs/exec/unix/dbus/priv/lifecycle)"
+            ))
         })?),
     };
 
@@ -208,7 +215,7 @@ pub fn audit(args: &[String]) -> Result<ExitCode, String> {
             let secs = parse_duration_secs(s)?;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| format!("system clock: {e}"))?
+                .map_err(|e| CliError::Failed(format!("system clock: {e}")))?
                 .as_secs();
             let cut = i64::try_from(now.saturating_sub(secs)).unwrap_or(i64::MAX);
             Some(kennel_lib_audit::format_rfc3339_micros(cut, 0))
@@ -235,7 +242,7 @@ pub fn audit(args: &[String]) -> Result<ExitCode, String> {
     }
 
     run_audit(&files, cutoff.as_deref(), novel_only, follow)
-        .map_err(|e| format!("reading audit logs: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("reading audit logs: {e}")))?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -265,18 +272,19 @@ fn resource_stem(token: &str) -> Option<&'static str> {
 ///
 /// Returns a message if the numeric part does not parse, or if the value times
 /// its unit multiplier overflows `u64`.
-pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
+pub fn parse_duration_secs(s: &str) -> Result<u64, CliError> {
     let s = s.trim();
     let (num, mult) = [('s', 1u64), ('m', 60), ('h', 3_600), ('d', 86_400)]
         .into_iter()
         .find_map(|(suffix, mult)| s.strip_suffix(suffix).map(|n| (n, mult)))
         .unwrap_or((s, 1));
-    let n: u64 = num
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid --since duration `{s}` (try 90s, 30m, 2h, 7d)"))?;
+    let n: u64 = num.trim().parse().map_err(|_| {
+        CliError::Usage(format!(
+            "invalid --since duration `{s}` (try 90s, 30m, 2h, 7d)"
+        ))
+    })?;
     n.checked_mul(mult)
-        .ok_or_else(|| format!("--since duration `{s}` overflows"))
+        .ok_or_else(|| CliError::Usage(format!("--since duration `{s}` overflows")))
 }
 
 fn print_journalctl_command(kennel: &str, resource: Option<&str>, since: Option<&str>) {

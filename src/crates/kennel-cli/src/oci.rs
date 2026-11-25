@@ -18,6 +18,7 @@
 //! `rootfs/` + `config.json` + `digest` are the integrity unit (the launcher trusts the config
 //! for the entrypoint/env); `policy.toml` is outside it, signature-covered separately.
 
+use crate::CliError;
 use std::path::{Path, PathBuf};
 
 /// The store root: `$XDG_DATA_HOME/kennel/images`, else `~/.local/share/kennel/images`.
@@ -25,14 +26,16 @@ use std::path::{Path, PathBuf};
 /// # Errors
 ///
 /// Fails if neither `XDG_DATA_HOME` nor `HOME` is set (no resolvable data dir).
-pub fn store_root() -> Result<PathBuf, String> {
+pub fn store_root() -> Result<PathBuf, CliError> {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(xdg).join("kennel/images"));
     }
     let home = std::env::var_os("HOME")
         .filter(|v| !v.is_empty())
         .ok_or_else(|| {
-            "neither XDG_DATA_HOME nor HOME is set; cannot locate the image store".to_owned()
+            CliError::Refused(
+                "neither XDG_DATA_HOME nor HOME is set; cannot locate the image store".to_owned(),
+            )
         })?;
     Ok(PathBuf::from(home).join(".local/share/kennel/images"))
 }
@@ -45,29 +48,33 @@ pub fn store_root() -> Result<PathBuf, String> {
 /// # Errors
 ///
 /// Returns a message naming the violation if `name` is not a safe single component.
-pub fn validate_name(name: &str) -> Result<(), String> {
+pub fn validate_name(name: &str) -> Result<(), CliError> {
     if name.is_empty() {
-        return Err("image name is empty".to_owned());
+        return Err(CliError::Usage("image name is empty".to_owned()));
     }
     if name == "." || name == ".." {
-        return Err(format!("image name `{name}` is not a valid entry"));
+        return Err(CliError::Usage(format!(
+            "image name `{name}` is not a valid entry"
+        )));
     }
     if name.contains('/') || name.contains('\\') {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "image name `{name}` must be a single path component (no `/`)"
-        ));
+        )));
     }
     if name
         .chars()
         .any(|c| c.is_control() || c.is_whitespace() || c == '\0')
     {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "image name `{name}` contains control or whitespace characters"
-        ));
+        )));
     }
     // A leading dot would hide the entry and risks colliding with dotfiles; disallow.
     if name.starts_with('.') {
-        return Err(format!("image name `{name}` must not start with `.`"));
+        return Err(CliError::Usage(format!(
+            "image name `{name}` must not start with `.`"
+        )));
     }
     Ok(())
 }
@@ -130,11 +137,11 @@ impl StoreEntry {
     /// # Errors
     ///
     /// Fails if the `digest` file is missing or unreadable.
-    pub fn read_digest(&self) -> Result<String, String> {
+    pub fn read_digest(&self) -> Result<String, CliError> {
         let p = self.digest_path();
         std::fs::read_to_string(&p)
             .map(|s| s.trim().to_owned())
-            .map_err(|e| format!("reading {}: {e}", p.display()))
+            .map_err(|e| CliError::file("reading", &p, &e))
     }
 
     /// Record the resolved `image@sha256:…` the build pulled from.
@@ -142,12 +149,12 @@ impl StoreEntry {
     /// # Errors
     ///
     /// Fails if the entry directory cannot be created or the file cannot be written.
-    pub fn write_digest(&self, image: &str) -> Result<(), String> {
+    pub fn write_digest(&self, image: &str) -> Result<(), CliError> {
         std::fs::create_dir_all(&self.dir)
-            .map_err(|e| format!("creating {}: {e}", self.dir.display()))?;
+            .map_err(|e| CliError::file("creating", &self.dir, &e))?;
         let p = self.digest_path();
         std::fs::write(&p, format!("{}\n", image.trim()))
-            .map_err(|e| format!("writing {}: {e}", p.display()))
+            .map_err(|e| CliError::file("writing", &p, &e))
     }
 
     /// Whether the entry has been populated (the rootfs exists).
@@ -169,7 +176,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails if no data dir is resolvable (see [`store_root`]).
-    pub fn open() -> Result<Self, String> {
+    pub fn open() -> Result<Self, CliError> {
         Ok(Self {
             root: store_root()?,
         })
@@ -194,7 +201,7 @@ impl Store {
     /// # Errors
     ///
     /// Fails if `name` is not a safe single path component.
-    pub fn entry(&self, name: &str) -> Result<StoreEntry, String> {
+    pub fn entry(&self, name: &str) -> Result<StoreEntry, CliError> {
         validate_name(name)?;
         Ok(StoreEntry {
             dir: self.root.join(name),
@@ -371,18 +378,18 @@ pub fn policy_image(settled_bytes: &[u8]) -> Option<String> {
 /// # Errors
 ///
 /// Returns a usage or operational error message (the caller prints it).
-pub fn dispatch(args: &[String]) -> Result<std::process::ExitCode, String> {
+pub fn dispatch(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     let (verb, rest) = args
         .split_first()
-        .ok_or("usage: kennel oci <build|run> <name> [...]")?;
+        .ok_or_else(|| CliError::usage("usage: kennel oci <build|run> <name> [...]"))?;
     match verb.as_str() {
         "build" => build(rest),
         "run" => run(rest),
         "revert" => revert(rest),
         "update" => update(rest),
-        other => Err(format!(
+        other => Err(CliError::Usage(format!(
             "unknown `kennel oci` verb `{other}` (expected build|run|revert|update)"
-        )),
+        ))),
     }
 }
 
@@ -390,24 +397,24 @@ pub fn dispatch(args: &[String]) -> Result<std::process::ExitCode, String> {
 /// running — its overlay has the store entry mounted live, and mutating `upper/`/`rootfs/`
 /// underneath it would corrupt the running view. A kenneld we cannot reach means nothing is
 /// running, so the op proceeds.
-fn refuse_if_running(name: &str) -> Result<(), String> {
+fn refuse_if_running(name: &str) -> Result<(), CliError> {
     use kennel_lib_control::control::{self, Request, Response};
     let Ok(conn) = crate::connect() else {
         return Ok(()); // no daemon ⇒ nothing running
     };
     crate::send(&conn, &Request::List, &[])?;
     let mut conn = conn;
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Listing(kennels) => {
             if kennels.iter().any(|k| k.kennel == name) {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "kennel `{name}` is running; stop it (`kennel stop {name}`) before this operation"
-                ));
+                )));
             }
             Ok(())
         }
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => Err(CliError::Daemon(message)),
+        other => Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
 }
 
@@ -433,7 +440,7 @@ fn refuse_if_running(name: &str) -> Result<(), String> {
 ///
 /// Returns an error if the name is invalid, the entry is not built, a path escapes the upper, the
 /// kennel is running (for a mutating mode), or the upper cannot be read/removed.
-pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
+pub fn revert(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     let (head, tail) = args
         .iter()
         .position(|a| a == "--")
@@ -443,21 +450,22 @@ pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut list = false;
-    for arg in head {
-        match arg.as_str() {
-            "--list" => list = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("unexpected extra argument before `--`".to_owned()),
-        }
-    }
-    let name = name.ok_or("usage: kennel oci revert <name> [--list] [-- <path>…]")?;
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci revert <name> [--list] [-- <path>…]",
+        |flag, _| {
+            list |= flag == "--list";
+            Ok(flag == "--list")
+        },
+    )?;
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if !entry.exists() {
-        return Err(format!("store entry `{name}` is not built"));
+        return Err(CliError::Refused(format!(
+            "store entry `{name}` is not built"
+        )));
     }
     let upper = entry.dir().join("upper");
 
@@ -473,13 +481,13 @@ pub fn revert(args: &[String]) -> Result<std::process::ExitCode, String> {
 
 /// The total revert: obliterate the whole managed upper (and workdir) so the next run's merged root
 /// is the lowers plus a clean layer — the blunt end of selective revert.
-fn revert_total(name: &str, entry_dir: &Path) -> Result<std::process::ExitCode, String> {
+fn revert_total(name: &str, entry_dir: &Path) -> Result<std::process::ExitCode, CliError> {
     let upper = entry_dir.join("upper");
     let work = entry_dir.join("work");
     let had = upper.exists() || work.exists();
     for d in [&upper, &work] {
         if d.exists() {
-            std::fs::remove_dir_all(d).map_err(|e| format!("removing {}: {e}", d.display()))?;
+            std::fs::remove_dir_all(d).map_err(|e| CliError::file("removing", d, &e))?;
         }
     }
     if had {
@@ -494,7 +502,7 @@ fn revert_total(name: &str, entry_dir: &Path) -> Result<std::process::ExitCode, 
 
 /// Print the diff against the pin: every persisted change in the upper (`M` a copy-up/added file,
 /// `D` a whiteout deleting a lower file). Container directories holding only copy-ups are not listed.
-fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, String> {
+fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, CliError> {
     if !upper.exists() {
         eprintln!("kennel: `{name}` has no persisted upper (discard/readonly) — nothing persisted");
         return Ok(std::process::ExitCode::SUCCESS);
@@ -520,15 +528,15 @@ fn list_upper(name: &str, upper: &Path) -> Result<std::process::ExitCode, String
 /// Recursively collect the upper's deviations from the lower. A whiteout (overlayfs marks a deleted
 /// lower file as a `char` device `0:0`) is `D`; a regular/other file is `M`; a directory is recursed
 /// (a plain container for copy-ups is not itself a change).
-fn walk_upper(root: &Path, dir: &Path, out: &mut Vec<(String, char)>) -> Result<(), String> {
+fn walk_upper(root: &Path, dir: &Path, out: &mut Vec<(String, char)>) -> Result<(), CliError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
-    let rd = std::fs::read_dir(dir).map_err(|e| format!("reading {}: {e}", dir.display()))?;
+    let rd = std::fs::read_dir(dir).map_err(|e| CliError::file("reading", dir, &e))?;
     for ent in rd {
-        let ent = ent.map_err(|e| format!("reading {}: {e}", dir.display()))?;
+        let ent = ent.map_err(|e| CliError::file("reading", dir, &e))?;
         let path = ent.path();
         let ft = ent
             .file_type()
-            .map_err(|e| format!("stat {}: {e}", path.display()))?;
+            .map_err(|e| CliError::file("stat", &path, &e))?;
         let rel = path.strip_prefix(root).unwrap_or(&path);
         let in_image = format!("/{}", rel.display());
         if ft.is_char_device() {
@@ -550,11 +558,11 @@ fn revert_paths(
     name: &str,
     upper: &Path,
     paths: &[String],
-) -> Result<std::process::ExitCode, String> {
+) -> Result<std::process::ExitCode, CliError> {
     if !upper.exists() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{name}` has no persisted upper (discard/readonly) — nothing to revert"
-        ));
+        )));
     }
     // The upper is written by the workload, so nothing in it is trusted to be what its name
     // says: a directory on the way to the target may have been replaced by a symlink out of the
@@ -562,7 +570,7 @@ fn revert_paths(
     // inside the upper, and only then removed by its final name — never by a path re-walked from
     // the top.
     let root = kennel_lib_syscall::fd::RootDir::open(upper)
-        .map_err(|e| format!("opening {}: {e}", upper.display()))?;
+        .map_err(|e| CliError::file("opening", upper, &e))?;
     let mut restored = 0_u32;
     for raw in paths {
         let rel = sanitize_rel(raw)?;
@@ -573,20 +581,22 @@ fn revert_paths(
             );
         };
         let Some(leaf) = rel.file_name() else {
-            return Err(format!("`{raw}` is not a path within the image"));
+            return Err(CliError::Usage(format!(
+                "`{raw}` is not a path within the image"
+            )));
         };
         let parent = rel.parent().filter(|p| !p.as_os_str().is_empty());
         let parent_dir: std::os::fd::OwnedFd = match parent {
             None => std::fs::File::open(upper)
-                .map_err(|e| format!("opening {}: {e}", upper.display()))?
+                .map_err(|e| CliError::file("opening", upper, &e))?
                 .into(),
             Some(parent) => {
-                let is_dir = root
-                    .is_dir(parent)
-                    .map_err(|e| format!("resolving `{raw}` in the upper: {e}"))?;
-                let handle = root
-                    .lookup(parent)
-                    .map_err(|e| format!("resolving `{raw}` in the upper: {e}"))?;
+                let is_dir = root.is_dir(parent).map_err(|e| {
+                    CliError::Failed(format!("resolving `{raw}` in the upper: {e}"))
+                })?;
+                let handle = root.lookup(parent).map_err(|e| {
+                    CliError::Failed(format!("resolving `{raw}` in the upper: {e}"))
+                })?;
                 match handle {
                     Some(handle) if is_dir => handle,
                     _ => {
@@ -602,11 +612,13 @@ fn revert_paths(
                 // `remove_dir_all` does not follow links inside the tree it removes, and a
                 // symlink at the target itself is removed as a link.
                 if md.is_dir() {
-                    std::fs::remove_dir_all(&target)
-                        .map_err(|e| format!("removing /{}: {e}", rel.display()))?;
+                    std::fs::remove_dir_all(&target).map_err(|e| {
+                        CliError::Failed(format!("removing /{}: {e}", rel.display()))
+                    })?;
                 } else {
-                    std::fs::remove_file(&target)
-                        .map_err(|e| format!("removing /{}: {e}", rel.display()))?;
+                    std::fs::remove_file(&target).map_err(|e| {
+                        CliError::Failed(format!("removing /{}: {e}", rel.display()))
+                    })?;
                 }
                 eprintln!("  restored /{} to the image", rel.display());
                 restored = restored.saturating_add(1);
@@ -624,18 +636,22 @@ fn revert_paths(
 /// # Errors
 ///
 /// Returns an error if the path contains a `..` component or normalises to empty.
-fn sanitize_rel(raw: &str) -> Result<PathBuf, String> {
+fn sanitize_rel(raw: &str) -> Result<PathBuf, CliError> {
     use std::path::Component;
     let mut rel = PathBuf::new();
     for c in Path::new(raw).components() {
         match c {
             Component::RootDir | Component::Prefix(_) | Component::CurDir => {}
             Component::Normal(s) => rel.push(s),
-            Component::ParentDir => return Err(format!("`{raw}` must not contain `..`")),
+            Component::ParentDir => {
+                return Err(CliError::Usage(format!("`{raw}` must not contain `..`")))
+            }
         }
     }
     if rel.as_os_str().is_empty() {
-        return Err(format!("`{raw}` is not a path within the image"));
+        return Err(CliError::Usage(format!(
+            "`{raw}` is not a path within the image"
+        )));
     }
     Ok(rel)
 }
@@ -658,7 +674,7 @@ fn sanitize_rel(raw: &str) -> Result<PathBuf, String> {
 ///
 /// Returns an error if the name is invalid, `<new-image-ref>` is missing, the entry is absent or has
 /// no readable `[rootfs]` policy, the kennel is running, the fetch fails, or the store cannot be written.
-pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
+pub fn update(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     let (head, tail) = args
         .iter()
         .position(|a| a == "--")
@@ -668,38 +684,35 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut keep_state = false;
-    let mut no_fetch = false;
-    let mut key_path: Option<&str> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut it = head.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--keep-state" => keep_state = true,
-            "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
-            "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
-            }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("unexpected extra argument before `--`".to_owned()),
-        }
-    }
-    let name = name.ok_or("usage: kennel oci update <name> [--keep-state] -- <new-image-ref>")?;
+    let mut fetch = FetchFlags::default();
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci update <name> [--keep-state] -- <new-image-ref>",
+        |flag, it| {
+            keep_state |= flag == "--keep-state";
+            Ok(flag == "--keep-state" || fetch.take(flag, it)?)
+        },
+    )?;
+    let FetchFlags {
+        no_fetch,
+        key_path,
+        dirs: crate::DirFlags {
+            template_dirs,
+            trust_dirs,
+        },
+    } = fetch;
     let new_ref = tail
         .first()
-        .ok_or("`kennel oci update` needs `-- <new-image-ref>`")?;
+        .ok_or_else(|| CliError::usage("`kennel oci update` needs `-- <new-image-ref>`"))?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if !entry.exists() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "store entry `{name}` does not exist; use `kennel oci build {name}` to create it"
-        ));
+        )));
     }
     refuse_if_running(name)?;
 
@@ -708,14 +721,14 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, String> {
     //    `readonly` entries from build-derived ones — §7.11.4c).
     let policy_path = entry.policy();
     let policy_text = std::fs::read_to_string(&policy_path)
-        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
+        .map_err(|e| CliError::file("reading", &policy_path, &e))?;
     let source = kennel_lib_compile::parse_source(policy_text.as_bytes())
-        .map_err(|e| format!("parsing {}: {e}", policy_path.display()))?;
+        .map_err(|e| CliError::file("parsing", &policy_path, &e))?;
     let rootfs = source.rootfs.ok_or_else(|| {
-        format!(
+        CliError::Refused(format!(
             "{} has no [rootfs] — not an OCI entry",
             policy_path.display()
-        )
+        ))
     })?;
     let old_image = rootfs.image.unwrap_or_default();
     let old_readonly = rootfs.readonly.unwrap_or_default();
@@ -800,7 +813,7 @@ fn finish_update(
     base: &Baseline,
     recorded: &str,
     keep_state: bool,
-) -> Result<std::process::ExitCode, String> {
+) -> Result<std::process::ExitCode, CliError> {
     let new_base = derive_closure_readonly(read_image_user(&entry.config()).as_deref());
     let new_readonly = preserve_closure(&base.old_readonly, &base.old_base, &new_base);
 
@@ -814,15 +827,14 @@ fn finish_update(
     };
     let new_text = rewrite_oci_policy(policy_text, &render)?;
     std::fs::write(policy_path, new_text)
-        .map_err(|e| format!("writing {}: {e}", policy_path.display()))?;
+        .map_err(|e| CliError::file("writing", policy_path, &e))?;
 
     if keep_state {
         eprintln!("kennel: kept the persisted upper for `{name}` — review for a rebase hazard against the new image");
     } else {
         for d in [entry.dir().join("upper"), entry.dir().join("work")] {
             if d.exists() {
-                std::fs::remove_dir_all(&d)
-                    .map_err(|e| format!("removing {}: {e}", d.display()))?;
+                std::fs::remove_dir_all(&d).map_err(|e| CliError::file("removing", &d, &e))?;
             }
         }
     }
@@ -915,13 +927,15 @@ fn render_rootfs_block(r: &RootfsRender) -> String {
 /// # Errors
 ///
 /// Returns an error if the policy has no `[rootfs]` table to rewrite.
-fn rewrite_oci_policy(text: &str, render: &RootfsRender) -> Result<String, String> {
+fn rewrite_oci_policy(text: &str, render: &RootfsRender) -> Result<String, CliError> {
     let lines: Vec<&str> = text.lines().collect();
     let is_header = |l: &str| l.starts_with('[') && !l.starts_with("[[");
     let rootfs_start = lines
         .iter()
         .position(|l| l.trim_end() == "[rootfs]")
-        .ok_or("the policy has no [rootfs] table to rewrite")?;
+        .ok_or_else(|| {
+            CliError::Refused("the policy has no [rootfs] table to rewrite".to_owned())
+        })?;
     let after_rootfs = rootfs_start.saturating_add(1);
     let next_header = lines
         .iter()
@@ -1069,13 +1083,14 @@ fn confined_fetch(
     entry: &StoreEntry,
     image: &str,
     opts: &FetchOpts<'_>,
-) -> Result<(), String> {
+) -> Result<(), CliError> {
     // The entry's path inside the fetch kennel's view. The store lives under the operator's $HOME,
     // so the `fs.write` grant canonicalises to `~/…` and the spawn remaps `~` to the persona home
     // (/home/kennel); the script writes that remapped path. A store outside $HOME (XDG_DATA_HOME
     // elsewhere) is granted and seen at its own absolute path.
-    let home = std::env::var("HOME")
-        .map_err(|_| "HOME is not set; cannot run the confined fetch".to_owned())?;
+    let home = std::env::var("HOME").map_err(|_| {
+        CliError::Refused("HOME is not set; cannot run the confined fetch".to_owned())
+    })?;
     let (fs_write, view) = entry.dir().strip_prefix(&home).map_or_else(
         |_| {
             let abs = entry.dir().display().to_string();
@@ -1103,7 +1118,7 @@ fn confined_fetch(
         opts.template_dirs.clone(),
         opts.trust_dirs.clone(),
     )
-    .map_err(|e| format!("compiling the fetch leaf: {e}"))?;
+    .map_err(|e| CliError::Failed(format!("compiling the fetch leaf: {e}")))?;
     let temp = crate::policy::TempSettled::write(&inst, &settled_bytes)?;
 
     let argv = vec![
@@ -1131,9 +1146,9 @@ fn confined_fetch(
         } else {
             detail.to_owned()
         };
-        return Err(format!(
+        return Err(CliError::Failed(format!(
             "the confined fetch did not populate `{name}` — {hint}"
-        ));
+        )));
     }
     let _ = std::fs::remove_file(entry.dir().join(".fetch.err"));
     Ok(())
@@ -1152,50 +1167,53 @@ fn confined_fetch(
 ///
 /// Returns an error if the name is invalid, `--image` is missing, the fetch fails, or the entry
 /// cannot be written.
-pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
-    let mut name: Option<&str> = None;
+pub fn build(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     let mut image: Option<&str> = None;
     let mut force = false;
-    let mut no_fetch = false;
-    let mut key_path: Option<&str> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--image" => image = Some(it.next().ok_or("--image needs a value")?),
-            "--force" => force = true,
-            "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
-            "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+    let mut fetch = FetchFlags::default();
+    let name = crate::one_positional(
+        args,
+        "unexpected extra argument",
+        "usage: kennel oci build <name> --image <ref> [--no-fetch] [--force] [--key K]",
+        |flag, it| match flag {
+            "--image" => {
+                image = Some(crate::flag_value(it, "--image")?);
+                Ok(true)
             }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("unexpected extra argument".to_owned()),
-        }
-    }
-    let name = name
-        .ok_or("usage: kennel oci build <name> --image <ref> [--no-fetch] [--force] [--key K]")?;
-    let image =
-        image.ok_or("`kennel oci build` needs --image <ref> (the image[@sha256] to pull)")?;
+            "--force" => {
+                force = true;
+                Ok(true)
+            }
+            _ => fetch.take(flag, it),
+        },
+    )?;
+    let FetchFlags {
+        no_fetch,
+        key_path,
+        dirs: crate::DirFlags {
+            template_dirs,
+            trust_dirs,
+        },
+    } = fetch;
+    let image = image.ok_or_else(|| {
+        CliError::usage("`kennel oci build` needs --image <ref> (the image[@sha256] to pull)")
+    })?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if entry.exists() && !force {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "store entry `{name}` already exists at {}; pass --force to overwrite",
             entry.dir().display()
-        ));
+        )));
     }
     std::fs::create_dir_all(entry.dir())
-        .map_err(|e| format!("creating {}: {e}", entry.dir().display()))?;
+        .map_err(|e| CliError::file("creating", entry.dir(), &e))?;
 
     if no_fetch {
         // Out-of-band population (a local unpack / test harness): record the digest as given.
         std::fs::create_dir_all(entry.rootfs())
-            .map_err(|e| format!("creating {}: {e}", entry.rootfs().display()))?;
+            .map_err(|e| CliError::file("creating", entry.rootfs(), &e))?;
         entry.write_digest(image)?;
     } else {
         let opts = FetchOpts {
@@ -1219,7 +1237,7 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
             &policy,
             scaffold_policy(name, &entry.rootfs(), &recorded, &readonly),
         )
-        .map_err(|e| format!("writing {}: {e}", policy.display()))?;
+        .map_err(|e| CliError::file("writing", &policy, &e))?;
     }
     eprintln!(
         "kennel: built store entry `{name}` at {}",
@@ -1247,7 +1265,7 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, String> {
 ///
 /// Returns an error if the name is invalid, the entry is not built, the digest is unreadable,
 /// or the run fails.
-pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
+pub fn run(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     let (head, command) = args
         .iter()
         .position(|a| a == "--")
@@ -1257,50 +1275,73 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, String> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut force = false;
-    for arg in head {
-        match arg.as_str() {
-            "--force" => force = true,
-            "--key" => {
-                return Err(
-                    "`--key` is a compile-side flag; `kennel oci run` boots the store entry's \
-                     compiled artefact and needs no key (the daemon verifies it). Complete \
-                     `reason` in the store policy, compile it (`kennel policy compile \
-                     <store>/<name>/policy.toml --key <key>`), then re-run"
-                        .to_owned(),
-                );
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci run <name> [--force] [-- <cmd...>]",
+        |flag, _| match flag {
+            "--force" => {
+                force = true;
+                Ok(true)
             }
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("unexpected extra argument before `--`".to_owned()),
-        }
-    }
-    let name = name.ok_or("usage: kennel oci run <name> [--force] [-- <cmd...>]")?;
+            "--key" => Err(CliError::usage(
+                "`--key` is a compile-side flag; `kennel oci run` boots the store entry's \
+                 compiled artefact and needs no key (the daemon verifies it). Complete \
+                 `reason` in the store policy, compile it (`kennel policy compile \
+                 <store>/<name>/policy.toml --key <key>`), then re-run",
+            )),
+            _ => Ok(false),
+        },
+    )?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if !entry.exists() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "store entry `{name}` is not built (no rootfs at {}); run `kennel oci build {name} …` first",
             entry.rootfs().display()
-        ));
+        )));
     }
     // The run house boots only the compiled artefact — `kennel policy compile` writes it
     // beside the scaffolded source (the flow the scaffold header names). Source-at-run died
     // with the 0.7.0 strip.
     let settled = entry.settled();
     if !settled.is_file() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "store entry `{name}` is not compiled (no {}); complete `reason` in {} and compile \
              it: `kennel policy compile {} --key <key>`",
             settled.display(),
             entry.policy().display(),
             entry.policy().display()
-        ));
+        )));
     }
     let digest = entry.read_digest()?;
     crate::run::launch(settled, name, command, force, Some(&digest), name)
+}
+
+/// The flags `build` and `update` share: how the image is fetched and with which key.
+#[derive(Default)]
+struct FetchFlags<'a> {
+    no_fetch: bool,
+    key_path: Option<&'a str>,
+    dirs: crate::DirFlags,
+}
+
+impl<'a> FetchFlags<'a> {
+    /// Take `flag` (and its value from `it`) if it is one of these. Returns whether it was.
+    fn take(
+        &mut self,
+        flag: &str,
+        it: &mut std::slice::Iter<'a, String>,
+    ) -> Result<bool, CliError> {
+        match flag {
+            "--no-fetch" => self.no_fetch = true,
+            "--key" => self.key_path = Some(crate::flag_value(it, "--key")?),
+            _ => return self.dirs.take(flag, it),
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

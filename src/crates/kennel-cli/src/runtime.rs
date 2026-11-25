@@ -4,6 +4,7 @@
 //!
 //! The daemon-facing runtime verbs, alongside `run`, `attach`, `review`, and `release`.
 
+use crate::CliError;
 use std::process::ExitCode;
 
 use kennel_lib_control::control::{self, Request, Response};
@@ -16,9 +17,9 @@ use crate::{connect, send};
 ///
 /// Returns a message if the arguments are not exactly one `<name>`, the daemon
 /// cannot be reached, or the daemon reports an error stopping the kennel.
-pub fn stop(args: &[String]) -> Result<ExitCode, String> {
+pub fn stop(args: &[String]) -> Result<ExitCode, CliError> {
     let [name] = args else {
-        return Err("usage: kennel stop <name>".to_owned());
+        return Err(CliError::usage("usage: kennel stop <name>"));
     };
     let mut conn = connect()?;
     send(
@@ -28,13 +29,13 @@ pub fn stop(args: &[String]) -> Result<ExitCode, String> {
         },
         &[],
     )?;
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Stopped => {
             eprintln!("kennel `{name}` stopped");
             Ok(ExitCode::SUCCESS)
         }
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => Err(CliError::Daemon(message)),
+        other => Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
 }
 
@@ -44,10 +45,10 @@ pub fn stop(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// Returns a message if the daemon cannot be reached, sends an unexpected
 /// response, or reports an error for the list or mesh queries.
-pub fn list() -> Result<ExitCode, String> {
+pub fn list() -> Result<ExitCode, CliError> {
     let mut conn = connect()?;
     send(&conn, &Request::List, &[])?;
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Listing(kennels) => {
             if kennels.is_empty() {
                 println!("no running kennels");
@@ -61,12 +62,12 @@ pub fn list() -> Result<ExitCode, String> {
                 }
             }
         }
-        Response::Error(message) => return Err(message),
-        other => return Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => return Err(CliError::Daemon(message)),
+        other => return Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
     let mut conn = connect()?;
     send(&conn, &Request::Mesh, &[])?;
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Mesh(providers) => {
             if !providers.is_empty() {
                 println!();
@@ -74,8 +75,8 @@ pub fn list() -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => Err(CliError::Daemon(message)),
+        other => Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
 }
 
@@ -85,17 +86,17 @@ pub fn list() -> Result<ExitCode, String> {
 ///
 /// Returns a message if the daemon cannot be reached, sends an unexpected
 /// response, or reports an error while reloading.
-pub fn daemon_reload() -> Result<ExitCode, String> {
+pub fn daemon_reload() -> Result<ExitCode, CliError> {
     let mut conn = connect()?;
     send(&conn, &Request::DaemonReload, &[])?;
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Reloaded { catalogued } => {
             let plural = if catalogued == 1 { "y" } else { "ies" };
             println!("reloaded: {catalogued} catalogued capabilit{plural}");
             Ok(ExitCode::SUCCESS)
         }
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => Err(CliError::Daemon(message)),
+        other => Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
 }
 

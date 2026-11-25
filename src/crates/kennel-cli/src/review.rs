@@ -7,6 +7,7 @@
 //! `run` and `policy compile`, so they are `pub(crate)`; the shared policy resolvers
 //! (`resolve_policy`, `is_source_policy`) stay in the crate root.
 
+use crate::CliError;
 use std::io::{self, IsTerminal as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,7 +33,7 @@ use crate::resolve_policy;
 /// Returns a message on an unknown flag or missing `<policy>` argument, if `HOME` is unset,
 /// if the policy cannot be resolved or read, if it is still a source policy (uncompiled) or
 /// fails to parse as a settled artefact, or if reviewing any writable root fails.
-pub fn review(args: &[String]) -> Result<ExitCode, String> {
+pub fn review(args: &[String]) -> Result<ExitCode, CliError> {
     let mut policy_arg: Option<&str> = None;
     let mut assume_yes = false;
     let mut do_revert = false;
@@ -44,34 +45,39 @@ pub fn review(args: &[String]) -> Result<ExitCode, String> {
             // from its blob, a planted (unpinned) one is removed.
             "--revert" => do_revert = true,
             other if other.starts_with('-') => {
-                return Err(format!("kennel review: unknown flag `{other}`"));
+                return Err(CliError::Usage(format!(
+                    "kennel review: unknown flag `{other}`"
+                )));
             }
             other => {
                 if policy_arg.replace(other).is_some() {
-                    return Err("usage: kennel review <policy> [--yes] [--revert]".to_owned());
+                    return Err(CliError::usage(
+                        "usage: kennel review <policy> [--yes] [--revert]",
+                    ));
                 }
             }
         }
     }
-    let policy_arg = policy_arg.ok_or("usage: kennel review <policy> [--yes] [--revert]")?;
+    let policy_arg = policy_arg
+        .ok_or_else(|| CliError::usage("usage: kennel review <policy> [--yes] [--revert]"))?;
     let (policy_file, _name) = resolve_policy(policy_arg, true)?;
-    let bytes = std::fs::read(&policy_file)
-        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    let bytes =
+        std::fs::read(&policy_file).map_err(|e| CliError::file("reading", &policy_file, &e))?;
     if is_source_policy(&bytes) {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{}` is a source policy — compile it first (`kennel policy compile {policy_arg}`), then review the settled artefact",
             policy_file.display()
-        ));
+        )));
     }
     let policy = kennel_lib_policy::parse_settled_unverified(&bytes)
-        .map_err(|e| format!("reading settled policy {}: {e}", policy_file.display()))?;
+        .map_err(|e| CliError::file("reading settled policy", &policy_file, &e))?;
     if !policy.effective_policy.trust.manifest {
         eprintln!("kennel: `[trust].manifest = false` for this policy — nothing to review");
         return Ok(ExitCode::SUCCESS);
     }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
+        .ok_or_else(|| CliError::Refused("HOME is not set".to_owned()))?;
     let generator = format!("kennel {}", env!("CARGO_PKG_VERSION"));
 
     let mut roots_reviewed = 0usize;
@@ -101,18 +107,18 @@ fn review_one_root(
     generator: &str,
     assume_yes: bool,
     do_revert: bool,
-) -> Result<(bool, usize), String> {
+) -> Result<(bool, usize), CliError> {
     let manifest_path = kennel_lib_manifest::manifest_path(root);
     if !manifest_path.is_file() {
         return Ok((false, 0)); // no manifest at this root (e.g. not generated yet)
     }
-    let raw = std::fs::read(&manifest_path)
-        .map_err(|e| format!("reading {}: {e}", manifest_path.display()))?;
+    let raw =
+        std::fs::read(&manifest_path).map_err(|e| CliError::file("reading", &manifest_path, &e))?;
     let mut manifest = kennel_lib_manifest::Manifest::from_json(&raw)
-        .map_err(|e| format!("parsing {}: {e}", manifest_path.display()))?;
+        .map_err(|e| CliError::file("parsing", &manifest_path, &e))?;
     let changes =
         kennel_lib_manifest::review(&manifest, root, &kennel_lib_manifest::Catalogue::load())
-            .map_err(|e| format!("reviewing {}: {e}", root.display()))?;
+            .map_err(|e| CliError::file("reviewing", root, &e))?;
     let divergences: Vec<_> = changes.iter().filter(|c| c.is_divergence()).collect();
     if divergences.is_empty() {
         println!("{}: no changes", root.display());
@@ -150,9 +156,9 @@ fn review_one_root(
         }
         let json = manifest
             .to_json()
-            .map_err(|e| format!("serialising {}: {e}", manifest_path.display()))?;
+            .map_err(|e| CliError::file("serialising", &manifest_path, &e))?;
         std::fs::write(&manifest_path, json)
-            .map_err(|e| format!("writing {}: {e}", manifest_path.display()))?;
+            .map_err(|e| CliError::file("writing", &manifest_path, &e))?;
         // GC the blob store down to the freshly re-pinned baseline (§3, steer 6).
         kennel_lib_manifest::prune_store(root, &manifest);
         println!("  re-pinned {}", manifest_path.display());
@@ -249,17 +255,19 @@ fn clean(text: &str) -> String {
 /// Prompt `question` on stderr and read a `y`/`n` answer from stdin. Non-`y` (incl. EOF) is
 /// "no". A non-terminal stdin defaults to "no" — an unattended `review` never auto-re-pins
 /// (use `--yes` to opt into that explicitly).
-fn prompt_yes(question: &str) -> Result<bool, String> {
+fn prompt_yes(question: &str) -> Result<bool, CliError> {
     use std::io::Write as _;
     if !io::stdin().is_terminal() {
         return Ok(false);
     }
     eprint!("{question} [y/N] ");
-    io::stderr().flush().map_err(|e| format!("stderr: {e}"))?;
+    io::stderr()
+        .flush()
+        .map_err(|e| CliError::Failed(format!("stderr: {e}")))?;
     let mut line = String::new();
     io::stdin()
         .read_line(&mut line)
-        .map_err(|e| format!("stdin: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("stdin: {e}")))?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes"))
 }
 
@@ -276,31 +284,31 @@ fn prompt_yes(question: &str) -> Result<bool, String> {
 /// Returns a message if no `<policy>` argument is given, if `HOME` is unset, if the policy
 /// cannot be resolved or read, if it is still a source policy or fails to parse as a settled
 /// artefact, if the deployment config cannot be loaded, or if spawning the privhelper fails.
-pub fn release(args: &[String]) -> Result<ExitCode, String> {
+pub fn release(args: &[String]) -> Result<ExitCode, CliError> {
     let policy_arg = args
         .iter()
         .find(|a| !a.starts_with('-'))
-        .ok_or("usage: kennel release <policy>")?;
+        .ok_or_else(|| CliError::usage("usage: kennel release <policy>"))?;
     let (policy_file, name) = resolve_policy(policy_arg, true)?;
-    let bytes = std::fs::read(&policy_file)
-        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    let bytes =
+        std::fs::read(&policy_file).map_err(|e| CliError::file("reading", &policy_file, &e))?;
     if is_source_policy(&bytes) {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{}` is a source policy — compile it first, then release the settled artefact",
             policy_file.display()
-        ));
+        )));
     }
     let policy = kennel_lib_policy::parse_settled_unverified(&bytes)
-        .map_err(|e| format!("reading settled policy {}: {e}", policy_file.display()))?;
+        .map_err(|e| CliError::file("reading settled policy", &policy_file, &e))?;
     if policy.effective_policy.fs.exclusive.is_empty() {
         eprintln!("kennel: `{name}` declares no exclusive binds — nothing to release");
         return Ok(ExitCode::SUCCESS);
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        CliError::Refused("HOME is not set (needed to resolve fs.exclusive host paths)".to_owned())
+    })?;
     let privhelper = kennel_lib_config::Deployment::load()
-        .map_err(|e| format!("loading deployment config: {e}"))?
+        .map_err(|e| CliError::Failed(format!("loading deployment config: {e}")))?
         .privhelper();
     let mut released = 0usize;
     let mut failed = 0usize;
@@ -312,7 +320,7 @@ pub fn release(args: &[String]) -> Result<ExitCode, String> {
             .arg("exclusive-unmount")
             .arg(&host)
             .status()
-            .map_err(|e| format!("spawning {}: {e}", privhelper.display()))?;
+            .map_err(|e| CliError::file("spawning", &privhelper, &e))?;
         match status.code() {
             Some(0) => {
                 println!("released {}", host.display());
@@ -350,7 +358,7 @@ pub fn release(args: &[String]) -> Result<ExitCode, String> {
 /// Returns a message if any `fs.exclusive` path cannot be resolved to a host path, does not
 /// exist, or is not owned by the real uid. An unparseable artefact is not an error here (the
 /// caller reports it).
-pub fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
+pub fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), CliError> {
     let Ok(policy) = kennel_lib_policy::parse_settled_unverified(settled_bytes) else {
         return Ok(()); // an unparseable artefact is reported by the caller, not here
     };
@@ -363,37 +371,37 @@ pub fn verify_exclusive_ownership(settled_bytes: &[u8]) -> Result<(), String> {
 ///
 /// Returns a message if `HOME` is unset, or if any `fs.exclusive` path cannot be resolved to
 /// a host path, does not exist, or is not owned by the real uid.
-pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), String> {
+pub fn check_exclusive_ownership(exclusive: &[String]) -> Result<(), CliError> {
     use std::os::unix::fs::MetadataExt as _;
     if exclusive.is_empty() {
         return Ok(());
     }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or("HOME is not set (needed to resolve fs.exclusive host paths)")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        CliError::Refused("HOME is not set (needed to resolve fs.exclusive host paths)".to_owned())
+    })?;
     let uid = kennel_lib_syscall::unistd::real_uid();
     for ex in exclusive {
         let Some(host) = writable_root(ex, &home) else {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "fs.exclusive `{ex}`: cannot resolve to a host path"
-            ));
+            )));
         };
         match std::fs::symlink_metadata(&host) {
             Ok(meta) if meta.uid() == uid => {}
             Ok(_) => {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "fs.exclusive `{ex}` ({}) is not owned by you (uid {uid}). An exclusive bind \
                      blind-mounts the host side with privilege, and the privhelper will not \
                      over-mount a path you do not own (overreach). Drop `exclusive` for this path \
                      (`fs.write` alone is fine), or use a path you own.",
                     host.display()
-                ));
+                )));
             }
             Err(e) => {
-                return Err(format!(
+                return Err(CliError::Failed(format!(
                     "fs.exclusive `{ex}` ({}): {e} — an exclusive path must exist and be owned by you",
                     host.display()
-                ));
+                )));
             }
         }
     }

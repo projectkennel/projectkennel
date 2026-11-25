@@ -142,6 +142,12 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The `kennel` CLI returns a typed error.** All 97 functions that returned
+  `Result<_, String>` now return `CliError`. It sorts failures by kind, not by message: a
+  wrong command line (`Usage`), an operation on a named file (`File`), the daemon unreachable
+  or answering with an error (`Daemon`), a step that failed (`Failed`), and a request the
+  command declines (`Refused`). `main` still prints the message and exits 1, and the messages
+  are unchanged.
 - **The rest of the daemon's start path returns typed errors.** The cwd grant, the Landlock
   floor, the workload merge, the digest pin, the command build and the SSH egress
   registration returned a `String`. They now return `CwdError`, `LandlockFloorError`,

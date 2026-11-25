@@ -14,6 +14,7 @@
 //! Every check here is a ceremony courtesy: enforcement stays with kenneld's signature
 //! verification, the compiler's gates, and filesystem permission on the tier dirs (W9).
 
+use crate::CliError;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -46,23 +47,24 @@ fn invoked_as_root() -> bool {
 ///
 /// Returns a message if the arguments are invalid, the name collides without `--force`,
 /// the key dir cannot be created, or `ssh-keygen` is missing or fails.
-pub fn generate(args: &[String]) -> Result<ExitCode, String> {
+pub fn generate(args: &[String]) -> Result<ExitCode, CliError> {
     let mut name: Option<&str> = None;
     let mut force = false;
     for arg in args {
         match arg.as_str() {
             "--force" => force = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if name.is_none() => name = Some(v),
-            _ => return Err("only one <name> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <name> may be given")),
         }
     }
-    let name = name.ok_or("usage: kennel key generate <name> [--force]")?;
+    let name =
+        name.ok_or_else(|| CliError::usage("usage: kennel key generate <name> [--force]"))?;
     if !is_valid_key_id(name) {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "invalid key name `{name}`: 1-64 chars of letters, digits, `.`, `-`, `_` \
              (it is both a filename and the signature key_id)"
-        ));
+        )));
     }
     let host = invoked_as_root();
     let dir = if host {
@@ -100,23 +102,23 @@ pub fn generate(args: &[String]) -> Result<ExitCode, String> {
 /// The user key dir is created 0700 (it holds secret seeds); the host trust dir is
 /// created 0755 — its `.pub` halves are read by every user's compile for `key_id`
 /// resolution, and the private halves carry their own 0600.
-fn generate_keypair(dir: &Path, name: &str, force: bool, host: bool) -> Result<(), String> {
+fn generate_keypair(dir: &Path, name: &str, force: bool, host: bool) -> Result<(), CliError> {
     use std::os::unix::fs::DirBuilderExt as _;
     let key_path = dir.join(name);
     let pub_path = dir.join(format!("{name}.pub"));
     if key_path.exists() && !force {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{} already exists; refusing to overwrite a signing key. To replace the \
              material AND re-sign everything it signs, use `kennel key rotate {name}`; \
              --force overwrites blind (invalidating everything signed with the old key)",
             key_path.display()
-        ));
+        )));
     }
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(if host { 0o755 } else { 0o700 })
         .create(dir)
-        .map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        .map_err(|e| CliError::file("creating", dir, &e))?;
     if force {
         let _ = std::fs::remove_file(&key_path);
         let _ = std::fs::remove_file(&pub_path);
@@ -126,12 +128,16 @@ fn generate_keypair(dir: &Path, name: &str, force: bool, host: bool) -> Result<(
         .arg(&key_path)
         .arg("-q")
         .status()
-        .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
+        .map_err(|e| {
+            CliError::Failed(format!(
+                "invoking ssh-keygen: {e} (is openssh-client installed?)"
+            ))
+        })?;
     if !status.success() {
-        return Err(format!(
+        return Err(CliError::Failed(format!(
             "ssh-keygen exited with status {} — check its output above",
             status.code().unwrap_or(-1)
-        ));
+        )));
     }
     Ok(())
 }
@@ -326,11 +332,11 @@ fn scan_template_dir(dir: &Path, out: &mut Vec<SignedRef>) {
 /// # Errors
 ///
 /// Returns a message on unexpected arguments.
-pub fn list(args: &[String]) -> Result<ExitCode, String> {
+pub fn list(args: &[String]) -> Result<ExitCode, CliError> {
     if let Some(arg) = args.first() {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "unexpected argument `{arg}` — usage: kennel key list"
-        ));
+        )));
     }
     let keys = all_keys();
     if keys.is_empty() {
@@ -354,16 +360,16 @@ pub fn list(args: &[String]) -> Result<ExitCode, String> {
 /// # Errors
 ///
 /// Returns a message if no `<name>` is given or no tier store carries the key.
-pub fn show(args: &[String]) -> Result<ExitCode, String> {
+pub fn show(args: &[String]) -> Result<ExitCode, CliError> {
     let name = match args {
         [one] => one.as_str(),
-        _ => return Err("usage: kennel key show <name>".to_owned()),
+        _ => return Err(CliError::usage("usage: kennel key show <name>")),
     };
     let keys: Vec<TierKey> = all_keys().into_iter().filter(|k| k.name == name).collect();
     if keys.is_empty() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "no key `{name}` in any tier store — `kennel key list` shows what exists"
-        ));
+        )));
     }
     for k in &keys {
         let pub_path = k.dir.join(format!("{}.pub", k.name));
@@ -409,52 +415,53 @@ pub fn show(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// Returns a message if not root, the file is not an OpenSSH Ed25519 public key, or the
 /// key id collides without `--force`.
-pub fn trust(args: &[String]) -> Result<ExitCode, String> {
+pub fn trust(args: &[String]) -> Result<ExitCode, CliError> {
     let mut file: Option<&str> = None;
     let mut force = false;
     for arg in args {
         match arg.as_str() {
             "--force" => force = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if file.is_none() => file = Some(v),
-            _ => return Err("only one <file.pub> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <file.pub> may be given")),
         }
     }
-    let file = file.ok_or("usage: kennel key trust <file.pub> [--force]")?;
+    let file =
+        file.ok_or_else(|| CliError::usage("usage: kennel key trust <file.pub> [--force]"))?;
     if !invoked_as_root() {
-        return Err(
+        return Err(CliError::Refused(
             "`key trust` operates on the host trust store (/etc/kennel/keys) and needs root. \
              The user tier has no trust list: to run someone else's policy, `kennel policy \
              install <file.toml>` re-signs it under your own key — that is user-level trust, \
              per object"
                 .to_owned(),
-        );
+        ));
     }
-    let contents = std::fs::read_to_string(file).map_err(|e| format!("reading {file}: {e}"))?;
+    let contents = std::fs::read_to_string(file)
+        .map_err(|e| CliError::Failed(format!("reading {file}: {e}")))?;
     if !kennel_lib_policy::openssh::is_openssh_public(&contents) {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{file} is not an OpenSSH ed25519 public key (the `ssh-ed25519 …` line \
              `kennel key generate` writes)"
-        ));
+        )));
     }
     let name = Path::new(file)
         .file_stem()
         .and_then(|s| s.to_str())
-        .ok_or_else(|| format!("cannot derive a key id from `{file}`"))?
+        .ok_or_else(|| CliError::Refused(format!("cannot derive a key id from `{file}`")))?
         .to_owned();
     if !is_valid_key_id(&name) {
-        return Err(format!("`{name}` is not a valid key id"));
+        return Err(CliError::Usage(format!("`{name}` is not a valid key id")));
     }
     let dest = host_key_dir().join(format!("{name}.pub"));
     if dest.exists() && !force {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{} already exists — pass --force to replace it (this changes which key \
              `{name}` signatures verify against)",
             dest.display()
-        ));
+        )));
     }
-    std::fs::write(&dest, contents.as_bytes())
-        .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    std::fs::write(&dest, contents.as_bytes()).map_err(|e| CliError::file("writing", &dest, &e))?;
     eprintln!(
         "trusted `{name}` at the host tier ({}) — artefacts it signs now verify for \
          every user on this host",
@@ -474,23 +481,13 @@ pub fn trust(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// Returns a message if not root, the key is not in the host trust store (vendor keys
 /// are package payload; user keys need no untrust), or the impact is unconfirmed.
-pub fn untrust(args: &[String]) -> Result<ExitCode, String> {
-    let mut name: Option<&str> = None;
-    let mut yes = false;
-    for arg in args {
-        match arg.as_str() {
-            "--yes" => yes = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("only one <name> may be given".to_owned()),
-        }
-    }
-    let name = name.ok_or("usage: kennel key untrust <name> [--yes]")?;
+pub fn untrust(args: &[String]) -> Result<ExitCode, CliError> {
+    let (name, yes) = name_and_yes(args, "usage: kennel key untrust <name> [--yes]")?;
     if !invoked_as_root() {
-        return Err(
+        return Err(CliError::Refused(
             "`key untrust` operates on the host trust store (/etc/kennel/keys) and needs root"
                 .to_owned(),
-        );
+        ));
     }
     let pub_path = host_key_dir().join(format!("{name}.pub"));
     if !pub_path.is_file() {
@@ -498,15 +495,15 @@ pub fn untrust(args: &[String]) -> Result<ExitCode, String> {
             .join(format!("{name}.pub"))
             .is_file()
         {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "`{name}` is a vendor-tier key — package payload, managed by the installer, \
                  not the host trust store"
-            ));
+            )));
         }
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "no key `{name}` in the host trust store ({})",
             host_key_dir().display()
-        ));
+        )));
     }
 
     // The impact report BEFORE the mutation — trust-store changes are never silent.
@@ -535,7 +532,7 @@ pub fn untrust(args: &[String]) -> Result<ExitCode, String> {
         eprintln!("\nnothing removed — re-run with --yes to proceed");
         return Ok(ExitCode::from(1));
     }
-    std::fs::remove_file(&pub_path).map_err(|e| format!("removing {}: {e}", pub_path.display()))?;
+    std::fs::remove_file(&pub_path).map_err(|e| CliError::file("removing", &pub_path, &e))?;
     eprintln!("untrusted `{name}` ({} removed)", pub_path.display());
     let private = host_key_dir().join(name);
     if private.is_file() {
@@ -591,18 +588,8 @@ struct LeafJob {
 /// Returns a message if the key is not at the invoking tier (root rotates the host
 /// tier, a user their own; the maintainer key rotates upstream, never here), a previous
 /// rotation's retired pair is still in place, or a ceremony step fails.
-pub fn rotate(args: &[String]) -> Result<ExitCode, String> {
-    let mut name: Option<&str> = None;
-    let mut yes = false;
-    for arg in args {
-        match arg.as_str() {
-            "--yes" => yes = true,
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
-            v if name.is_none() => name = Some(v),
-            _ => return Err("only one <name> may be given".to_owned()),
-        }
-    }
-    let name = name.ok_or("usage: kennel key rotate <name> [--yes]")?;
+pub fn rotate(args: &[String]) -> Result<ExitCode, CliError> {
+    let (name, yes) = name_and_yes(args, "usage: kennel key rotate <name> [--yes]")?;
     let host = invoked_as_root();
     let tier = if host { "host" } else { "user" };
     let dir = if host {
@@ -616,12 +603,12 @@ pub fn rotate(args: &[String]) -> Result<ExitCode, String> {
             .join(format!("{name}.pub"))
             .is_file()
         {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "`{name}` is the vendor tier's — the maintainer key is the project's affair \
                  and rotates upstream, never on a host"
-            ));
+            )));
         }
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "no private key `{name}` at the {tier} tier ({}) — a key rotates only at the \
              level it lives at{}",
             dir.display(),
@@ -630,7 +617,7 @@ pub fn rotate(args: &[String]) -> Result<ExitCode, String> {
             } else {
                 "; rotating the host key needs root"
             }
-        ));
+        )));
     }
 
     let plan = rotation_plan(name, tier);
@@ -645,27 +632,27 @@ pub fn rotate(args: &[String]) -> Result<ExitCode, String> {
     let retired_key = dir.join(format!("{name}.retired"));
     let retired_pub = dir.join(format!("{name}.pub.retired"));
     if retired_key.exists() || retired_pub.exists() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "a previous rotation's retired pair is still at {} — remove it first",
             retired_key.display()
-        ));
+        )));
     }
     let pub_path = dir.join(format!("{name}.pub"));
     std::fs::rename(&key_path, &retired_key)
-        .map_err(|e| format!("retiring {}: {e}", key_path.display()))?;
+        .map_err(|e| CliError::file("retiring", &key_path, &e))?;
     if let Err(e) = std::fs::rename(&pub_path, &retired_pub) {
         // Roll the private half back so the store is unchanged on failure.
         let _ = std::fs::rename(&retired_key, &key_path);
-        return Err(format!("retiring {}: {e}", pub_path.display()));
+        return Err(CliError::file("retiring", &pub_path, &e));
     }
 
     // Mint the successor under the same name; on failure restore the old pair.
     if let Err(e) = generate_keypair(&dir, name, false, host) {
         let _ = std::fs::rename(&retired_key, &key_path);
         let _ = std::fs::rename(&retired_pub, &pub_path);
-        return Err(format!(
+        return Err(CliError::Failed(format!(
             "minting the successor failed ({e}); old key restored"
-        ));
+        )));
     }
     eprintln!("successor minted: {}", fingerprint(&pub_path));
 
@@ -902,14 +889,13 @@ fn lock_pinning(artefact: &Path, template_names: &[String]) -> Option<PathBuf> {
 /// last `[signature]` header to EOF — then proves the remainder is the same object,
 /// unsigned, before writing anything. A hand-moved `[signature]` refuses rather than
 /// guesses.
-fn resign_template(path: &Path, key: &str) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+fn resign_template(path: &Path, key: &str) -> Result<(), CliError> {
+    let text = std::fs::read_to_string(path).map_err(|e| CliError::file("reading", path, &e))?;
     let idx = text
         .rfind("\n[signature]\n")
         .map(|i| i.saturating_add(1))
         .or_else(|| text.starts_with("[signature]\n").then_some(0))
-        .ok_or("carries no [signature] block to replace")?;
+        .ok_or_else(|| CliError::Refused("carries no [signature] block to replace".to_owned()))?;
     // The cut tail must be EXACTLY the appended block (its three keys, nothing else) —
     // a `[signature]` sitting mid-file would otherwise take innocent trailing tables
     // with it. Anything unexpected refuses rather than guesses.
@@ -924,27 +910,26 @@ fn resign_template(path: &Path, key: &str) -> Result<(), String> {
                 || l.starts_with("signature = ")
         });
     if !tail_is_pure_block {
-        return Err(
+        return Err(CliError::Refused(
             "its [signature] is not the appended-last block `template sign` writes — \
              remove it by hand and re-sign"
                 .to_owned(),
-        );
+        ));
     }
     let stripped = &text[..idx];
     let parsed = kennel_lib_compile::parse_source(stripped.as_bytes()).map_err(|e| {
-        format!(
+        CliError::Failed(format!(
             "stripping the [signature] block broke the source ({e}) — \
              remove it by hand and re-sign"
-        )
+        ))
     })?;
     if parsed.signature.is_some() {
-        return Err(
+        return Err(CliError::Refused(
             "still carries a [signature] after the strip — remove it by hand and re-sign"
                 .to_owned(),
-        );
+        ));
     }
-    std::fs::write(path, stripped.as_bytes())
-        .map_err(|e| format!("writing {}: {e}", path.display()))?;
+    std::fs::write(path, stripped.as_bytes()).map_err(|e| CliError::file("writing", path, &e))?;
     let sign_args = [
         path.to_string_lossy().into_owned(),
         "--key".to_owned(),
@@ -952,9 +937,19 @@ fn resign_template(path: &Path, key: &str) -> Result<(), String> {
     ];
     match crate::policy::template_sign(&sign_args) {
         Ok(code) if code == ExitCode::SUCCESS => Ok(()),
-        Ok(_) => Err("the sign step failed".to_owned()),
+        Ok(_) => Err(CliError::Failed("the sign step failed".to_owned())),
         Err(e) => Err(e),
     }
+}
+
+/// Parse `<name> [--yes]`, the arguments of `untrust` and `rotate`.
+fn name_and_yes<'a>(args: &'a [String], usage: &str) -> Result<(&'a str, bool), CliError> {
+    let mut yes = false;
+    let name = crate::one_positional(args, "only one <name> may be given", usage, |flag, _| {
+        yes |= flag == "--yes";
+        Ok(flag == "--yes")
+    })?;
+    Ok((name, yes))
 }
 
 #[cfg(test)]

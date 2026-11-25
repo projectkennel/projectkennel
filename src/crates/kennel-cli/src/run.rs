@@ -8,6 +8,7 @@
 //! compile-side material (`kennel policy …`); the trust-manifest and exclusive-bind helpers
 //! live in `review`.
 
+use crate::CliError;
 use std::io::{self, IsTerminal as _};
 use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -33,7 +34,7 @@ use crate::{connect, exit_code, send};
 /// Returns a message if a flag is missing its value or is unknown, if no `<policy>`
 /// argument is given, if the name does not resolve to a settled artefact (the refusal
 /// names what was found instead and the real next step), or if [`launch`] fails.
-pub fn run(args: &[String]) -> Result<ExitCode, String> {
+pub fn run(args: &[String]) -> Result<ExitCode, CliError> {
     // <head...> optionally then "--" then the command. The `--` is OPTIONAL: with no
     // command the daemon runs the policy's embedded [workload] (§7.4); with a command it
     // overrides the policy workload (unless pinned — then --force is required).
@@ -55,20 +56,21 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
             "--force" => force = true,
             // The compile-house flags `run` carried before 0.7.0 refuse with the real home.
             f @ ("--key" | "--key-id" | "--template-dir" | "--trust-dir") => {
-                return Err(format!(
+                return Err(CliError::Usage(format!(
                     "`{f}` is a compile-side flag; `kennel run` runs a settled artefact by name \
                      and needs no key (the daemon verifies it). Compile first: `kennel policy \
                      compile <policy> --key <key>`, then `kennel run <name>`"
-                ));
+                )));
             }
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if policy_arg.is_none() => policy_arg = Some(v),
             v if name_arg.is_none() => name_arg = Some(v),
-            _ => return Err("unexpected extra argument before `--`".to_owned()),
+            _ => return Err(CliError::usage("unexpected extra argument before `--`")),
         }
     }
-    let policy_arg =
-        policy_arg.ok_or("usage: kennel run <policy> [<name>] [--force] [-- <cmd...>]")?;
+    let policy_arg = policy_arg.ok_or_else(|| {
+        CliError::usage("usage: kennel run <policy> [<name>] [--force] [-- <cmd...>]")
+    })?;
     // `<policy>` is a NAME resolving to a settled artefact in the three policy repos — never a
     // path, never source. The kennel instance `<name>` is optional and defaults to the policy
     // name (`07-paths`, resolve-by-name).
@@ -89,7 +91,7 @@ pub fn run(args: &[String]) -> Result<ExitCode, String> {
 /// Anything else refuses with the object named and the real next step: a path (the form died
 /// with 0.7.0 — place the artefact in a repo), a source policy (compile it), a template name
 /// (derive a leaf from it), or nothing at all (list/compile).
-fn resolve_settled_for_run(arg: &str) -> Result<PathBuf, String> {
+fn resolve_settled_for_run(arg: &str) -> Result<PathBuf, CliError> {
     let user = kennel_lib_config::User::load().unwrap_or_default();
     resolve_settled_in(
         arg,
@@ -107,20 +109,20 @@ fn resolve_settled_in(
     policy_dirs: &[PathBuf],
     template_dirs: &[PathBuf],
     base: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<PathBuf, CliError> {
     if arg.contains('/') {
-        return Err(
+        return Err(CliError::Usage(
             "`kennel run` takes a policy NAME resolved from the policy repos \
              (~/.config/kennel/policies, /etc/kennel/policies, /usr/lib/kennel/policies), not a \
              path. Compile your source into a repo first (`kennel policy compile <policy> --key \
              <key>` writes the settled artefact beside it), then `kennel run <name>`"
                 .to_owned(),
-        );
+        ));
     }
     if !crate::is_valid_policy_name(arg) {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "`{arg}` is not a valid policy name (no `/`, `..`, or whitespace)"
-        ));
+        )));
     }
     let mut source_hit: Option<PathBuf> = None;
     for dir in policy_dirs {
@@ -136,19 +138,19 @@ fn resolve_settled_in(
     }
     // Nothing runnable. Say what WAS found and the real next step.
     if let Some(source) = source_hit {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{arg}` is a source policy ({}) with no compiled artefact — compile it first: \
              `kennel policy compile {arg} --key <key>`, then re-run",
             source.display()
-        ));
+        )));
     }
     for tdir in template_dirs {
         if tdir.join(arg).join("policy.toml").is_file() {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "`{arg}` is a template — a shared base, not a runnable policy. Derive a leaf \
                  from it (`kennel policy generate --from {arg}`), then `kennel policy compile` \
                  and `kennel run` the leaf"
-            ));
+            )));
         }
     }
     let here = if base.join(arg).exists() {
@@ -159,11 +161,11 @@ fn resolve_settled_in(
     } else {
         String::new()
     };
-    Err(format!(
+    Err(CliError::Refused(format!(
         "no policy named `{arg}` (searched `policies/` under ~/.config/kennel, /etc/kennel, \
          /usr/lib/kennel — `kennel policy list` shows what is there){here}; author one with \
          `kennel policy generate`, then `kennel policy compile {arg} --key <key>`"
-    ))
+    )))
 }
 
 /// The shared launch core for `kennel run` and `kennel oci run`: pre-flight the settled
@@ -194,19 +196,19 @@ pub fn launch(
     force: bool,
     oci_digest: Option<&str>,
     display: &str,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, CliError> {
     let allow_oci = oci_digest.is_some();
     // For an OCI run the launcher reads the store entry's `config.json` (the sibling of the
     // entry's settled policy); kenneld binds it into the view.
     let oci_config =
         oci_digest.and_then(|_| policy_file.parent().map(|dir| dir.join("config.json")));
-    let bytes = std::fs::read(&policy_file)
-        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    let bytes =
+        std::fs::read(&policy_file).map_err(|e| CliError::file("reading", &policy_file, &e))?;
     if is_source_policy(&bytes) {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{display}` is a source policy — the run house takes only settled artefacts. \
              Compile it first: `kennel policy compile {display} --key <key>`"
-        ));
+        )));
     }
     let effective_policy = policy_file;
 
@@ -220,9 +222,9 @@ pub fn launch(
     // `[rootfs].image` against the recorded digest. `kennel run` refuses it rather than boot
     // an image without that provenance check.
     if !allow_oci && crate::oci::policy_is_oci(&settled_bytes) {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{display}` is an OCI-model policy ([rootfs] set); run it with `kennel oci run <name>`"
-        ));
+        )));
     }
     if let Some(expected) = oci_digest {
         // Provenance check (§7.11): the signed `[rootfs].image` must equal the digest the
@@ -230,10 +232,10 @@ pub fn launch(
         // valid signature on the policy. The signature is verified daemon-side at Start.
         let declared = crate::oci::policy_image(&settled_bytes);
         if declared.as_deref() != Some(expected) {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "image mismatch for `{display}`: policy [rootfs].image is {}, store digest is `{expected}`",
                 declared.map_or_else(|| "absent".to_owned(), |d| format!("`{d}`"))
-            ));
+            )));
         }
     }
     ensure_workspace_manifests(&settled_bytes);
@@ -244,7 +246,7 @@ pub fn launch(
     // CLI-side, because the catalogue lives in this crate; the daemon just watches the list.
     let watch_paths = workspace_watch_paths(&settled_bytes);
 
-    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    let cwd = std::env::current_dir().map_err(|e| CliError::Failed(format!("cwd: {e}")))?;
     let request = Request::Start(StartRequest {
         policy: effective_policy,
         kennel: name.to_owned(),
@@ -274,19 +276,19 @@ pub fn launch(
     send(&conn, &request, &fds)?;
 
     // First the daemon confirms the launch, then (when the workload exits) the code.
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         // Non-interactive (piped) launch: stdio passes straight through, no proxied
         // terminal, so `filter_escapes` does not apply here.
         Response::Started { ctx, pid, .. } => {
             eprintln!("kennel `{name}` started (ctx {ctx}, pid {pid})");
         }
-        Response::Error(message) => return Err(message),
-        other => return Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => return Err(CliError::Daemon(message)),
+        other => return Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
-    match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
+    match control::recv_response(&mut conn).map_err(|e| CliError::Daemon(format!("daemon: {e}")))? {
         Response::Exited { code } => Ok(exit_code(code)),
-        Response::Error(message) => Err(message),
-        other => Err(format!("unexpected response: {other:?}")),
+        Response::Error(message) => Err(CliError::Daemon(message)),
+        other => Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
     }
 }
 
@@ -416,29 +418,32 @@ fn run_interactive(
     mut conn: UnixStream,
     request: &Request,
     name: &str,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, CliError> {
     use kennel_lib_syscall::pty;
     let real_in = io::stdin();
     // Raw mode now; the guard restores the terminal on every return below.
-    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let prev = pty::make_raw(real_in.as_fd())
+        .map_err(|e| CliError::Failed(format!("setting raw mode: {e}")))?;
     let _restore = RawGuard { prev };
     let _ = pty::block_winch();
 
     // One socket pair: the daemon's broker proxies the kennel's pty over `theirs`; we
     // keep `ours`. (Before, the seal sent the *master* fd to us; now the master stays in
     // kenneld and only bytes cross.)
-    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    let (ours, theirs) =
+        UnixStream::pair().map_err(|e| CliError::Failed(format!("socketpair: {e}")))?;
     send(&conn, request, &[theirs.as_fd()])?;
     drop(theirs);
 
     // The daemon confirms the launch (or reports a bring-up failure) and tells us whether
     // to filter the workload's terminal escapes client-side (§4.8 — the broker routes raw).
-    let filter_escapes =
-        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-            Response::Started { filter_escapes, .. } => filter_escapes,
-            Response::Error(message) => return Err(message),
-            other => return Err(format!("unexpected response: {other:?}")),
-        };
+    let filter_escapes = match control::recv_response(&mut conn)
+        .map_err(|e| CliError::Daemon(format!("daemon: {e}")))?
+    {
+        Response::Started { filter_escapes, .. } => filter_escapes,
+        Response::Error(message) => return Err(CliError::Daemon(message)),
+        other => return Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
+    };
     proxy_session(conn, ours, name, filter_escapes)
 }
 
@@ -453,21 +458,25 @@ fn run_interactive(
 /// Returns a message if the arguments are not a single `<name>`, if stdin is not a
 /// terminal, if raw mode or the socketpair cannot be set up, if the daemon cannot be
 /// reached or the request/response exchange fails, or if the daemon reports an error.
-pub fn attach(args: &[String]) -> Result<ExitCode, String> {
+pub fn attach(args: &[String]) -> Result<ExitCode, CliError> {
     use kennel_lib_syscall::pty;
     let [name] = args else {
-        return Err("usage: kennel attach <name>".to_owned());
+        return Err(CliError::usage("usage: kennel attach <name>"));
     };
     if !io::stdin().is_terminal() {
-        return Err("kennel attach needs a terminal on stdin".to_owned());
+        return Err(CliError::Refused(
+            "kennel attach needs a terminal on stdin".to_owned(),
+        ));
     }
     let real_in = io::stdin();
-    let prev = pty::make_raw(real_in.as_fd()).map_err(|e| format!("setting raw mode: {e}"))?;
+    let prev = pty::make_raw(real_in.as_fd())
+        .map_err(|e| CliError::Failed(format!("setting raw mode: {e}")))?;
     let _restore = RawGuard { prev };
     let _ = pty::block_winch();
 
     let mut conn = connect()?;
-    let (ours, theirs) = UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    let (ours, theirs) =
+        UnixStream::pair().map_err(|e| CliError::Failed(format!("socketpair: {e}")))?;
     send(
         &conn,
         &Request::Attach {
@@ -476,12 +485,13 @@ pub fn attach(args: &[String]) -> Result<ExitCode, String> {
         &[theirs.as_fd()],
     )?;
     drop(theirs);
-    let filter_escapes =
-        match control::recv_response(&mut conn).map_err(|e| format!("daemon: {e}"))? {
-            Response::Attached { filter_escapes, .. } => filter_escapes,
-            Response::Error(message) => return Err(message),
-            other => return Err(format!("unexpected response: {other:?}")),
-        };
+    let filter_escapes = match control::recv_response(&mut conn)
+        .map_err(|e| CliError::Daemon(format!("daemon: {e}")))?
+    {
+        Response::Attached { filter_escapes, .. } => filter_escapes,
+        Response::Error(message) => return Err(CliError::Daemon(message)),
+        other => return Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
+    };
     proxy_session(conn, ours, name, filter_escapes)
 }
 
@@ -496,7 +506,7 @@ enum SessionEnd {
     Detached,
     /// The control-connection reader received the daemon's final word and resolved the
     /// session to an exit code (or an error).
-    Outcome(Result<ExitCode, String>),
+    Outcome(Result<ExitCode, CliError>),
 }
 
 /// Read the control connection for the whole session (§9.7): handle an operator-prompt
@@ -543,9 +553,9 @@ fn control_reader(
                 let _ = write!(term, "\r\ndetached: {reason}\r\n");
                 break Ok(ExitCode::SUCCESS);
             }
-            Ok(Response::Error(message)) => break Err(message),
-            Ok(other) => break Err(format!("unexpected response: {other:?}")),
-            Err(e) => break Err(format!("daemon: {e}")),
+            Ok(Response::Error(message)) => break Err(CliError::Daemon(message)),
+            Ok(other) => break Err(CliError::Daemon(format!("unexpected response: {other:?}"))),
+            Err(e) => break Err(CliError::Daemon(format!("daemon: {e}"))),
         }
     };
     let _ = tx.send(SessionEnd::Outcome(outcome));
@@ -569,7 +579,7 @@ fn proxy_session(
     ours: UnixStream,
     name: &str,
     filter_escapes: bool,
-) -> Result<ExitCode, String> {
+) -> Result<ExitCode, CliError> {
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc};
     // Tell the broker our initial size, then relay every later SIGWINCH.
@@ -581,11 +591,13 @@ fn proxy_session(
     let (answer_tx, answer_rx) = mpsc::channel::<u8>();
 
     // stdin → broker, watching for the `Ctrl-\ d` detach sequence and renew answers.
-    let in_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+    let in_sock = ours
+        .try_clone()
+        .map_err(|e| CliError::Failed(format!("socket dup: {e}")))?;
     let stdin_dup = io::stdin()
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|e| format!("stdin dup: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("stdin dup: {e}")))?;
     let tx_in = tx.clone();
     let pa_in = Arc::clone(&prompt_active);
     std::thread::spawn(move || {
@@ -642,8 +654,10 @@ fn proxy_session(
     let stdout_dup = io::stdout()
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|e| format!("stdout dup: {e}"))?;
-    let out_sock = ours.try_clone().map_err(|e| format!("socket dup: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("stdout dup: {e}")))?;
+    let out_sock = ours
+        .try_clone()
+        .map_err(|e| CliError::Failed(format!("socket dup: {e}")))?;
     std::thread::spawn(move || {
         output_pump(out_sock, std::fs::File::from(stdout_dup), filter_escapes);
     });
@@ -652,7 +666,7 @@ fn proxy_session(
     let term_dup = io::stdout()
         .as_fd()
         .try_clone_to_owned()
-        .map_err(|e| format!("stdout dup: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("stdout dup: {e}")))?;
     std::thread::spawn(move || {
         control_reader(
             conn,
@@ -681,7 +695,9 @@ fn proxy_session(
         }
         Err(_) => {
             drop(ours);
-            Err("session ended without an outcome".to_owned())
+            Err(CliError::Failed(
+                "session ended without an outcome".to_owned(),
+            ))
         }
     }
 }
@@ -766,7 +782,7 @@ mod resolve_tests {
             std::fs::write(&path, b"x").expect("write");
             path
         }
-        fn resolve(&self, arg: &str) -> Result<PathBuf, String> {
+        fn resolve(&self, arg: &str) -> Result<PathBuf, CliError> {
             resolve_settled_in(
                 arg,
                 &[self.0.join("policies")],
@@ -797,7 +813,8 @@ mod resolve_tests {
         let t = Tree::new("slash");
         t.put("policies/opencode/opencode.settled.toml");
         let err = t.resolve("./opencode").expect_err("a path is refused");
-        assert!(err.contains("takes a policy NAME"), "got {err}");
+        assert!(err.to_string().contains("takes a policy NAME"), "got {err}");
+        assert!(matches!(err, CliError::Usage(_)), "kind: {err:?}");
     }
 
     #[test]
@@ -807,9 +824,10 @@ mod resolve_tests {
         let err = t
             .resolve("agent.settled.toml")
             .expect_err("not a policy name");
-        assert!(err.contains("no policy named"), "got {err}");
+        assert!(err.to_string().contains("no policy named"), "got {err}");
+        assert!(matches!(err, CliError::Refused(_)), "kind: {err:?}");
         assert!(
-            err.contains("is a file in this directory"),
+            err.to_string().contains("is a file in this directory"),
             "the file is named as the likely confusion: {err}"
         );
     }
@@ -819,7 +837,8 @@ mod resolve_tests {
         let t = Tree::new("source");
         t.put("policies/agent/policy.toml");
         let err = t.resolve("agent").expect_err("no settled artefact");
-        assert!(err.contains("compile it first"), "got {err}");
+        assert!(err.to_string().contains("compile it first"), "got {err}");
+        assert!(matches!(err, CliError::Refused(_)), "kind: {err:?}");
     }
 }
 
