@@ -47,6 +47,7 @@ pub mod server;
 pub mod spawn;
 pub mod ssh;
 pub mod sshd;
+pub mod start_error;
 pub mod supervisor;
 pub mod tripwire;
 pub mod tun_sink;
