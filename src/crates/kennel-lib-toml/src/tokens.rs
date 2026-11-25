@@ -301,8 +301,10 @@ impl<'a> Tokenizer<'a> {
             match self.one() {
                 Some((i, '\n')) => {
                     if multiline {
-                        // (Upstream quirk kept as-is: `i` is the `\n`'s own index, so this never
-                        // matches; behaviour-preserving in a lint-only pass.)
+                        // A CRLF pair reaches us as one `'\n'` (`CrlfFold`), and its index `i`
+                        // is the `\r`'s. The value so far may still be a borrowed slice of the
+                        // input, which would run on over the `\r`. Make it owned up to the `\r`,
+                        // so the `'\n'` pushed below stands for the whole pair.
                         if self.input.as_bytes().get(i) == Some(&b'\r') {
                             val.make_owned(&self.input[..i]);
                         }

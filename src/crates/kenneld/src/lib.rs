@@ -2,25 +2,31 @@
 
 //! Project Kennel orchestration core.
 //!
-//! [`start`] brings a kennel up and [`Kennel::stop`] tears it down. The bring-up
-//! sequence mirrors `08-enforcement-architecture.md` §8.3, minus the supporting
-//! daemons (not built yet):
+//! [`start`] brings a kennel up and [`Kennel::stop`] tears it down. The design is
+//! `docs/archive/design/08-enforcement-architecture.md` §8.3; what the code does, in order:
 //!
-//! 1. create the kennel's cgroup (kenneld owns its delegated `user@<uid>`
-//!    subtree, so this is unprivileged — see §8.5 and the cgroup-join note on
-//!    [`kennel_lib_spawn`]);
-//! 2. add the per-kennel loopback addresses (privileged — via the helper);
-//! 3. load + attach the egress BPF programs to the cgroup (privileged);
-//! 4. spawn the workload, which joins the cgroup in its seal.
+//! 1. **Prepare the plan** (unprivileged). Create the kennel's cgroup in the daemon's delegated
+//!    subtree; work out the loopback addresses and the egress BPF payload; render the synthetic
+//!    `/etc`; and add to the plan the binds and Landlock rules of each facade the kennel has
+//!    (SOCKS5 egress, the inbound client, `AF_UNIX`, D-Bus, the UDP tun) and of the constructed
+//!    view.
+//! 2. **Construct the kennel** (privileged). One call to the privhelper factory, which adds
+//!    the loopback addresses, attaches the egress BPF, builds the view in a root-owned user
+//!    namespace and executes `kennel-bin-init` as the kennel's PID 1. The daemon gets back the
+//!    init pid, a boot-sync socket and a handle to the kennel's binder device. It never enters
+//!    the kennel's namespaces.
+//! 3. **Serve it.** Wait for `kennel-bin-init` to announce itself, start the egress and inbound
+//!    delegates, take binder node 0 and serve the lifecycle on it, then signal the bus live so
+//!    `kennel-bin-init` pulls its plan and starts the workload.
 //!
 //! Every privileged step goes through the [`Privileged`] trait, whose production
-//! implementation ([`HelperClient`]) drives the setuid privhelper. If any step
-//! fails, the partial bring-up is unwound in reverse (`teardown`), so a failed
-//! `start` leaves no addresses or cgroup behind.
+//! implementation ([`HelperClient`]) runs the privhelper. Besides the construction there are
+//! two: removing a loopback address and releasing an exclusive over-mount, both at teardown.
+//! If any step of a bring-up fails, what was provisioned is unwound in reverse, so a failed
+//! `start` leaves no addresses, cgroup or helper processes behind.
 //!
-//! This crate holds no `unsafe` (`#![forbid(unsafe_code)]`): privilege is
-//! borrowed transiently through the helper, and the workload syscalls route
-//! through `kennel-lib-spawn`/`kennel-lib-syscall`.
+//! This crate holds no `unsafe` (`#![forbid(unsafe_code)]`): privilege is borrowed through the
+//! helper, and system calls go through `kennel-lib-spawn` and `kennel-lib-syscall`.
 
 #![forbid(unsafe_code)]
 
