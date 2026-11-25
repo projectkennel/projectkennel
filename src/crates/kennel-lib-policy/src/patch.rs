@@ -84,13 +84,10 @@ fn apply_net_proxy_allow(policy: &mut SettledPolicy, value: &str) -> Result<(), 
     let net = &mut policy.effective_policy.net;
     if let Ok(ip) = dest.host.parse::<std::net::IpAddr>() {
         let prefix_len = if ip.is_ipv4() { 32 } else { 128 };
-        net.allow.push(NetRule {
-            cidr: dest.host,
-            prefix_len,
-            port_min: dest.port.get(),
-            port_max: dest.port.get(),
-            protocol: Protocol::Tcp,
-        });
+        let port = dest.port.get();
+        let rule = NetRule::new(&dest.host, prefix_len, port, port, Protocol::Tcp)
+            .map_err(|e| PolicyError::Patch(format!("net.proxy.allow `{value}`: {e}")))?;
+        net.allow.push(rule);
     } else {
         net.allow_names.push(NameRule {
             name: dest.host,
@@ -274,7 +271,7 @@ mod tests {
         assert!(net
             .allow
             .iter()
-            .any(|r| r.cidr == "10.0.0.7" && r.prefix_len == 32));
+            .any(|r| r.addr_text() == "10.0.0.7" && r.prefix_len() == 32));
         assert!(net.bpf_connect_allow.is_empty(), "BPF is never touched");
         // A destination matching no pattern is refused.
         assert!(instantiate(&t, &[entry("net.proxy.allow", "evil.com:443")]).is_err());

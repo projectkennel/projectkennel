@@ -56,14 +56,14 @@ pub use error::PolicyError;
 pub use invariant::{validate, InvariantViolation};
 pub use keys::{KeySet, SigningKey};
 pub use settled::{
-    name_matches, AuditFileConfig, AuditRuntime, AuditSinkKind, CapPolicy, ConsumeRuntime,
-    DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime, ExecPolicy, FsPolicy,
-    IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode, NetPolicy, NetRule,
-    OnChangeAction, ProcPolicy, Protocol, Provenance, ProvideRuntime, ProxyListen,
-    ResolvedArtifact, RestartPolicy, SeccompAction, SeccompPolicy, ServiceRuntime, SettledPolicy,
-    Shape, SignedSettledPolicy, SpawnGrant, SpawnTemplate, SshGrant, SshRuntime, TmpPolicy,
-    TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket, WorkloadRuntime,
-    RESERVED_PREFIX, ULIMIT_RESOURCES,
+    name_matches, AuditFileConfig, AuditRuntime, AuditSinkKind, BindPorts, CapPolicy,
+    ConsumeRuntime, DbusBusRuntime, DbusRuntime, DevPolicy, EffectivePolicy, EnvRuntime,
+    ExecPolicy, FsPolicy, IdentityRuntime, LifecyclePolicy, MeshRuntime, NameRule, NetMode,
+    NetPolicy, NetRule, OnChangeAction, ProcPolicy, Protocol, Provenance, ProvideRuntime,
+    ProxyListen, ResolvedArtifact, RestartPolicy, SeccompAction, SeccompPolicy, ServiceRuntime,
+    SettledPolicy, Shape, SignedSettledPolicy, SpawnGrant, SpawnTemplate, SshGrant, SshRuntime,
+    TmpPolicy, TrustPolicy, TtlAction, TtyPolicy, UlimitsRuntime, UnixRuntime, UnixSocket,
+    WorkloadRuntime, RESERVED_PREFIX, ULIMIT_RESOURCES,
 };
 pub use signature::{verify_signature, SignatureEnvelope, SignatureError};
 pub use spawn::spawn_eligible;
@@ -583,25 +583,19 @@ mod tests {
     fn proxy_listen_round_trips_and_is_signature_bound() {
         let key = signing_key();
         let mut policy = sample_policy();
-        policy.effective_policy.net.proxy = ProxyListen {
-            offset: 3,
-            port: 8443,
-        };
+        policy.effective_policy.net.proxy = ProxyListen::new(3, 8443).expect("a listener");
 
         let doc = sign_settled(&policy, &key).expect("sign");
         let bytes = to_bytes(&doc).expect("serialise");
         let verified = verify_settled(&bytes, &keyset_for(&key)).expect("verify");
         assert_eq!(
             verified.effective_policy.net.proxy,
-            ProxyListen {
-                offset: 3,
-                port: 8443
-            }
+            ProxyListen::new(3, 8443).expect("a listener")
         );
 
         // Tampering with the resolved offset/port breaks the signature.
         let mut tampered = doc;
-        tampered.policy.effective_policy.net.proxy.port = 1080;
+        tampered.policy.effective_policy.net.proxy = ProxyListen::new(3, 1080).expect("a listener");
         let bytes = to_bytes(&tampered).expect("serialise");
         let err = verify_settled(&bytes, &keyset_for(&key)).expect_err("tamper must fail");
         assert!(

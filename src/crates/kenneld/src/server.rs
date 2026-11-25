@@ -4022,7 +4022,7 @@ mod tests {
                 bpf_bind_allow: Vec::new(),
                 bpf_bind_deny: Vec::new(),
                 bind_port_min: 0,
-                bind_allowed_ports: Vec::new(),
+                bind_allowed_ports: kennel_lib_policy::BindPorts::default(),
             };
             Ok(Loaded {
                 plan,

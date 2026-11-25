@@ -848,11 +848,11 @@ mod tests {
         assert!(
             denies
                 .iter()
-                .any(|r| r.cidr == "203.0.113.0" && r.prefix_len == 24),
+                .any(|r| r.addr_text() == "203.0.113.0" && r.prefix_len() == 24),
             "fragment invariant added"
         );
         assert!(
-            denies.iter().any(|r| r.cidr == "169.254.169.254"),
+            denies.iter().any(|r| r.addr_text() == "169.254.169.254"),
             "base invariants still present"
         );
     }

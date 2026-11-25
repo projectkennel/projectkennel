@@ -146,8 +146,8 @@ fn ports_for(port_min: u16, port_max: u16) -> Vec<u16> {
 fn rule_from_cidr(rule: &NetRule) -> Option<Rule> {
     Some(Rule {
         matcher: Matcher::Cidr(cidr_of(rule)?),
-        ports: ports_for(rule.port_min, rule.port_max),
-        protocol: rule_protocol(rule.protocol),
+        ports: ports_for(rule.port_min(), rule.port_max()),
+        protocol: rule_protocol(rule.protocol()),
     })
 }
 
@@ -162,14 +162,15 @@ fn rule_from_name(rule: &NameRule) -> Rule {
 fn deny_from_cidr(rule: &NetRule) -> Option<DenyRule> {
     Some(DenyRule {
         matcher: DenyMatcher::Cidr(cidr_of(rule)?),
-        ports: ports_for(rule.port_min, rule.port_max),
+        ports: ports_for(rule.port_min(), rule.port_max()),
     })
 }
 
-/// A policy CIDR (`cidr` literal + `prefix_len`) as a ruleset [`Cidr`], or `None` if the literal
-/// does not parse (a malformed signed policy — dropped rather than admitting a wrong match).
+/// A policy address rule as a ruleset [`Cidr`]. A [`NetRule`] already holds a parsed address
+/// and a prefix that fits it, so `None` is only the ruleset refusing what the policy type
+/// admitted; no rule of a decoded policy is dropped here.
 fn cidr_of(rule: &NetRule) -> Option<Cidr> {
-    Cidr::new(rule.cidr.parse::<IpAddr>().ok()?, rule.prefix_len).ok()
+    Cidr::new(rule.addr(), rule.prefix_len()).ok()
 }
 
 /// The outcome of an `INet` decision. `Pinned` carries the vetted address set (in resolver order)

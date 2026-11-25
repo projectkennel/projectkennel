@@ -109,20 +109,15 @@ fn minimal_policy(home: &Path) -> SettledPolicy {
                 proxy: kennel_lib_policy::ProxyListen::default(),
                 allow: Vec::new(),
                 allow_names: Vec::new(),
-                deny_invariant: vec![NetRule {
-                    cidr: "169.254.169.254".to_owned(),
-                    prefix_len: 32,
-                    port_min: 0,
-                    port_max: 65535,
-                    protocol: Protocol::Any,
-                }],
+                deny_invariant: vec![NetRule::new("169.254.169.254", 32, 0, 65535, Protocol::Any)
+                    .expect("a valid rule")],
                 deny_author: Vec::new(),
                 bpf_connect_allow: Vec::new(),
                 bpf_connect_deny: Vec::new(),
                 bpf_bind_allow: Vec::new(),
                 bpf_bind_deny: Vec::new(),
                 bind_port_min: 0,
-                bind_allowed_ports: Vec::new(),
+                bind_allowed_ports: kennel_lib_policy::BindPorts::default(),
             },
             fs: FsPolicy {
                 home_shadow: true,

@@ -21,6 +21,7 @@
 //! reproducible without JSON's canonicalisation machinery.
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
@@ -104,19 +105,188 @@ pub enum TtlAction {
 }
 
 /// One network allow/deny rule: a CIDR plus a port range and protocol.
+///
+/// It can only be built by [`NetRule::new`], which the decoder also goes through, so a rule in
+/// hand always has an address that is an IP literal, a prefix that fits the address family, and
+/// a port range whose lower bound is not above its upper bound (CODING-STANDARDS.md §11.1). The
+/// proxy and the BPF loader match on the parsed address; neither has a rule it must skip.
+///
+/// The address keeps the text it was written with. The canonical form is signed over that
+/// text, so `::ffff:1.2.3.4` and its normalised spelling stay distinct artefacts.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "NetRuleWire", into = "NetRuleWire")]
 pub struct NetRule {
-    /// Network address in dotted-quad (v4) or colon (v6) form.
-    pub cidr: String,
-    /// Prefix length in bits.
-    pub prefix_len: u8,
+    text: String,
+    addr: IpAddr,
+    prefix_len: u8,
+    port_min: u16,
+    port_max: u16,
+    protocol: Protocol,
+}
+
+/// Why a [`NetRule`] could not be built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetRuleError {
+    /// The address is not an IP literal, so no rule can match on it.
+    NotAnAddress(String),
+    /// The prefix is longer than the address: over 32 bits for IPv4, over 128 for IPv6.
+    PrefixTooLong {
+        /// The address as written.
+        addr: String,
+        /// The prefix length that does not fit it.
+        prefix_len: u8,
+    },
+    /// The port range's lower bound is above its upper bound, so it matches no port.
+    EmptyPortRange {
+        /// The lower bound.
+        port_min: u16,
+        /// The upper bound.
+        port_max: u16,
+    },
+}
+
+impl std::fmt::Display for NetRuleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAnAddress(addr) => write!(
+                f,
+                "address rule `{addr}` is not an IP address, so no rule can match on it"
+            ),
+            Self::PrefixTooLong { addr, prefix_len } => write!(
+                f,
+                "address rule `{addr}/{prefix_len}` has a prefix longer than its address"
+            ),
+            Self::EmptyPortRange { port_min, port_max } => write!(
+                f,
+                "address rule has port range {port_min}..={port_max}, which matches no port"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for NetRuleError {}
+
+impl NetRule {
+    /// Build a rule for `addr/prefix_len` on ports `port_min..=port_max`.
+    ///
+    /// # Errors
+    /// [`NetRuleError`] if `addr` is not an IP literal, `prefix_len` does not fit its family, or
+    /// `port_min` is above `port_max`.
+    pub fn new(
+        addr: &str,
+        prefix_len: u8,
+        port_min: u16,
+        port_max: u16,
+        protocol: Protocol,
+    ) -> Result<Self, NetRuleError> {
+        let ip = addr
+            .parse::<IpAddr>()
+            .map_err(|_| NetRuleError::NotAnAddress(addr.to_owned()))?;
+        let width: u8 = if ip.is_ipv4() { 32 } else { 128 };
+        if prefix_len > width {
+            return Err(NetRuleError::PrefixTooLong {
+                addr: addr.to_owned(),
+                prefix_len,
+            });
+        }
+        if port_min > port_max {
+            return Err(NetRuleError::EmptyPortRange { port_min, port_max });
+        }
+        Ok(Self {
+            text: addr.to_owned(),
+            addr: ip,
+            prefix_len,
+            port_min,
+            port_max,
+            protocol,
+        })
+    }
+
+    /// The network address.
+    #[must_use]
+    pub const fn addr(&self) -> IpAddr {
+        self.addr
+    }
+
+    /// The network address as it was written, the text the signature covers.
+    #[must_use]
+    pub fn addr_text(&self) -> &str {
+        &self.text
+    }
+
+    /// Prefix length in bits; never more than the address family holds.
+    #[must_use]
+    pub const fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
     /// Inclusive lower bound of the port range (host order).
-    pub port_min: u16,
-    /// Inclusive upper bound of the port range (host order).
-    pub port_max: u16,
+    #[must_use]
+    pub const fn port_min(&self) -> u16 {
+        self.port_min
+    }
+
+    /// Inclusive upper bound of the port range (host order); never below the lower bound.
+    #[must_use]
+    pub const fn port_max(&self) -> u16 {
+        self.port_max
+    }
+
+    /// Whether the rule covers every port.
+    #[must_use]
+    pub const fn any_port(&self) -> bool {
+        self.port_min == 0 && self.port_max == u16::MAX
+    }
+
     /// Protocol the rule applies to.
-    pub protocol: Protocol,
+    #[must_use]
+    pub const fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    /// The same rule for another protocol.
+    #[must_use]
+    pub const fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+}
+
+/// A [`NetRule`] as the settled artefact spells it: the fields, in the order the canonical
+/// form emits them, before any of them is checked.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename = "NetRule")]
+struct NetRuleWire {
+    /// Network address in dotted-quad (v4) or colon (v6) form.
+    cidr: String,
+    /// Prefix length in bits.
+    prefix_len: u8,
+    /// Inclusive lower bound of the port range (host order).
+    port_min: u16,
+    /// Inclusive upper bound of the port range (host order).
+    port_max: u16,
+    /// Protocol the rule applies to.
+    protocol: Protocol,
+}
+
+impl TryFrom<NetRuleWire> for NetRule {
+    type Error = NetRuleError;
+
+    fn try_from(w: NetRuleWire) -> Result<Self, Self::Error> {
+        Self::new(&w.cidr, w.prefix_len, w.port_min, w.port_max, w.protocol)
+    }
+}
+
+impl From<NetRule> for NetRuleWire {
+    fn from(r: NetRule) -> Self {
+        Self {
+            cidr: r.text,
+            prefix_len: r.prefix_len,
+            port_min: r.port_min,
+            port_max: r.port_max,
+            protocol: r.protocol,
+        }
+    }
 }
 
 /// One by-name egress allow rule, enforced by the per-kennel egress proxy.
@@ -200,6 +370,116 @@ fn ends_with_label(name: &str, suffix: &str) -> bool {
 }
 
 #[cfg(test)]
+mod checked_on_read_tests {
+    use super::{sample_settled, BindPorts, NetRule, NetRuleError, Protocol, ProxyListen};
+    use super::{SettledPolicy, MAX_BIND_PORTS};
+
+    /// The fixture's canonical text with `from` replaced by `to`, decoded again.
+    fn decode_with(from: &str, to: &str) -> Result<SettledPolicy, String> {
+        let bytes = crate::canonical::canonical_bytes(&sample_settled()).expect("canonical");
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains(from), "the fixture has no `{from}`");
+        kennel_lib_toml::from_slice(text.replacen(from, to, 1).as_bytes())
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn an_address_rule_must_be_an_address_with_a_fitting_prefix() {
+        assert!(matches!(
+            NetRule::new("10.0.0/8", 8, 0, u16::MAX, Protocol::Any),
+            Err(NetRuleError::NotAnAddress(_))
+        ));
+        assert!(matches!(
+            NetRule::new("metadata.internal", 32, 0, u16::MAX, Protocol::Any),
+            Err(NetRuleError::NotAnAddress(_))
+        ));
+        assert!(matches!(
+            NetRule::new("10.0.0.0", 33, 0, u16::MAX, Protocol::Any),
+            Err(NetRuleError::PrefixTooLong { prefix_len: 33, .. })
+        ));
+        assert!(matches!(
+            NetRule::new("fd00::", 129, 0, u16::MAX, Protocol::Any),
+            Err(NetRuleError::PrefixTooLong { .. })
+        ));
+        assert!(NetRule::new("fd00::", 128, 0, u16::MAX, Protocol::Any).is_ok());
+    }
+
+    #[test]
+    fn an_address_rule_with_an_inverted_port_range_is_refused() {
+        assert_eq!(
+            NetRule::new("10.0.0.0", 8, 444, 443, Protocol::Tcp),
+            Err(NetRuleError::EmptyPortRange {
+                port_min: 444,
+                port_max: 443
+            })
+        );
+    }
+
+    /// The address keeps its spelling, so the canonical form is the bytes that were signed.
+    #[test]
+    fn an_address_rule_keeps_the_text_it_was_written_with() {
+        let rule = NetRule::new("FD00:0:0::1", 128, 1, 2, Protocol::Udp).expect("a valid rule");
+        assert_eq!(rule.addr_text(), "FD00:0:0::1");
+        assert_eq!(
+            rule.addr(),
+            "fd00::1".parse::<std::net::IpAddr>().expect("ip")
+        );
+    }
+
+    /// A settled artefact signed without passing through the compiler is checked as it is
+    /// read: a rule the proxy and the BPF loader could not match on never becomes a value.
+    #[test]
+    fn a_settled_policy_with_an_unmatchable_rule_does_not_decode() {
+        assert!(decode_with("port_min = 443", "port_min = 443").is_ok());
+        for (from, to) in [
+            ("cidr = \"169.254.169.254\"", "cidr = \"metadata.internal\""),
+            ("prefix_len = 32", "prefix_len = 33"),
+            ("port_min = 443", "port_min = 444"),
+        ] {
+            let err = decode_with(from, to).expect_err("refused");
+            assert!(err.contains("address rule"), "`{to}`: {err}");
+        }
+    }
+
+    #[test]
+    fn a_proxy_listener_needs_a_port() {
+        assert!(ProxyListen::new(1, 0).is_err());
+        assert!(ProxyListen::new(1, 1080).is_ok());
+        assert_eq!(ProxyListen::new(0, 0), Ok(ProxyListen::disabled()));
+        assert_eq!(ProxyListen::disabled().port(), None);
+        assert_eq!(
+            ProxyListen::default().port().map(crate::variant::Port::get),
+            Some(1080)
+        );
+        let err = decode_with("port = 1080", "port = 0").expect_err("refused");
+        assert!(err.contains("a proxy needs a port"), "{err}");
+    }
+
+    #[test]
+    fn a_bind_port_list_fits_the_bind_map() {
+        let full: Vec<u16> = (8000..).take(MAX_BIND_PORTS).collect();
+        assert!(BindPorts::new(full.clone()).is_ok());
+        let mut over = full;
+        over.push(9000);
+        assert!(BindPorts::new(over).is_err());
+
+        let mut p = sample_settled();
+        p.effective_policy.net.bind_allowed_ports =
+            BindPorts::new(vec![8080]).expect("one port fits");
+        let bytes = crate::canonical::canonical_bytes(&p).expect("canonical");
+        let text = String::from_utf8(bytes).expect("utf-8");
+        assert!(text.contains("bind_allowed_ports = [8080]"), "{text}");
+        let nine = "bind_allowed_ports = [1, 2, 3, 4, 5, 6, 7, 8, 9]";
+        let err = kennel_lib_toml::from_slice::<SettledPolicy>(
+            text.replacen("bind_allowed_ports = [8080]", nine, 1)
+                .as_bytes(),
+        )
+        .expect_err("nine ports do not fit");
+        assert!(err.to_string().contains("net.bind.allowed_ports"), "{err}");
+    }
+}
+
+#[cfg(test)]
 mod name_match_tests {
     use super::name_matches;
 
@@ -279,12 +559,56 @@ mod name_match_tests {
 /// signed policy makes the BPF-enforced proxy address signature-bound rather than
 /// a runtime constant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ProxyListenWire", into = "ProxyListenWire")]
 pub struct ProxyListen {
-    /// Host offset within the kennel's subnet (1..=14; 0 and 15 reserved).
+    offset: u8,
+    port: u16,
+}
+
+/// A [`ProxyListen`] as the settled artefact spells it, before it is checked.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename = "ProxyListen")]
+struct ProxyListenWire {
+    /// Host offset within the kennel's subnet; 0 is the "no proxy" marker.
+    offset: u8,
+    /// The proxy's listen port.
+    port: u16,
+}
+
+/// A proxy listener was given an offset but port 0, which nothing can listen on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProxyListenError {
+    /// The offset of the listener that has no port.
     pub offset: u8,
-    /// The proxy's listen port (1025..=32767).
-    pub port: u16,
+}
+
+impl std::fmt::Display for ProxyListenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "net.proxy listens at offset {} but on port 0; a proxy needs a port",
+            self.offset
+        )
+    }
+}
+
+impl std::error::Error for ProxyListenError {}
+
+impl TryFrom<ProxyListenWire> for ProxyListen {
+    type Error = ProxyListenError;
+
+    fn try_from(w: ProxyListenWire) -> Result<Self, Self::Error> {
+        Self::new(w.offset, w.port)
+    }
+}
+
+impl From<ProxyListen> for ProxyListenWire {
+    fn from(p: ProxyListen) -> Self {
+        Self {
+            offset: p.offset,
+            port: p.port,
+        }
+    }
 }
 
 impl Default for ProxyListen {
@@ -298,6 +622,18 @@ impl Default for ProxyListen {
 }
 
 impl ProxyListen {
+    /// A listener at `offset` on `port`. Offset 0 is the [`disabled`](Self::disabled) marker,
+    /// whatever port comes with it.
+    ///
+    /// # Errors
+    /// [`ProxyListenError`] if `offset` names a listener and `port` is 0.
+    pub const fn new(offset: u8, port: u16) -> Result<Self, ProxyListenError> {
+        if offset != 0 && port == 0 {
+            return Err(ProxyListenError { offset });
+        }
+        Ok(Self { offset, port })
+    }
+
     /// The "no proxy" marker — `offset 0` (reserved, never a real listener).
     ///
     /// Used by the non-proxied modes (`open`/`none`) so the daemon stands up no SOCKS facade
@@ -311,6 +647,22 @@ impl ProxyListen {
     #[must_use]
     pub const fn is_disabled(&self) -> bool {
         self.offset == 0
+    }
+
+    /// Host offset within the kennel's subnet; 0 when there is no proxy.
+    #[must_use]
+    pub const fn offset(&self) -> u8 {
+        self.offset
+    }
+
+    /// The port the proxy listens on, or `None` when there is no proxy.
+    #[must_use]
+    pub fn port(&self) -> Option<crate::variant::Port> {
+        if self.is_disabled() {
+            None
+        } else {
+            crate::variant::Port::new(self.port)
+        }
     }
 }
 
@@ -340,8 +692,8 @@ pub struct NetPolicy {
     /// the floor. Capped at [`MAX_BIND_PORTS`] by translation (the `bind_subnet` BPF map
     /// carries a fixed-size array). Carried into the `bind_subnet` map; omitted from the
     /// canonical form when empty.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bind_allowed_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "BindPorts::is_empty")]
+    pub bind_allowed_ports: BindPorts,
     /// Where the egress proxy listens (offset + port within the kennel's subnet).
     #[serde(default)]
     pub proxy: ProxyListen,
@@ -407,6 +759,75 @@ const fn is_zero_u16(v: &u16) -> bool {
 /// listing more is a translation error (the author learns the limit rather than having
 /// ports silently dropped).
 pub const MAX_BIND_PORTS: usize = 8;
+
+/// The ports a workload may `bind()` (`[net.bind].allowed_ports`): at most [`MAX_BIND_PORTS`].
+///
+/// It can only be built by [`BindPorts::new`], which the decoder also goes through, so the list
+/// always fits the fixed array the `bind_subnet` BPF map carries (CODING-STANDARDS.md §11.1).
+/// Empty means any port at or above the floor.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(try_from = "Vec<u16>", into = "Vec<u16>")]
+pub struct BindPorts(Vec<u16>);
+
+/// A bind-port list has more entries than the `bind_subnet` map holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TooManyBindPorts {
+    /// How many ports the list has.
+    pub count: usize,
+}
+
+impl std::fmt::Display for TooManyBindPorts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "net.bind.allowed_ports has {} entries; the maximum is {MAX_BIND_PORTS}",
+            self.count
+        )
+    }
+}
+
+impl std::error::Error for TooManyBindPorts {}
+
+impl BindPorts {
+    /// A bind-port list.
+    ///
+    /// # Errors
+    /// [`TooManyBindPorts`] if `ports` has more than [`MAX_BIND_PORTS`] entries.
+    pub fn new(ports: Vec<u16>) -> Result<Self, TooManyBindPorts> {
+        if ports.len() > MAX_BIND_PORTS {
+            return Err(TooManyBindPorts { count: ports.len() });
+        }
+        Ok(Self(ports))
+    }
+
+    /// Whether the list is empty, which means any port at or above the floor.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::ops::Deref for BindPorts {
+    type Target = [u16];
+
+    fn deref(&self) -> &[u16] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<u16>> for BindPorts {
+    type Error = TooManyBindPorts;
+
+    fn try_from(ports: Vec<u16>) -> Result<Self, Self::Error> {
+        Self::new(ports)
+    }
+}
+
+impl From<BindPorts> for Vec<u16> {
+    fn from(ports: BindPorts) -> Self {
+        ports.0
+    }
+}
 
 /// Capacity of each per-family cgroup-BPF **allow** LPM trie (`allow_v4`/`allow_v6`).
 ///
@@ -1873,23 +2294,17 @@ pub fn sample_settled() -> SettledPolicy {
                 udp: false,
                 udp_allow_names: Vec::new(),
                 proxy: ProxyListen::default(),
-                allow: vec![NetRule {
-                    cidr: "93.184.216.0".to_owned(),
-                    prefix_len: 24,
-                    port_min: 443,
-                    port_max: 443,
-                    protocol: Protocol::Tcp,
-                }],
+                // A rule that failed to build would leave its list empty, and the invariant
+                // pass then refuses the fixture for its missing metadata deny.
+                allow: NetRule::new("93.184.216.0", 24, 443, 443, Protocol::Tcp)
+                    .into_iter()
+                    .collect(),
                 allow_names: Vec::new(),
-                deny_invariant: vec![NetRule {
-                    cidr: "169.254.169.254".to_owned(),
-                    prefix_len: 32,
-                    port_min: 0,
-                    port_max: 65535,
-                    protocol: Protocol::Any,
-                }],
+                deny_invariant: NetRule::new("169.254.169.254", 32, 0, 65535, Protocol::Any)
+                    .into_iter()
+                    .collect(),
                 bind_port_min: 0,
-                bind_allowed_ports: Vec::new(),
+                bind_allowed_ports: BindPorts::default(),
                 deny_author: Vec::new(),
                 bpf_connect_allow: Vec::new(),
                 bpf_connect_deny: Vec::new(),

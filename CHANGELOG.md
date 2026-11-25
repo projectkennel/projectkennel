@@ -8,6 +8,23 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The settled policy's address rules, bind-port list and proxy listener are types**
+  (CODING-STANDARDS.md §11.1). Each is checked as the policy is read, so a rule the
+  enforcement side could not match on never becomes a value. The canonical bytes are
+  unchanged: both golden files are untouched and no signature is invalidated.
+  - `NetRule` is built only by `NetRule::new`: the address is an IP literal, the prefix fits
+    its family, and the port range is not inverted. It keeps the address as written, since
+    the signature covers that text. The plan builder and the proxy match on the parsed
+    address, so their "skip a rule that does not parse" branches are gone.
+  - `BindPorts` holds at most `MAX_BIND_PORTS` entries.
+  - `ProxyListen` is either the no-proxy marker or a listener with a port that is not 0.
+  - Changed behaviour for an artefact signed without going through the compiler: a bad
+    address rule or an over-long bind-port list is now a parse error where it was an
+    invariant violation, and two cases are newly refused at read: a port range whose lower
+    bound is above its upper bound (it matched nothing, so a deny written that way denied
+    nothing), and a proxy listener on port 0 (refused at bring-up before).
+  - A name rule's port list stays a plain list: every `u16` list is a valid one.
+
 - **The kennel context is a type** (CODING-STANDARDS.md §11.1). `Ctx` (`kennel-lib-spawn`) is
   the per-user slot a running kennel holds, never 0. The daemon's allocator, registry, audit
   drain and address bookkeeping carry it, as do the plan and the helper's address derivation.
