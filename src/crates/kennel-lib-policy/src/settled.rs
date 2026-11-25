@@ -538,6 +538,15 @@ pub struct FsPolicy {
     /// signs unchanged.
     #[serde(default, skip_serializing_if = "is_false")]
     pub home_readonly: bool,
+    /// Writable grants whose binds allow executable file mappings (#229): every other writable
+    /// bind is mounted `noexec`. Each entry is a path from `write`, as written there. Omitted
+    /// when empty, so an artefact that grants no such opt-out serialises exactly as before.
+    ///
+    /// Declared before `redirect`: that is an array of tables, and the canonical TOML writes a
+    /// table's plain values before its sub-tables. With the two the other way round, a policy
+    /// that used both could not be serialised, so it could not be signed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_mmap_exec: Vec<String>,
     /// Asymmetric `source` redirects (W15): view paths served by a different host path.
     ///
     /// Each entry's `path` is also in `read` (and in `write` when the carrying grant was
@@ -548,11 +557,6 @@ pub struct FsPolicy {
     /// without redirects signs exactly as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub redirect: Vec<FsRedirect>,
-    /// Writable grants whose binds allow executable file mappings (#229): every other writable
-    /// bind is mounted `noexec`. Each entry is a path from `write`, as written there. Omitted
-    /// when empty, so an artefact that grants no such opt-out serialises exactly as before.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub write_mmap_exec: Vec<String>,
     /// The invocation-cwd grant. Declared among the sub-tables so the canonical TOML
     /// emits it as a table; omitted entirely when default, so a policy without a
     /// `[fs.cwd]` signs exactly as before.

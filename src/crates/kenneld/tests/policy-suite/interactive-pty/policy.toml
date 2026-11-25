@@ -1,0 +1,30 @@
+# ============================================================================
+# Suite case: interactive-pty — an interactive run gets a terminal (§7.9.2).
+#
+# Every other case runs with stdin redirected, so the daemon takes the non-interactive path.
+# This one is started under a pseudo-terminal by run.sh, so the CLI asks for an interactive
+# run: the seal allocates a pty inside the kennel, the daemon receives its master and pumps
+# it to the CLI's terminal socket. The workload checks that all three of its standard streams
+# are a terminal and prints a marker; run.sh checks the marker came back through the pump.
+# ============================================================================
+
+template_name = "interactive-pty"
+template_base = "base-confined"
+
+[net]
+mode = "none"
+
+[fs]
+read = ["/usr/**", "/lib/**", "/lib64/**"]
+
+[exec]
+shell = "/bin/sh"
+allow = ["/bin/sh", "/bin/dash"]
+
+[workload]
+argv = [
+    "/bin/sh", "-c",
+    """
+    [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && echo KENNEL-PTY-OK
+    """,
+]

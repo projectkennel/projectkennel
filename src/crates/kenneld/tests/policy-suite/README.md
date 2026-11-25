@@ -34,6 +34,8 @@ missing prerequisite aborts with the precise cause.
 | `fs-redirect`     | none | a `source`-redirected grant (W15) serves the view path from a different host inode, over-mounting the symmetric parent; the never-granted store is ENOENT. Setup stages the host tree. |
 | `exec-deny`       | none | execution is deny-by-default — an allowlisted binary runs, a non-listed one is refused at execve |
 | `workload-sha256` | none | a digest-pinned workload runs — the daemon hashes the binary and the kennel executes that same descriptor, which has to stay open in between |
+| `interactive-pty` | none | an interactive run gets a terminal — started under a pseudo-terminal, the workload sees a tty on all three streams and its output comes back through the daemon's pty pump |
+| `mesh-bus-concurrent` | proxied | four kennels reach one mesh bus at the same moment, three rounds over — the bus is created once, shared, torn down and created again without a consumer failing or a start hanging |
 | `tmp-mmap-exec`   | constrained | `[fs.tmp] mmap_exec`: `/tmp` is mounted without `noexec`, a `.so` copied there loads, and `execve` from `/tmp` is still refused (#218) |
 | `write-bind-noexec` | constrained | writable binds are `noexec,nosuid,nodev` by default (a `.so` written there does not load); a grant with `mmap_exec = true` loads it; `execve` is refused from both (#229). Setup creates the two host dirs. |
 | `proc-curated`    | none | children/grandchildren read their own `/proc/self`; `/proc/{cpuinfo,stat,meminfo,version}` are synthesized and agree with `nproc`; ungranted host-global entries (`kallsyms`, `loadavg`, `sys`) are masked empty (#218) |
