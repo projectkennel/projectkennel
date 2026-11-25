@@ -477,6 +477,23 @@ pub fn build_settled(
     kennel_lib_compile::compile(&entry, source, trust, version)
 }
 
+/// Parse `<policy> [--template-dir D]... [--trust-dir D]... [<switch>]`, the arguments of
+/// `validate` and `risks`. Returns the policy, whether `switch` was given, and the directories.
+fn policy_and_switch<'a>(
+    args: &'a [String],
+    switch: &str,
+    usage: &str,
+) -> Result<(&'a str, bool, crate::DirFlags), CliError> {
+    let mut on = false;
+    let mut dirs = crate::DirFlags::default();
+    let policy =
+        crate::one_positional(args, "only one <policy> may be given", usage, |flag, it| {
+            on |= flag == switch;
+            Ok(flag == switch || dirs.take(flag, it)?)
+        })?;
+    Ok((policy, on, dirs))
+}
+
 /// `kennel policy validate <policy> [--template-dir D] [--require-signed] [--trust-dir D]`
 ///
 /// Resolve and check a policy (chain, signatures, deltas, includes, invariants)
@@ -489,29 +506,15 @@ pub fn build_settled(
 /// cannot be read, or the trust store cannot be loaded. A policy that resolves but is
 /// invalid is reported via the exit code, not an error.
 pub fn validate(args: &[String]) -> Result<ExitCode, CliError> {
-    let mut policy_path: Option<&str> = None;
-    let mut require_signed = false;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--require-signed" => require_signed = true,
-            "--template-dir" => {
-                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
-            }
-            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            value if policy_path.is_none() => policy_path = Some(value),
-            _ => return Err(CliError::usage("only one <policy> may be given")),
-        }
-    }
-    let policy_path = policy_path.ok_or_else(|| {
-        CliError::usage(
-            "usage: kennel policy validate <policy> [--template-dir D] [--require-signed]",
-        )
-    })?;
+    let (policy_path, require_signed, dirs) = policy_and_switch(
+        args,
+        "--require-signed",
+        "usage: kennel policy validate <policy> [--template-dir D] [--require-signed]",
+    )?;
+    let crate::DirFlags {
+        mut template_dirs,
+        mut trust_dirs,
+    } = dirs;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
@@ -558,29 +561,15 @@ pub fn validate(args: &[String]) -> Result<ExitCode, CliError> {
 /// cannot be read, the trust store cannot be loaded, the source cannot be resolved, or
 /// the threat catalogue cannot be loaded.
 pub fn policy_risks(args: &[String]) -> Result<ExitCode, CliError> {
-    let mut policy_path: Option<&str> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut json = false;
-
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--json" => json = true,
-            "--template-dir" => {
-                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
-            }
-            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            value if policy_path.is_none() => policy_path = Some(value),
-            _ => return Err(CliError::usage("only one <policy> may be given")),
-        }
-    }
-    let policy_path = policy_path.ok_or_else(|| {
-        CliError::usage(
-            "usage: kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
-        )
-    })?;
+    let (policy_path, json, dirs) = policy_and_switch(
+        args,
+        "--json",
+        "usage: kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+    )?;
+    let crate::DirFlags {
+        mut template_dirs,
+        mut trust_dirs,
+    } = dirs;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
@@ -1194,16 +1183,13 @@ fn parse_show_args(
     table: &[kennel_lib_cli::CommandSpec],
 ) -> Result<(String, Vec<PathBuf>, Vec<PathBuf>), CliError> {
     let mut positional: Option<String> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut dirs = crate::DirFlags::default();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
     while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
-            lexopt::Arg::Long("template-dir") => {
-                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
-            }
-            lexopt::Arg::Long("trust-dir") => {
-                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            lexopt::Arg::Long(long @ ("template-dir" | "trust-dir")) => {
+                let flag = format!("--{long}");
+                dirs.push(&flag, lexopt_value(&mut p, &flag)?);
             }
             lexopt::Arg::Value(v) if positional.is_none() => {
                 positional = Some(v.to_string_lossy().into_owned());
@@ -1212,7 +1198,7 @@ fn parse_show_args(
         }
     }
     let positional = positional.ok_or_else(|| CliError::Usage(usage_of(table, "show")))?;
-    Ok((positional, template_dirs, trust_dirs))
+    Ok((positional, dirs.template_dirs, dirs.trust_dirs))
 }
 
 /// The shared `show` body: read `policy_file`, compile (source) or verify (settled), render.
@@ -1535,16 +1521,13 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, CliError> {
 /// Returns a message if the arguments are invalid or the trust store cannot be loaded.
 /// A template that fails to compile is reported and counted, not returned as an error.
 pub fn template_lint(args: &[String]) -> Result<ExitCode, CliError> {
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
+    let mut dirs = crate::DirFlags::default();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
     while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
-            lexopt::Arg::Long("template-dir") => {
-                template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
-            }
-            lexopt::Arg::Long("trust-dir") => {
-                trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
+            lexopt::Arg::Long(long @ ("template-dir" | "trust-dir")) => {
+                let flag = format!("--{long}");
+                dirs.push(&flag, lexopt_value(&mut p, &flag)?);
             }
             other => {
                 return Err(CliError::Usage(lexopt_unexpected(
@@ -1555,6 +1538,10 @@ pub fn template_lint(args: &[String]) -> Result<ExitCode, CliError> {
             }
         }
     }
+    let crate::DirFlags {
+        mut template_dirs,
+        mut trust_dirs,
+    } = dirs;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
     let tc = TrustContext::load(&trust_dirs)?;

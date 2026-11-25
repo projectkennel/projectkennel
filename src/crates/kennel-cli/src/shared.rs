@@ -141,6 +141,73 @@ pub fn flag_value<'a>(
     it.next().ok_or_else(|| CliError::missing_value(flag))
 }
 
+/// The arguments of a verb that takes one positional and some flags.
+///
+/// `flag` is called for each argument that starts with `--`, with the iterator so it can read
+/// the flag's value; it returns whether it took the flag. An untaken flag is an unknown-flag
+/// error, a second positional is the usage error `extra`, and a missing positional is the
+/// usage error `usage`.
+///
+/// # Errors
+/// A usage error as above, or whatever `flag` returns.
+pub fn one_positional<'a>(
+    args: &'a [String],
+    extra: &str,
+    usage: &str,
+    mut flag: impl FnMut(&str, &mut std::slice::Iter<'a, String>) -> Result<bool, CliError>,
+) -> Result<&'a str, CliError> {
+    let mut positional: Option<&str> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            name if name.starts_with("--") => {
+                if !flag(name, &mut it)? {
+                    return Err(CliError::unknown_flag(name));
+                }
+            }
+            value if positional.is_none() => positional = Some(value),
+            _ => return Err(CliError::usage(extra)),
+        }
+    }
+    positional.ok_or_else(|| CliError::usage(usage))
+}
+
+/// The repeatable `--template-dir` and `--trust-dir` flags.
+#[derive(Debug, Default)]
+pub struct DirFlags {
+    /// Every `--template-dir` given, in order.
+    pub template_dirs: Vec<PathBuf>,
+    /// Every `--trust-dir` given, in order.
+    pub trust_dirs: Vec<PathBuf>,
+}
+
+impl DirFlags {
+    /// Take `flag`'s value from `it` if `flag` is one of the two. Returns whether it was.
+    ///
+    /// # Errors
+    /// A usage error if the flag is one of the two and has no value.
+    pub fn take<'a>(
+        &mut self,
+        flag: &str,
+        it: &mut impl Iterator<Item = &'a String>,
+    ) -> Result<bool, CliError> {
+        if !matches!(flag, "--template-dir" | "--trust-dir") {
+            return Ok(false);
+        }
+        self.push(flag, flag_value(it, flag)?.into());
+        Ok(true)
+    }
+
+    /// Record `dir` as given with `flag`: `--template-dir`, or else `--trust-dir`.
+    pub fn push(&mut self, flag: &str, dir: PathBuf) {
+        if flag == "--template-dir" {
+            self.template_dirs.push(dir);
+        } else {
+            self.trust_dirs.push(dir);
+        }
+    }
+}
+
 /// Format an unexpected lexopt arg into a usage error for `verb`.
 #[must_use]
 pub fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &str) -> String {
@@ -1131,6 +1198,54 @@ mod signer_tests {
         assert_eq!(
             resolve_key_id(std::slice::from_ref(&scratch.0), &pubkey).as_deref(),
             Some("release-key")
+        );
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    #[test]
+    fn one_positional_takes_a_name_and_hands_flags_to_the_caller() {
+        let args = argv(&["--yes", "web", "--template-dir", "/t", "--trust-dir", "/k"]);
+        let mut yes = false;
+        let mut dirs = DirFlags::default();
+        let name = one_positional(&args, "extra", "usage", |flag, it| {
+            yes |= flag == "--yes";
+            Ok(flag == "--yes" || dirs.take(flag, it)?)
+        });
+        assert_eq!(name, Ok("web"));
+        assert!(yes);
+        assert_eq!(dirs.template_dirs, [PathBuf::from("/t")]);
+        assert_eq!(dirs.trust_dirs, [PathBuf::from("/k")]);
+    }
+
+    #[test]
+    fn one_positional_names_each_way_the_arguments_can_be_wrong() {
+        let none = |_: &str, _: &mut std::slice::Iter<'_, String>| Ok(false);
+        assert_eq!(
+            one_positional(&argv(&["a", "--nope"]), "extra", "usage", none),
+            Err(CliError::unknown_flag("--nope"))
+        );
+        assert_eq!(
+            one_positional(&argv(&["a", "b"]), "extra", "usage", none),
+            Err(CliError::usage("extra"))
+        );
+        assert_eq!(
+            one_positional(&argv(&[]), "extra", "usage", none),
+            Err(CliError::usage("usage"))
+        );
+        // A directory flag with nothing after it.
+        let mut dirs = DirFlags::default();
+        let args = argv(&["a", "--trust-dir"]);
+        assert_eq!(
+            one_positional(&args, "extra", "usage", |flag, it| dirs.take(flag, it)),
+            Err(CliError::missing_value("--trust-dir"))
         );
     }
 }

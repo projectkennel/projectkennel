@@ -450,18 +450,16 @@ pub fn revert(args: &[String]) -> Result<std::process::ExitCode, CliError> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut list = false;
-    for arg in head {
-        match arg.as_str() {
-            "--list" => list = true,
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("unexpected extra argument before `--`")),
-        }
-    }
-    let name = name
-        .ok_or_else(|| CliError::usage("usage: kennel oci revert <name> [--list] [-- <path>…]"))?;
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci revert <name> [--list] [-- <path>…]",
+        |flag, _| {
+            list |= flag == "--list";
+            Ok(flag == "--list")
+        },
+    )?;
     let store = Store::open()?;
     let entry = store.entry(name)?;
     if !entry.exists() {
@@ -686,30 +684,25 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, CliError> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut keep_state = false;
-    let mut no_fetch = false;
-    let mut key_path: Option<&str> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut it = head.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--keep-state" => keep_state = true,
-            "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
-            "--template-dir" => {
-                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
-            }
-            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("unexpected extra argument before `--`")),
-        }
-    }
-    let name = name.ok_or_else(|| {
-        CliError::usage("usage: kennel oci update <name> [--keep-state] -- <new-image-ref>")
-    })?;
+    let mut fetch = FetchFlags::default();
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci update <name> [--keep-state] -- <new-image-ref>",
+        |flag, it| {
+            keep_state |= flag == "--keep-state";
+            Ok(flag == "--keep-state" || fetch.take(flag, it)?)
+        },
+    )?;
+    let FetchFlags {
+        no_fetch,
+        key_path,
+        dirs: crate::DirFlags {
+            template_dirs,
+            trust_dirs,
+        },
+    } = fetch;
     let new_ref = tail
         .first()
         .ok_or_else(|| CliError::usage("`kennel oci update` needs `-- <new-image-ref>`"))?;
@@ -1175,36 +1168,33 @@ fn confined_fetch(
 /// Returns an error if the name is invalid, `--image` is missing, the fetch fails, or the entry
 /// cannot be written.
 pub fn build(args: &[String]) -> Result<std::process::ExitCode, CliError> {
-    let mut name: Option<&str> = None;
     let mut image: Option<&str> = None;
     let mut force = false;
-    let mut no_fetch = false;
-    let mut key_path: Option<&str> = None;
-    let mut template_dirs: Vec<PathBuf> = Vec::new();
-    let mut trust_dirs: Vec<PathBuf> = Vec::new();
-    let mut it = args.iter();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
+    let mut fetch = FetchFlags::default();
+    let name = crate::one_positional(
+        args,
+        "unexpected extra argument",
+        "usage: kennel oci build <name> --image <ref> [--no-fetch] [--force] [--key K]",
+        |flag, it| match flag {
             "--image" => {
-                image = Some(crate::flag_value(&mut it, "--image")?);
+                image = Some(crate::flag_value(it, "--image")?);
+                Ok(true)
             }
-            "--force" => force = true,
-            "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
-            "--template-dir" => {
-                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
+            "--force" => {
+                force = true;
+                Ok(true)
             }
-            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("unexpected extra argument")),
-        }
-    }
-    let name = name.ok_or_else(|| {
-        CliError::usage(
-            "usage: kennel oci build <name> --image <ref> [--no-fetch] [--force] [--key K]",
-        )
-    })?;
+            _ => fetch.take(flag, it),
+        },
+    )?;
+    let FetchFlags {
+        no_fetch,
+        key_path,
+        dirs: crate::DirFlags {
+            template_dirs,
+            trust_dirs,
+        },
+    } = fetch;
     let image = image.ok_or_else(|| {
         CliError::usage("`kennel oci build` needs --image <ref> (the image[@sha256] to pull)")
     })?;
@@ -1285,27 +1275,25 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, CliError> {
                 args.get(sep.saturating_add(1)..).unwrap_or(&[]),
             )
         });
-    let mut name: Option<&str> = None;
     let mut force = false;
-    for arg in head {
-        match arg.as_str() {
-            "--force" => force = true,
-            "--key" => {
-                return Err(CliError::Usage(
-                    "`--key` is a compile-side flag; `kennel oci run` boots the store entry's \
-                     compiled artefact and needs no key (the daemon verifies it). Complete \
-                     `reason` in the store policy, compile it (`kennel policy compile \
-                     <store>/<name>/policy.toml --key <key>`), then re-run"
-                        .to_owned(),
-                ));
+    let name = crate::one_positional(
+        head,
+        "unexpected extra argument before `--`",
+        "usage: kennel oci run <name> [--force] [-- <cmd...>]",
+        |flag, _| match flag {
+            "--force" => {
+                force = true;
+                Ok(true)
             }
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("unexpected extra argument before `--`")),
-        }
-    }
-    let name = name
-        .ok_or_else(|| CliError::usage("usage: kennel oci run <name> [--force] [-- <cmd...>]"))?;
+            "--key" => Err(CliError::usage(
+                "`--key` is a compile-side flag; `kennel oci run` boots the store entry's \
+                 compiled artefact and needs no key (the daemon verifies it). Complete \
+                 `reason` in the store policy, compile it (`kennel policy compile \
+                 <store>/<name>/policy.toml --key <key>`), then re-run",
+            )),
+            _ => Ok(false),
+        },
+    )?;
 
     let store = Store::open()?;
     let entry = store.entry(name)?;
@@ -1330,6 +1318,30 @@ pub fn run(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     }
     let digest = entry.read_digest()?;
     crate::run::launch(settled, name, command, force, Some(&digest), name)
+}
+
+/// The flags `build` and `update` share: how the image is fetched and with which key.
+#[derive(Default)]
+struct FetchFlags<'a> {
+    no_fetch: bool,
+    key_path: Option<&'a str>,
+    dirs: crate::DirFlags,
+}
+
+impl<'a> FetchFlags<'a> {
+    /// Take `flag` (and its value from `it`) if it is one of these. Returns whether it was.
+    fn take(
+        &mut self,
+        flag: &str,
+        it: &mut std::slice::Iter<'a, String>,
+    ) -> Result<bool, CliError> {
+        match flag {
+            "--no-fetch" => self.no_fetch = true,
+            "--key" => self.key_path = Some(crate::flag_value(it, "--key")?),
+            _ => return self.dirs.take(flag, it),
+        }
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

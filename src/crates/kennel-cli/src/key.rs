@@ -482,17 +482,7 @@ pub fn trust(args: &[String]) -> Result<ExitCode, CliError> {
 /// Returns a message if not root, the key is not in the host trust store (vendor keys
 /// are package payload; user keys need no untrust), or the impact is unconfirmed.
 pub fn untrust(args: &[String]) -> Result<ExitCode, CliError> {
-    let mut name: Option<&str> = None;
-    let mut yes = false;
-    for arg in args {
-        match arg.as_str() {
-            "--yes" => yes = true,
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("only one <name> may be given")),
-        }
-    }
-    let name = name.ok_or_else(|| CliError::usage("usage: kennel key untrust <name> [--yes]"))?;
+    let (name, yes) = name_and_yes(args, "usage: kennel key untrust <name> [--yes]")?;
     if !invoked_as_root() {
         return Err(CliError::Refused(
             "`key untrust` operates on the host trust store (/etc/kennel/keys) and needs root"
@@ -599,17 +589,7 @@ struct LeafJob {
 /// tier, a user their own; the maintainer key rotates upstream, never here), a previous
 /// rotation's retired pair is still in place, or a ceremony step fails.
 pub fn rotate(args: &[String]) -> Result<ExitCode, CliError> {
-    let mut name: Option<&str> = None;
-    let mut yes = false;
-    for arg in args {
-        match arg.as_str() {
-            "--yes" => yes = true,
-            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
-            v if name.is_none() => name = Some(v),
-            _ => return Err(CliError::usage("only one <name> may be given")),
-        }
-    }
-    let name = name.ok_or_else(|| CliError::usage("usage: kennel key rotate <name> [--yes]"))?;
+    let (name, yes) = name_and_yes(args, "usage: kennel key rotate <name> [--yes]")?;
     let host = invoked_as_root();
     let tier = if host { "host" } else { "user" };
     let dir = if host {
@@ -960,6 +940,16 @@ fn resign_template(path: &Path, key: &str) -> Result<(), CliError> {
         Ok(_) => Err(CliError::Failed("the sign step failed".to_owned())),
         Err(e) => Err(e),
     }
+}
+
+/// Parse `<name> [--yes]`, the arguments of `untrust` and `rotate`.
+fn name_and_yes<'a>(args: &'a [String], usage: &str) -> Result<(&'a str, bool), CliError> {
+    let mut yes = false;
+    let name = crate::one_positional(args, "only one <name> may be given", usage, |flag, _| {
+        yes |= flag == "--yes";
+        Ok(flag == "--yes")
+    })?;
+    Ok((name, yes))
 }
 
 #[cfg(test)]
