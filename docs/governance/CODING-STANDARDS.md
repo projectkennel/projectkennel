@@ -463,6 +463,20 @@ The standard is: if a reviewer would have to ask "why?", write it down. This rul
 
 We do not write comments that restate the code. We do not write `// increment i` next to `i += 1`. We do not write "Returns a Result" in a doc comment when the signature already says so. Comments that rot are worse than no comments.
 
+### 6.5 Citations in comments
+
+Comments cite the design by section. Where each form resolves today:
+
+| Form in a comment | Resolves to |
+|---|---|
+| `§7.4.3`, `§2.7`, `§9.7` — a section number | The design corpus, `docs/archive/design/`. The file is the one whose name starts with the section's leading numbers: `§7.4.x` is `07-4-filesystem.md`, `§7.11.x` is `07-11-oci-substrate.md`, `§2.x` is `02-adversary-model.md`, `§9.x` is `09-policy-lifecycle.md`. |
+| `07-2`, `07-5` — a design file by its number | The same corpus: `docs/archive/design/07-2-kennel-init.md`, `07-5-network.md`. |
+| `02-3`, `02-7`, `02-10`, `07-paths` — an architecture file | `docs/archive/architecture/` (`02-3-audit-schema.md`, `02-7-bpf-abi.md`, `02-10-dynamic-spawn.md`, `07-paths.md`). Both directories have files numbered `02-…` and `07-…`; the topic tells them apart. |
+| `T2.8`, `T6` — a threat | `docs/reference/THREATS.md`. |
+| `Kennel book Vol N ch.M (Title)` | A chapter title, not a file in this repository. Give the section number as well when citing this way. |
+
+A citation that names a section is only as good as that section staying put. New comments cite by section number and say what the rule is, so the comment still reads if the document moves. `[review]`.
+
 ---
 
 ## 7. Tests come first

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/bind4
  * Purpose: Gate IPv4 binds by the [net.bpf].bind ACL (§7.5.7), deny-first. A bind

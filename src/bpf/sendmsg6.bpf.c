@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Program: cgroup/sendmsg6
  * Purpose: IPv6 counterpart of sendmsg4. Connectionless IPv6 datagrams are

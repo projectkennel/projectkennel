@@ -142,6 +142,23 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Leftovers from the quality assessment.**
+  - *Fuzz.* The seeded mutations were single-byte only. They now also remove and double each
+    byte, and overwrite every four-byte window with a boundary length (zero, one, one past the
+    buffer, the sign boundary, all ones) in both byte orders. No decoder failed.
+  - *Canonical form.* A golden-bytes test pins the canonical form of the sample settled
+    policy. The canonical form is what a signature covers, so a change to it now fails a test
+    and has to be accepted on purpose (`KENNEL_BLESS=1`). The sample does not populate every
+    field of the policy.
+  - *BPF licence identifier.* The BPF sources carried `SPDX-License-Identifier: GPL-2.0`, a
+    deprecated identifier; CODING-STANDARDS.md §2 requires `GPL-2.0-only`. They now carry
+    that, and the three headers, which had none, carry it too. The licence is unchanged.
+  - *Dead state.* `Provision::factory` in `kenneld` was written and never read; it is gone,
+    with the parameter that existed to set it.
+  - *Doc comments.* `effective_workload`'s doc comment sat on `resolve_cwd_grant`;
+    `af_unix_connect` had none.
+  - *Citations.* CODING-STANDARDS.md §6.5 says where the section, file-number, threat and
+    "Kennel book" citations in code comments resolve. The comments themselves are unchanged.
 - **The three node-0 handlers without a test have one.** `register_mirror`,
   `register_tun_sink` and `tun_connect` each mixed a decision with calls on the binder
   connection, which `cargo test` cannot open. The decisions are now functions of their own

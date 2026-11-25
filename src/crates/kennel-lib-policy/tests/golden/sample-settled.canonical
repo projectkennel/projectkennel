@@ -1,0 +1,75 @@
+settled_schema_version = 6
+name = "ai-coding"
+deferred_substitutions = ["<ctx>", "<uid>"]
+framework_invariants_asserted = ["cap.no_new_privs"]
+[effective_policy.net]
+mode = "constrained"
+
+[effective_policy.net.proxy]
+offset = 1
+port = 1080
+
+[[effective_policy.net.allow]]
+cidr = "93.184.216.0"
+prefix_len = 24
+port_min = 443
+port_max = 443
+protocol = "tcp"
+
+[[effective_policy.net.deny_invariant]]
+cidr = "169.254.169.254"
+prefix_len = 32
+port_min = 0
+port_max = 65535
+protocol = "any"
+
+[effective_policy.fs]
+home_shadow = true
+read = ["/usr"]
+write = ["/run/kennel/ai-coding/home"]
+
+[effective_policy.fs.tmp]
+writable = true
+size_mib = 512
+
+[effective_policy.fs.dev]
+allow = ["/dev/null", "/dev/urandom"]
+
+[effective_policy.exec]
+deny_setuid = true
+deny_setgid = true
+deny_setcap = true
+deny_writable = true
+allow = ["/usr/bin/python3"]
+path = ["/usr/bin"]
+
+[effective_policy.proc]
+hidepid = true
+
+[effective_policy.cap]
+no_new_privs = true
+
+[effective_policy.seccomp]
+deny_action = "errno"
+deny = ["bpf"]
+
+[effective_policy.lifecycle]
+ttl_seconds = 3600
+ttl_action = "exit"
+
+[effective_policy.tty]
+filter_terminal_escapes = true
+
+[effective_policy.trust]
+manifest = true
+on_change = "warn"
+
+[provenance]
+compiler_version = "0.0.0"
+schema_version = 6
+threat_catalogue_version = "0.1"
+
+[[provenance.resolved_artifacts]]
+name = "base-confined"
+signing_key_id = "kennel-maint-2026-01"
+signature = "c2ln"
