@@ -2411,26 +2411,70 @@ pub(crate) fn spawn_key(a: &SpawnAllow) -> &str {
 ///
 /// # Errors
 ///
-/// Returns a message if `reference` is empty, too long, or contains a character outside
+/// The [`RefNameError`] if `reference` is empty, too long, or contains a character outside
 /// `[a-z0-9-]` (or starts with `-`).
-pub fn validate_reference(reference: &str) -> Result<(), String> {
+pub fn validate_reference(reference: &str) -> Result<(), RefNameError> {
     validate_ref_name(reference)
 }
 
+/// Which rule of the reference grammar `[a-z0-9][a-z0-9-]{0,63}` a name breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefNameError {
+    /// Empty, or longer than 64 characters.
+    Length,
+    /// Does not start with a lowercase letter or digit.
+    FirstCharacter,
+    /// Contains a character other than a lowercase letter, a digit or `-`.
+    Character,
+}
+
+impl std::fmt::Display for RefNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Length => "name must be 1..=64 characters",
+            Self::FirstCharacter => "name must start with a lowercase letter or digit",
+            Self::Character => "name may contain only lowercase letters, digits, and `-`",
+        })
+    }
+}
+
+impl std::error::Error for RefNameError {}
+
 /// Validate the `<name>` part of a reference: `[a-z0-9][a-z0-9-]{0,63}`.
-pub(crate) fn validate_ref_name(name: &str) -> Result<(), String> {
+pub(crate) fn validate_ref_name(name: &str) -> Result<(), RefNameError> {
     if name.is_empty() || name.len() > 64 {
-        return Err("name must be 1..=64 characters".to_owned());
+        return Err(RefNameError::Length);
     }
     let mut chars = name.chars();
     match chars.next() {
         Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit() => {}
-        _ => return Err("name must start with a lowercase letter or digit".to_owned()),
+        _ => return Err(RefNameError::FirstCharacter),
     }
     if chars.any(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')) {
-        return Err("name may contain only lowercase letters, digits, and `-`".to_owned());
+        return Err(RefNameError::Character);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ref_name_tests {
+    use super::*;
+
+    #[test]
+    fn each_rule_of_the_reference_grammar_has_its_own_error() {
+        assert_eq!(validate_reference("ai-coding"), Ok(()));
+        assert_eq!(validate_reference(""), Err(RefNameError::Length));
+        assert_eq!(
+            validate_reference(&"a".repeat(65)),
+            Err(RefNameError::Length)
+        );
+        assert_eq!(validate_reference("-a"), Err(RefNameError::FirstCharacter));
+        assert_eq!(validate_reference("a@1"), Err(RefNameError::Character));
+        assert_eq!(
+            RefNameError::Length.to_string(),
+            "name must be 1..=64 characters"
+        );
+    }
 }
 
 #[cfg(test)]

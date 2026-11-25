@@ -1,8 +1,8 @@
 {
   "crate_count": 32,
-  "total_sloc": 47369,
+  "total_sloc": 47556,
   "tcb_crate_count": 18,
-  "tcb_sloc": 29202,
+  "tcb_sloc": 29302,
   "crates": [
     {
       "name": "kenneld",
@@ -16,7 +16,7 @@
     },
     {
       "name": "kennel-lib-compile",
-      "sloc": 5929,
+      "sloc": 5946,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": [],
@@ -36,7 +36,7 @@
     },
     {
       "name": "kennel-lib-policy",
-      "sloc": 3037,
+      "sloc": 3137,
       "uses_unsafe": false,
       "in_tcb": true,
       "bins": [],
@@ -156,7 +156,7 @@
     },
     {
       "name": "kennel-compose",
-      "sloc": 762,
+      "sloc": 815,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-compose"],
@@ -256,7 +256,7 @@
     },
     {
       "name": "kennel-bin-oci-entry",
-      "sloc": 159,
+      "sloc": 176,
       "uses_unsafe": false,
       "in_tcb": false,
       "bins": ["kennel-bin-oci-entry"],

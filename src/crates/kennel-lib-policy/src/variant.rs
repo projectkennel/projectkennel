@@ -158,7 +158,7 @@ impl Variant {
         if is_pattern {
             let mut pats = Vec::with_capacity(self.pattern.len());
             for p in &self.pattern {
-                pats.push(DestPattern::parse(p).map_err(|m| bad(&m))?);
+                pats.push(DestPattern::parse(p).map_err(|m| bad(&m.to_string()))?);
             }
             return Ok(Constraint::Pattern(pats));
         }
@@ -282,6 +282,67 @@ pub struct Destination {
     pub port: u16,
 }
 
+/// Why a string is not a `host:port` destination, or not a destination pattern.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestFault {
+    /// There is no `:port`.
+    MissingPort,
+    /// The host is empty.
+    EmptyHost,
+    /// The host contains `:` (an IPv6 literal).
+    Ipv6Host,
+    /// The port is not a number that fits a `u16`.
+    NotAPort(String),
+    /// The port is 0.
+    PortZero,
+    /// A `*.suffix` wildcard with an empty or wildcarded suffix.
+    MalformedSuffix,
+    /// A `prefix.*` wildcard with an empty or wildcarded prefix.
+    MalformedPrefix,
+    /// A wildcard that is neither a leading `*.` nor a trailing `.*`.
+    InteriorWildcard,
+    /// More than one wildcard.
+    TooManyWildcards,
+}
+
+impl std::fmt::Display for DestFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingPort => f.write_str("missing `:port`"),
+            Self::EmptyHost => f.write_str("empty host"),
+            Self::Ipv6Host => {
+                f.write_str("host contains `:` (IPv6 is not supported by pattern constraints)")
+            }
+            Self::NotAPort(port) => write!(f, "`{port}` is not a port"),
+            Self::PortZero => f.write_str("port 0"),
+            Self::MalformedSuffix => f.write_str("malformed `*.suffix`"),
+            Self::MalformedPrefix => f.write_str("malformed `prefix.*`"),
+            Self::InteriorWildcard => {
+                f.write_str("wildcard must be a leading `*.` or trailing `.*`, not interior")
+            }
+            Self::TooManyWildcards => f.write_str("at most one wildcard"),
+        }
+    }
+}
+
+/// A destination pattern that does not parse: the pattern as written, and what is wrong with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternError {
+    /// The pattern as written.
+    pub pattern: String,
+    /// What is wrong with it.
+    pub fault: DestFault,
+}
+
+impl std::fmt::Display for PatternError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pattern `{}`: {}", self.pattern, self.fault)
+    }
+}
+
+impl std::error::Error for DestFault {}
+impl std::error::Error for PatternError {}
+
 impl Destination {
     /// Parse `host:port`. The host is everything before the final `:`; the port is an exact `u16`.
     /// (IPv6 bracket syntax is out of scope for the pattern constraint — net patterns are names and
@@ -289,25 +350,21 @@ impl Destination {
     ///
     /// # Errors
     ///
-    /// A reason string if there is no `:port`, the host is empty or contains `:` (IPv6), or the port
-    /// is not a non-zero `u16`.
-    pub fn parse(value: &str) -> Result<Self, String> {
-        let (host, port) = value
-            .rsplit_once(':')
-            .ok_or_else(|| "missing `:port`".to_owned())?;
+    /// The [`DestFault`] if there is no `:port`, the host is empty or contains `:` (IPv6), or the
+    /// port is not a non-zero `u16`.
+    pub fn parse(value: &str) -> Result<Self, DestFault> {
+        let (host, port) = value.rsplit_once(':').ok_or(DestFault::MissingPort)?;
         if host.is_empty() {
-            return Err("empty host".to_owned());
+            return Err(DestFault::EmptyHost);
         }
         if host.contains(':') {
-            return Err(
-                "host contains `:` (IPv6 is not supported by pattern constraints)".to_owned(),
-            );
+            return Err(DestFault::Ipv6Host);
         }
         let port: u16 = port
             .parse()
-            .map_err(|_| format!("`{port}` is not a port"))?;
+            .map_err(|_| DestFault::NotAPort(port.to_owned()))?;
         if port == 0 {
-            return Err("port 0".to_owned());
+            return Err(DestFault::PortZero);
         }
         Ok(Self {
             host: host.to_owned(),
@@ -345,20 +402,25 @@ impl DestPattern {
     ///
     /// # Errors
     ///
-    /// A reason string if the port is not an exact `u16`, or the host carries a malformed / interior
-    /// / multiple wildcard.
-    pub fn parse(pattern: &str) -> Result<Self, String> {
-        let (host, port) = pattern
-            .rsplit_once(':')
-            .ok_or_else(|| format!("pattern `{pattern}`: missing `:port`"))?;
+    /// The [`PatternError`] if the port is not an exact `u16`, or the host carries a malformed,
+    /// interior or second wildcard.
+    pub fn parse(pattern: &str) -> Result<Self, PatternError> {
+        Self::parse_parts(pattern).map_err(|fault| PatternError {
+            pattern: pattern.to_owned(),
+            fault,
+        })
+    }
+
+    fn parse_parts(pattern: &str) -> Result<Self, DestFault> {
+        let (host, port) = pattern.rsplit_once(':').ok_or(DestFault::MissingPort)?;
         let port: u16 = port
             .parse()
-            .map_err(|_| format!("pattern `{pattern}`: `{port}` is not a port"))?;
+            .map_err(|_| DestFault::NotAPort(port.to_owned()))?;
         if port == 0 {
-            return Err(format!("pattern `{pattern}`: port 0"));
+            return Err(DestFault::PortZero);
         }
         if host.is_empty() {
-            return Err(format!("pattern `{pattern}`: empty host"));
+            return Err(DestFault::EmptyHost);
         }
         let stars = host.matches('*').count();
         let host = if stars == 0 {
@@ -366,21 +428,19 @@ impl DestPattern {
         } else if stars == 1 {
             if let Some(suffix) = host.strip_prefix("*.") {
                 if suffix.is_empty() || suffix.contains('*') {
-                    return Err(format!("pattern `{pattern}`: malformed `*.suffix`"));
+                    return Err(DestFault::MalformedSuffix);
                 }
                 HostPattern::Suffix(suffix.to_owned())
             } else if let Some(prefix) = host.strip_suffix(".*") {
                 if prefix.is_empty() || prefix.contains('*') {
-                    return Err(format!("pattern `{pattern}`: malformed `prefix.*`"));
+                    return Err(DestFault::MalformedPrefix);
                 }
                 HostPattern::Prefix(prefix.to_owned())
             } else {
-                return Err(format!(
-                    "pattern `{pattern}`: wildcard must be a leading `*.` or trailing `.*`, not interior"
-                ));
+                return Err(DestFault::InteriorWildcard);
             }
         } else {
-            return Err(format!("pattern `{pattern}`: at most one wildcard"));
+            return Err(DestFault::TooManyWildcards);
         };
         Ok(Self { host, port })
     }
@@ -544,9 +604,23 @@ mod tests {
         assert!(c.admits("ghcr.io:443").is_ok());
         assert!(c.admits("ghcr.io:80").is_err());
         // Interior / multiple / portless wildcards are refused at parse.
-        assert!(DestPattern::parse("a.*.b:443").is_err());
-        assert!(DestPattern::parse("*.*.com:443").is_err());
-        assert!(DestPattern::parse("ghcr.io").is_err());
-        assert!(DestPattern::parse("ghcr.io:0").is_err());
+        let fault = |p: &str| DestPattern::parse(p).map_err(|e| e.fault);
+        assert_eq!(fault("a.*.b:443"), Err(DestFault::InteriorWildcard));
+        assert_eq!(fault("*.*.com:443"), Err(DestFault::TooManyWildcards));
+        assert_eq!(fault("ghcr.io"), Err(DestFault::MissingPort));
+        assert_eq!(fault("ghcr.io:0"), Err(DestFault::PortZero));
+        assert_eq!(
+            fault("ghcr.io:http"),
+            Err(DestFault::NotAPort("http".to_owned()))
+        );
+        assert_eq!(fault(":443"), Err(DestFault::EmptyHost));
+        assert_eq!(fault("*.:443"), Err(DestFault::MalformedSuffix));
+        // The text names the pattern and the fault, as it did when this was a string.
+        assert_eq!(
+            DestPattern::parse("ghcr.io:0").map_err(|e| e.to_string()),
+            Err("pattern `ghcr.io:0`: port 0".to_owned())
+        );
+        assert_eq!(Destination::parse("[::1]:443"), Err(DestFault::Ipv6Host));
+        assert_eq!(Destination::parse("h"), Err(DestFault::MissingPort));
     }
 }

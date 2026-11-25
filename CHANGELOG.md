@@ -142,6 +142,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The last `String` errors outside the test code are typed.** `kennel-compose`
+  (`ArgError`, `BinaryError`, `ProbeError`; its prompts return `io::Error`),
+  `kennel-bin-oci-entry` (`EntryError`), the destination and pattern parsers in
+  `kennel-lib-policy` (`DestFault`, `PatternError`), its OpenSSH key parser
+  (`KeyParseError`, one variant per way an untrusted key file can be wrong) and the
+  reference-name check in
+  `kennel-lib-compile` (`RefNameError`). Messages are unchanged. No shipped function returns
+  `Result<_, String>` any more.
 - **No function in `kenneld` returns a `String` error.** The last four are converted: the
   binary's startup (`StartupError`), the enablement scan's per-link load (`ProviderError`),
   and the spawn path's narrowed-manifest check (`OutsideNarrowedManifest`). Messages are

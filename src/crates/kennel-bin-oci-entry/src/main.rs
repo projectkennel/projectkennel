@@ -16,7 +16,7 @@
 mod env_strip;
 
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use serde::Deserialize;
@@ -57,7 +57,31 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Why the image's command was not run.
+#[derive(Debug)]
+enum EntryError {
+    /// The image config could not be read.
+    Read(PathBuf, std::io::Error),
+    /// The image config is not the JSON this launcher expects.
+    Parse(PathBuf, serde_json::Error),
+    /// The image config names no command and none was given.
+    NoCommand,
+    /// The command could not be executed.
+    Exec(String, std::io::Error),
+}
+
+impl std::fmt::Display for EntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read(path, e) => write!(f, "reading {}: {e}", path.display()),
+            Self::Parse(path, e) => write!(f, "parsing {}: {e}", path.display()),
+            Self::NoCommand => f.write_str("image config has neither Entrypoint nor Cmd"),
+            Self::Exec(prog, e) => write!(f, "execve {prog}: {e}"),
+        }
+    }
+}
+
+fn run() -> Result<(), EntryError> {
     // argv: [config-path] [-- override Cmd tokens...]. kenneld passes the config path as the
     // launcher's argv[1]; any `kennel oci run … -- <cmd>` tokens follow as a Cmd override.
     let mut cli = std::env::args().skip(1);
@@ -67,7 +91,7 @@ fn run() -> Result<(), String> {
 
     let argv = resolve_argv(&cfg.entrypoint, &cfg.cmd, &override_cmd);
     let Some((prog, rest)) = argv.split_first() else {
-        return Err("image config has neither Entrypoint nor Cmd".to_owned());
+        return Err(EntryError::NoCommand);
     };
 
     // Env: image env (sanitised) is the floor; the launcher's own environ (Kennel-synthesised) is
@@ -103,12 +127,12 @@ fn run() -> Result<(), String> {
         command.current_dir(&cfg.working_dir);
     }
     // `exec` replaces this process image; it returns only on failure.
-    Err(format!("execve {prog}: {}", command.exec()))
+    Err(EntryError::Exec(prog.clone(), command.exec()))
 }
 
-fn read_config(path: &Path) -> Result<ImageConfigBlob, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("parsing {}: {e}", path.display()))
+fn read_config(path: &Path) -> Result<ImageConfigBlob, EntryError> {
+    let bytes = std::fs::read(path).map_err(|e| EntryError::Read(path.to_path_buf(), e))?;
+    serde_json::from_slice(&bytes).map_err(|e| EntryError::Parse(path.to_path_buf(), e))
 }
 
 /// Resolve the final argv: `Entrypoint ++ Cmd` per OCI image-spec semantics, with a non-empty

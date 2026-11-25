@@ -350,7 +350,7 @@ fn build_leaf_from_probe(name: &str, probe_result: &probe::ProbeResult) -> Sourc
 fn build_leaf_interactive(
     name: &str,
     probe_result: &probe::ProbeResult,
-) -> Result<SourcePolicy, String> {
+) -> std::io::Result<SourcePolicy> {
     let mut leaf = build_leaf_from_probe(name, probe_result);
 
     // Override template base interactively.
@@ -364,7 +364,7 @@ fn build_leaf_interactive(
 }
 
 /// Ask capability questions and populate the leaf in-place.
-fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
+fn ask_capabilities(leaf: &mut SourcePolicy) -> std::io::Result<()> {
     use std::io::{self, BufRead, Write};
 
     let stdin = io::stdin();
@@ -417,14 +417,10 @@ fn ask_capabilities(leaf: &mut SourcePolicy) -> Result<(), String> {
     write!(
         stdout,
         "Home directory write path (e.g. ~/projects/myproj/**, blank for none): "
-    )
-    .map_err(|e| e.to_string())?;
-    stdout.flush().map_err(|e| e.to_string())?;
+    )?;
+    stdout.flush()?;
     let mut line = String::new();
-    stdin
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
+    stdin.lock().read_line(&mut line)?;
     let home_path = line.trim();
     if !home_path.is_empty() {
         let fs = leaf.fs.get_or_insert_with(FsSection::default);
@@ -562,30 +558,86 @@ fn emit_leaf(leaf: &SourcePolicy, args: &Args, is_script: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+// --- Errors ---
+
+/// What is wrong with the command line.
+#[derive(Debug)]
+enum ArgError {
+    /// No arguments at all.
+    NoArguments,
+    /// A flag that takes a value was given without one.
+    MissingValue(&'static str),
+    /// A flag this tool does not take.
+    UnknownFlag(String),
+    /// No kennel name.
+    MissingName,
+    /// `--compose` was given together with a binary.
+    ComposeTakesNoBinary,
+    /// No binary, and no `--compose`.
+    MissingBinary,
+    /// More positional arguments than a name and a binary.
+    TooManyPositionals,
+    /// The binary could not be found.
+    Binary(BinaryError),
+}
+
+impl std::fmt::Display for ArgError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoArguments => f.write_str("no arguments"),
+            Self::MissingValue(flag) => write!(f, "{flag} needs a value"),
+            Self::UnknownFlag(flag) => write!(f, "unknown flag `{flag}`"),
+            Self::MissingName => f.write_str("missing kennel name"),
+            Self::ComposeTakesNoBinary => f.write_str("--compose does not take a binary argument"),
+            Self::MissingBinary => f.write_str("missing binary path (or use --compose)"),
+            Self::TooManyPositionals => f.write_str("too many positional arguments"),
+            Self::Binary(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Why the binary named on the command line could not be resolved.
+#[derive(Debug)]
+enum BinaryError {
+    /// An absolute path that does not exist.
+    NotFound(String),
+    /// A path that could not be resolved.
+    Resolve(String, std::io::Error),
+    /// A bare name that is in no `$PATH` directory.
+    NotOnPath(String),
+}
+
+impl std::fmt::Display for BinaryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(raw) => write!(f, "{raw}: not found"),
+            Self::Resolve(shown, e) => write!(f, "{shown}: {e}"),
+            Self::NotOnPath(raw) => write!(f, "`{raw}` not found on $PATH"),
+        }
+    }
+}
+
 // --- Helpers ---
 
-fn ask_line(prompt: &str) -> Result<String, String> {
+fn ask_line(prompt: &str) -> std::io::Result<String> {
     use std::io::{self, BufRead, Write};
-    write!(io::stdout(), "{prompt}").map_err(|e| e.to_string())?;
-    io::stdout().flush().map_err(|e| e.to_string())?;
+    write!(io::stdout(), "{prompt}")?;
+    io::stdout().flush()?;
     let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
+    io::stdin().lock().read_line(&mut line)?;
     Ok(line.trim().to_owned())
 }
 
-fn ask_yn(prompt: &str) -> Result<bool, String> {
+fn ask_yn(prompt: &str) -> std::io::Result<bool> {
     Ok(ask_line(prompt)?.eq_ignore_ascii_case("y"))
 }
 
 // --- Arg parsing ---
 
-fn parse_args() -> Result<Args, String> {
+fn parse_args() -> Result<Args, ArgError> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if raw.is_empty() {
-        return Err("no arguments".to_owned());
+        return Err(ArgError::NoArguments);
     }
 
     let mut no_prompts = false;
@@ -600,36 +652,38 @@ fn parse_args() -> Result<Args, String> {
             "--no-prompts" => no_prompts = true,
             "--compose" => compose = true,
             "--output" => {
-                output = Some(it.next().ok_or("--output needs a value")?.into());
+                output = Some(it.next().ok_or(ArgError::MissingValue("--output"))?.into());
             }
             "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+                template_dirs.push(
+                    it.next()
+                        .ok_or(ArgError::MissingValue("--template-dir"))?
+                        .into(),
+                );
             }
             "--help" | "-h" => {
                 print_usage();
                 std::process::exit(0);
             }
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(ArgError::UnknownFlag(flag.to_owned())),
             _ => positionals.push(arg.clone()),
         }
     }
 
-    let name = positionals.first().ok_or("missing kennel name")?.clone();
+    let name = positionals.first().ok_or(ArgError::MissingName)?.clone();
 
     let binary = if compose {
         if positionals.len() > 1 {
-            return Err("--compose does not take a binary argument".to_owned());
+            return Err(ArgError::ComposeTakesNoBinary);
         }
         None
     } else {
-        let raw_binary = positionals
-            .get(1)
-            .ok_or("missing binary path (or use --compose)")?;
-        Some(resolve_binary(raw_binary)?)
+        let raw_binary = positionals.get(1).ok_or(ArgError::MissingBinary)?;
+        Some(resolve_binary(raw_binary).map_err(ArgError::Binary)?)
     };
 
     if positionals.len() > 2 {
-        return Err("too many positional arguments".to_owned());
+        return Err(ArgError::TooManyPositionals);
     }
 
     Ok(Args {
@@ -647,19 +701,19 @@ fn parse_args() -> Result<Args, String> {
 /// - Absolute paths are used as-is.
 /// - Relative paths (starting with `.` or `..`) are resolved against CWD.
 /// - Bare names (no `/`) are searched via `$PATH` (like `which`).
-fn resolve_binary(raw: &str) -> Result<PathBuf, String> {
+fn resolve_binary(raw: &str) -> Result<PathBuf, BinaryError> {
     let path = Path::new(raw);
 
     if path.is_absolute() {
         if !path.exists() {
-            return Err(format!("{raw}: not found"));
+            return Err(BinaryError::NotFound(raw.to_owned()));
         }
         return Ok(path.to_owned());
     }
 
     // Relative path (contains `/` — e.g. `./run.sh`, `../scripts/app.py`).
     if raw.contains('/') {
-        return std::fs::canonicalize(path).map_err(|e| format!("{raw}: {e}"));
+        return std::fs::canonicalize(path).map_err(|e| BinaryError::Resolve(raw.to_owned(), e));
     }
 
     // Bare name — search $PATH.
@@ -668,11 +722,11 @@ fn resolve_binary(raw: &str) -> Result<PathBuf, String> {
         let candidate = Path::new(dir).join(raw);
         if candidate.is_file() {
             return std::fs::canonicalize(&candidate)
-                .map_err(|e| format!("{}: {e}", candidate.display()));
+                .map_err(|e| BinaryError::Resolve(candidate.display().to_string(), e));
         }
     }
 
-    Err(format!("`{raw}` not found on $PATH"))
+    Err(BinaryError::NotOnPath(raw.to_owned()))
 }
 
 fn print_usage() {
@@ -717,14 +771,33 @@ mod tests {
     /// Compile a composed leaf against the real base-confined floor (unsigned dev trust),
     /// returning the settled policy — so a test can assert not just that it compiles but
     /// that the grant SURVIVES the fold (the silent-drop the delta form would cause).
-    fn compile_leaf(leaf: &SourcePolicy) -> Result<kennel_lib_policy::SettledPolicy, String> {
-        let bytes = kennel_lib_toml::to_string(leaf).map_err(|e| e.to_string())?;
-        let entry =
-            kennel_lib_compile::parse_source(bytes.as_bytes()).map_err(|e| e.to_string())?;
+    fn compile_leaf(
+        leaf: &SourcePolicy,
+    ) -> Result<kennel_lib_policy::SettledPolicy, Box<dyn std::error::Error>> {
+        let bytes = kennel_lib_toml::to_string(leaf)?;
+        let entry = kennel_lib_compile::parse_source(bytes.as_bytes())?;
         let trust = kennel_lib_compile::source_sig::Trust::dev();
-        kennel_lib_compile::compile(&entry, &OneTemplate, &trust, "0.0.0-test")
-            .map(|c| c.policy)
-            .map_err(|e| e.to_string())
+        Ok(kennel_lib_compile::compile(&entry, &OneTemplate, &trust, "0.0.0-test")?.policy)
+    }
+
+    #[test]
+    fn a_wrong_command_line_says_which_way_it_is_wrong() {
+        assert_eq!(
+            ArgError::MissingValue("--output").to_string(),
+            "--output needs a value"
+        );
+        assert_eq!(
+            ArgError::UnknownFlag("--nope".to_owned()).to_string(),
+            "unknown flag `--nope`"
+        );
+        assert!(matches!(
+            resolve_binary("/nonexistent/kennel-compose-test"),
+            Err(BinaryError::NotFound(_))
+        ));
+        assert_eq!(
+            resolve_binary("kennel-compose-no-such-program").map_err(|e| e.to_string()),
+            Err("`kennel-compose-no-such-program` not found on $PATH".to_owned())
+        );
     }
 
     fn base_leaf() -> SourcePolicy {
