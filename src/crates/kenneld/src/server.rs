@@ -14,6 +14,7 @@
 //! signed-policy crypto: [`Privileged`] (the privhelper) and [`PolicyLoader`]
 //! (policy file → [`Plan`]).
 
+use kennel_lib_spawn::Ctx;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -258,7 +259,7 @@ pub struct BastionSetup {
 /// Registry metadata for one kennel (the workload itself is owned by the
 /// connection thread that started it).
 struct KennelMeta {
-    ctx: u16,
+    ctx: Ctx,
     /// `None` while the kennel is still starting (before the workload's pid is known).
     pid: Option<u32>,
     /// The PTY broker for an interactive kennel, once the master is owned. `None` for
@@ -324,7 +325,7 @@ struct Registry {
 /// There is no stored filter table and no per-consumer state — the running kennel's own settled
 /// policy is the single source. `None` if there is no such running kennel, its policy is not
 /// retained, the capability is not a dbus one, or the kennel does not enable that bus.
-fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
+fn session_policy_for(reg: &Registry, ctx: Ctx, name: &str) -> Option<Vec<u8>> {
     use kennel_lib_binder::service::{broker, dbus};
 
     let settled = reg
@@ -358,7 +359,7 @@ fn session_policy_for(reg: &Registry, ctx: u16, name: &str) -> Option<Vec<u8>> {
 /// provider at exactly this bus's tier, and its **signed** policy declares the name in
 /// `[[provides]]` (the reserved-namespace gate was applied to that policy at compile and is sealed
 /// in its signature). Both facts are the daemon's own records; nothing here comes from the caller.
-fn provides_at(reg: &Registry, ctx: u16, tier: crate::catalogue::Tier, name: &str) -> bool {
+fn provides_at(reg: &Registry, ctx: Ctx, tier: crate::catalogue::Tier, name: &str) -> bool {
     reg.kennels.values().any(|m| {
         m.ctx == ctx
             && m.provider_tier == Some(tier)
@@ -811,6 +812,8 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             crate::mesh_bus::Mediation {
                 broker_service: name.to_owned(),
                 policy: std::sync::Arc::new(move |ctx: u16, cap: &str| {
+                    // A bus peer with no kennel context has no session policy.
+                    let ctx = Ctx::new(ctx)?;
                     let reg = registry
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -836,6 +839,10 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         let registry = std::sync::Arc::clone(&self.registry);
         let may_register: crate::mesh_bus::RegisterFn =
             std::sync::Arc::new(move |ctx: u16, service: &str| {
+                // A bus peer with no kennel context provides nothing.
+                let Some(ctx) = Ctx::new(ctx) else {
+                    return false;
+                };
                 let reg = registry
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -892,7 +899,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
 
     /// Reserve a name and allocate its context, atomically. Returns the context,
     /// or an error response if the name is taken or the pool is exhausted.
-    fn reserve(&self, name: &KennelName) -> Result<u16, Response> {
+    fn reserve(&self, name: &KennelName) -> Result<Ctx, Response> {
         let mut reg = self
             .registry
             .lock()
@@ -977,7 +984,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// The `(ctx, pid)` of a started kennel, or `None` if unknown or still starting.
-    fn ctx_pid(&self, name: &KennelName) -> Option<(u16, u32)> {
+    fn ctx_pid(&self, name: &KennelName) -> Option<(Ctx, u32)> {
         let reg = self
             .registry
             .lock()
@@ -1041,7 +1048,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     }
 
     /// Deregister `name` and return its context to the pool.
-    fn release(&self, name: &KennelName, ctx: u16) {
+    fn release(&self, name: &KennelName, ctx: Ctx) {
         let mut reg = self
             .registry
             .lock()
@@ -1116,9 +1123,9 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// requester tears down — explicit `stop`, or its own workload exit / TTL — so a tool that ignores
     /// the soft-reaper `EOF` still dies with the agent that spawned it (the template's TTL is the
     /// independent backstop for the requester-holds-its-session-forever case).
-    fn reap_children(&self, parent_ctx: u16) {
+    fn reap_children(&self, parent_ctx: Ctx) {
         let prefix = crate::spawn::child_name_prefix(parent_ctx);
-        let children: Vec<u16> = {
+        let children: Vec<Ctx> = {
             let mut reg = self
                 .registry
                 .lock()
@@ -1171,7 +1178,7 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
             .iter()
             .map(|(name, meta)| KennelInfo {
                 kennel: name.to_string(),
-                ctx: meta.ctx,
+                ctx: meta.ctx.get(),
                 pid: meta.pid.unwrap_or(0),
                 running: meta.pid.is_some(),
                 attached: meta
@@ -1709,7 +1716,7 @@ fn run_attach<P, L>(
     let _ = control::send_response(
         conn,
         &Response::Attached {
-            ctx,
+            ctx: ctx.get(),
             pid,
             filter_escapes: broker.filter_escapes(),
         },
@@ -1735,7 +1742,7 @@ fn admit<P, L>(
     kname: &KennelName,
     spawned: bool,
     conn: &mut UnixStream,
-) -> Option<u16>
+) -> Option<Ctx>
 where
     P: Privileged + Clone + Send + Sync + 'static,
     L: PolicyLoader + Send + Sync + 'static,
@@ -1855,7 +1862,7 @@ where
 fn etc_setup(
     id: &Identity,
     kname: &KennelName,
-    ctx: u16,
+    ctx: Ctx,
     loaded: &Loaded,
     shim_root: &Path,
 ) -> Option<crate::EtcSetup> {
@@ -1909,7 +1916,7 @@ fn settle<P, L>(
     req: &StartRequest,
     fds: Vec<OwnedFd>,
     preloaded: Option<kennel_lib_policy::SettledPolicy>,
-    ctx: u16,
+    ctx: Ctx,
 ) -> Result<Settled, Refused>
 where
     P: Privileged + Clone + Send + Sync + 'static,
@@ -1997,7 +2004,7 @@ fn assemble<P, L>(
     kname: &KennelName,
     req: &StartRequest,
     provider_tier: Option<crate::catalogue::Tier>,
-    ctx: u16,
+    ctx: Ctx,
     mesh_bus_guard: &mut MeshBusGuard<'_, P, L>,
     settled: Settled,
 ) -> Result<Assembled, Refused>
@@ -2617,7 +2624,7 @@ fn supervise<P, L>(
     kname: &KennelName,
     req: &StartRequest,
     conn: &mut UnixStream,
-    ctx: u16,
+    ctx: Ctx,
     parent_alive: Option<&std::sync::atomic::AtomicBool>,
     running: Running,
 ) where
@@ -2685,7 +2692,7 @@ fn supervise<P, L>(
     let _ = control::send_response(
         conn,
         &Response::Started {
-            ctx,
+            ctx: ctx.get(),
             pid,
             filter_escapes: req.interactive && loaded_tty_filter,
         },
@@ -3149,7 +3156,7 @@ fn workload_env(command: &mut Command, loaded: &Loaded, home: &Path, term: &str)
 fn fail<P: Privileged + Clone, L: PolicyLoader>(
     shared: &Shared<P, L>,
     name: &KennelName,
-    ctx: u16,
+    ctx: Ctx,
     conn: &mut UnixStream,
     stage: StartStage,
     reason: impl std::fmt::Display,
@@ -3215,7 +3222,7 @@ fn resolve_path(raw: &str, subst: &RuntimeSubstitutions, base_home: &Path) -> Pa
     let s = kennel_lib_policy::settled::fill_socket_placeholders(
         raw,
         &subst.kennel,
-        subst.ctx,
+        subst.ctx.get(),
         subst.uid,
         &subst.home.to_string_lossy(),
     );
@@ -3894,7 +3901,7 @@ mod tests {
         // operator would plausibly choose should be.
         assert!(is_reserved_kennel_name(&format!(
             "{}00000000002a",
-            crate::spawn::child_name_prefix(7)
+            crate::spawn::child_name_prefix(Ctx::new(7).expect("a non-zero ctx"))
         )));
         assert!(is_reserved_kennel_name("spawn-7-1"));
         assert!(
@@ -3954,7 +3961,7 @@ mod tests {
     #[derive(Clone)]
     struct OkPriv;
     impl Privileged for OkPriv {
-        fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<HelperResponse> {
+        fn del_address(&self, _: Ctx, _: &str, _: IpAddr, _: u8) -> io::Result<HelperResponse> {
             Ok(HelperResponse::ok())
         }
     }
@@ -4086,11 +4093,15 @@ mod tests {
     #[test]
     fn reserve_allocates_and_refuses_duplicates() {
         let s = shared();
-        assert_eq!(s.reserve(&kn("a")), Ok(1));
-        assert_eq!(s.reserve(&kn("b")), Ok(2));
+        assert_eq!(s.reserve(&kn("a")).map(Ctx::get), Ok(1));
+        assert_eq!(s.reserve(&kn("b")).map(Ctx::get), Ok(2));
         assert!(s.reserve(&kn("a")).is_err(), "duplicate name refused");
-        s.release(&kn("a"), 1);
-        assert_eq!(s.reserve(&kn("a")), Ok(1), "released ctx is reusable");
+        s.release(&kn("a"), Ctx::new(1).expect("a non-zero ctx"));
+        assert_eq!(
+            s.reserve(&kn("a")).map(Ctx::get),
+            Ok(1),
+            "released ctx is reusable"
+        );
     }
 
     #[test]
@@ -4115,7 +4126,7 @@ mod tests {
         use kennel_lib_policy::settled::Shape;
         let s = shared();
         let subst = RuntimeSubstitutions {
-            ctx: 1,
+            ctx: Ctx::new(1).expect("a non-zero ctx"),
             uid: 1000,
             kennel: "t".to_owned(),
             home: PathBuf::from("/home/dev"),

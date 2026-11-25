@@ -25,6 +25,7 @@
 //! outbound reply ([[binder-fd-passing-safety-verdict]]). The slot releases when the spawned kennel
 //! terminates (soft `EOF`, the template's TTL self-reap, or a build abort — §7.12.7).
 
+use kennel_lib_spawn::Ctx;
 use std::io;
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
@@ -227,7 +228,7 @@ fn deny(status: u8, reason: impl Into<String>) -> Deny {
 pub fn handle_spawn(
     rt: Option<&SpawnRuntime>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let Some(rt) = rt else {
@@ -280,7 +281,7 @@ pub fn handle_spawn(
 pub fn handle_spawn_query(
     rt: Option<&SpawnRuntime>,
     incoming: &Incoming,
-    ctx: u16,
+    ctx: Ctx,
     writer: &Writer,
 ) -> Reply {
     let Some(rt) = rt else {
@@ -521,7 +522,7 @@ fn mint() -> io::Result<(Vec<OwnedFd>, Channel)> {
 /// reaper can find every child of a requester by registry prefix. The id is a process-global
 /// monotonic counter — clocks/`Math::random` are unavailable in this build, and a counter is
 /// collision-free within a daemon's life (all a transient name needs — `02-10` §Ephemerality).
-fn spawn_name(parent_ctx: u16) -> String {
+fn spawn_name(parent_ctx: Ctx) -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     format!(
         "spawn-{parent_ctx}-{:012x}",
@@ -532,12 +533,12 @@ fn spawn_name(parent_ctx: u16) -> String {
 /// The registry-name prefix for every kennel spawned by the requester at `parent_ctx` — the hard
 /// reaper's lookup key (§7.12.7).
 #[must_use]
-pub fn child_name_prefix(parent_ctx: u16) -> String {
+pub fn child_name_prefix(parent_ctx: Ctx) -> String {
     format!("spawn-{parent_ctx}-")
 }
 
 /// Emit a `kennel.spawn` audit event (`02-10` §Audit events).
-fn emit(writer: &Writer, ctx: u16, incoming: &Incoming, outcome: Outcome, detail: &str) {
+fn emit(writer: &Writer, ctx: Ctx, incoming: &Incoming, outcome: Outcome, detail: &str) {
     writer.emit(
         &Event::new("kennel.spawn", Resource::Binder, outcome, Source::Kenneld)
             .pid(u32::try_from(incoming.sender_pid).unwrap_or(0))
@@ -677,15 +678,15 @@ mod tests {
 
     #[test]
     fn spawn_name_encodes_the_parent_ctx_and_is_unique() {
-        let n1 = spawn_name(7);
-        let n2 = spawn_name(7);
+        let n1 = spawn_name(Ctx::new(7).expect("a non-zero ctx"));
+        let n2 = spawn_name(Ctx::new(7).expect("a non-zero ctx"));
         assert_ne!(n1, n2, "names are unique");
         assert!(
-            n1.starts_with(&child_name_prefix(7)),
+            n1.starts_with(&child_name_prefix(Ctx::new(7).expect("a non-zero ctx"))),
             "encodes the parent ctx"
         );
         assert!(
-            !n1.starts_with(&child_name_prefix(8)),
+            !n1.starts_with(&child_name_prefix(Ctx::new(8).expect("a non-zero ctx"))),
             "distinguishes parents"
         );
     }

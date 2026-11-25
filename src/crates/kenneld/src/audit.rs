@@ -8,6 +8,7 @@
 //! netproxy is the other. Sink/writer assembly is shared via
 //! [`kennel_lib_audit::build`]; kenneld maps the settled runtime onto it.
 
+use kennel_lib_spawn::Ctx;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -219,7 +220,7 @@ fn parse_level(token: Option<&str>) -> Option<Level> {
 
 /// `lifecycle.kennel-start`: the workload was spawned (`started_pid`).
 #[must_use]
-pub fn kennel_start(pid: u32, ctx: u16) -> Event {
+pub fn kennel_start(pid: u32, ctx: Ctx) -> Event {
     Event::new(
         "lifecycle.kennel-start",
         Resource::Lifecycle,
@@ -514,7 +515,7 @@ impl<'a, P> AuditedPrivileged<'a, P> {
     }
 }
 
-fn addr_params(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Value {
+fn addr_params(ctx: Ctx, interface: &str, addr: IpAddr, prefix: u8) -> Value {
     Value::object(vec![
         ("ctx", Value::Uint(u64::from(ctx))),
         ("interface", Value::str(interface.to_owned())),
@@ -526,7 +527,7 @@ fn addr_params(ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> Value {
 impl<P: Privileged> Privileged for AuditedPrivileged<'_, P> {
     fn del_address(
         &self,
-        ctx: u16,
+        ctx: Ctx,
         interface: &str,
         addr: IpAddr,
         prefix: u8,
@@ -569,7 +570,7 @@ mod tests {
     /// A `Privileged` that returns one fixed response for every operation.
     struct FixedPriv(Response);
     impl Privileged for FixedPriv {
-        fn del_address(&self, _: u16, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
+        fn del_address(&self, _: Ctx, _: &str, _: IpAddr, _: u8) -> io::Result<Response> {
             Ok(self.0)
         }
     }
@@ -602,7 +603,7 @@ mod tests {
             &AuditRuntime::default(),
             "test-uuid".to_owned(),
         );
-        assert!(writer.emit(&kennel_start(4242, 7)));
+        assert!(writer.emit(&kennel_start(4242, Ctx::new(7).expect("a non-zero ctx"))));
         // Sinks are buffered (TimeoutSink); dropping the writer joins the worker
         // so the event is flushed to the file before we read it.
         drop(writer);
@@ -660,12 +661,12 @@ mod tests {
         let refusing = FixedPriv(Response::refused(2));
         let audited = AuditedPrivileged::new(&refusing, Some(&writer));
         let addr = "127.0.0.1".parse::<IpAddr>().expect("addr");
-        let _ = audited.del_address(7, "lo", addr, 28);
+        let _ = audited.del_address(Ctx::new(7).expect("a non-zero ctx"), "lo", addr, 28);
 
         // A success (invoke) on del_address.
         let ok = FixedPriv(Response::ok());
         let audited_ok = AuditedPrivileged::new(&ok, Some(&writer));
-        let _ = audited_ok.del_address(8, "lo", addr, 28);
+        let _ = audited_ok.del_address(Ctx::new(8).expect("a non-zero ctx"), "lo", addr, 28);
 
         // Dropping the writer joins the buffered sink so priv.jsonl is flushed.
         drop(writer);

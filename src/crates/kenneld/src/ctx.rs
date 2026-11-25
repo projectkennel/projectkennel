@@ -14,6 +14,7 @@
 //! *reuse* across restarts is the registry's concern (it remembers which name
 //! held which `ctx`), not the allocator's.
 
+use kennel_lib_spawn::Ctx;
 use std::collections::BTreeSet;
 
 /// The `ctx` reserved for the default (unconfined) context; never allocated.
@@ -25,7 +26,7 @@ pub const MAX_V4_CTX: u16 = 255;
 /// A per-user allocator of kennel context numbers.
 #[derive(Debug)]
 pub struct CtxAllocator {
-    used: BTreeSet<u16>,
+    used: BTreeSet<Ctx>,
     max: u16,
 }
 
@@ -56,37 +57,37 @@ impl CtxAllocator {
     }
 
     /// Allocate the lowest free `ctx`, or `None` if the range is exhausted.
-    pub fn allocate(&mut self) -> Option<u16> {
-        // Skip the reserved default context; scan upward for the first gap.
-        (DEFAULT_CTX.checked_add(1)?..=self.max)
-            .find(|c| !self.used.contains(c))
-            .inspect(|&c| {
-                self.used.insert(c);
-            })
+    pub fn allocate(&mut self) -> Option<Ctx> {
+        // A `Ctx` is never the reserved default context; scan upward for the first gap.
+        let free = (1..=self.max)
+            .filter_map(Ctx::new)
+            .find(|c| !self.used.contains(c))?;
+        self.used.insert(free);
+        Some(free)
     }
 
     /// Mark `ctx` as in use (e.g. reusing a name's previous context). Returns
     /// `true` if it was free and is now reserved, `false` if already in use or out
     /// of range.
-    pub fn reserve(&mut self, ctx: u16) -> bool {
-        if ctx == DEFAULT_CTX || ctx > self.max || self.used.contains(&ctx) {
+    pub fn reserve(&mut self, ctx: Ctx) -> bool {
+        if ctx.get() > self.max || self.used.contains(&ctx) {
             return false;
         }
         self.used.insert(ctx)
     }
 
-    /// Release `ctx` back to the pool.
-    pub fn release(&mut self, ctx: u16) {
+    /// Return `ctx` to the pool.
+    pub fn release(&mut self, ctx: Ctx) {
         self.used.remove(&ctx);
     }
 
     /// Whether `ctx` is currently allocated.
     #[must_use]
-    pub fn is_allocated(&self, ctx: u16) -> bool {
+    pub fn is_allocated(&self, ctx: Ctx) -> bool {
         self.used.contains(&ctx)
     }
 
-    /// How many contexts are currently allocated.
+    /// The number of allocated contexts.
     #[must_use]
     pub fn len(&self) -> usize {
         self.used.len()
@@ -103,47 +104,58 @@ impl CtxAllocator {
 mod tests {
     use super::*;
 
+    fn c(n: u16) -> Ctx {
+        Ctx::new(n).expect("a non-zero ctx")
+    }
+
     #[test]
     fn allocates_lowest_free_skipping_zero() {
         let mut a = CtxAllocator::new();
-        assert_eq!(a.allocate(), Some(1));
-        assert_eq!(a.allocate(), Some(2));
-        assert_eq!(a.allocate(), Some(3));
+        assert_eq!(a.allocate(), Some(c(1)));
+        assert_eq!(a.allocate(), Some(c(2)));
+        assert_eq!(a.allocate(), Some(c(3)));
     }
 
     #[test]
     fn release_makes_a_context_reusable_lowest_first() {
         let mut a = CtxAllocator::new();
         let (one, two, three) = (a.allocate(), a.allocate(), a.allocate());
-        assert_eq!((one, two, three), (Some(1), Some(2), Some(3)));
-        a.release(2);
-        assert_eq!(a.allocate(), Some(2), "the freed slot is the lowest free");
-        assert_eq!(a.allocate(), Some(4));
+        assert_eq!((one, two, three), (Some(c(1)), Some(c(2)), Some(c(3))));
+        a.release(c(2));
+        assert_eq!(
+            a.allocate(),
+            Some(c(2)),
+            "the freed slot is the lowest free"
+        );
+        assert_eq!(a.allocate(), Some(c(4)));
     }
 
     #[test]
     fn reserve_pins_a_specific_context() {
         let mut a = CtxAllocator::new();
-        assert!(a.reserve(5), "5 was free");
-        assert!(!a.reserve(5), "5 is now taken");
-        assert!(!a.reserve(0), "ctx 0 is reserved for the default context");
+        assert!(a.reserve(c(5)), "5 was free");
+        assert!(!a.reserve(c(5)), "5 is now taken");
+        // Context 0, the default context, cannot even be named as a kennel's.
+        assert_eq!(Ctx::new(DEFAULT_CTX), None);
         // Allocation skips the reserved 5.
-        assert_eq!(a.allocate(), Some(1));
+        assert_eq!(a.allocate(), Some(c(1)));
         for _ in 1..4 {
             a.allocate();
         }
-        assert_eq!(a.allocate(), Some(6), "5 stays pinned, so 6 follows 4");
+        assert_eq!(a.allocate(), Some(c(6)), "5 stays pinned, so 6 follows 4");
     }
 
     #[test]
     fn exhaustion_yields_none() {
         let mut a = CtxAllocator::with_max(2); // contexts 1 and 2
-        assert_eq!(a.allocate(), Some(1));
-        assert_eq!(a.allocate(), Some(2));
+        assert_eq!(a.allocate(), Some(c(1)));
+        assert_eq!(a.allocate(), Some(c(2)));
         assert_eq!(a.allocate(), None, "range exhausted");
         assert_eq!(a.len(), 2);
-        a.release(1);
-        assert!(!a.is_allocated(1));
-        assert_eq!(a.allocate(), Some(1));
+        a.release(c(1));
+        assert!(!a.is_allocated(c(1)));
+        assert_eq!(a.allocate(), Some(c(1)));
+        // A context above the allocator's range cannot be reserved.
+        assert!(!a.reserve(c(3)));
     }
 }

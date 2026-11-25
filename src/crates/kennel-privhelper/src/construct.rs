@@ -783,7 +783,10 @@ fn pop_stdio_fds(
 /// operator-supplied addresses; the gate moves with the privilege). One exec per address; an
 /// empty list — the common no-bind case (100% of ephemeral spawns) — execs nothing, so the
 /// network helper is never even invoked.
-fn add_loopback_via_helper(addrs: &[LoopbackAddr], ctx: u16) -> Result<(), ConstructError> {
+fn add_loopback_via_helper(
+    addrs: &[LoopbackAddr],
+    ctx: kennel_lib_spawn::Ctx,
+) -> Result<(), ConstructError> {
     if addrs.is_empty() {
         return Ok(());
     }

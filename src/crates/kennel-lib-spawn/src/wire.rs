@@ -53,6 +53,8 @@ pub enum PlanWireError {
     BadViewPath,
     /// A bind's host source is relative or has a `..` component.
     BadHostPath,
+    /// The context is 0, which is the operator's own and never a kennel's.
+    BadCtx,
 }
 
 // ---- writer ---------------------------------------------------------------
@@ -1046,7 +1048,7 @@ pub fn encode_construction(c: &ConstructionHalf) -> Vec<u8> {
         w.u32(*g);
     }
     w.bool(c.lo);
-    w.u16(c.ctx);
+    w.u16(c.ctx.get());
     w.count(c.loopback.len());
     for lb in &c.loopback {
         // The address octets carry the family by length (4 = v4, 16 = v6); then the prefix.
@@ -1092,7 +1094,7 @@ pub fn decode_construction(buf: &[u8]) -> Result<ConstructionHalf, PlanWireError
         granted_gids.push(r.u32()?);
     }
     let lo = r.bool()?;
-    let ctx = r.u16()?;
+    let ctx = crate::Ctx::new(r.u16()?).ok_or(PlanWireError::BadCtx)?;
     let mut loopback = Vec::new();
     for _ in 0..r.count()? {
         let octets = r.bytes()?;
@@ -1498,7 +1500,7 @@ mod tests {
             file_binds: p.file_binds,
             granted_gids: vec![27, 44],
             lo: true,
-            ctx: 7,
+            ctx: crate::Ctx::new(7).expect("a non-zero ctx"),
             loopback: vec![
                 crate::plan::LoopbackAddr {
                     addr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 7, 0, 1)),
@@ -1538,7 +1540,7 @@ mod tests {
             file_binds: Vec::new(),
             granted_gids: Vec::new(),
             lo: false,
-            ctx: 0,
+            ctx: crate::Ctx::new(1).expect("a non-zero ctx"),
             loopback: Vec::new(),
             tun: false,
             hostname: None,
@@ -1548,6 +1550,31 @@ mod tests {
         };
         let back = decode_construction(&encode_construction(&c)).expect("decode");
         assert_eq!(back, c);
+    }
+
+    /// Context 0 is the operator's own: no kennel has it, so a construction half
+    /// that carries it is refused at the frame, whatever else it says.
+    #[test]
+    fn a_construction_for_context_zero_is_refused() {
+        let c = rich_construction();
+        let good = encode_construction(&c);
+        let needle = c.ctx.get().to_le_bytes();
+        // Zero each occurrence of the context's bytes in turn; the one that is the
+        // context field must turn the decode into `BadCtx`.
+        let mut refused = false;
+        for at in 0..good.len().saturating_sub(1) {
+            if good.get(at..at + 2) != Some(needle.as_slice()) {
+                continue;
+            }
+            let mut bytes = good.clone();
+            if let Some(slot) = bytes.get_mut(at..at + 2) {
+                slot.copy_from_slice(&[0, 0]);
+            }
+            if decode_construction(&bytes) == Err(PlanWireError::BadCtx) {
+                refused = true;
+            }
+        }
+        assert!(refused, "no position decoded as a zero context");
     }
 
     #[test]

@@ -85,10 +85,10 @@ const fn allow_entry(port_min: u16, port_max: u16, protocol: Protocol, flags: u8
 /// Encode `bpf/maps.h`'s `kennel_meta` (64 bytes); magic/abi/ctx are set here,
 /// the proxy fields are filled by [`stamp_proxy_meta`] once kenneld knows the
 /// proxy address, and the policy-hash tail stays zero until that lands.
-fn meta_bytes(ctx: u16) -> [u8; 64] {
+fn meta_bytes(ctx: crate::Ctx) -> [u8; 64] {
     let [m0, m1, m2, m3] = KENNEL_META_MAGIC.to_ne_bytes();
     let [a0, a1] = KENNEL_ABI_VERSION.to_ne_bytes();
-    let [c0, c1] = ctx.to_ne_bytes();
+    let [c0, c1] = ctx.get().to_ne_bytes();
     let head = [m0, m1, m2, m3, a0, a1, c0, c1];
     let mut m = [0u8; 64];
     for (dst, src) in m.iter_mut().zip(head.iter()) {
@@ -1054,7 +1054,7 @@ pub struct ConstructionHalf {
     pub lo: bool,
     /// The kennel's context number — re-supplied so the factory can re-validate each
     /// [`loopback`](Self::loopback) address against the caller's reserved per-kennel subnet.
-    pub ctx: u16,
+    pub ctx: crate::Ctx,
     /// The per-kennel loopback address to add on host `lo` (the v6 ULA `/64`
     /// `fd6b:6e00:<uid_subnet>:<ctx>::/64`). The factory adds it itself (folding the former
     /// separate `add-addr` privhelper ops into the one `construct` op), re-validating each is
@@ -1214,7 +1214,7 @@ impl Plan {
     // exec gate, the device allowlist, the fixed rules, the masks and the `/etc` overlays.
     pub fn from_policy(
         policy: &SettledPolicy,
-        ctx: u16,
+        ctx: crate::Ctx,
         namespace: &str,
         home: &Path,
     ) -> Result<Self, SpawnError> {
@@ -1817,7 +1817,7 @@ mod tests {
     fn bind_port_min_lands_in_the_meta_pad_slot() {
         // `bind_port_min` occupies the repurposed `_pad0` slot at offset 14 (host
         // order) and disturbs nothing else; `0` leaves the slot zero.
-        let mut meta = meta_bytes(7);
+        let mut meta = meta_bytes(crate::Ctx::new(7).expect("a non-zero ctx"));
         assert_eq!(&meta[14..16], &[0, 0], "no floor ⇒ slot stays zero");
         stamp_bind_port_min(&mut meta, 1024);
         assert_eq!(meta.get(14..16), Some(1024u16.to_ne_bytes().as_slice()));

@@ -8,6 +8,17 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The kennel context is a type** (CODING-STANDARDS.md §11.1). `Ctx` (`kennel-lib-spawn`) is
+  the per-user slot a running kennel holds, never 0. The daemon's allocator, registry, audit
+  drain and address bookkeeping carry it, as do the plan and the helper's address derivation.
+  - The plan decoder refuses a construction half whose context is 0
+    (`PlanWireError::BadCtx`); the bytes of the plan on the wire are unchanged.
+  - The helper refuses to add or remove an address for context 0, the operator's own block
+    (`Refusal::DefaultContext`). Before, the request was checked only against the address
+    range that context 0 derives.
+  - The control and binder wire messages still carry the context as a number; the daemon
+    parses it where a message comes in.
+
 - **A bind's host source and the proxy's port are types** (CODING-STANDARDS.md §11.1).
   - `HostPath` (`kennel-lib-spawn`): the host path a bind takes its content from, absolute
     and free of `..`. `BindMount::source` is one. The plan builder, the daemon and the plan

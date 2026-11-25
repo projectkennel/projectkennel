@@ -92,8 +92,17 @@ fn drains_a_denied_connect_event_through_the_writer() {
     ));
 
     // 5. The real drain: obj_get the pin and spawn the per-kennel drain thread.
-    //    The all-zero meta means events carry ctx_byte 0, so drain with ctx 0.
-    let drain = kenneld::bpf_audit::spawn(pin_dir, 0, Arc::clone(&writer))
+    //    A kennel's context is never 0, so stamp one into the metadata record
+    //    (`ctx_byte`, offset 6, host order) and drain with the same context; the
+    //    rest of the record stays zero, which leaves every egress map empty.
+    let ctx = kennel_lib_spawn::Ctx::new(3).expect("a non-zero ctx");
+    let mut meta = [0u8; 64];
+    if let Some(slot) = meta.get_mut(6..8) {
+        slot.copy_from_slice(&ctx.get().to_ne_bytes());
+    }
+    kennel_lib_bpf::update_kennel_map(&maps, "kennel_meta_map", &0u32.to_ne_bytes(), &meta, 0)
+        .expect("stamp the context into kennel_meta_map");
+    let drain = kenneld::bpf_audit::spawn(pin_dir, ctx, Arc::clone(&writer))
         .expect("spawn drain (obj_get + thread)");
 
     // 6. Denied connect from inside the cgroup, producing an audit event.

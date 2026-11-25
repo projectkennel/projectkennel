@@ -64,6 +64,7 @@ pub mod tun_sink;
 // `kenneld`/`kennel-akc` binaries) keep resolving unchanged.
 pub use kennel_lib_control::{control, name, socket};
 
+use kennel_lib_spawn::Ctx;
 use std::io;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -150,7 +151,7 @@ pub trait Privileged {
     /// An OS error if the helper cannot be invoked or its response is malformed.
     fn del_address(
         &self,
-        ctx: u16,
+        ctx: Ctx,
         interface: &str,
         addr: IpAddr,
         prefix: u8,
@@ -212,7 +213,7 @@ impl HelperClient {
 impl Privileged for HelperClient {
     fn del_address(
         &self,
-        ctx: u16,
+        ctx: Ctx,
         interface: &str,
         addr: IpAddr,
         prefix: u8,
@@ -367,7 +368,7 @@ pub struct Spec {
     /// (unprivileged) and the workload joins it; the helper attaches BPF to it.
     pub cgroup: PathBuf,
     /// The kennel's context number (assigned by the daemon's allocator).
-    pub ctx: u16,
+    pub ctx: Ctx,
     /// The caller's reserved scope (tag + ULA GID), used to build the addresses.
     pub scope: ReservedScope,
     /// The verified, substituted enforcement plan. Its `cgroup` is overridden
@@ -531,7 +532,7 @@ pub struct Kennel {
     /// exit status (`07-2`).
     init_pid: i32,
     cgroup: PathBuf,
-    ctx: u16,
+    ctx: Ctx,
     v6: Option<Ipv6Addr>,
     /// The egress-proxy child, if one was launched. Killed and reaped on teardown.
     proxy: Option<Child>,
@@ -817,7 +818,7 @@ fn prepare_plan(
     if proxied && !mirror_ports.is_empty() {
         // v6-only ULA: the inbound-mirror address derives from the caller's uid (W10); there
         // is no IPv4 loopback alias anymore.
-        let addr6 = loopback_v6(scope.uid(), ctx, u64::from(offset));
+        let addr6 = loopback_v6(scope.uid(), ctx.get(), u64::from(offset));
         loopback.push(kennel_lib_spawn::LoopbackAddr {
             addr: addr6.into(),
             prefix: V6_PREFIX,
@@ -1065,7 +1066,7 @@ struct FacadeWiring<'a> {
     facade_tun: Option<&'a Path>,
     net: &'a NetPolicy,
     scope: &'a ReservedScope,
-    ctx: u16,
+    ctx: Ctx,
     /// The port the SOCKS5 facade listens on.
     port: u16,
     mirror_ports: &'a [u16],
@@ -1164,7 +1165,7 @@ fn serve_binder(
     id: &str,
     prep: &BinderPrep,
     served: BinderServed,
-    ctx: u16,
+    ctx: Ctx,
     tracer: kennel_lib_config::Tracer,
     state: &mut Provision,
 ) -> Result<(), Error> {
@@ -1272,7 +1273,7 @@ fn net_runtime_for(
     ssh: &SshPrep,
     proxy: Option<&ProxySetup>,
     proxied: bool,
-    ctx: u16,
+    ctx: Ctx,
 ) -> Result<(Option<PathBuf>, crate::inet::NetRuntime), Error> {
     if let (true, Some(setup)) = (proxied, proxy) {
         std::fs::create_dir_all(&setup.config_dir)?;
@@ -1303,7 +1304,7 @@ fn wire_file_binds(
     ssh: &SshPrep,
     state: &Provision,
     scope: &ReservedScope,
-    ctx: u16,
+    ctx: Ctx,
     tun_active: bool,
 ) -> Result<(), Error> {
     if let Some(etc) = etc {
@@ -1489,7 +1490,7 @@ fn start_delegates(
     proxy: Option<&ProxySetup>,
     command_socket: Option<&PathBuf>,
     mirror_ports: &[u16],
-    ctx: u16,
+    ctx: Ctx,
     inbound_runtime: &std::sync::Arc<crate::inbound::InboundRuntime>,
     state: &mut Provision,
     tracer: kennel_lib_config::Tracer,
@@ -1596,7 +1597,7 @@ fn construct_via_factory<P: Privileged + Sync>(
     privileged: &P,
     plan: &Plan,
     command: &Command,
-    ctx: u16,
+    ctx: Ctx,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
     tun: bool,
@@ -1635,7 +1636,7 @@ fn construct_via_factory<P: Privileged + Sync>(
 /// `ctx`, and the per-kennel `loopback` addresses the factory adds on `lo`.
 fn construction_half_from(
     plan: &Plan,
-    ctx: u16,
+    ctx: Ctx,
     loopback: &[kennel_lib_spawn::LoopbackAddr],
     lo_up: bool,
     tun: bool,
@@ -1734,7 +1735,7 @@ fn supervision_from(
 #[allow(clippy::too_many_arguments)] // the node-0 serve inputs; each is one subsystem's state
 fn acquire_binder_node0(
     handle: &std::os::fd::OwnedFd,
-    ctx: u16,
+    ctx: Ctx,
     prep: &BinderPrep,
     lifecycle: crate::binder::Lifecycle,
     net: crate::inet::NetRuntime,
@@ -2109,7 +2110,7 @@ fn apply_dbus(
 fn teardown<P: Privileged>(
     tracer: kennel_lib_config::Tracer,
     privileged: &P,
-    ctx: u16,
+    ctx: Ctx,
     cgroup: Option<&Path>,
     v6: Option<Ipv6Addr>,
     proxy: Option<Child>,
