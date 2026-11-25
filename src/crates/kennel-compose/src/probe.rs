@@ -51,13 +51,44 @@ pub struct FsGrant {
 /// authority is the compiled template.
 const SYSTEM_PREFIXES: &[&str] = &["/usr/", "/lib/", "/lib64/", "/bin/", "/sbin/"];
 
+/// Why a workload could not be probed.
+#[derive(Debug)]
+pub enum ProbeError {
+    /// The workload could not be resolved or read.
+    Path(PathBuf, std::io::Error),
+    /// A script whose `#!` line names no interpreter, or a relative one.
+    Shebang,
+    /// A `#!/usr/bin/env` line with no program after it.
+    EnvWithoutProgram,
+    /// Neither an ELF binary nor a `#!` script.
+    NotExecutable(PathBuf),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Path(path, e) => write!(f, "{}: {e}", path.display()),
+            Self::Shebang => f.write_str("script has an empty or relative shebang — cannot probe"),
+            Self::EnvWithoutProgram => f.write_str("#!/usr/bin/env with no program name"),
+            Self::NotExecutable(path) => write!(
+                f,
+                "{}: not an ELF binary or a #! script — is it chmod +x?",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Probe a workload (binary or script) and produce the `exec.allow` seed.
-pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
+///
+/// # Errors
+/// The [`ProbeError`] if the workload cannot be read or is not something that can be executed.
+pub fn probe(workload: &Path) -> Result<ProbeResult, ProbeError> {
     let abs =
-        std::fs::canonicalize(workload).map_err(|e| format!("{}: {e}", workload.display()))?;
+        std::fs::canonicalize(workload).map_err(|e| ProbeError::Path(workload.to_path_buf(), e))?;
     let abs_str = abs.to_string_lossy().into_owned();
 
-    let data = std::fs::read(&abs).map_err(|e| format!("{}: {e}", abs.display()))?;
+    let data = std::fs::read(&abs).map_err(|e| ProbeError::Path(abs.clone(), e))?;
 
     let mut exec_allow: Vec<String> = Vec::new();
     let mut extra_fs_read: Vec<FsGrant> = Vec::new();
@@ -72,7 +103,7 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         let tokens: Vec<&str> = text.split_whitespace().collect();
 
         if tokens.is_empty() || !tokens[0].starts_with('/') {
-            return Err("script has an empty or relative shebang — cannot probe".to_owned());
+            return Err(ProbeError::Shebang);
         }
 
         let shebang_binary = tokens[0];
@@ -84,7 +115,7 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
                 .iter()
                 .skip(1)
                 .find(|t| !t.starts_with('-'))
-                .ok_or("#!/usr/bin/env with no program name")?;
+                .ok_or(ProbeError::EnvWithoutProgram)?;
 
             exec_allow.push("/usr/bin/env".to_owned());
 
@@ -139,10 +170,7 @@ pub fn probe(workload: &Path) -> Result<ProbeResult, String> {
         }
         warnings.extend(resolution.warnings);
     } else {
-        return Err(format!(
-            "{}: not an ELF binary or a #! script — is it chmod +x?",
-            abs.display()
-        ));
+        return Err(ProbeError::NotExecutable(abs));
     }
 
     // The workload itself goes on exec.allow.
@@ -304,10 +332,8 @@ mod tests {
         let file = dir.join(format!("kennel-compose-test-plain-{}", std::process::id()));
         std::fs::write(&file, b"just some text\n").expect("write");
         let err = probe(&file).unwrap_err();
-        assert!(
-            err.contains("not an ELF") || err.contains("script"),
-            "error: {err}"
-        );
+        assert!(matches!(&err, ProbeError::NotExecutable(_)), "error: {err}");
+        assert!(err.to_string().contains("not an ELF binary or a #! script"));
         let _ = std::fs::remove_file(&file);
     }
 }

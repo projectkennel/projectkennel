@@ -272,8 +272,9 @@ pub(crate) fn apply_fragment(base: &SourcePolicy, fragment: &SourcePolicy) -> So
 
 /// Validate a template reference (a bare name) and return it.
 pub(crate) fn parse_reference(reference: &str) -> Result<String, PolicyError> {
-    let bad =
-        |d: String| PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"));
+    let bad = |d: source::RefNameError| {
+        PolicyError::Resolution(format!("`template_base` = \"{reference}\": {d}"))
+    };
     source::validate_ref_name(reference).map_err(bad)?;
     Ok(reference.to_owned())
 }
