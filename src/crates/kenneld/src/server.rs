@@ -294,6 +294,19 @@ struct ConsumedEntry {
     required: bool,
 }
 
+/// What a mesh-bus slot holds.
+enum BusState {
+    /// Filed in the table, not created yet.
+    Empty,
+    /// A running bus.
+    Live(crate::mesh_bus::MeshBus),
+    /// Torn down, or never created; removed from the table. A waiter looks the key up again.
+    Retired,
+}
+
+/// One capability's entry in the mesh-bus table: the bus behind its own lock.
+type BusSlot = Arc<Mutex<BusState>>;
+
 /// The mutable shared state: the context allocator and the kennel registry.
 #[derive(Default)]
 struct Registry {
@@ -382,7 +395,13 @@ pub struct Shared<P: Privileged, L: PolicyLoader> {
     /// The live `binder-connector` mesh buses (§7.13.4a): one per capability, keyed by the
     /// `(tier, name, key)` triple. Created lazily on first consumes/provides match (D4);
     /// ref-counted for teardown. The `MeshBus` serves node 0 on its own looper thread.
-    mesh_buses: Mutex<HashMap<String, crate::mesh_bus::MeshBus>>,
+    ///
+    /// The table lock covers only looking a slot up or removing it. Creating a bus (a fork and a
+    /// mount), cloning its mount (a socket round trip) and tearing it down are done under that
+    /// bus's own slot lock, so one slow or stalled bus does not hold up the others. Lock order:
+    /// the table lock is never held while a slot lock is taken; a slot lock may be held while the
+    /// table lock is taken.
+    mesh_buses: Mutex<HashMap<String, BusSlot>>,
     /// The daemon-global tun-egress sink (§8 / W2): the standing tun-broker registers its sink node
     /// here (over its own per-kennel bus), and every `[net.udp]` consumer's binder manager delivers a
     /// session through it. One [`crate::tun_sink::TunSink`] for the whole daemon, cloned into each
@@ -520,18 +539,6 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         if ssh.is_empty() {
             return Ok(crate::SshPrep::default());
         }
-        let mut guard = self
-            .bastion
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bastion = guard.get_or_insert_with(|| {
-            crate::bastion::Bastion::new(crate::bastion::BastionConfig {
-                dir: setup.dir.clone(),
-                listen: setup.listen,
-                akc: setup.akc.clone(),
-            })
-        });
-
         // The synthetic keypairs were minted at compile time and persist beside the signed
         // artefact in `<policy-dir>/ssh/`; the public half is signature-pinned in each grant.
         // Stage a copy of the private key for the kennel's `~/.ssh`, and register the edge
@@ -545,9 +552,24 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
                     dest: grant.dest.clone(),
                 });
             }
-            let key_file = grant.key_file.clone();
-            crate::ssh::stage_synthetic_key(policy_ssh_dir, &staging, &key_file)
+            crate::ssh::stage_synthetic_key(policy_ssh_dir, &staging, &grant.key_file)
                 .map_err(SshEgressError::Io)?;
+        }
+        // Only now take the bastion lock: it covers registration (which may start `sshd`), not
+        // the file copies above, which touch nothing but this kennel's staging directory.
+        let mut guard = self
+            .bastion
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let bastion = guard.get_or_insert_with(|| {
+            crate::bastion::Bastion::new(crate::bastion::BastionConfig {
+                dir: setup.dir.clone(),
+                listen: setup.listen,
+                akc: setup.akc.clone(),
+            })
+        });
+        for grant in &ssh.grants {
+            let key_file = grant.key_file.clone();
             bastion
                 .register(crate::bastion::Edge {
                     kennel: kennel.to_owned(),
@@ -699,6 +721,9 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
     /// # Errors
     ///
     /// Returns the OS error if creating the mesh bus or cloning its mount fails.
+    // allow(significant_drop_tightening): the slot lock is held across creating the bus and
+    // cloning its mount on purpose. It is what keeps two starts from creating the same bus twice.
+    #[allow(clippy::significant_drop_tightening)]
     fn ensure_mesh_bus(
         &self,
         tier: crate::catalogue::Tier,
@@ -706,88 +731,150 @@ impl<P: Privileged + Clone, L: PolicyLoader> Shared<P, L> {
         key: Option<&str>,
     ) -> io::Result<std::os::fd::OwnedFd> {
         let bus_key = mesh_bus_key(tier, name, key);
+        loop {
+            let slot = self.bus_slot(&bus_key);
+            let mut state = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &mut *state {
+                // A release retired this slot while we waited for it; its table entry is gone
+                // (or about to be), so look the key up again.
+                BusState::Retired => {
+                    drop(state);
+                    std::thread::yield_now();
+                }
+                BusState::Live(bus) => {
+                    bus.add_participant();
+                    return bus.clone_mount_fd();
+                }
+                BusState::Empty => match self.create_mesh_bus(tier, name, key) {
+                    Ok(mut bus) => {
+                        bus.add_participant();
+                        let clone = bus.clone_mount_fd();
+                        *state = BusState::Live(bus);
+                        return clone;
+                    }
+                    Err(e) => {
+                        // Nothing was created: retire the slot so the table holds no empty entry.
+                        *state = BusState::Retired;
+                        self.forget_bus_slot(&bus_key, &slot);
+                        return Err(e);
+                    }
+                },
+            }
+        }
+    }
+
+    /// The slot for `bus_key` in the mesh-bus table, created empty if there is none. Holds the
+    /// table lock only for the lookup.
+    fn bus_slot(&self, bus_key: &str) -> BusSlot {
         let mut buses = self
             .mesh_buses
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let bus = match buses.entry(bus_key) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                // The mesh bus mediates every cross-kennel D-Bus session — its verdicts are
-                // security-relevant, so they go to a real journal-backed writer (not a noop drain),
-                // keyed to the bus identity (it has no per-kennel audit state dir).
-                let w =
-                    std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
-                // A mediation-broker bus (dbus, tun) gets a `Mediation`: its node-0 handler mints a
-                // per-consumer session via the generic `NEW_SESSION` and answers the broker's
-                // `GET_SESSION_POLICY` pull from the running kennel's retained settled struct. Every
-                // other connector bus resolves a consumer straight to its provider's handle.
-                let mediation = crate::mesh_bus::mediation_for(name).then(|| {
-                    let registry = std::sync::Arc::clone(&self.registry);
-                    crate::mesh_bus::Mediation {
-                        broker_service: name.to_owned(),
-                        policy: std::sync::Arc::new(move |ctx: u16, cap: &str| {
-                            let reg = registry
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            session_policy_for(&reg, ctx, cap)
-                        }),
-                    }
-                });
-                // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
-                // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
-                // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
-                // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
-                // owned by kenneld's own uid); the socket lets kenneld request movable clones.
-                let (cap_name, cap_key) = crate::mesh::capability(name, key).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "mesh capability name or key is not well formed",
-                    )
-                })?;
-                let mount_dir = crate::mesh::host_rp_dir(tier, &cap_name, cap_key.as_ref());
-                let holder = crate::mesh_holder::spawn(&mount_dir)?;
-                // Who may register a service on this bus: the supervised provider of that name at
-                // this bus's tier, decided from the daemon's registry (see `provides_at`).
-                let registry = std::sync::Arc::clone(&self.registry);
-                let may_register: crate::mesh_bus::RegisterFn =
-                    std::sync::Arc::new(move |ctx: u16, service: &str| {
-                        let reg = registry
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        provides_at(&reg, ctx, tier, service)
-                    });
-                let mb = crate::mesh_bus::MeshBus::create(
-                    tier,
-                    name,
-                    key,
-                    &w,
-                    mediation,
-                    may_register,
-                    holder,
-                )?;
-                e.insert(mb)
+        Arc::clone(
+            buses
+                .entry(bus_key.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(BusState::Empty))),
+        )
+    }
+
+    /// Remove `slot` from the mesh-bus table, if it is still the slot filed under `bus_key`.
+    fn forget_bus_slot(&self, bus_key: &str, slot: &BusSlot) {
+        let mut buses = self
+            .mesh_buses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if buses.get(bus_key).is_some_and(|cur| Arc::ptr_eq(cur, slot)) {
+            buses.remove(bus_key);
+        }
+    }
+
+    /// Create the mesh bus for a capability: its audit writer, its holder process and its
+    /// binderfs mount. Called under the bus's slot lock, never under the table lock.
+    fn create_mesh_bus(
+        &self,
+        tier: crate::catalogue::Tier,
+        name: &str,
+        key: Option<&str>,
+    ) -> io::Result<crate::mesh_bus::MeshBus> {
+        // The mesh bus mediates every cross-kennel D-Bus session — its verdicts are
+        // security-relevant, so they go to a real journal-backed writer (not a noop drain),
+        // keyed to the bus identity (it has no per-kennel audit state dir).
+        let w = std::sync::Arc::new(crate::audit::daemon_writer(&format!("mesh-bus/{name}")));
+        // A mediation-broker bus (dbus, tun) gets a `Mediation`: its node-0 handler mints a
+        // per-consumer session via the generic `NEW_SESSION` and answers the broker's
+        // `GET_SESSION_POLICY` pull from the running kennel's retained settled struct. Every
+        // other connector bus resolves a consumer straight to its provider's handle.
+        let mediation = crate::mesh_bus::mediation_for(name).then(|| {
+            let registry = std::sync::Arc::clone(&self.registry);
+            crate::mesh_bus::Mediation {
+                broker_service: name.to_owned(),
+                policy: std::sync::Arc::new(move |ctx: u16, cap: &str| {
+                    let reg = registry
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    session_policy_for(&reg, ctx, cap)
+                }),
             }
-        };
-        bus.add_participant();
-        let clone = bus.clone_mount_fd()?;
-        drop(buses);
-        Ok(clone)
+        });
+        // Mount the shared binderfs by forking an unprivileged holder under kenneld's own
+        // AppArmor profile (which carries the `userns` grant): it creates a user namespace,
+        // self-maps `0 <kenneld-uid> 1`, and mounts the binderfs — no privilege, no
+        // privhelper. The holder pid lets kenneld reach node 0 via `/proc/<pid>/root` (nodes
+        // owned by kenneld's own uid); the socket lets kenneld request movable clones.
+        let (cap_name, cap_key) = crate::mesh::capability(name, key).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mesh capability name or key is not well formed",
+            )
+        })?;
+        let mount_dir = crate::mesh::host_rp_dir(tier, &cap_name, cap_key.as_ref());
+        let holder = crate::mesh_holder::spawn(&mount_dir)?;
+        // Who may register a service on this bus: the supervised provider of that name at
+        // this bus's tier, decided from the daemon's registry (see `provides_at`).
+        let registry = std::sync::Arc::clone(&self.registry);
+        let may_register: crate::mesh_bus::RegisterFn =
+            std::sync::Arc::new(move |ctx: u16, service: &str| {
+                let reg = registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                provides_at(&reg, ctx, tier, service)
+            });
+        crate::mesh_bus::MeshBus::create(tier, name, key, &w, mediation, may_register, holder)
     }
 
     /// Release a participant from a mesh bus. If the refcount reaches zero, the bus
     /// is torn down (serve loop stopped, binderfs unmounted).
+    // allow(significant_drop_tightening): the slot lock is held across the teardown on purpose,
+    // so a new bus for the same capability cannot be mounted over the one being torn down.
+    #[allow(clippy::significant_drop_tightening)]
     fn release_mesh_bus(&self, tier: crate::catalogue::Tier, name: &str, key: Option<&str>) {
         let bus_key = mesh_bus_key(tier, name, key);
-        let mut buses = self
-            .mesh_buses
+        let slot = {
+            let buses = self
+                .mesh_buses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            buses.get(&bus_key).cloned()
+        };
+        let Some(slot) = slot else {
+            return;
+        };
+        let mut state = slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let std::collections::hash_map::Entry::Occupied(mut e) = buses.entry(bus_key) {
-            if e.get_mut().remove_participant() {
-                // Last participant — tear down the bus.
-                e.remove();
-            }
+        let last = match &mut *state {
+            BusState::Live(bus) => bus.remove_participant(),
+            BusState::Empty | BusState::Retired => false,
+        };
+        if last {
+            // The last participant left. Tear the bus down under its own slot lock, so a new
+            // bus for the same capability cannot be mounted over it meanwhile, then drop the
+            // table entry. Anyone waiting on this slot finds it retired and looks up again.
+            let retired = std::mem::replace(&mut *state, BusState::Retired);
+            drop(retired);
+            self.forget_bus_slot(&bus_key, &slot);
         }
     }
 

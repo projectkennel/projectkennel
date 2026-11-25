@@ -142,6 +142,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Two daemon locks are no longer held across blocking work.**
+  - *The mesh-bus table.* One lock covered the whole table while a bus was created (a fork
+    and a mount), while its mount was cloned (a socket round trip to the holder), and while
+    it was torn down. A slow or stalled bus held up every other kennel's start and teardown
+    that touched the mesh. Each bus now has its own lock; the table lock covers only looking
+    a slot up or removing it. Two starts of the same capability still wait for one another,
+    and a new bus cannot be mounted over one that is being torn down.
+  - *The bastion.* The lock was held while a kennel's synthetic SSH keys were copied into its
+    staging directory. The copies now happen first; the lock covers registration only.
 - **The daemon's `run_kennel` is split into phases.** It was one 1046-line function with a
   length exemption. It is now four phases, each a function: `admit` (the name and a context),
   `settle` (load the policy, fix the command and its descriptors, apply the grants that depend
