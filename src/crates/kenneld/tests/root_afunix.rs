@@ -74,13 +74,10 @@ fn run_manager() {
     ));
 
     let fd = binderfs::open_binder_device(&dir).expect("manager: open device");
+    let ctx = kennel_lib_spawn::Ctx::new(7).expect("a non-zero ctx");
     let manager = binder::spawn(binder::NodeZero {
         unix,
-        ..binder::NodeZero::closed(
-            fd,
-            kennel_lib_spawn::Ctx::new(7).expect("a non-zero ctx"),
-            writer,
-        )
+        ..binder::NodeZero::closed(fd, ctx, writer)
     })
     .expect("manager: become context manager");
     std::fs::File::create(dir.with_extension("ready")).expect("manager: ready file");
