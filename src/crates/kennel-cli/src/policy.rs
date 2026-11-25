@@ -9,6 +9,7 @@
 //! Path/name resolvers, the template/trust-dir cascade, and key loading stay in the crate root
 //! (shared across modules); `review::check_exclusive_ownership` gates `compile`.
 
+use crate::CliError;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -78,7 +79,7 @@ impl TemplateSource for FsTemplateSource {
 /// path, the lockfile mismatches a prior pin, or writing the settled artefact fails.
 // allow: one cohesive arg-parse + compile + write/sign sequence for the CLI subcommand.
 #[allow(clippy::too_many_lines)]
-pub fn compile(args: &[String]) -> Result<ExitCode, String> {
+pub fn compile(args: &[String]) -> Result<ExitCode, CliError> {
     let mut policy_path: Option<&str> = None;
     let mut output_path: Option<PathBuf> = None;
     let mut key_path: Option<&str> = None;
@@ -93,46 +94,65 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--output" => {
-                output_path = Some(it.next().ok_or("--output needs a value")?.into());
+                output_path = Some(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--output"))?
+                        .into(),
+                );
             }
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
-            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
+            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key-id" => {
+                key_id = Some(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--key-id"))?,
+                );
+            }
             "--unsigned" => unsigned = true,
             "--require-signed" => require_signed = true,
             "--no-lock" => no_lock = true,
             "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+                template_dirs.push(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
+                        .into(),
+                );
             }
             "--trust-dir" => {
-                trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into());
+                trust_dirs.push(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--trust-dir"))?
+                        .into(),
+                );
             }
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value => {
                 if policy_path.is_some() {
-                    return Err("only one <policy> may be given".to_owned());
+                    return Err(CliError::usage("only one <policy> may be given"));
                 }
                 policy_path = Some(value);
             }
         }
     }
 
-    let policy_arg = policy_path.ok_or(
-        "usage: kennel policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] \
-         [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...",
-    )?;
+    let policy_arg = policy_path.ok_or_else(|| CliError::Usage("usage: kennel policy compile <policy> [--output P] [--key K | --unsigned] [--key-id ID] \
+         [--require-signed] [--no-lock] [--template-dir D]... [--trust-dir D]...".to_owned()))?;
     // `<policy>` is a path or a name resolved from the `policies/` cascade,
     // preferring the source `policy.toml` (the artefact we are about to compile).
     let (policy_path, _name) = resolve_policy(policy_arg, false)?;
     if key_path.is_some() && unsigned {
-        return Err("--key and --unsigned are mutually exclusive".to_owned());
+        return Err(CliError::usage(
+            "--key and --unsigned are mutually exclusive",
+        ));
     }
     if key_id.is_some() && unsigned {
-        return Err("--key-id and --unsigned are mutually exclusive".to_owned());
+        return Err(CliError::usage(
+            "--key-id and --unsigned are mutually exclusive",
+        ));
     }
     add_default_template_dirs(&mut template_dirs);
 
-    let bytes = std::fs::read(&policy_path)
-        .map_err(|e| format!("reading {}: {e}", policy_path.display()))?;
+    let bytes =
+        std::fs::read(&policy_path).map_err(|e| CliError::file("reading", &policy_path, &e))?;
 
     // No installation constants here: per-kennel loopback addressing is derived at spawn from
     // the caller's uid (v6-only ULA), never baked into the compiled policy. The CLI has no part in it.
@@ -174,7 +194,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
     // Refuse an exclusive bind on a host path the operator does not own (§2.7) — the privhelper
     // would otherwise be asked to blind-mount over a path you have no ownership of (overreach).
     review::check_exclusive_ownership(&compiled.policy.effective_policy.fs.exclusive)
-        .map_err(|e| format!("kennel: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("kennel: {e}")))?;
     // Resolve the shared-library closure of the allowlist into the settled artefact
     // (reads the binaries from disk; deny-by-default execution, 07-3) before signing.
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(
@@ -200,7 +220,7 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
         let lock_path = lock_path_for(&out, &policy.name);
         if let Ok(prev_bytes) = std::fs::read(&lock_path) {
             let previous = kennel_lib_compile::Lockfile::parse(&prev_bytes)
-                .map_err(|e| format!("reading {}: {e}", lock_path.display()))?;
+                .map_err(|e| CliError::file("reading", &lock_path, &e))?;
             if let Err(e) = compiled.lock.verify_against(&previous) {
                 eprintln!("kennel: {e}");
                 return Ok(ExitCode::from(6));
@@ -209,9 +229,9 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
         let lock_bytes = compiled
             .lock
             .to_bytes()
-            .map_err(|e| format!("lockfile: {e}"))?;
+            .map_err(|e| CliError::Failed(format!("lockfile: {e}")))?;
         std::fs::write(&lock_path, &lock_bytes)
-            .map_err(|e| format!("writing {}: {e}", lock_path.display()))?;
+            .map_err(|e| CliError::file("writing", &lock_path, &e))?;
     }
 
     // Sign via `ssh-keygen -Y sign` with `--key` (else the sole key in the user key
@@ -226,13 +246,14 @@ pub fn compile(args: &[String]) -> Result<ExitCode, String> {
             Some(p) => resolve_key_arg(p)?.to_string_lossy().into_owned(),
             None => default_signing_key()?.to_string_lossy().into_owned(),
         };
-        let canonical =
-            kennel_lib_policy::canonical::canonical_bytes(policy).map_err(|e| e.to_string())?;
+        let canonical = kennel_lib_policy::canonical::canonical_bytes(policy)
+            .map_err(|e| CliError::Failed(e.to_string()))?;
         let (key_id, armor) = sshsig_sign(&canonical, &key, key_id, &signing_trust_dirs())?;
         settled_with_sshsig(policy, key_id, armor)
     };
-    let out_bytes = kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))?;
-    std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
+    let out_bytes = kennel_lib_policy::to_bytes(&doc)
+        .map_err(|e| CliError::Failed(format!("serialising: {e}")))?;
+    std::fs::write(&out, &out_bytes).map_err(|e| CliError::file("writing", &out, &e))?;
 
     let note = if unsigned {
         " (unsigned development build)"
@@ -269,7 +290,7 @@ impl TempSettled {
     /// # Errors
     ///
     /// Returns a message if the file cannot be written to the chosen directory.
-    pub fn write(name: &str, bytes: &[u8]) -> Result<Self, String> {
+    pub fn write(name: &str, bytes: &[u8]) -> Result<Self, CliError> {
         let dir =
             std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
         Self::write_in(&dir, name, bytes)
@@ -282,10 +303,10 @@ impl TempSettled {
     /// # Errors
     ///
     /// Returns a message if the file cannot be written into `dir`.
-    pub fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> Result<Self, String> {
+    pub fn write_in(dir: &Path, name: &str, bytes: &[u8]) -> Result<Self, CliError> {
         let path = dir.join(format!("kennel-run-{name}-{}.settled", std::process::id()));
         std::fs::write(&path, bytes)
-            .map_err(|e| format!("writing temp settled policy {}: {e}", path.display()))?;
+            .map_err(|e| CliError::file("writing temp settled policy", &path, &e))?;
         Ok(Self { path })
     }
 
@@ -361,7 +382,7 @@ pub fn compile_and_sign(
     key_id: Option<&str>,
     mut template_dirs: Vec<PathBuf>,
     mut trust_dirs: Vec<PathBuf>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CliError> {
     crate::add_default_template_dirs(&mut template_dirs);
     crate::add_system_trust_dirs(&mut trust_dirs);
     let source = FsTemplateSource {
@@ -370,7 +391,7 @@ pub fn compile_and_sign(
     let tc = TrustContext::load(&trust_dirs)?;
     let trust = tc.allow_unsigned();
     let mut compiled = build_settled(bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-        .map_err(|e| format!("compiling: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("compiling: {e}")))?;
     print_warnings(&compiled.warnings);
     print_warnings(&kennel_lib_policy::resolve_settled_loaders(
         &mut compiled.policy,
@@ -381,11 +402,11 @@ pub fn compile_and_sign(
         None => crate::default_signing_key()?.to_string_lossy().into_owned(),
     };
     let canonical = kennel_lib_policy::canonical::canonical_bytes(&compiled.policy)
-        .map_err(|e| format!("canonical form: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("canonical form: {e}")))?;
     let (resolved_id, armor) =
         crate::sshsig_sign(&canonical, &key, key_id, &crate::signing_trust_dirs())?;
     let doc = crate::settled_with_sshsig(&compiled.policy, resolved_id, armor);
-    kennel_lib_policy::to_bytes(&doc).map_err(|e| format!("serialising: {e}"))
+    kennel_lib_policy::to_bytes(&doc).map_err(|e| CliError::Failed(format!("serialising: {e}")))
 }
 
 /// Mint (or reuse) one synthetic ed25519 keypair per `[ssh]` destination under
@@ -408,11 +429,11 @@ pub fn compile_and_sign(
 pub fn mint_ssh_keys(
     policy: &mut kennel_lib_policy::SettledPolicy,
     ssh_dir: &Path,
-) -> Result<bool, String> {
+) -> Result<bool, CliError> {
     if policy.ssh.grants.is_empty() {
         return Ok(false);
     }
-    std::fs::create_dir_all(ssh_dir).map_err(|e| format!("creating {}: {e}", ssh_dir.display()))?;
+    std::fs::create_dir_all(ssh_dir).map_err(|e| CliError::file("creating", ssh_dir, &e))?;
     for grant in &mut policy.ssh.grants {
         let key_id = grant.key_id();
         let key_path = ssh_dir.join(&key_id);
@@ -427,13 +448,16 @@ pub fn mint_ssh_keys(
                 .arg("-f")
                 .arg(&key_path)
                 .status()
-                .map_err(|e| format!("running ssh-keygen: {e}"))?;
+                .map_err(|e| CliError::Failed(format!("running ssh-keygen: {e}")))?;
             if !status.success() {
-                return Err(format!("ssh-keygen failed for `{}`", grant.dest));
+                return Err(CliError::Failed(format!(
+                    "ssh-keygen failed for `{}`",
+                    grant.dest
+                )));
             }
         }
         let pub_line = std::fs::read_to_string(&pub_path)
-            .map_err(|e| format!("reading {}: {e}", pub_path.display()))?;
+            .map_err(|e| CliError::file("reading", &pub_path, &e))?;
         pub_line.trim().clone_into(&mut grant.public_key);
         grant.key_file = key_id;
     }
@@ -479,7 +503,7 @@ pub fn build_settled(
 /// Returns a message if the arguments are invalid, no policy is given, the policy file
 /// cannot be read, or the trust store cannot be loaded. A policy that resolves but is
 /// invalid is reported via the exit code, not an error.
-pub fn validate(args: &[String]) -> Result<ExitCode, String> {
+pub fn validate(args: &[String]) -> Result<ExitCode, CliError> {
     let mut policy_path: Option<&str> = None;
     let mut require_signed = false;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
@@ -490,16 +514,27 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
         match arg.as_str() {
             "--require-signed" => require_signed = true,
             "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+                template_dirs.push(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
+                        .into(),
+                );
             }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--trust-dir" => trust_dirs.push(
+                it.next()
+                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
+                    .into(),
+            ),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if policy_path.is_none() => policy_path = Some(value),
-            _ => return Err("only one <policy> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <policy> may be given")),
         }
     }
-    let policy_path = policy_path
-        .ok_or("usage: kennel policy validate <policy> [--template-dir D] [--require-signed]")?;
+    let policy_path = policy_path.ok_or_else(|| {
+        CliError::usage(
+            "usage: kennel policy validate <policy> [--template-dir D] [--require-signed]",
+        )
+    })?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
@@ -545,7 +580,7 @@ pub fn validate(args: &[String]) -> Result<ExitCode, String> {
 /// Returns a message if the arguments are invalid, no policy is given, the policy file
 /// cannot be read, the trust store cannot be loaded, the source cannot be resolved, or
 /// the threat catalogue cannot be loaded.
-pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_risks(args: &[String]) -> Result<ExitCode, CliError> {
     let mut policy_path: Option<&str> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -556,17 +591,27 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
         match arg.as_str() {
             "--json" => json = true,
             "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+                template_dirs.push(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
+                        .into(),
+                );
             }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--trust-dir" => trust_dirs.push(
+                it.next()
+                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
+                    .into(),
+            ),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if policy_path.is_none() => policy_path = Some(value),
-            _ => return Err("only one <policy> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <policy> may be given")),
         }
     }
-    let policy_path = policy_path.ok_or(
-        "usage: kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
-    )?;
+    let policy_path = policy_path.ok_or_else(|| {
+        CliError::usage(
+            "usage: kennel policy risks <policy> [--template-dir D]... [--trust-dir D]... [--json]",
+        )
+    })?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
 
@@ -581,9 +626,9 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
     // `effective_source` folds either form — a template/source document or a
     // delta-leaf (`[[fs.read.add]]`, …) — so the report works on a leaf policy too.
     let effective = kennel_lib_compile::effective_source(&bytes, &source, &trust)
-        .map_err(|e| format!("resolving {policy_path}: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("resolving {policy_path}: {e}")))?;
     let catalogue = kennel_lib_compile::threats::Catalogue::load(catalogue_path().as_deref())
-        .map_err(|e| format!("threat catalogue: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("threat catalogue: {e}")))?;
     let report = kennel_lib_compile::risks::evaluate(&effective, &catalogue);
 
     let name = effective.name.as_deref().unwrap_or(policy_path);
@@ -610,7 +655,7 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, String> {
 /// Returns a message if the arguments are invalid, no policy is given, the trust store
 /// cannot be loaded, a policy cannot be resolved or read, the one-argument form has no
 /// `template_base` to diff against, or the threat catalogue cannot be loaded.
-pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_diff(args: &[String]) -> Result<ExitCode, CliError> {
     let mut positionals: Vec<&str> = Vec::new();
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
@@ -621,17 +666,23 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
         match arg.as_str() {
             "--json" => json = true,
             "--template-dir" => {
-                template_dirs.push(it.next().ok_or("--template-dir needs a value")?.into());
+                template_dirs.push(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
+                        .into(),
+                );
             }
-            "--trust-dir" => trust_dirs.push(it.next().ok_or("--trust-dir needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--trust-dir" => trust_dirs.push(
+                it.next()
+                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
+                    .into(),
+            ),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if positionals.len() < 2 => positionals.push(value),
-            _ => return Err("at most two policies may be given".to_owned()),
+            _ => return Err(CliError::usage("at most two policies may be given")),
         }
     }
-    let primary = *positionals.first().ok_or(
-        "usage: kennel policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]",
-    )?;
+    let primary = *positionals.first().ok_or_else(|| CliError::usage("usage: kennel policy diff <policy> [<other>] [--template-dir D]... [--trust-dir D]... [--json]"))?;
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
     let tc = TrustContext::load(&trust_dirs)?;
@@ -651,10 +702,10 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
         (primary_eff, primary_label, other_eff, other_label)
     } else {
         let reference = primary_base.ok_or_else(|| {
-            format!(
+            CliError::Refused(format!(
                 "`{primary_label}` has no `template_base` to diff against; \
                  pass a second policy to compare two"
-            )
+            ))
         })?;
         let baseline = resolve_template_baseline(&reference, &template_dirs, &tc)?;
         (
@@ -666,7 +717,7 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
     };
 
     let catalogue = kennel_lib_compile::threats::Catalogue::load(catalogue_path().as_deref())
-        .map_err(|e| format!("threat catalogue: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("threat catalogue: {e}")))?;
     let d = kennel_lib_compile::diff::diff(&old_eff, &new_eff, &catalogue);
 
     if json {
@@ -679,15 +730,15 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, String> {
 
 /// Read a `<policy>` argument's file and source bytes: a name in the policy repos, or a path
 /// (the [`resolve_policy`] rule every verb shares).
-fn read_policy_arg(arg: &str) -> Result<(PathBuf, Vec<u8>), String> {
+fn read_policy_arg(arg: &str) -> Result<(PathBuf, Vec<u8>), CliError> {
     let (path, _) = resolve_policy(arg, false)?;
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|e| CliError::file("reading", &path, &e))?;
     Ok((path, bytes))
 }
 
 /// The policy's *declared* `(name, template_base)` from its raw source, before the
 /// fold drops them. Works for both the template/source and the delta-leaf forms.
-fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), String> {
+fn declared_meta(arg: &str) -> Result<(Option<String>, Option<String>), CliError> {
     let (_, bytes) = read_policy_arg(arg)?;
     if let Ok(src) = kennel_lib_compile::parse_source(&bytes) {
         return Ok((src.name.or(src.template_name), src.template_base));
@@ -702,14 +753,14 @@ fn resolve_effective(
     arg: &str,
     template_dirs: &[PathBuf],
     tc: &TrustContext,
-) -> Result<kennel_lib_compile::SourcePolicy, String> {
+) -> Result<kennel_lib_compile::SourcePolicy, CliError> {
     let (path, bytes) = read_policy_arg(arg)?;
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
     let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
-        .map_err(|e| format!("resolving {}: {e}", path.display()))
+        .map_err(|e| CliError::file("resolving", &path, &e))
 }
 
 /// Resolve a template reference (a bare `<name>`) as a standalone effective policy —
@@ -718,16 +769,18 @@ fn resolve_template_baseline(
     reference: &str,
     template_dirs: &[PathBuf],
     tc: &TrustContext,
-) -> Result<kennel_lib_compile::SourcePolicy, String> {
+) -> Result<kennel_lib_compile::SourcePolicy, CliError> {
     let source = FsTemplateSource {
         dirs: template_dirs.to_vec(),
     };
     let bytes = source.fetch(reference).ok_or_else(|| {
-        format!("cannot read `{reference}` to diff against (pass --template-dir)")
+        CliError::Refused(format!(
+            "cannot read `{reference}` to diff against (pass --template-dir)"
+        ))
     })?;
     let trust = tc.allow_unsigned();
     kennel_lib_compile::effective_source(&bytes, &source, &trust)
-        .map_err(|e| format!("resolving `{reference}`: {e}"))
+        .map_err(|e| CliError::Failed(format!("resolving `{reference}`: {e}")))
 }
 
 /// Human-readable interpreted diff. Policy-sourced strings (carrier, detail,
@@ -946,9 +999,9 @@ fn print_risks_json(name: &str, report: &kennel_lib_compile::risks::RiskReport) 
 /// # Errors
 ///
 /// Returns a usage message if any arguments are given (the verb takes none).
-pub fn policy_list(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_list(args: &[String]) -> Result<ExitCode, CliError> {
     if !args.is_empty() {
-        return Err(usage_of(POLICY_VERBS, "list"));
+        return Err(CliError::Usage(usage_of(POLICY_VERBS, "list")));
     }
     let user = kennel_lib_config::User::load().unwrap_or_default();
     if !list_house("policies", &user.policy_dirs()) {
@@ -962,9 +1015,12 @@ pub fn policy_list(args: &[String]) -> Result<ExitCode, String> {
 /// # Errors
 ///
 /// Returns the usage line on extra arguments.
-pub fn template_list(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_list(args: &[String]) -> Result<ExitCode, CliError> {
     if !args.is_empty() {
-        return Err(crate::usage_of(crate::TEMPLATE_VERBS, "list"));
+        return Err(CliError::Usage(crate::usage_of(
+            crate::TEMPLATE_VERBS,
+            "list",
+        )));
     }
     let user = kennel_lib_config::User::load().unwrap_or_default();
     if !list_house("templates", &user.template_dirs()) {
@@ -1112,17 +1168,17 @@ pub fn policy_kind(path: &Path) -> &'static str {
 /// Returns a message if the arguments are invalid, no policy is given, the policy
 /// cannot be resolved or read, the trust store cannot be loaded, or the policy fails
 /// to compile (source form) or verify (settled form).
-pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_show(args: &[String]) -> Result<ExitCode, CliError> {
     let (policy_arg, template_dirs, trust_dirs) = parse_show_args(args, POLICY_VERBS)?;
     let policy_file = match resolve_policy(&policy_arg, false) {
         Ok((file, _name)) => file,
         // Cross-house courtesy: a template name misses the policies cascade; say what it is.
         Err(e) => match resolve_template(&policy_arg) {
             Ok(_) => {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "`{policy_arg}` is a template — the shared-base house; show it with \
                      `kennel template show {policy_arg}`"
-                ));
+                )));
             }
             Err(_) => return Err(e),
         },
@@ -1147,17 +1203,17 @@ pub fn policy_show(args: &[String]) -> Result<ExitCode, String> {
 /// Returns a message if the arguments are invalid, no template is given, the name does not
 /// resolve in the template cascade (a leaf name points back at `policy show`), the trust
 /// store cannot be loaded, or the template fails to compile.
-pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_show(args: &[String]) -> Result<ExitCode, CliError> {
     let (template_arg, template_dirs, trust_dirs) = parse_show_args(args, crate::TEMPLATE_VERBS)?;
     let template_file = match resolve_template(&template_arg) {
         Ok((file, _name)) => file,
         // Cross-house courtesy: a leaf/policy name misses the template cascade; say what it is.
         Err(e) => match resolve_policy(&template_arg, false) {
             Ok(_) => {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "`{template_arg}` is a policy, not a template — show it with \
                      `kennel policy show {template_arg}`"
-                ));
+                )));
             }
             Err(_) => return Err(e),
         },
@@ -1175,12 +1231,12 @@ pub fn template_show(args: &[String]) -> Result<ExitCode, String> {
 fn parse_show_args(
     args: &[String],
     table: &[kennel_lib_cli::CommandSpec],
-) -> Result<(String, Vec<PathBuf>, Vec<PathBuf>), String> {
+) -> Result<(String, Vec<PathBuf>, Vec<PathBuf>), CliError> {
     let mut positional: Option<String> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+    while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
             lexopt::Arg::Long("template-dir") => {
                 template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
@@ -1191,10 +1247,10 @@ fn parse_show_args(
             lexopt::Arg::Value(v) if positional.is_none() => {
                 positional = Some(v.to_string_lossy().into_owned());
             }
-            other => return Err(lexopt_unexpected(&other, table, "show")),
+            other => return Err(CliError::Usage(lexopt_unexpected(&other, table, "show"))),
         }
     }
-    let positional = positional.ok_or_else(|| usage_of(table, "show"))?;
+    let positional = positional.ok_or_else(|| CliError::Usage(usage_of(table, "show")))?;
     Ok((positional, template_dirs, trust_dirs))
 }
 
@@ -1203,9 +1259,9 @@ fn show_file(
     policy_file: &Path,
     mut template_dirs: Vec<PathBuf>,
     mut trust_dirs: Vec<PathBuf>,
-) -> Result<ExitCode, String> {
-    let bytes = std::fs::read(policy_file)
-        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+) -> Result<ExitCode, CliError> {
+    let bytes =
+        std::fs::read(policy_file).map_err(|e| CliError::file("reading", policy_file, &e))?;
 
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
@@ -1216,7 +1272,7 @@ fn show_file(
         let tc = TrustContext::load(&trust_dirs)?;
         let trust = tc.allow_unsigned();
         let mut compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+            .map_err(|e| CliError::file("compiling", policy_file, &e))?;
         print_warnings(&compiled.warnings);
         print_warnings(&kennel_lib_policy::resolve_settled_loaders(
             &mut compiled.policy,
@@ -1225,7 +1281,7 @@ fn show_file(
     } else {
         let tc = TrustContext::load(&trust_dirs)?;
         kennel_lib_policy::verify_settled(&bytes, tc.keys())
-            .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
+            .map_err(|e| CliError::file("verifying", policy_file, &e))?
     };
     print_effective_policy(&policy);
     Ok(ExitCode::SUCCESS)
@@ -1374,12 +1430,14 @@ fn user_policies_dir() -> PathBuf {
 /// Returns a message if the arguments are invalid, the name is not a valid policy name,
 /// the policy cannot be resolved, the copy-on-write into the user config fails, the
 /// editor cannot be launched, or the editor exits non-zero.
-pub fn policy_edit(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_edit(args: &[String]) -> Result<ExitCode, CliError> {
     let [name] = args else {
-        return Err(usage_of(POLICY_VERBS, "edit"));
+        return Err(CliError::Usage(usage_of(POLICY_VERBS, "edit")));
     };
     if !is_valid_policy_name(name) {
-        return Err(format!("`{name}` is not a valid policy name"));
+        return Err(CliError::Usage(format!(
+            "`{name}` is not a valid policy name"
+        )));
     }
     let (source, _) = resolve_policy(name, false)?;
     // A source under a system dir is copied into the user config first (COW), unless a
@@ -1389,9 +1447,14 @@ pub fn policy_edit(args: &[String]) -> Result<ExitCode, String> {
         if !dest.is_file() {
             let dest_dir = dest.parent().unwrap_or_else(|| Path::new("."));
             std::fs::create_dir_all(dest_dir)
-                .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
-            std::fs::copy(&source, &dest)
-                .map_err(|e| format!("copying {} to {}: {e}", source.display(), dest.display()))?;
+                .map_err(|e| CliError::file("creating", dest_dir, &e))?;
+            std::fs::copy(&source, &dest).map_err(|e| {
+                CliError::Failed(format!(
+                    "copying {} to {}: {e}",
+                    source.display(),
+                    dest.display()
+                ))
+            })?;
             eprintln!(
                 "kennel: copied system policy into {} for editing",
                 dest.display()
@@ -1407,11 +1470,16 @@ pub fn policy_edit(args: &[String]) -> Result<ExitCode, String> {
     let status = std::process::Command::new(&editor)
         .arg(&target)
         .status()
-        .map_err(|e| format!("launching editor {}: {e}", editor.to_string_lossy()))?;
+        .map_err(|e| {
+            CliError::Failed(format!(
+                "launching editor {}: {e}",
+                editor.to_string_lossy()
+            ))
+        })?;
     if status.success() {
         Ok(ExitCode::SUCCESS)
     } else {
-        Err(format!("editor exited with {status}"))
+        Err(CliError::Failed(format!("editor exited with {status}")))
     }
 }
 
@@ -1431,43 +1499,52 @@ fn is_under_system_dir(path: &Path) -> bool {
 /// Returns a message if the arguments are invalid, no name is given, the name is not a
 /// valid policy name, `--from` is not a valid template name, a policy of that name
 /// already exists, or the scaffold directory or file cannot be written.
-pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_generate(args: &[String]) -> Result<ExitCode, CliError> {
     let mut name: Option<String> = None;
     let mut from = "base-confined".to_owned();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+    while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
             lexopt::Arg::Long("from") => {
                 from = p
                     .value()
-                    .map_err(|_| "--from needs a value")?
+                    .map_err(|_| CliError::missing_value("--from"))?
                     .to_string_lossy()
                     .into_owned();
             }
             lexopt::Arg::Value(v) if name.is_none() => {
                 name = Some(v.to_string_lossy().into_owned());
             }
-            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "generate")),
+            other => {
+                return Err(CliError::Usage(lexopt_unexpected(
+                    &other,
+                    POLICY_VERBS,
+                    "generate",
+                )))
+            }
         }
     }
-    let name = name.ok_or_else(|| usage_of(POLICY_VERBS, "generate"))?;
+    let name = name.ok_or_else(|| CliError::Usage(usage_of(POLICY_VERBS, "generate")))?;
     if !is_valid_policy_name(&name) {
-        return Err(format!("`{name}` is not a valid policy name"));
+        return Err(CliError::Usage(format!(
+            "`{name}` is not a valid policy name"
+        )));
     }
     // `--from` is the leaf's `template_base`: a bare template name (versioned references were
     // removed). Validate it with the compiler's own rule so a scaffold can never carry a
     // `template_base` that `kennel policy compile` would then reject as malformed.
-    kennel_lib_compile::source::validate_reference(&from)
-        .map_err(|d| format!("--from `{from}` is not a valid template name: {d}"))?;
+    kennel_lib_compile::source::validate_reference(&from).map_err(|d| {
+        CliError::Usage(format!("--from `{from}` is not a valid template name: {d}"))
+    })?;
     let dir = user_policies_dir().join(&name);
     let dest = dir.join("policy.toml");
     if dest.exists() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{} already exists; refusing to overwrite",
             dest.display()
-        ));
+        )));
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| CliError::file("creating", &dir, &e))?;
     let scaffold = format!(
         "# Leaf policy `{name}` — see `kennel policy show {name}` for what it resolves to.\n\
          name = \"{name}\"\n\
@@ -1479,7 +1556,7 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
          # pinned = false          # refuse a `-- <cmd>` override unless --force\n\
          # sha256 = []             # accepted binary digests (empty = no pin)\n"
     );
-    std::fs::write(&dest, scaffold).map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    std::fs::write(&dest, scaffold).map_err(|e| CliError::file("writing", &dest, &e))?;
     eprintln!("generated {}", dest.display());
     eprintln!("next: `kennel policy show {name}`, then `kennel policy compile {name}`");
     Ok(ExitCode::SUCCESS)
@@ -1496,11 +1573,11 @@ pub fn policy_generate(args: &[String]) -> Result<ExitCode, String> {
 ///
 /// Returns a message if the arguments are invalid or the trust store cannot be loaded.
 /// A template that fails to compile is reported and counted, not returned as an error.
-pub fn template_lint(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_lint(args: &[String]) -> Result<ExitCode, CliError> {
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+    while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
             lexopt::Arg::Long("template-dir") => {
                 template_dirs.push(lexopt_value(&mut p, "--template-dir")?);
@@ -1508,7 +1585,13 @@ pub fn template_lint(args: &[String]) -> Result<ExitCode, String> {
             lexopt::Arg::Long("trust-dir") => {
                 trust_dirs.push(lexopt_value(&mut p, "--trust-dir")?);
             }
-            other => return Err(lexopt_unexpected(&other, crate::TEMPLATE_VERBS, "lint")),
+            other => {
+                return Err(CliError::Usage(lexopt_unexpected(
+                    &other,
+                    crate::TEMPLATE_VERBS,
+                    "lint",
+                )))
+            }
         }
     }
     add_default_template_dirs(&mut template_dirs);
@@ -1586,7 +1669,7 @@ pub fn template_lint(args: &[String]) -> Result<ExitCode, String> {
 /// argument is a leaf policy (not a template), the file cannot be read, the key cannot be
 /// loaded, the file already carries a `[signature]`, the file is not a signable source
 /// template or fragment, signing fails, or the output cannot be written.
-pub fn template_sign(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_sign(args: &[String]) -> Result<ExitCode, CliError> {
     let mut path: Option<&str> = None;
     let mut key_path: Option<&str> = None;
     let mut key_id: Option<&str> = None;
@@ -1594,51 +1677,65 @@ pub fn template_sign(args: &[String]) -> Result<ExitCode, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--key" => key_path = Some(it.next().ok_or("--key needs a value")?),
-            "--key-id" => key_id = Some(it.next().ok_or("--key-id needs a value")?),
-            "--output" => output = Some(it.next().ok_or("--output needs a value")?.into()),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key-id" => {
+                key_id = Some(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--key-id"))?,
+                );
+            }
+            "--output" => {
+                output = Some(
+                    it.next()
+                        .ok_or_else(|| CliError::missing_value("--output"))?
+                        .into(),
+                );
+            }
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if path.is_none() => path = Some(value),
-            _ => return Err("only one <template> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <template> may be given")),
         }
     }
-    let path_arg = path.ok_or(
-        "usage: kennel template sign <template> --key <key> [--key-id <id>] [--output <path>]",
-    )?;
+    let path_arg = path.ok_or_else(|| {
+        CliError::usage(
+            "usage: kennel template sign <template> --key <key> [--key-id <id>] [--output <path>]",
+        )
+    })?;
     // Resolve the template by NAME from the template cascade (user ~/.config/kennel/templates
     // first), or take a path — the same smart resolution `compile` gives a policy.
     let (path, _tname) = resolve_template(path_arg)?;
 
-    let bytes = std::fs::read(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let bytes = std::fs::read(&path).map_err(|e| CliError::file("reading", &path, &e))?;
     // A template (`[fs] read = [...]`) and a composable fragment (`[[fs.read.add]]`) are the one
     // `SourcePolicy` type, so this covers both through a single parse (Kennel book Vol 2, templates).
     // We need the canonical bytes the signature covers, which the signer then signs.
     let policy = kennel_lib_compile::parse_source(&bytes).map_err(|e| {
-        format!(
+        CliError::Refused(format!(
             "{} is not a signable source template/fragment ({e})",
             path.display()
-        )
+        ))
     })?;
     // A leaf is not signed here — it is signed when compiled. Point the way (BEFORE demanding a key)
     // rather than append a meaningless source signature to a policy only ever run as a settled artefact.
     if policy.is_leaf() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{} is a leaf policy, not a template — sign it by compiling it: \
              `kennel policy compile {} --key <key>`",
             path.display(),
             policy.name.as_deref().unwrap_or(path_arg)
-        ));
+        )));
     }
-    let key_arg = key_path.ok_or("template sign needs --key <name-or-path>")?;
+    let key_arg =
+        key_path.ok_or_else(|| CliError::usage("template sign needs --key <name-or-path>"))?;
     let key_path = resolve_key_arg(key_arg)?;
     if policy.signature.is_some() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{} already carries a [signature]; remove it before re-signing",
             path.display()
-        ));
+        )));
     }
-    let payload =
-        kennel_lib_compile::canonical_source(&policy).map_err(|e| format!("signing: {e}"))?;
+    let payload = kennel_lib_compile::canonical_source(&policy)
+        .map_err(|e| CliError::Failed(format!("signing: {e}")))?;
 
     // Templates are the security baseline: only a system/vendor key may sign one, so
     // the `key_id` resolves against the system trust dirs — never the user's keys. The
@@ -1657,7 +1754,7 @@ pub fn template_sign(args: &[String]) -> Result<ExitCode, String> {
     let mut out_bytes = bytes;
     out_bytes.extend_from_slice(block.as_bytes());
     let out = output.unwrap_or(path);
-    std::fs::write(&out, &out_bytes).map_err(|e| format!("writing {}: {e}", out.display()))?;
+    std::fs::write(&out, &out_bytes).map_err(|e| CliError::file("writing", &out, &e))?;
 
     eprintln!("signed {} with key `{key_id}`", out.display());
     Ok(ExitCode::SUCCESS)
@@ -1676,13 +1773,13 @@ pub fn template_sign(args: &[String]) -> Result<ExitCode, String> {
 /// (`--unix`) is selected, the policy cannot be resolved or read, the trust store
 /// cannot be loaded, or the policy fails to compile (source form) or verify (settled
 /// form).
-pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_inspect(args: &[String]) -> Result<ExitCode, CliError> {
     let mut policy_arg: Option<String> = None;
     let mut template_dirs: Vec<PathBuf> = Vec::new();
     let mut trust_dirs: Vec<PathBuf> = Vec::new();
     let mut show_unix = false;
     let mut p = lexopt::Parser::from_args(args.iter().cloned());
-    while let Some(arg) = p.next().map_err(|e| e.to_string())? {
+    while let Some(arg) = p.next().map_err(|e| CliError::Failed(e.to_string()))? {
         match arg {
             lexopt::Arg::Long("unix") => show_unix = true,
             lexopt::Arg::Long("template-dir") => {
@@ -1694,17 +1791,26 @@ pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
             lexopt::Arg::Value(v) if policy_arg.is_none() => {
                 policy_arg = Some(v.to_string_lossy().into_owned());
             }
-            other => return Err(lexopt_unexpected(&other, POLICY_VERBS, "inspect")),
+            other => {
+                return Err(CliError::Usage(lexopt_unexpected(
+                    &other,
+                    POLICY_VERBS,
+                    "inspect",
+                )))
+            }
         }
     }
-    let policy_arg = policy_arg.ok_or_else(|| usage_of(POLICY_VERBS, "inspect"))?;
+    let policy_arg =
+        policy_arg.ok_or_else(|| CliError::Usage(usage_of(POLICY_VERBS, "inspect")))?;
     if !show_unix {
-        return Err("no grant filter specified — use --unix to inspect AF_UNIX grants".to_owned());
+        return Err(CliError::Usage(
+            "no grant filter specified — use --unix to inspect AF_UNIX grants".to_owned(),
+        ));
     }
 
     let (policy_file, _name) = resolve_policy(&policy_arg, true)?;
-    let bytes = std::fs::read(&policy_file)
-        .map_err(|e| format!("reading {}: {e}", policy_file.display()))?;
+    let bytes =
+        std::fs::read(&policy_file).map_err(|e| CliError::file("reading", &policy_file, &e))?;
 
     add_default_template_dirs(&mut template_dirs);
     add_system_trust_dirs(&mut trust_dirs);
@@ -1715,12 +1821,12 @@ pub fn policy_inspect(args: &[String]) -> Result<ExitCode, String> {
         let tc = TrustContext::load(&trust_dirs)?;
         let trust = tc.allow_unsigned();
         let compiled = build_settled(&bytes, &source, &trust, env!("CARGO_PKG_VERSION"))
-            .map_err(|e| format!("compiling {}: {e}", policy_file.display()))?;
+            .map_err(|e| CliError::file("compiling", &policy_file, &e))?;
         compiled.policy
     } else {
         let tc = TrustContext::load(&trust_dirs)?;
         kennel_lib_policy::verify_settled(&bytes, tc.keys())
-            .map_err(|e| format!("verifying {}: {e}", policy_file.display()))?
+            .map_err(|e| CliError::file("verifying", &policy_file, &e))?
     };
 
     if show_unix {
@@ -1813,7 +1919,7 @@ fn reserved_violations(
 /// # Errors
 ///
 /// See the install ceremony (`install_object`).
-pub fn policy_install(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_install(args: &[String]) -> Result<ExitCode, CliError> {
     install_object(args, House::Policy)
 }
 
@@ -1822,7 +1928,7 @@ pub fn policy_install(args: &[String]) -> Result<ExitCode, String> {
 /// # Errors
 ///
 /// See the install ceremony (`install_object`).
-pub fn template_install(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_install(args: &[String]) -> Result<ExitCode, CliError> {
     install_object(args, House::Template)
 }
 
@@ -1841,7 +1947,7 @@ pub fn template_install(args: &[String]) -> Result<ExitCode, String> {
 /// `[[provides]]` claim the tier cannot sign; `--host` without root or without the host
 /// key; a name collision without `--force`; or a placement/signing failure.
 #[allow(clippy::too_many_lines)]
-fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
+fn install_object(args: &[String], house: House) -> Result<ExitCode, CliError> {
     use kennel_lib_compile::source_sig::Tier;
     let mut file: Option<&str> = None;
     let mut host = false;
@@ -1852,19 +1958,20 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
         match arg.as_str() {
             "--host" => host = true,
             "--force" => force = true,
-            "--key" => key = Some(it.next().ok_or("--key needs a value")?),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--key" => key = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if file.is_none() => file = Some(v),
-            _ => return Err("only one <file.toml> may be given".to_owned()),
+            _ => return Err(CliError::usage("only one <file.toml> may be given")),
         }
     }
     let file = file.ok_or_else(|| {
-        format!(
+        CliError::Usage(format!(
             "usage: kennel {} install <file.toml> [--host] [--force] [--key K]",
             house.noun()
-        )
+        ))
     })?;
-    let bytes = std::fs::read(file).map_err(|e| format!("reading {file}: {e}"))?;
+    let bytes =
+        std::fs::read(file).map_err(|e| CliError::Failed(format!("reading {file}: {e}")))?;
 
     // A settled artefact is not install material: acceptance is downward-inclusive, so a
     // vendor-/host-signed artefact just works wherever it is placed — plain `cp` it. The
@@ -1872,28 +1979,28 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
     // source" are distinguished, so a typo gets the parser's real diagnostic, not the
     // copy note.
     if kennel_lib_policy::parse_signed_settled_unverified(&bytes).is_ok() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{file} is a compiled (settled) artefact, not source. A higher-tier-signed \
              artefact verifies wherever it is placed — copy it into a `policies/` repo \
              directly. `install` places and signs SOURCE at your tier"
-        ));
+        )));
     }
     let source = kennel_lib_compile::parse_source(&bytes)
-        .map_err(|e| format!("{file} is not a source policy/template: {e}"))?;
+        .map_err(|e| CliError::Refused(format!("{file} is not a source policy/template: {e}")))?;
 
     // Classify + cross-house refusal: the object's identity says which house owns it.
     let is_template = source.template_name.is_some();
     match (house, is_template) {
         (House::Policy, true) => {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "{file} is a template (a shared base) — install it with `kennel template \
                  install {file}`"
-            ));
+            )));
         }
         (House::Template, false) if source.is_leaf() => {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "{file} is a leaf policy — install it with `kennel policy install {file}`"
-            ));
+            )));
         }
         _ => {}
     }
@@ -1901,9 +2008,11 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
         .template_name
         .clone()
         .or_else(|| source.name.clone())
-        .ok_or_else(|| format!("{file} has no `name`/`template_name`"))?;
+        .ok_or_else(|| CliError::Refused(format!("{file} has no `name`/`template_name`")))?;
     if !crate::is_valid_policy_name(&name) {
-        return Err(format!("`{name}` is not a valid object name"));
+        return Err(CliError::Usage(format!(
+            "`{name}` is not a valid object name"
+        )));
     }
 
     // Tier + authority gate, the ceremony half (the compiler re-enforces at compile).
@@ -1911,15 +2020,17 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
     let violations = reserved_violations(&source, tier);
     if !violations.is_empty() {
         let at = if host { "host" } else { "user" };
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "{file} carries reserved [[provides]] claims a {at}-tier key cannot sign \
              ({}) — reserved names belong to the tier that owns them; derive from the \
              signed base instead (`kennel policy generate --from <template>`)",
             violations.join(", ")
-        ));
+        )));
     }
     if host && kennel_lib_syscall::unistd::effective_uid() != 0 {
-        return Err("`--host` installs into /etc/kennel and needs root".to_owned());
+        return Err(CliError::Refused(
+            "`--host` installs into /etc/kennel and needs root".to_owned(),
+        ));
     }
 
     // Destination: the tier's canonical layout. Collision refuses (an admin edit is never
@@ -1932,20 +2043,21 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
             .as_deref()
             .and_then(Path::parent)
             .map(|d| d.join(house.repo_leaf()))
-            .ok_or("cannot resolve ~/.config/kennel (HOME unset)")?
+            .ok_or_else(|| {
+                CliError::Refused("cannot resolve ~/.config/kennel (HOME unset)".to_owned())
+            })?
     };
     let dest_dir = repo_root.join(&name);
     let created_fresh = !dest_dir.exists();
     if !created_fresh && !force {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{name}` already exists at {} — pass --force to replace it",
             dest_dir.display()
-        ));
+        )));
     }
-    std::fs::create_dir_all(&dest_dir)
-        .map_err(|e| format!("creating {}: {e}", dest_dir.display()))?;
+    std::fs::create_dir_all(&dest_dir).map_err(|e| CliError::file("creating", &dest_dir, &e))?;
     let placed = dest_dir.join("policy.toml");
-    std::fs::write(&placed, &bytes).map_err(|e| format!("writing {}: {e}", placed.display()))?;
+    std::fs::write(&placed, &bytes).map_err(|e| CliError::file("writing", &placed, &e))?;
 
     // Sign at the tier's level: a leaf compiles (which signs), a template/fragment is
     // source-signed. The host tier's key is the installer-provisioned `kennel-host`.
@@ -1956,10 +2068,10 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
                 .unwrap_or_else(|_| kennel_lib_config::Deployment::defaults());
             let host_key = deployment.trust_dir().join("kennel-host");
             if !host_key.is_file() {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "no host signing key at {} (install.sh provisions it); pass --key",
                     host_key.display()
-                ));
+                )));
             }
             host_key.to_string_lossy().into_owned()
         }
@@ -2022,7 +2134,7 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, String> {
 /// # Errors
 ///
 /// See the clone ceremony (`clone_object`).
-pub fn policy_clone(args: &[String]) -> Result<ExitCode, String> {
+pub fn policy_clone(args: &[String]) -> Result<ExitCode, CliError> {
     clone_object(args, House::Policy)
 }
 
@@ -2031,7 +2143,7 @@ pub fn policy_clone(args: &[String]) -> Result<ExitCode, String> {
 /// # Errors
 ///
 /// See the clone ceremony (`clone_object`).
-pub fn template_clone(args: &[String]) -> Result<ExitCode, String> {
+pub fn template_clone(args: &[String]) -> Result<ExitCode, CliError> {
     clone_object(args, House::Template)
 }
 
@@ -2050,7 +2162,7 @@ pub fn template_clone(args: &[String]) -> Result<ExitCode, String> {
 /// Returns a message on: bad arguments; a name that does not resolve to SOURCE in this
 /// house's cascade (a settled-only entry names where the source lives); a reserved
 /// `[[provides]]` claim; a user-house collision; or a placement/signing failure.
-fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
+fn clone_object(args: &[String], house: House) -> Result<ExitCode, CliError> {
     use kennel_lib_compile::source_sig::Tier;
     let mut src_arg: Option<&str> = None;
     let mut new_name: Option<&str> = None;
@@ -2058,25 +2170,29 @@ fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--key" => key = Some(it.next().ok_or("--key needs a value")?),
-            flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
+            "--key" => key = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if src_arg.is_none() => src_arg = Some(v),
             v if new_name.is_none() => new_name = Some(v),
-            _ => return Err("at most <name> and <new-name> may be given".to_owned()),
+            _ => {
+                return Err(CliError::usage(
+                    "at most <name> and <new-name> may be given",
+                ))
+            }
         }
     }
     let src_arg = src_arg.ok_or_else(|| {
-        format!(
+        CliError::Usage(format!(
             "usage: kennel {} clone <name> [<new-name>] [--key K]",
             house.noun()
-        )
+        ))
     })?;
     if src_arg.contains('/') {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "`clone` takes an object NAME from the {} cascade, not a path — `install` places \
              a file you already hold",
             house.repo_leaf()
-        ));
+        )));
     }
 
     // Resolve SOURCE form across this house's cascade (a settled-only tier is skipped: its
@@ -2089,26 +2205,31 @@ fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
         }
         House::Policy => resolve_clonable_policy_source(src_arg)?,
     };
-    let bytes =
-        std::fs::read(&src_file).map_err(|e| format!("reading {}: {e}", src_file.display()))?;
-    let source = kennel_lib_compile::parse_source(&bytes)
-        .map_err(|e| format!("{} is not clonable source ({e})", src_file.display()))?;
+    let bytes = std::fs::read(&src_file).map_err(|e| CliError::file("reading", &src_file, &e))?;
+    let source = kennel_lib_compile::parse_source(&bytes).map_err(|e| {
+        CliError::Refused(format!(
+            "{} is not clonable source ({e})",
+            src_file.display()
+        ))
+    })?;
 
     // The content-total authority gate: renaming is no escape.
     let violations = reserved_violations(&source, Tier::User);
     if !violations.is_empty() {
-        return Err(format!(
+        return Err(CliError::Refused(format!(
             "`{src_arg}` carries reserved [[provides]] claims ({}) — the claim lives in the \
              content, and a user key cannot re-sign it under any name. Not clonable; derive \
              from it where it stands instead: `kennel policy generate --from {src_arg}`",
             violations.join(", ")
-        ));
+        )));
     }
 
     // The clone's name: default keeps it (the copy shadows the original user-first).
     let target = new_name.unwrap_or(src_arg);
     if !crate::is_valid_policy_name(target) {
-        return Err(format!("`{target}` is not a valid object name"));
+        return Err(CliError::Usage(format!(
+            "`{target}` is not a valid object name"
+        )));
     }
     let renamed = if target == src_arg {
         String::from_utf8_lossy(&bytes).into_owned()
@@ -2120,7 +2241,8 @@ fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
     // temp file, then run the same place+sign ceremony.
     let staging =
         std::env::temp_dir().join(format!("kennel-clone-{target}-{}.toml", std::process::id()));
-    std::fs::write(&staging, renamed.as_bytes()).map_err(|e| format!("staging the clone: {e}"))?;
+    std::fs::write(&staging, renamed.as_bytes())
+        .map_err(|e| CliError::Failed(format!("staging the clone: {e}")))?;
     let mut install_args: Vec<String> = vec![staging.to_string_lossy().into_owned()];
     if let Some(k) = key {
         install_args.extend(["--key".to_owned(), k.to_owned()]);
@@ -2141,7 +2263,7 @@ fn clone_object(args: &[String], house: House) -> Result<ExitCode, String> {
 
 /// Rewrite the top-level `name`/`template_name` line to `target`, preserving every other
 /// byte (comments included). Exactly one identity line must match.
-fn rename_source_object(bytes: &[u8], target: &str) -> Result<String, String> {
+fn rename_source_object(bytes: &[u8], target: &str) -> Result<String, CliError> {
     let text = String::from_utf8_lossy(bytes);
     let mut replaced = false;
     let out: Vec<String> = text
@@ -2164,7 +2286,9 @@ fn rename_source_object(bytes: &[u8], target: &str) -> Result<String, String> {
         })
         .collect();
     if !replaced {
-        return Err("no top-level `name`/`template_name` line to rename".to_owned());
+        return Err(CliError::Refused(
+            "no top-level `name`/`template_name` line to rename".to_owned(),
+        ));
     }
     Ok(out.join("\n") + "\n")
 }
@@ -2176,7 +2300,7 @@ fn rename_source_object(bytes: &[u8], target: &str) -> Result<String, String> {
 ///
 /// Returns a message when no tier ships source: naming the settled-only artefact if one
 /// exists (derived, not clonable), else the plain not-found with the `list` pointer.
-fn resolve_clonable_policy_source(name: &str) -> Result<(PathBuf, &'static str), String> {
+fn resolve_clonable_policy_source(name: &str) -> Result<(PathBuf, &'static str), CliError> {
     let user = kennel_lib_config::User::load().unwrap_or_default();
     let mut settled_hit: Option<PathBuf> = None;
     for dir in user.policy_dirs() {
@@ -2193,18 +2317,18 @@ fn resolve_clonable_policy_source(name: &str) -> Result<(PathBuf, &'static str),
     }
     settled_hit.map_or_else(
         || {
-            Err(format!(
+            Err(CliError::Refused(format!(
                 "no policy named `{name}` in the policies cascade (`kennel policy list` shows \
                  what is there)"
-            ))
+            )))
         },
         |s| {
-            Err(format!(
+            Err(CliError::Refused(format!(
                 "`{name}` exists only as compiled artefacts (e.g. {}) — a settled artefact is \
                  derived, not clonable source, and no tier in the cascade ships this policy's \
                  source",
                 s.display()
-            ))
+            )))
         },
     )
 }

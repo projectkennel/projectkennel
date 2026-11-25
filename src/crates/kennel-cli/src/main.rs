@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout)] // allow: this is a binary; stdout is its output
 
+use kennel_cli::CliError;
 use std::process::ExitCode;
 
 use kennel_cli::{
@@ -28,7 +29,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(args: &[String]) -> Result<ExitCode, String> {
+fn dispatch(args: &[String]) -> Result<ExitCode, CliError> {
     let Some((cmd, rest)) = args.split_first() else {
         print_help();
         return Ok(ExitCode::SUCCESS);
@@ -63,18 +64,20 @@ fn dispatch(args: &[String]) -> Result<ExitCode, String> {
         "template" => dispatch_template(rest),
         "key" => dispatch_key(rest),
         // Retired spelling: the key house owns key management (the 0.7.0 courtesy pointer).
-        "keygen" => Err(
+        "keygen" => Err(CliError::Usage(
             "`kennel keygen` moved to the key house: `kennel key generate <name>` \
              (as a user it writes your user key; as root, the host key)"
                 .to_owned(),
-        ),
+        )),
         "version" => kennel_cli::misc::version(rest),
         "audit" => kennel_cli::misc::audit(rest),
-        other => Err(format!("unknown command `{other}` — run `kennel --help`")),
+        other => Err(CliError::Usage(format!(
+            "unknown command `{other}` — run `kennel --help`"
+        ))),
     }
 }
 
-fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
+fn dispatch_policy(args: &[String]) -> Result<ExitCode, CliError> {
     let Some((verb, rest)) = args.split_first() else {
         print_policy_help();
         return Ok(ExitCode::SUCCESS);
@@ -97,32 +100,32 @@ fn dispatch_policy(args: &[String]) -> Result<ExitCode, String> {
         "compile" => kennel_cli::policy::compile(rest),
         "validate" => kennel_cli::policy::validate(rest),
         // Retired spellings answer with the house pointer for one release (the 0.6.0 courtesy).
-        "sign-template" => Err(
+        "sign-template" => Err(CliError::Usage(
             "`kennel policy sign-template` moved to the template house: `kennel template sign \
              <template> --key <key>`"
                 .to_owned(),
-        ),
-        "sign" => Err(
+        )),
+        "sign" => Err(CliError::Usage(
             "`kennel policy sign` was renamed. To sign your own policy so you can run it, use \
              `kennel policy compile <policy> --key <key>`. To sign a shared base template, use \
              `kennel template sign <template> --key <key>`."
                 .to_owned(),
-        ),
-        "lint" => Err(
+        )),
+        "lint" => Err(CliError::Usage(
             "`kennel policy lint` moved to the template house (it checks the template corpus): \
              `kennel template lint`"
                 .to_owned(),
-        ),
+        )),
         "risks" => kennel_cli::policy::policy_risks(rest),
         "diff" => kennel_cli::policy::policy_diff(rest),
         "inspect" => kennel_cli::policy::policy_inspect(rest),
-        other => Err(format!(
+        other => Err(CliError::Usage(format!(
             "unknown policy verb `{other}` — run `kennel policy --help`"
-        )),
+        ))),
     }
 }
 
-fn dispatch_template(args: &[String]) -> Result<ExitCode, String> {
+fn dispatch_template(args: &[String]) -> Result<ExitCode, CliError> {
     let Some((verb, rest)) = args.split_first() else {
         print_template_help();
         return Ok(ExitCode::SUCCESS);
@@ -142,13 +145,13 @@ fn dispatch_template(args: &[String]) -> Result<ExitCode, String> {
         "install" => kennel_cli::policy::template_install(rest),
         "sign" => kennel_cli::policy::template_sign(rest),
         "lint" => kennel_cli::policy::template_lint(rest),
-        other => Err(format!(
+        other => Err(CliError::Usage(format!(
             "unknown template verb `{other}` — run `kennel template --help`"
-        )),
+        ))),
     }
 }
 
-fn dispatch_key(args: &[String]) -> Result<ExitCode, String> {
+fn dispatch_key(args: &[String]) -> Result<ExitCode, CliError> {
     let Some((verb, rest)) = args.split_first() else {
         print_key_help();
         return Ok(ExitCode::SUCCESS);
@@ -168,9 +171,9 @@ fn dispatch_key(args: &[String]) -> Result<ExitCode, String> {
         "trust" => kennel_cli::key::trust(rest),
         "untrust" => kennel_cli::key::untrust(rest),
         "rotate" => kennel_cli::key::rotate(rest),
-        other => Err(format!(
+        other => Err(CliError::Usage(format!(
             "unknown key verb `{other}` — run `kennel key --help`"
-        )),
+        ))),
     }
 }
 
@@ -271,7 +274,7 @@ signed_fields = []
     #[test]
     fn resolve_policy_rejects_an_unknown_name() {
         let err = resolve_policy("definitely-no-such-policy-xyz", true).expect_err("must fail");
-        assert!(err.contains("no policy named"), "got {err}");
+        assert!(err.to_string().contains("no policy named"), "got {err}");
     }
 
     #[test]

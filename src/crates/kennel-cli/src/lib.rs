@@ -9,6 +9,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::print_stdout)] // allow: the command implementations of the `kennel` binary; stdout is its output
 
+mod error;
+pub use error::CliError;
+
 // The verb modules — the `kennel-host` unit dispatches into these.
 pub mod key;
 pub mod misc;

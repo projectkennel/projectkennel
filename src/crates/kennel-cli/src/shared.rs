@@ -5,6 +5,7 @@
 //! Daemon connection, key loading, policy/template/trust-store resolution,
 //! exit-code mapping, lexopt helpers, and the command tables.
 
+use crate::CliError;
 use std::collections::BTreeSet;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -78,20 +79,20 @@ pub fn usage_of(table: &[CommandSpec], verb: &str) -> String {
 ///
 /// Returns a message if the control socket cannot be reached or the version
 /// handshake with the daemon fails.
-pub fn connect() -> Result<UnixStream, String> {
+pub fn connect() -> Result<UnixStream, CliError> {
     let path = socket::socket_path();
     let mut conn = UnixStream::connect(&path).map_err(|e| {
-        format!(
+        CliError::Daemon(format!(
             "cannot reach kenneld at {} ({e}); is the kenneld.socket user unit enabled?",
             path.display()
-        )
+        ))
     })?;
     control::client_handshake(
         &mut conn,
         kennel_lib_policy::SETTLED_SCHEMA_VERSION,
         env!("CARGO_PKG_VERSION"),
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| CliError::Failed(e.to_string()))?;
     Ok(conn)
 }
 
@@ -101,12 +102,12 @@ pub fn connect() -> Result<UnixStream, String> {
 ///
 /// Returns a message if encoding the request frame fails or the `SCM_RIGHTS`
 /// send on the socket fails.
-pub fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<(), String> {
+pub fn send(conn: &UnixStream, request: &Request, fds: &[BorrowedFd<'_>]) -> Result<(), CliError> {
     let mut framed = Vec::new();
     control::write_frame(&mut framed, &request.encode())
-        .map_err(|e| format!("encoding request: {e}"))?;
+        .map_err(|e| CliError::Daemon(format!("encoding request: {e}")))?;
     kennel_lib_syscall::scm::send_with_fds(conn.as_fd(), &framed, fds)
-        .map_err(|e| format!("sending request: {e}"))?;
+        .map_err(|e| CliError::Daemon(format!("sending request: {e}")))?;
     Ok(())
 }
 
@@ -123,10 +124,10 @@ pub fn exit_code(code: i32) -> ExitCode {
 /// # Errors
 ///
 /// Returns a message if `flag` has no following value.
-pub fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, String> {
+pub fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, CliError> {
     p.value()
         .map(PathBuf::from)
-        .map_err(|_| format!("{flag} needs a value"))
+        .map_err(|_| CliError::Usage(format!("{flag} needs a value")))
 }
 
 /// Format an unexpected lexopt arg into a usage error for `verb`.
@@ -173,7 +174,7 @@ pub fn resolve_policy_in(
     prefer_settled: bool,
     policy_dirs: &[PathBuf],
     base: &Path,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, CliError> {
     let candidates = policy_dirs.iter().flat_map(|dir| {
         let named = dir.join(arg);
         let settled = named.join(format!("{arg}.settled.toml"));
@@ -203,7 +204,7 @@ fn resolve_name_then_file(
     candidates: impl Iterator<Item = PathBuf>,
     kind: &str,
     searched: &str,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, CliError> {
     let literal = base.join(arg);
     let as_path = |path: PathBuf| Resolved {
         name: policy_name_from_path(&path),
@@ -214,7 +215,7 @@ fn resolve_name_then_file(
         return if literal.exists() {
             Ok(as_path(literal))
         } else {
-            Err(format!("`{arg}`: no such file"))
+            Err(CliError::Refused(format!("`{arg}`: no such file")))
         };
     }
     let valid = is_valid_policy_name(arg);
@@ -233,11 +234,13 @@ fn resolve_name_then_file(
         return Ok(as_path(literal));
     }
     if !valid {
-        return Err(format!(
+        return Err(CliError::Usage(format!(
             "`{arg}` is not an existing file, and not a valid {kind} name (no `/`, `..`, or whitespace)"
-        ));
+        )));
     }
-    Err(format!("no {kind} named `{arg}` ({searched}"))
+    Err(CliError::Refused(format!(
+        "no {kind} named `{arg}` ({searched}"
+    )))
 }
 
 /// The note for a bare word that named both a policy (or template) and a file in the current
@@ -271,7 +274,7 @@ pub fn resolve_template_in(
     arg: &str,
     template_dirs: &[PathBuf],
     base: &Path,
-) -> Result<Resolved, String> {
+) -> Result<Resolved, CliError> {
     // FsTemplateSource layout: flat `<name>.toml`, then nested `<name>/policy.toml`.
     let candidates = template_dirs.iter().flat_map(|dir| {
         [
@@ -299,7 +302,7 @@ pub fn resolve_template_in(
 ///
 /// Returns a message if a path argument does not exist, or a bare word is neither a policy
 /// name nor an existing file.
-pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), String> {
+pub fn resolve_policy(arg: &str, prefer_settled: bool) -> Result<(PathBuf, String), CliError> {
     let dirs = kennel_lib_config::User::load()
         .unwrap_or_default()
         .policy_dirs();
@@ -356,7 +359,7 @@ pub fn tier_of_key_id(key_id: &str) -> Option<&'static str> {
 ///
 /// Returns a message naming the keys that ARE in the key dir if the argument is neither a key there
 /// nor an existing file.
-pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
+pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, CliError> {
     // Where `key generate` puts keys: the user key dir, by name. Look here first.
     let in_key_dir = default_key_dir().join(arg);
     if in_key_dir.is_file() {
@@ -386,10 +389,10 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
     } else {
         names.join(", ")
     };
-    Err(format!(
+    Err(CliError::Refused(format!(
         "no signing key `{arg}`: not a key in {} and not a file (available: {avail})",
         dir.display()
-    ))
+    )))
 }
 
 /// Resolve a template/fragment argument: a **name** in the template cascade, else a path.
@@ -406,7 +409,7 @@ pub fn resolve_key_arg(arg: &str) -> Result<PathBuf, String> {
 ///
 /// Returns a message if the argument is neither an existing file nor a valid name resolving in the
 /// template dirs.
-pub fn resolve_template(arg: &str) -> Result<(PathBuf, String), String> {
+pub fn resolve_template(arg: &str) -> Result<(PathBuf, String), CliError> {
     let mut dirs = Vec::new();
     add_default_template_dirs(&mut dirs);
     let resolved = resolve_template_in(arg, &dirs, Path::new(""))?;
@@ -507,7 +510,7 @@ fn by_trust_precedence(dirs: &[PathBuf]) -> Vec<PathBuf> {
 ///
 /// Returns a message if a `.pub` file cannot be read, is not an OpenSSH
 /// Ed25519 public key, or cannot be inserted into the key set.
-pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, String> {
+pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, CliError> {
     let mut keys = kennel_lib_policy::KeySet::new();
     for dir in &by_trust_precedence(dirs) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -521,12 +524,12 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
             let Some(key_id) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let contents = std::fs::read_to_string(&path)
-                .map_err(|e| format!("reading {}: {e}", path.display()))?;
+            let contents =
+                std::fs::read_to_string(&path).map_err(|e| CliError::file("reading", &path, &e))?;
             if kennel_lib_policy::openssh::is_openssh_public(&contents) {
                 let (pubkey_bytes, _comment) =
                     kennel_lib_policy::openssh::parse_public_key(&contents)
-                        .map_err(|e| format!("key {}: {e}", path.display()))?;
+                        .map_err(|e| CliError::file("key", &path, &e))?;
                 // A key id names one key. The first directory in precedence order defines it;
                 // a later file of the same name is not a second definition, and saying so
                 // matters: the signer's tier is read off the id.
@@ -539,20 +542,20 @@ pub fn load_trust_store(dirs: &[PathBuf]) -> Result<kennel_lib_policy::KeySet, S
                     Some(_) => {}
                     None => keys
                         .insert(key_id, &pubkey_bytes)
-                        .map_err(|e| format!("key {}: {e}", path.display()))?,
+                        .map_err(|e| CliError::file("key", &path, &e))?,
                 }
             } else if is_legacy_raw_b64(&contents) {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "key {}: legacy raw-base64 public key (format removed in 0.6.0) — \
                      regenerate with `kennel key generate`, or convert the pair once with \
                      0.5.x's `kennel keygen migrate`",
                     path.display()
-                ));
+                )));
             } else {
-                return Err(format!(
+                return Err(CliError::Refused(format!(
                     "key {}: not an OpenSSH ed25519 public key",
                     path.display()
-                ));
+                )));
             }
         }
     }
@@ -614,7 +617,7 @@ impl TrustContext {
     /// # Errors
     ///
     /// Returns a message if a `.pub` file under `dirs` cannot be read or parsed.
-    pub fn load(dirs: &[PathBuf]) -> Result<Self, String> {
+    pub fn load(dirs: &[PathBuf]) -> Result<Self, CliError> {
         let keys = load_trust_store(dirs)?;
         let (vendor, host) = trust_tier_sets();
         let reserved = kennel_lib_config::Deployment::load()
@@ -683,7 +686,7 @@ impl TrustContext {
 ///
 /// Returns a message if the user key dir contains no signing key, or more than
 /// one (the caller must then pass `--key` to disambiguate).
-pub fn default_signing_key() -> Result<PathBuf, String> {
+pub fn default_signing_key() -> Result<PathBuf, CliError> {
     let dir = default_key_dir();
     let mut found: Vec<PathBuf> = Vec::new();
     let mut legacy: Vec<String> = Vec::new();
@@ -709,28 +712,28 @@ pub fn default_signing_key() -> Result<PathBuf, String> {
     found.sort();
     legacy.sort();
     match found.as_slice() {
-        [] if !legacy.is_empty() => Err(format!(
+        [] if !legacy.is_empty() => Err(CliError::Refused(format!(
             "no OpenSSH signing key in {}, only legacy raw-base64 key(s) ({}) — the format \
              was removed in 0.6.0: regenerate with `kennel key generate <name>`, or convert \
              once with 0.5.x's `kennel keygen migrate`",
             dir.display(),
             legacy.join(", ")
-        )),
-        [] => Err(format!(
+        ))),
+        [] => Err(CliError::Refused(format!(
             "no signing key in {} — generate one with `kennel key generate <name>`, or pass --key <path>",
             dir.display()
-        )),
+        ))),
         [only] => Ok(only.clone()),
         many => {
             let ids: Vec<&str> = many
                 .iter()
                 .filter_map(|p| p.file_stem().and_then(|s| s.to_str()))
                 .collect();
-            Err(format!(
+            Err(CliError::Refused(format!(
                 "multiple signing keys in {} ({}); pass --key <name> to choose one of them",
                 dir.display(),
                 ids.join(", ")
-            ))
+            )))
         }
     }
 }
@@ -802,7 +805,7 @@ pub fn sshsig_sign(
     key: &str,
     key_id_override: Option<&str>,
     trust_dirs: &[PathBuf],
-) -> Result<(String, String), String> {
+) -> Result<(String, String), CliError> {
     // The message goes to `ssh-keygen` on stdin and the signature comes back on stdout: with no
     // file argument `-Y sign` works as a filter. Nothing is staged on disk. (It used to be written
     // to `/tmp/kennel-sign-<pid>/canonical` — a predictable, pre-creatable path, which root also
@@ -823,36 +826,43 @@ pub fn sshsig_sign(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("invoking ssh-keygen: {e} (is openssh-client installed?)"))?;
+        .map_err(|e| {
+            CliError::Failed(format!(
+                "invoking ssh-keygen: {e} (is openssh-client installed?)"
+            ))
+        })?;
     // Feed the message from a thread, so a signer that writes before it has read everything
     // cannot deadlock against us on two full pipes.
     let mut stdin = child
         .stdin
         .take()
-        .ok_or_else(|| "ssh-keygen: no stdin pipe".to_owned())?;
+        .ok_or_else(|| CliError::Failed("ssh-keygen: no stdin pipe".to_owned()))?;
     let message = canonical.to_vec();
     let feeder = std::thread::spawn(move || stdin.write_all(&message));
     let output = child
         .wait_with_output()
-        .map_err(|e| format!("waiting for ssh-keygen: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("waiting for ssh-keygen: {e}")))?;
     let fed = feeder
         .join()
-        .map_err(|_| "ssh-keygen: the input thread panicked".to_owned())?;
+        .map_err(|_| CliError::Failed("ssh-keygen: the input thread panicked".to_owned()))?;
     if !output.status.success() {
-        return Err(format!("ssh-keygen -Y sign failed for key `{key}`"));
+        return Err(CliError::Failed(format!(
+            "ssh-keygen -Y sign failed for key `{key}`"
+        )));
     }
-    fed.map_err(|e| format!("passing the message to ssh-keygen: {e}"))?;
-    let armor = String::from_utf8(output.stdout)
-        .map_err(|_| "ssh-keygen produced a signature that is not text".to_owned())?;
+    fed.map_err(|e| CliError::Failed(format!("passing the message to ssh-keygen: {e}")))?;
+    let armor = String::from_utf8(output.stdout).map_err(|_| {
+        CliError::Failed("ssh-keygen produced a signature that is not text".to_owned())
+    })?;
 
     // The SSHSIG embeds the public key; read it back to resolve the trust-store name.
     let parsed = kennel_lib_policy::sshsig::SshSig::parse_armored(&armor)
-        .map_err(|e| format!("parsing the signature ssh-keygen produced: {e}"))?;
+        .map_err(|e| CliError::Failed(format!("parsing the signature ssh-keygen produced: {e}")))?;
     if parsed.key_kind != kennel_lib_policy::sshsig::KeyKind::Ed25519 {
-        return Err(
+        return Err(CliError::Refused(
             "hardware (sk-) signing keys are not yet supported for signing; use an Ed25519 key"
                 .to_owned(),
-        );
+        ));
     }
     let matched = resolve_key_id(trust_dirs, &parsed.pubkey);
     let key_id = match (key_id_override, matched) {
@@ -868,10 +878,10 @@ pub fn sshsig_sign(
         }
         (None, Some(found)) => found,
         (None, None) => {
-            return Err(format!(
+            return Err(CliError::Refused(format!(
                 "the signing key's public half is not in any trust dir, so its key_id cannot be \
                  resolved; install its `.pub` in a trust dir or pass --key-id <id> (key: `{key}`)"
-            ));
+            )));
         }
     };
     Ok((key_id, armor))
@@ -1072,8 +1082,10 @@ mod signer_tests {
         let pubkey = signing_key(4).public_key_bytes();
         scratch.write("old.pub", &kennel_lib_policy::b64::encode(&pubkey));
 
-        let err = load_trust_store(std::slice::from_ref(&scratch.0))
-            .map_or_else(|e| e, |_| "load unexpectedly succeeded".to_owned());
+        let err = load_trust_store(std::slice::from_ref(&scratch.0)).map_or_else(
+            |e| e.to_string(),
+            |_| "load unexpectedly succeeded".to_owned(),
+        );
         assert!(err.contains("raw-base64"), "names the format: {err}");
         assert!(
             err.contains("kennel key generate"),
@@ -1086,8 +1098,10 @@ mod signer_tests {
     fn garbage_pub_refused_without_migration_pointer() {
         let scratch = Scratch::new("garbage-pub");
         scratch.write("junk.pub", "not a key at all");
-        let err = load_trust_store(std::slice::from_ref(&scratch.0))
-            .map_or_else(|e| e, |_| "load unexpectedly succeeded".to_owned());
+        let err = load_trust_store(std::slice::from_ref(&scratch.0)).map_or_else(
+            |e| e.to_string(),
+            |_| "load unexpectedly succeeded".to_owned(),
+        );
         assert!(err.contains("not an OpenSSH"), "plain parse error: {err}");
         assert!(
             !err.contains("raw-base64"),
@@ -1192,7 +1206,7 @@ mod resolve_tests {
 
         let err = resolve_policy_in("./missing", false, &t.policies(), &t.cwd())
             .expect_err("a missing path does not fall back to a name");
-        assert!(err.contains("no such file"), "got {err}");
+        assert!(err.to_string().contains("no such file"), "got {err}");
     }
 
     #[test]
@@ -1209,7 +1223,10 @@ mod resolve_tests {
     fn an_unknown_bare_word_with_no_file_is_refused() {
         let t = Tree::new("unknown");
         let err = resolve_policy_in("nope", false, &t.policies(), &t.cwd()).expect_err("refused");
-        assert!(err.contains("no policy named `nope`"), "got {err}");
+        assert!(
+            err.to_string().contains("no policy named `nope`"),
+            "got {err}"
+        );
     }
 
     #[test]
