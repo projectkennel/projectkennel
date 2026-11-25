@@ -2093,9 +2093,8 @@ where
     };
     if tr.on() {
         tr.step(&format!(
-            "run_kennel: policy loaded — net.mode={:?}, account={}, ssh grants={}, unix sockets={}",
+            "run_kennel: policy loaded — net.mode={:?}, ssh grants={}, unix sockets={}",
             loaded.net.mode,
-            loaded.account,
             loaded.ssh.grants.len(),
             loaded.unix.sockets.len()
         ));
