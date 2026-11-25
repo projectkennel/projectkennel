@@ -149,6 +149,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The public functions that returned a bare `io::Error` say which step failed.**
+  - `kennel-privhelper`'s client returns a `ClientError`: the socket pair, starting the
+    helper, sending, receiving, a factory that did not return the init pid or the boot-sync
+    socket, a malformed response, a failed `exclusive-unmount`. The daemon's `Privileged`
+    trait still speaks `io::Error`; the conversion keeps the error kind, and the text now
+    names the step ("starting the privhelper: …").
+  - `build_ruleset` returns a `RulesetError`. A Landlock rule that cannot be added names its
+    path; before, the caller got the OS error alone.
+  - `mesh_rendezvous::decode` returns a `RendezvousError` with a variant per malformation.
+  - `ProcFacts::gather` names the call that failed (`sysinfo(2)` or `uname(2)`).
+  The private helpers inside the view build still return `io::Error`; `ViewError` already
+  attaches the phase to them at the boundary.
 - **Three test gaps are closed.**
   - *A fully populated policy.* The golden-bytes test for the canonical form covered only the
     sample policy, which leaves most optional sections empty. `every-field.canonical` is the

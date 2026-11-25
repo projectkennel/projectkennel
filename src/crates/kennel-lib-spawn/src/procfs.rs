@@ -49,7 +49,7 @@ impl ProcFacts {
     ///
     /// # Errors
     ///
-    /// Returns the OS error if `sysinfo(2)` or `uname(2)` fails.
+    /// An OS error that names the call, if `sysinfo(2)` or `uname(2)` fails.
     pub fn gather() -> io::Result<Self> {
         use kennel_lib_syscall::sysinfo;
         let now_secs = std::time::SystemTime::now()
@@ -57,8 +57,10 @@ impl ProcFacts {
             .map_or(0, |d| d.as_secs());
         Ok(Self {
             cpus: sysinfo::usable_cpus(),
-            memory: sysinfo::memory()?,
-            kernel: sysinfo::kernel()?,
+            memory: sysinfo::memory()
+                .map_err(|e| io::Error::new(e.kind(), format!("sysinfo(2): {e}")))?,
+            kernel: sysinfo::kernel()
+                .map_err(|e| io::Error::new(e.kind(), format!("uname(2): {e}")))?,
             now_secs,
         })
     }

@@ -53,6 +53,48 @@ pub use plan::{
 };
 pub use view_path::{ViewPath, ViewPathError};
 
+/// Why a Landlock ruleset could not be built.
+#[derive(Debug)]
+pub enum RulesetError {
+    /// The ruleset itself could not be created.
+    Create(io::Error),
+    /// A path rule could not be added.
+    Path {
+        /// The path the rule is for.
+        path: PathBuf,
+        /// What adding it returned.
+        source: io::Error,
+    },
+}
+
+impl core::fmt::Display for RulesetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Create(e) => write!(f, "creating the Landlock ruleset: {e}"),
+            Self::Path { path, source } => {
+                write!(f, "Landlock rule for {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for RulesetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Create(e) | Self::Path { source: e, .. } => Some(e),
+        }
+    }
+}
+
+impl From<RulesetError> for io::Error {
+    fn from(e: RulesetError) -> Self {
+        let kind = match &e {
+            RulesetError::Create(source) | RulesetError::Path { source, .. } => source.kind(),
+        };
+        Self::new(kind, e.to_string())
+    }
+}
+
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
 #[derive(Debug, Clone)]
@@ -291,22 +333,27 @@ pub fn prepare(
 ///
 /// # Errors
 ///
-/// Returns the OS error if the ruleset cannot be created or a path rule fails to apply
-/// (other than a `skip_missing`-tolerated absent path).
+/// The [`RulesetError`] if the ruleset cannot be created or a path rule fails to apply (other
+/// than a `skip_missing`-tolerated absent path); a failed rule names its path.
 pub fn build_ruleset(
     fs: &[(PathBuf, AccessFs)],
     net: &[(u16, AccessNet)],
     net_handled: AccessNet,
     skip_missing: bool,
-) -> io::Result<Ruleset> {
-    let mut ruleset = Ruleset::new()?;
+) -> Result<Ruleset, RulesetError> {
+    let mut ruleset = Ruleset::new().map_err(RulesetError::Create)?;
     // TCP rights the BPF ACL alone gates (#218): Landlock must not handle them.
     ruleset.handle_net_only(net_handled);
     for (path, access) in fs {
         match ruleset.allow_path(path, *access) {
             Ok(()) => {}
             Err(e) if skip_missing && e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+            Err(source) => {
+                return Err(RulesetError::Path {
+                    path: path.clone(),
+                    source,
+                })
+            }
         }
     }
     for (port, access) in net {
@@ -1298,6 +1345,30 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_landlock_rule_that_fails_names_its_path() {
+        // With `skip_missing` off, a rule for a path that does not exist is an error, and the
+        // error says which path. Building a ruleset needs no privilege.
+        let missing = PathBuf::from("/nonexistent/kennel-ruleset-test");
+        let Err(err) = build_ruleset(
+            &[(missing.clone(), AccessFs::READ_FILE)],
+            &[],
+            AccessNet::empty(),
+            false,
+        ) else {
+            // A kernel without Landlock cannot create the ruleset at all; nothing to check.
+            return;
+        };
+        match &err {
+            RulesetError::Path { path, .. } => assert_eq!(path, &missing),
+            RulesetError::Create(_) => return,
+        }
+        assert!(err
+            .to_string()
+            .starts_with("Landlock rule for /nonexistent/kennel-ruleset-test: "));
+        assert_eq!(io::Error::from(err).kind(), io::ErrorKind::NotFound);
+    }
     use kennel_lib_policy::{
         CapPolicy, DevPolicy, EffectivePolicy, ExecPolicy, FsPolicy, LifecyclePolicy, NetMode,
         NetPolicy, NetRule, ProcPolicy, Protocol, Provenance, SeccompAction, SeccompPolicy,

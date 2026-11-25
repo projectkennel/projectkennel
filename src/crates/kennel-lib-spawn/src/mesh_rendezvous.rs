@@ -41,6 +41,50 @@ pub fn encode(mounts: &[(OwnedFd, PathBuf)]) -> (Vec<u8>, Vec<BorrowedFd<'_>>) {
     (data, fds)
 }
 
+/// Why a rendezvous datagram was not accepted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendezvousError {
+    /// The datagram has no count byte.
+    Empty,
+    /// The datagram names one number of mounts and carries another number of descriptors.
+    CountMismatch {
+        /// The count the datagram states.
+        named: usize,
+        /// The descriptors that came with it.
+        carried: usize,
+    },
+    /// A record ends before its length field is complete.
+    RecordCutShort,
+    /// A path ends before the length its record states.
+    PathCutShort,
+    /// Bytes follow the last record.
+    TrailingBytes,
+}
+
+impl std::fmt::Display for RendezvousError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("mesh rendezvous datagram: ")?;
+        match self {
+            Self::Empty => f.write_str("it is empty"),
+            Self::CountMismatch { named, carried } => write!(
+                f,
+                "it names {named} mount(s) and carries {carried} descriptor(s)"
+            ),
+            Self::RecordCutShort => f.write_str("a record is cut short"),
+            Self::PathCutShort => f.write_str("a path is cut short"),
+            Self::TrailingBytes => f.write_str("bytes follow the last record"),
+        }
+    }
+}
+
+impl std::error::Error for RendezvousError {}
+
+impl From<RendezvousError> for io::Error {
+    fn from(e: RendezvousError) -> Self {
+        Self::new(io::ErrorKind::InvalidData, e)
+    }
+}
+
 /// Decode the rendezvous datagram into `(mount fd, in-view target dir)` pairs.
 ///
 /// `fds` are the received mounts in send order (as [`kennel_lib_syscall::scm::recv_with_fds`] returns
@@ -49,39 +93,33 @@ pub fn encode(mounts: &[(OwnedFd, PathBuf)]) -> (Vec<u8>, Vec<BorrowedFd<'_>>) {
 ///
 /// # Errors
 ///
-/// `InvalidData` if the datagram is empty, a record is cut short, bytes follow the last record,
-/// or the number of descriptors is not the count the datagram states.
-pub fn decode(data: &[u8], fds: Vec<OwnedFd>) -> io::Result<Vec<(OwnedFd, PathBuf)>> {
-    let malformed = |what: &str| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("mesh rendezvous datagram: {what}"),
-        )
-    };
-    let (count, mut rest) = data.split_first().ok_or_else(|| malformed("it is empty"))?;
+/// The [`RendezvousError`] if the datagram is empty, a record or a path is cut short, bytes
+/// follow the last record, or the number of descriptors is not the count the datagram states.
+pub fn decode(data: &[u8], fds: Vec<OwnedFd>) -> Result<Vec<(OwnedFd, PathBuf)>, RendezvousError> {
+    let (count, mut rest) = data.split_first().ok_or(RendezvousError::Empty)?;
     let count = usize::from(*count);
     if fds.len() != count {
-        return Err(malformed(&format!(
-            "it names {count} mount(s) and carries {} descriptor(s)",
-            fds.len()
-        )));
+        return Err(RendezvousError::CountMismatch {
+            named: count,
+            carried: fds.len(),
+        });
     }
     let mut out = Vec::with_capacity(count);
     for fd in fds {
         let (lenb, after_len) = rest
             .split_at_checked(2)
-            .ok_or_else(|| malformed("a record is cut short"))?;
+            .ok_or(RendezvousError::RecordCutShort)?;
         let [a, b] = *lenb else {
-            return Err(malformed("a record is cut short"));
+            return Err(RendezvousError::RecordCutShort);
         };
         let (pathb, after_path) = after_len
             .split_at_checked(usize::from(u16::from_le_bytes([a, b])))
-            .ok_or_else(|| malformed("a path is cut short"))?;
+            .ok_or(RendezvousError::PathCutShort)?;
         out.push((fd, PathBuf::from(std::ffi::OsStr::from_bytes(pathb))));
         rest = after_path;
     }
     if !rest.is_empty() {
-        return Err(malformed("bytes follow the last record"));
+        return Err(RendezvousError::TrailingBytes);
     }
     Ok(out)
 }
@@ -128,11 +166,30 @@ mod tests {
         let (data, _borrowed) = encode(&sent);
         let cut = data.get(..data.len().saturating_sub(3)).expect("cut");
         assert!(decode(cut, fds(2)).is_err(), "truncated");
-        assert!(decode(&data, fds(1)).is_err(), "a descriptor short");
+        assert_eq!(
+            decode(&data, fds(1)).map(|_| ()),
+            Err(RendezvousError::CountMismatch {
+                named: 2,
+                carried: 1
+            }),
+            "a descriptor short"
+        );
         assert!(decode(&data, fds(3)).is_err(), "a descriptor over");
         let mut long = data.clone();
         long.push(0);
-        assert!(decode(&long, fds(2)).is_err(), "trailing bytes");
-        assert!(decode(&[], Vec::new()).is_err(), "empty");
+        assert_eq!(
+            decode(&long, fds(2)).map(|_| ()),
+            Err(RendezvousError::TrailingBytes),
+            "trailing bytes"
+        );
+        assert_eq!(
+            decode(&[], Vec::new()).map(|_| ()),
+            Err(RendezvousError::Empty),
+            "empty"
+        );
+        assert_eq!(
+            RendezvousError::Empty.to_string(),
+            "mesh rendezvous datagram: it is empty"
+        );
     }
 }
