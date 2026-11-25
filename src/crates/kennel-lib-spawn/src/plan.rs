@@ -761,6 +761,16 @@ fn is_safe_dev_path(path: &Path) -> bool {
         && !path.components().any(|c| c == Component::ParentDir)
 }
 
+/// What classifying the `fs` grants yields (an intermediate of [`Plan::from_policy`]).
+struct FsGrants {
+    landlock_fs: Vec<(PathBuf, AccessFs)>,
+    binds: Vec<BindMount>,
+    /// The redirects, keyed like the grants.
+    redirects: std::collections::BTreeMap<PathBuf, PathBuf>,
+    proc: ProcView,
+    permissive_exec: bool,
+}
+
 /// The kernel enforcement objects derived from a settled policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -1199,9 +1209,8 @@ impl Plan {
     /// Returns [`SpawnError::InvalidPolicy`] if a network rule's CIDR is not a
     /// valid IPv4 or IPv6 address, or if an `fs.dev.allow` entry is not a device path
     /// under `/dev`.
-    // allow: one cohesive policy→plan translation (namespaces, fs view, exec gate,
-    // landlock, seccomp, BPF); splitting it would only scatter the shared locals.
-    #[allow(clippy::too_many_lines)]
+    // The translation runs in stages, each a function below: namespaces, the fs grants, the
+    // exec gate, the device allowlist, the fixed rules, the masks and the `/etc` overlays.
     pub fn from_policy(
         policy: &SettledPolicy,
         ctx: u16,
@@ -1210,24 +1219,7 @@ impl Plan {
     ) -> Result<Self, SpawnError> {
         let ep = &policy.effective_policy;
 
-        // The unprivileged spawn: USER establishes the identity-mapped user
-        // namespace (granting CAP_SYS_ADMIN within it) so MOUNT/IPC/PID and the
-        // mount/pivot_root need no real privilege; `kennel-bin-init` is the kennel's PID 1
-        // (it mounts the fresh /proc and forks the workload). NET is unshared for every mode
-        // EXCEPT `host`: a proxied kennel (`constrained`/`unconstrained`) gets its own net-ns
-        // with an in-ns `lo` carrying the proxy's loopback alias (the only path out is the
-        // binder gateway); `none` gets an own EMPTY net-ns (no interfaces). `host` deliberately
-        // shares the HOST net-ns for direct egress, gated by cgroup BPF + Landlock.
-        let mut namespaces =
-            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
-        if ep.net.mode != NetMode::Host {
-            namespaces |= Namespaces::NET;
-        }
-        // `[identity].hostname` (W12): a masked hostname needs its own UTS namespace —
-        // unset means NO masking and no UTS unshare (the host name shows through).
-        if policy.identity.hostname.is_some() {
-            namespaces |= Namespaces::UTS;
-        }
+        let namespaces = Self::namespaces_for(policy);
 
         let cgroup = PathBuf::from(format!("/sys/fs/cgroup/{namespace}/{ctx}"));
 
@@ -1235,284 +1227,21 @@ impl Plan {
         // masked `[identity].user`, default `kennel`). `~/…` grants remap beneath it.
         let shim_root = PathBuf::from(format!("/home/{}", policy.identity.user));
 
-        // Classify every granted path once. The in-kennel target — `~/…` paths
-        // remap beneath `shim_root`, `/etc` is the constructed synthetic set, any
-        // other absolute path keeps its place — drives both the Landlock rule and
-        // the bind mount. Landlock is sealed AFTER `pivot_root`, so it references
-        // the post-pivot target, not the host source. `/etc` gets a Landlock rule
-        // (on the constructed `/etc`) but no bind (it is built, not bound).
-        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
-        let mut binds: Vec<BindMount> = Vec::new();
-        // Deny-by-default execution (§7.3), matching fs (allow-only) and net
-        // (`constrained` permits nothing): the allowlist is ALWAYS enforced — a merely
-        // readable file is NOT implicitly executable. Execution is granted only to the
-        // allowlisted binaries plus the loader's lib dirs; an empty allowlist denies
-        // ALL execution (so a bare `base-confined` cannot run anything). The sole
-        // escape hatch is an explicit `**` entry — the `permissive-exec` opt-in — which
-        // restores the open posture (reads carry EXECUTE, nothing is gated).
-        let permissive_exec = ep.exec.allow.iter().any(|e| is_exec_wildcard(e));
-        // A path is, at the end of the day, ONE bind mount with one mode. `fs.read`/`fs.write` only
-        // express which mode; the implied rule (translate) already folds every write path into read,
-        // so a writable path appears in both lists. Collapse to one entry per glob-stripped source,
-        // writable iff it is in `fs.write` (write wins — read is subsumed). Then mount **shortest
-        // path first**, so a broad parent grant lands before a more-specific child and the child
-        // (e.g. a writable subtree inside a read-only tree) nests on top deterministically.
-        //
-        // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the bind source and
-        // Landlock target must be the real directory root — the literal glob has no inode, so
-        // binding it is `ENOENT` and the Landlock rule would be dropped by skip-missing. Strip it.
-        let mut fs_grants: Vec<(PathBuf, bool)> = Vec::new();
-        for (path_str, writable) in ep
-            .fs
-            .read
-            .iter()
-            .map(|p| (p, false))
-            .chain(ep.fs.write.iter().map(|p| (p, true)))
-        {
-            let source = glob_root(path_str);
-            if let Some(existing) = fs_grants.iter_mut().find(|(s, _)| *s == source) {
-                existing.1 |= writable; // a path in both read and write is writable
-            } else {
-                fs_grants.push((source, writable));
-            }
-        }
-        // The exclusive sources (§2.7), transformed identically to the bind sources so they
-        // match: `exclusive` is a subset of `write`, so `glob_root` of each yields the same
-        // source path the writable bind carries.
-        let exclusive_sources: std::collections::BTreeSet<PathBuf> =
-            ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
-        // The writable grants that keep executable mappings (#229), keyed like the grants.
-        let mmap_exec_roots: std::collections::BTreeSet<PathBuf> =
-            ep.fs.write_mmap_exec.iter().map(|p| glob_root(p)).collect();
-        // The redirects (W15), keyed like the grants (glob-rooted) so a redirected grant's
-        // lookup matches its `fs_grants` entry. Translate guarantees each `path` is granted
-        // and maps to exactly one `source`.
-        let redirects: std::collections::BTreeMap<PathBuf, PathBuf> = ep
-            .fs
-            .redirect
-            .iter()
-            .map(|r| (glob_root(&r.path), glob_root(&r.source)))
-            .collect();
-        // Shortest source path first (parent before child). Stable: equal-length paths keep their
-        // first-seen order, so the result is deterministic.
-        fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
-        // #218: every READ grant under /proc is served by ONE rule on /proc itself — the only
-        // rule that covers each forked child's own /proc/self (a rule on /proc/self anchors on
-        // the sealing process's /proc/<pid>). What it exposes is the curated view's job
-        // (`ProcView`). A write grant under /proc keeps its own rule.
-        let mut proc_read = false;
-        for (granted, writable) in fs_grants {
-            if !writable && granted.starts_with("/proc") {
-                proc_read = true;
-                continue;
-            }
-            let target = remap_target(&granted, home, &shim_root);
-            landlock_fs.push((
-                target.clone(),
-                if writable {
-                    write_access()
-                } else {
-                    read_access(permissive_exec)
-                },
-            ));
-            if !is_special_mount(&granted) {
-                let exclusive = writable && exclusive_sources.contains(&granted);
-                // #229: a writable bind is hardened noexec unless its grant opted out.
-                let mmap_exec = writable && mmap_exec_roots.contains(&granted);
-                // A redirect decouples the bind's host origin from the granted (view) path;
-                // everything view-side — the target, the Landlock rule, the exclusive match —
-                // keys on the granted path as before.
-                let (source, redirected) = redirects
-                    .get(&granted)
-                    .map_or((granted, false), |src| (src.clone(), true));
-                let target = crate::ViewPath::parse(target)
-                    .map_err(|e| SpawnError::InvalidPolicy(e.to_string()))?;
-                binds.push(BindMount {
-                    source,
-                    target,
-                    writable,
-                    exclusive,
-                    redirected,
-                    mmap_exec,
-                });
-            }
-        }
+        // The filesystem half, a stage at a time: classify the grants into Landlock rules and
+        // binds, add the execution gate and the device allowlist, then the rules every view has.
+        let FsGrants {
+            mut landlock_fs,
+            binds,
+            redirects,
+            proc,
+            permissive_exec,
+        } = Self::fs_grants(ep, home, &shim_root)?;
+        Self::exec_rules(ep, home, &shim_root, permissive_exec, &mut landlock_fs)?;
+        let dev_allow = Self::dev_allowlist(ep, &mut landlock_fs)?;
+        Self::fixed_fs_rules(policy, &shim_root, &mut landlock_fs);
 
-        if proc_read {
-            landlock_fs.push((PathBuf::from("/proc"), read_access(permissive_exec)));
-        }
-        let proc = proc_view(&ep.fs.read)?;
-
-        // The execution gate (§7.3): grant FS_EXECUTE on the allowlisted binaries and on
-        // each one's dynamic loader (`PT_INTERP`/`ld.so`, resolved at compile time into
-        // `exec.loaders`). Both are needed because the kernel opens a dynamic binary AND its
-        // loader `FMODE_EXEC` during `execve`, which Landlock gates. The binaries' shared
-        // libraries are deliberately NOT granted EXECUTE: the loader `mmap`s them and
-        // Landlock has no `mmap` hook, so they load via READ alone (07-3-exec) — granting
-        // execute would be unenforceable, so the kennel makes no such claim. Skipped under
-        // `permissive-exec` (`**`), where reads already carry EXECUTE.
-        let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
-        if !permissive_exec {
-            for entry in &ep.exec.allow {
-                let root = glob_root(entry);
-                // deny_writable (§7.3): a writable path must never be executable.
-                if ep.exec.deny_writable
-                    && ep
-                        .fs
-                        .write
-                        .iter()
-                        .any(|w| root.starts_with(PathBuf::from(w.as_str())))
-                {
-                    return Err(SpawnError::InvalidPolicy(format!(
-                        "exec.allow `{entry}` lies under a writable path, but deny_writable is set"
-                    )));
-                }
-                landlock_fs.push((remap_target(&root, home, &shim_root), exec_access));
-            }
-            // The resolved dynamic loaders (each allowlisted binary's PT_INTERP): exact
-            // paths settled at compile time. `skip_missing` drops any the view omits.
-            for loader in &ep.exec.loaders {
-                landlock_fs.push((
-                    remap_target(Path::new(loader), home, &shim_root),
-                    exec_access,
-                ));
-            }
-        }
-
-        // Validate the device allowlist before it reaches the mount syscalls: a device
-        // path outside `/dev` or carrying `..` would escape the constructed `/dev`.
-        let mut dev_allow: Vec<PathBuf> = Vec::new();
-        for d in &ep.fs.dev.allow {
-            // A device grant may use a `/**`/`/*` glob (e.g. `/dev/pts/**` for the ptys);
-            // strip it to the real node/dir — `/dev/pts` is mounted as a fresh devpts in
-            // the view, every other entry is bound as a single node.
-            let path = glob_root(d.as_str());
-            if !is_safe_dev_path(&path) {
-                return Err(SpawnError::InvalidPolicy(format!(
-                    "fs.dev.allow entry must be a device under /dev, got `{d}`"
-                )));
-            }
-            // Grant the device its Landlock access too, not just view visibility:
-            // read/write plus `ioctl` (IOCTL_DEV). The ruleset handles IOCTL_DEV on
-            // ABI >= 5, so without an explicit grant here a device `ioctl` (a tty
-            // TCGETS/TIOCGWINSZ, §7.9.2) is denied even on an allowlisted node;
-            // the grant makes the allowed devices usable while every non-granted
-            // device — and the gated ioctls on them — stays denied.
-            landlock_fs.push((path.clone(), dev_access()));
-            dev_allow.push(path);
-        }
-
-        // The constructed `$HOME` is writable by default (§7.4.3): grant Landlock
-        // write on the home root so the workload owns its home like any ordinary
-        // user. Its safety is that it is a *fresh tmpfs* — ephemeral, reconstructed
-        // each spawn, so nothing written here survives unless a path is opted into
-        // persistence via `[fs.home].persist` (which binds the real host inode,
-        // read-write, beneath the home). Read-only project binds beneath the home
-        // stay read-only at the VFS layer (`MS_RDONLY` remount). `write_access()`
-        // omits `EXECUTE` (so the home is not an `execve` target), but that is not an
-        // execution barrier — an allowlisted interpreter reads a script as data
-        // (`sh script`, `python evil.py`), needing no `EXECUTE` on it. `[fs.home].readonly`
-        // suppresses the grant (escape hatch), leaving only `write`-granted `~/` paths
-        // writable.
-        if !ep.fs.home_readonly {
-            landlock_fs.push((shim_root.clone(), write_access()));
-        }
-
-        // The workload's own scratch space: `/tmp` is a fresh, ephemeral tmpfs each
-        // spawn; `writable` grants it read+write+list. Without the grant the mounted
-        // `/tmp` is present but unusable — `mktemp`, build scratch, and even `ls /tmp`
-        // would be denied.
-        if ep.fs.tmp.writable {
-            landlock_fs.push((PathBuf::from("/tmp"), write_access()));
-            // POSIX shared memory: a private `/dev/shm` tmpfs alongside `/tmp` (`07-4`). `shm_open(3)`
-            // users — wlroots/Wayland compositors, Chromium, anything allocating a shared buffer —
-            // need it; its absence is a silent `ENOENT` that breaks them. Fresh, ephemeral, no leak.
-            landlock_fs.push((PathBuf::from("/dev/shm"), write_access()));
-        }
-        // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
-        // top-level entries are not sensitive and their contents stay separately gated).
-        //
-        // For an OCI image root: the substrate base. The unprivileged `oci build` flattens every
-        // image inode to the one persona uid, so the flattened rootfs is read+write+execute by
-        // default (the flatten made DAC vacuous; there is no boundary to assert on an unlisted
-        // path). Landlock grants the broad writable substrate here — `/` read+write+execute — and
-        // the **closure-lock is enforced at the mount layer** (`[rootfs].readonly` → read-only
-        // mounts in the construction child, §7.11.4c), because Landlock rights are additive: a `/`
-        // write cannot be subtracted at `/usr`. Read-only `[fs.read]` binds and the T2.8 masks are
-        // likewise read-only *mounts*, so this broad Landlock grant does not make them writable.
-        if policy.rootfs.path.is_empty() {
-            landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
-        } else {
-            landlock_fs.push((PathBuf::from("/"), write_access() | AccessFs::EXECUTE));
-        }
-
-        // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
-        // kennel mounts a per-kennel binderfs instance so `kennel-bin-init` can pull its
-        // supervision-half over node 0, whether or not the policy grants any IPC facade. The
-        // workload always gets its standard `binder` device (read/write/ioctl) and read of
-        // the binderfs dir + features; `binder-control` is never granted (only the factory
-        // allocates devices).
-        landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
-        landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
-        landlock_fs.push((
-            PathBuf::from("/dev/binderfs/features"),
-            AccessFs::READ_DIR | AccessFs::READ_FILE,
-        ));
-
-        // Mask the workspace trust manifest (§7.4 / T2.8): at each writable bind's root the
-        // host `.trust-manifest.json` is reachable through the bind, so the factory
-        // overmounts an empty file there — the workload can neither read the integrity pins
-        // nor forge them, while the host IDE reads the untouched real inode. Gated by
-        // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
-        // target keys on the bind *target* (the in-kennel path).
-        let (mask_paths, mut mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
-            let writable = || binds.iter().filter(|b| b.writable);
-            (
-                writable()
-                    .map(|b| b.target.join(".trust-manifest.json"))
-                    .collect(),
-                // The blob store beside the manifest (kennel-lib-manifest STORE_DIRNAME);
-                // hardcoded here like the manifest filename to keep it off the spawn crate's deps.
-                writable()
-                    .map(|b| b.target.join(".trust-manifest.d"))
-                    .collect(),
-            )
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        // The host-control-surface blacklist (W10): the host `/usr/libexec/kennel` tree holds the
-        // daemon, the privhelper, the host execution unit, and the host delegates — none of which a
-        // constructed view ever needs (the in-cage binaries live in `/usr/libexec/kennel-facades`,
-        // and `kennel-bin-init` is `fexecve`'d from an fd). Overmount it with an empty read-only dir
-        // so the whole host control surface is absent from every view by one rule — construction-by-
-        // absence for the entire subtree, not per-binary. A no-op when the view does not bind `/usr`.
-        mask_dir_paths.push(PathBuf::from(HOST_LIBEXEC_DIR));
-
-        // `/etc` overlays (the synthetic `/etc` is a floor, real host files bind on top): a
-        // policy that `fs.read`s a specific, safe host `/etc` file gets the REAL file mounted
-        // read-only over the synthetic one. `is_special_mount` keeps `/etc` grants out of the
-        // ordinary bind set (the synthetic `/etc` owns the directory); these are the explicit
-        // exceptions, layered after the synthetic copy. Restricted to specific files (no glob)
-        // that are not identity-mask or credential files, so a grant can expose the host
-        // resolver/hosts without re-leaking the masked user list or a secret.
-        // A W15 `source` redirect on an overlayable `/etc` grant serves the overlay from an
-        // alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`) — the mechanism a policy
-        // uses to lay a kennel-shipped config over the floor without touching the host's version.
-        // The redirect map is glob-rooted; `/etc` grants carry no glob, so the key is the path.
-        let etc_overlays: Vec<EtcOverlay> = ep
-            .fs
-            .read
-            .iter()
-            .map(PathBuf::from)
-            .filter(|p| is_overlayable_etc_path(p))
-            .map(|view_path| {
-                let source = redirects
-                    .get(&view_path)
-                    .cloned()
-                    .unwrap_or_else(|| view_path.clone());
-                EtcOverlay { source, view_path }
-            })
-            .collect();
+        let (mask_paths, mask_dir_paths) = Self::mask_paths(ep, &binds);
+        let etc_overlays = Self::etc_overlays(ep, &redirects);
 
         let view = Some(ShimView {
             shim_root,
@@ -1529,25 +1258,7 @@ impl Plan {
             // overlay's middle lower. The translate step subst-resolved it to an absolute host
             // path; empty means an ordinary constructed view. `scaffold`/`store_upper` are
             // kenneld runtime inputs filled at bring-up (the staging dir is set the same way).
-            image: (!policy.rootfs.path.is_empty()).then(|| ImageRoot {
-                image: PathBuf::from(&policy.rootfs.path),
-                persistence: Persistence::from_settled(&policy.rootfs.persistence),
-                store_upper: None,
-                // Closure-lock paths are enforced as read-only mounts in the construction child
-                // (§7.11.4c) — `glob_root`-stripped so a `/usr/**` entry keys on `/usr`.
-                readonly: policy
-                    .rootfs
-                    .readonly
-                    .iter()
-                    .map(|p| glob_root(p))
-                    .collect(),
-                writable: policy
-                    .rootfs
-                    .writable
-                    .iter()
-                    .map(|p| glob_root(p))
-                    .collect(),
-            }),
+            image: Self::image_root(policy),
             etc_overlays,
         });
 
@@ -1628,6 +1339,383 @@ impl Plan {
             ttl_action: ep.lifecycle.ttl_action,
             hostname: policy.identity.hostname.clone(),
         })
+    }
+
+    /// The OCI image root, if the policy has a `[rootfs]`.
+    fn image_root(policy: &SettledPolicy) -> Option<ImageRoot> {
+        (!policy.rootfs.path.is_empty()).then(|| ImageRoot {
+            image: PathBuf::from(&policy.rootfs.path),
+            persistence: Persistence::from_settled(&policy.rootfs.persistence),
+            store_upper: None,
+            // Closure-lock paths are enforced as read-only mounts in the construction child
+            // (§7.11.4c) — `glob_root`-stripped so a `/usr/**` entry keys on `/usr`.
+            readonly: policy
+                .rootfs
+                .readonly
+                .iter()
+                .map(|p| glob_root(p))
+                .collect(),
+            writable: policy
+                .rootfs
+                .writable
+                .iter()
+                .map(|p| glob_root(p))
+                .collect(),
+        })
+    }
+
+    /// The namespaces a kennel for `policy` is created with.
+    fn namespaces_for(policy: &SettledPolicy) -> Namespaces {
+        let ep = &policy.effective_policy;
+        // The unprivileged spawn: USER establishes the identity-mapped user
+        // namespace (granting CAP_SYS_ADMIN within it) so MOUNT/IPC/PID and the
+        // mount/pivot_root need no real privilege; `kennel-bin-init` is the kennel's PID 1
+        // (it mounts the fresh /proc and forks the workload). NET is unshared for every mode
+        // EXCEPT `host`: a proxied kennel (`constrained`/`unconstrained`) gets its own net-ns
+        // with an in-ns `lo` carrying the proxy's loopback alias (the only path out is the
+        // binder gateway); `none` gets an own EMPTY net-ns (no interfaces). `host` deliberately
+        // shares the HOST net-ns for direct egress, gated by cgroup BPF + Landlock.
+        let mut namespaces =
+            Namespaces::USER | Namespaces::MOUNT | Namespaces::PID | Namespaces::IPC;
+        if ep.net.mode != NetMode::Host {
+            namespaces |= Namespaces::NET;
+        }
+        // `[identity].hostname` (W12): a masked hostname needs its own UTS namespace —
+        // unset means NO masking and no UTS unshare (the host name shows through).
+        if policy.identity.hostname.is_some() {
+            namespaces |= Namespaces::UTS;
+        }
+        namespaces
+    }
+
+    /// Classify the `fs.read` and `fs.write` grants into Landlock rules and bind mounts.
+    fn fs_grants(
+        ep: &kennel_lib_policy::settled::EffectivePolicy,
+        home: &Path,
+        shim_root: &Path,
+    ) -> Result<FsGrants, SpawnError> {
+        // Classify every granted path once. The in-kennel target — `~/…` paths
+        // remap beneath `shim_root`, `/etc` is the constructed synthetic set, any
+        // other absolute path keeps its place — drives both the Landlock rule and
+        // the bind mount. Landlock is sealed AFTER `pivot_root`, so it references
+        // the post-pivot target, not the host source. `/etc` gets a Landlock rule
+        // (on the constructed `/etc`) but no bind (it is built, not bound).
+        let mut landlock_fs: Vec<(PathBuf, AccessFs)> = Vec::new();
+        let mut binds: Vec<BindMount> = Vec::new();
+        // Deny-by-default execution (§7.3), matching fs (allow-only) and net
+        // (`constrained` permits nothing): the allowlist is ALWAYS enforced — a merely
+        // readable file is NOT implicitly executable. Execution is granted only to the
+        // allowlisted binaries plus the loader's lib dirs; an empty allowlist denies
+        // ALL execution (so a bare `base-confined` cannot run anything). The sole
+        // escape hatch is an explicit `**` entry — the `permissive-exec` opt-in — which
+        // restores the open posture (reads carry EXECUTE, nothing is gated).
+        let permissive_exec = ep.exec.allow.iter().any(|e| is_exec_wildcard(e));
+        // A path is, at the end of the day, ONE bind mount with one mode. `fs.read`/`fs.write` only
+        // express which mode; the implied rule (translate) already folds every write path into read,
+        // so a writable path appears in both lists. Collapse to one entry per glob-stripped source,
+        // writable iff it is in `fs.write` (write wins — read is subsumed). Then mount **shortest
+        // path first**, so a broad parent grant lands before a more-specific child and the child
+        // (e.g. a writable subtree inside a read-only tree) nests on top deterministically.
+        //
+        // A read/write grant may use a `/**` or `/*` glob (e.g. `/usr/**`); the bind source and
+        // Landlock target must be the real directory root — the literal glob has no inode, so
+        // binding it is `ENOENT` and the Landlock rule would be dropped by skip-missing. Strip it.
+        let mut fs_grants: Vec<(PathBuf, bool)> = Vec::new();
+        for (path_str, writable) in ep
+            .fs
+            .read
+            .iter()
+            .map(|p| (p, false))
+            .chain(ep.fs.write.iter().map(|p| (p, true)))
+        {
+            let source = glob_root(path_str);
+            if let Some(existing) = fs_grants.iter_mut().find(|(s, _)| *s == source) {
+                existing.1 |= writable; // a path in both read and write is writable
+            } else {
+                fs_grants.push((source, writable));
+            }
+        }
+        // The exclusive sources (§2.7), transformed identically to the bind sources so they
+        // match: `exclusive` is a subset of `write`, so `glob_root` of each yields the same
+        // source path the writable bind carries.
+        let exclusive_sources: std::collections::BTreeSet<PathBuf> =
+            ep.fs.exclusive.iter().map(|p| glob_root(p)).collect();
+        // The writable grants that keep executable mappings (#229), keyed like the grants.
+        let mmap_exec_roots: std::collections::BTreeSet<PathBuf> =
+            ep.fs.write_mmap_exec.iter().map(|p| glob_root(p)).collect();
+        // The redirects (W15), keyed like the grants (glob-rooted) so a redirected grant's
+        // lookup matches its `fs_grants` entry. Translate guarantees each `path` is granted
+        // and maps to exactly one `source`.
+        let redirects: std::collections::BTreeMap<PathBuf, PathBuf> = ep
+            .fs
+            .redirect
+            .iter()
+            .map(|r| (glob_root(&r.path), glob_root(&r.source)))
+            .collect();
+        // Shortest source path first (parent before child). Stable: equal-length paths keep their
+        // first-seen order, so the result is deterministic.
+        fs_grants.sort_by_key(|(s, _)| s.as_os_str().len());
+        // #218: every READ grant under /proc is served by ONE rule on /proc itself — the only
+        // rule that covers each forked child's own /proc/self (a rule on /proc/self anchors on
+        // the sealing process's /proc/<pid>). What it exposes is the curated view's job
+        // (`ProcView`). A write grant under /proc keeps its own rule.
+        let mut proc_read = false;
+        for (granted, writable) in fs_grants {
+            if !writable && granted.starts_with("/proc") {
+                proc_read = true;
+                continue;
+            }
+            let target = remap_target(&granted, home, shim_root);
+            landlock_fs.push((
+                target.clone(),
+                if writable {
+                    write_access()
+                } else {
+                    read_access(permissive_exec)
+                },
+            ));
+            if !is_special_mount(&granted) {
+                let exclusive = writable && exclusive_sources.contains(&granted);
+                // #229: a writable bind is hardened noexec unless its grant opted out.
+                let mmap_exec = writable && mmap_exec_roots.contains(&granted);
+                // A redirect decouples the bind's host origin from the granted (view) path;
+                // everything view-side — the target, the Landlock rule, the exclusive match —
+                // keys on the granted path as before.
+                let (source, redirected) = redirects
+                    .get(&granted)
+                    .map_or((granted, false), |src| (src.clone(), true));
+                let target = crate::ViewPath::parse(target)
+                    .map_err(|e| SpawnError::InvalidPolicy(e.to_string()))?;
+                binds.push(BindMount {
+                    source,
+                    target,
+                    writable,
+                    exclusive,
+                    redirected,
+                    mmap_exec,
+                });
+            }
+        }
+
+        if proc_read {
+            landlock_fs.push((PathBuf::from("/proc"), read_access(permissive_exec)));
+        }
+        let proc = proc_view(&ep.fs.read)?;
+        Ok(FsGrants {
+            landlock_fs,
+            binds,
+            redirects,
+            proc,
+            permissive_exec,
+        })
+    }
+
+    /// Add the execution gate's Landlock rules (§7.3) to `landlock_fs`.
+    fn exec_rules(
+        ep: &kennel_lib_policy::settled::EffectivePolicy,
+        home: &Path,
+        shim_root: &Path,
+        permissive_exec: bool,
+        landlock_fs: &mut Vec<(PathBuf, AccessFs)>,
+    ) -> Result<(), SpawnError> {
+        // The execution gate (§7.3): grant FS_EXECUTE on the allowlisted binaries and on
+        // each one's dynamic loader (`PT_INTERP`/`ld.so`, resolved at compile time into
+        // `exec.loaders`). Both are needed because the kernel opens a dynamic binary AND its
+        // loader `FMODE_EXEC` during `execve`, which Landlock gates. The binaries' shared
+        // libraries are deliberately NOT granted EXECUTE: the loader `mmap`s them and
+        // Landlock has no `mmap` hook, so they load via READ alone (07-3-exec) — granting
+        // execute would be unenforceable, so the kennel makes no such claim. Skipped under
+        // `permissive-exec` (`**`), where reads already carry EXECUTE.
+        let exec_access = AccessFs::EXECUTE | AccessFs::READ_FILE;
+        if !permissive_exec {
+            for entry in &ep.exec.allow {
+                let root = glob_root(entry);
+                // deny_writable (§7.3): a writable path must never be executable.
+                if ep.exec.deny_writable
+                    && ep
+                        .fs
+                        .write
+                        .iter()
+                        .any(|w| root.starts_with(PathBuf::from(w.as_str())))
+                {
+                    return Err(SpawnError::InvalidPolicy(format!(
+                        "exec.allow `{entry}` lies under a writable path, but deny_writable is set"
+                    )));
+                }
+                landlock_fs.push((remap_target(&root, home, shim_root), exec_access));
+            }
+            // The resolved dynamic loaders (each allowlisted binary's PT_INTERP): exact
+            // paths settled at compile time. `skip_missing` drops any the view omits.
+            for loader in &ep.exec.loaders {
+                landlock_fs.push((
+                    remap_target(Path::new(loader), home, shim_root),
+                    exec_access,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check the device allowlist and add its Landlock rules; returns the devices to bind.
+    fn dev_allowlist(
+        ep: &kennel_lib_policy::settled::EffectivePolicy,
+        landlock_fs: &mut Vec<(PathBuf, AccessFs)>,
+    ) -> Result<Vec<PathBuf>, SpawnError> {
+        // Validate the device allowlist before it reaches the mount syscalls: a device
+        // path outside `/dev` or carrying `..` would escape the constructed `/dev`.
+        let mut dev_allow: Vec<PathBuf> = Vec::new();
+        for d in &ep.fs.dev.allow {
+            // A device grant may use a `/**`/`/*` glob (e.g. `/dev/pts/**` for the ptys);
+            // strip it to the real node/dir — `/dev/pts` is mounted as a fresh devpts in
+            // the view, every other entry is bound as a single node.
+            let path = glob_root(d.as_str());
+            if !is_safe_dev_path(&path) {
+                return Err(SpawnError::InvalidPolicy(format!(
+                    "fs.dev.allow entry must be a device under /dev, got `{d}`"
+                )));
+            }
+            // Grant the device its Landlock access too, not just view visibility:
+            // read/write plus `ioctl` (IOCTL_DEV). The ruleset handles IOCTL_DEV on
+            // ABI >= 5, so without an explicit grant here a device `ioctl` (a tty
+            // TCGETS/TIOCGWINSZ, §7.9.2) is denied even on an allowlisted node;
+            // the grant makes the allowed devices usable while every non-granted
+            // device — and the gated ioctls on them — stays denied.
+            landlock_fs.push((path.clone(), dev_access()));
+            dev_allow.push(path);
+        }
+        Ok(dev_allow)
+    }
+
+    /// Add the Landlock rules every view carries: the home, `/tmp`, the view root, binder.
+    fn fixed_fs_rules(
+        policy: &SettledPolicy,
+        shim_root: &Path,
+        landlock_fs: &mut Vec<(PathBuf, AccessFs)>,
+    ) {
+        let ep = &policy.effective_policy;
+        // The constructed `$HOME` is writable by default (§7.4.3): grant Landlock
+        // write on the home root so the workload owns its home like any ordinary
+        // user. Its safety is that it is a *fresh tmpfs* — ephemeral, reconstructed
+        // each spawn, so nothing written here survives unless a path is opted into
+        // persistence via `[fs.home].persist` (which binds the real host inode,
+        // read-write, beneath the home). Read-only project binds beneath the home
+        // stay read-only at the VFS layer (`MS_RDONLY` remount). `write_access()`
+        // omits `EXECUTE` (so the home is not an `execve` target), but that is not an
+        // execution barrier — an allowlisted interpreter reads a script as data
+        // (`sh script`, `python evil.py`), needing no `EXECUTE` on it. `[fs.home].readonly`
+        // suppresses the grant (escape hatch), leaving only `write`-granted `~/` paths
+        // writable.
+        if !ep.fs.home_readonly {
+            landlock_fs.push((shim_root.to_path_buf(), write_access()));
+        }
+
+        // The workload's own scratch space: `/tmp` is a fresh, ephemeral tmpfs each
+        // spawn; `writable` grants it read+write+list. Without the grant the mounted
+        // `/tmp` is present but unusable — `mktemp`, build scratch, and even `ls /tmp`
+        // would be denied.
+        if ep.fs.tmp.writable {
+            landlock_fs.push((PathBuf::from("/tmp"), write_access()));
+            // POSIX shared memory: a private `/dev/shm` tmpfs alongside `/tmp` (`07-4`). `shm_open(3)`
+            // users — wlroots/Wayland compositors, Chromium, anything allocating a shared buffer —
+            // need it; its absence is a silent `ENOENT` that breaks them. Fresh, ephemeral, no leak.
+            landlock_fs.push((PathBuf::from("/dev/shm"), write_access()));
+        }
+        // The view-root grant. For a constructed view: READ_DIR on `/` only (`ls /`; the
+        // top-level entries are not sensitive and their contents stay separately gated).
+        //
+        // For an OCI image root: the substrate base. The unprivileged `oci build` flattens every
+        // image inode to the one persona uid, so the flattened rootfs is read+write+execute by
+        // default (the flatten made DAC vacuous; there is no boundary to assert on an unlisted
+        // path). Landlock grants the broad writable substrate here — `/` read+write+execute — and
+        // the **closure-lock is enforced at the mount layer** (`[rootfs].readonly` → read-only
+        // mounts in the construction child, §7.11.4c), because Landlock rights are additive: a `/`
+        // write cannot be subtracted at `/usr`. Read-only `[fs.read]` binds and the T2.8 masks are
+        // likewise read-only *mounts*, so this broad Landlock grant does not make them writable.
+        if policy.rootfs.path.is_empty() {
+            landlock_fs.push((PathBuf::from("/"), AccessFs::READ_DIR));
+        } else {
+            landlock_fs.push((PathBuf::from("/"), write_access() | AccessFs::EXECUTE));
+        }
+
+        // Binder IPC (07-1/02-4): the binder bus is the universal control plane — every
+        // kennel mounts a per-kennel binderfs instance so `kennel-bin-init` can pull its
+        // supervision-half over node 0, whether or not the policy grants any IPC facade. The
+        // workload always gets its standard `binder` device (read/write/ioctl) and read of
+        // the binderfs dir + features; `binder-control` is never granted (only the factory
+        // allocates devices).
+        landlock_fs.push((PathBuf::from("/dev/binderfs/binder"), dev_access()));
+        landlock_fs.push((PathBuf::from("/dev/binderfs"), AccessFs::READ_DIR));
+        landlock_fs.push((
+            PathBuf::from("/dev/binderfs/features"),
+            AccessFs::READ_DIR | AccessFs::READ_FILE,
+        ));
+    }
+
+    /// The files and directories to mask in the view: `(files, directories)`.
+    fn mask_paths(
+        ep: &kennel_lib_policy::settled::EffectivePolicy,
+        binds: &[BindMount],
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        // Mask the workspace trust manifest (§7.4 / T2.8): at each writable bind's root the
+        // host `.trust-manifest.json` is reachable through the bind, so the factory
+        // overmounts an empty file there — the workload can neither read the integrity pins
+        // nor forge them, while the host IDE reads the untouched real inode. Gated by
+        // `[trust].manifest` (default on); only writable binds carry a manifest. The mask
+        // target keys on the bind *target* (the in-kennel path).
+        let (mask_paths, mut mask_dir_paths): (Vec<PathBuf>, Vec<PathBuf>) = if ep.trust.manifest {
+            let writable = || binds.iter().filter(|b| b.writable);
+            (
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.json"))
+                    .collect(),
+                // The blob store beside the manifest (kennel-lib-manifest STORE_DIRNAME);
+                // hardcoded here like the manifest filename to keep it off the spawn crate's deps.
+                writable()
+                    .map(|b| b.target.join(".trust-manifest.d"))
+                    .collect(),
+            )
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        // The host-control-surface blacklist (W10): the host `/usr/libexec/kennel` tree holds the
+        // daemon, the privhelper, the host execution unit, and the host delegates — none of which a
+        // constructed view ever needs (the in-cage binaries live in `/usr/libexec/kennel-facades`,
+        // and `kennel-bin-init` is `fexecve`'d from an fd). Overmount it with an empty read-only dir
+        // so the whole host control surface is absent from every view by one rule — construction-by-
+        // absence for the entire subtree, not per-binary. A no-op when the view does not bind `/usr`.
+        mask_dir_paths.push(PathBuf::from(HOST_LIBEXEC_DIR));
+        (mask_paths, mask_dir_paths)
+    }
+
+    /// The host `/etc` entries to lay over the synthetic `/etc`.
+    fn etc_overlays(
+        ep: &kennel_lib_policy::settled::EffectivePolicy,
+        redirects: &std::collections::BTreeMap<PathBuf, PathBuf>,
+    ) -> Vec<EtcOverlay> {
+        // `/etc` overlays (the synthetic `/etc` is a floor, real host files bind on top): a
+        // policy that `fs.read`s a specific, safe host `/etc` file gets the REAL file mounted
+        // read-only over the synthetic one. `is_special_mount` keeps `/etc` grants out of the
+        // ordinary bind set (the synthetic `/etc` owns the directory); these are the explicit
+        // exceptions, layered after the synthetic copy. Restricted to specific files (no glob)
+        // that are not identity-mask or credential files, so a grant can expose the host
+        // resolver/hosts without re-leaking the masked user list or a secret.
+        // A W15 `source` redirect on an overlayable `/etc` grant serves the overlay from an
+        // alternate host path (`/etc/sway` ← `/etc/kennel/config/sway`) — the mechanism a policy
+        // uses to lay a kennel-shipped config over the floor without touching the host's version.
+        // The redirect map is glob-rooted; `/etc` grants carry no glob, so the key is the path.
+        ep.fs
+            .read
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| is_overlayable_etc_path(p))
+            .map(|view_path| {
+                let source = redirects
+                    .get(&view_path)
+                    .cloned()
+                    .unwrap_or_else(|| view_path.clone());
+                EtcOverlay { source, view_path }
+            })
+            .collect()
     }
 
     /// Stamp the kennel's egress proxy `endpoint` into the plan: record it in the
