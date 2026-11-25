@@ -80,11 +80,14 @@ pub fn supplementary_groups() -> Vec<u32> {
 /// # Errors
 ///
 /// An OS error if the lookup itself fails (NSS error). A simple "not found" is
-/// `Ok(None)`.
+/// `Ok(None)`: that includes `ENOENT` and `ESRCH`, which `getgrnam_r(3)` documents as ways
+/// some NSS back ends report a name that is not there.
 pub fn group_gid(name: &str) -> io::Result<Option<u32>> {
-    Group::from_name(name)
-        .map(|g| g.map(|g| g.gid.as_raw()))
-        .map_err(|e| io::Error::from_raw_os_error(e as i32))
+    match Group::from_name(name) {
+        Ok(group) => Ok(group.map(|g| g.gid.as_raw())),
+        Err(nix::errno::Errno::ENOENT | nix::errno::Errno::ESRCH) => Ok(None),
+        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+    }
 }
 
 /// Set the calling process's supplementary groups to exactly `gids` (`setgroups(2)`).
@@ -209,6 +212,12 @@ pub fn chown_to(path: &std::path::Path, uid: u32, gid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unknown_group_is_not_found_rather_than_an_error() {
+        // Some NSS back ends answer ENOENT for a name that is not there.
+        assert!(matches!(group_gid("kennel-no-such-group-xyzzy"), Ok(None)));
+    }
 
     /// The effective uid parsed from `/proc/self/status` (`Uid: real eff saved
     /// fs`) — an independent witness, via the kernel rather than nix/libc, that

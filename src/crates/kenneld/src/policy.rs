@@ -226,14 +226,14 @@ impl PolicyLoader for TrustStoreLoader {
         crate::catalogue::Catalogue::project(&self.enabled_providers())
     }
 
-    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, String> {
-        let bytes = std::fs::read(path)
-            .map_err(|e| format!("cannot read policy {}: {e}", path.display()))?;
+    fn load(&self, path: &Path, subst: &RuntimeSubstitutions) -> Result<Loaded, LoadError> {
+        let bytes = std::fs::read(path).map_err(|source| LoadError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
         // Re-read the trust store now, so a key created/changed since the daemon
         // started is honoured (the loader is built once at boot but keys live on disk).
-        let store = self
-            .current_keys()
-            .map_err(|e| format!("reading trust store: {e}"))?;
+        let store = self.current_keys().map_err(LoadError::TrustStore)?;
         // Verify the settled signature against the trust store. That trusted signature is the whole
         // boundary: the reserved-namespace authority was resolved tier-aware at compile and sealed into
         // it (§7.13.5), so the daemon does not re-derive it. Substitute once; derive both artefacts
@@ -241,8 +241,122 @@ impl PolicyLoader for TrustStoreLoader {
         // net section is available to configure the egress proxy).
         let (verified, _signing_key_id) =
             kennel_lib_policy::verify_settled_signed(&bytes, &store.keys)
-                .map_err(|e| e.to_string())?;
+                .map_err(LoadError::Verify)?;
         loaded_from_settled(&verified, subst)
+    }
+}
+
+/// Why a policy could not be loaded into a [`Loaded`].
+///
+/// `Verify`, `WritableRedirectSource` and `Group` are refusals: the policy, or what it asks for
+/// on this host, is not acceptable. The others are failures to read or build.
+#[derive(Debug)]
+pub enum LoadError {
+    /// The policy file could not be read.
+    Read {
+        /// The file.
+        path: PathBuf,
+        /// What the read returned.
+        source: std::io::Error,
+    },
+    /// The trust store could not be read.
+    TrustStore(std::io::Error),
+    /// The policy's signature did not verify against the trust store, or it is malformed.
+    Verify(kennel_lib_policy::PolicyError),
+    /// Substitution left a placeholder unresolved, or the enforcement plan could not be built.
+    Plan(kennel_lib_spawn::SpawnError),
+    /// A redirected source is writable by the workload through another bind.
+    WritableRedirectSource {
+        /// The redirect's source.
+        source: PathBuf,
+        /// The writable bind that reaches it.
+        writable: PathBuf,
+    },
+    /// A supplementary group the policy names cannot be granted.
+    Group(GroupError),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Read { path, source } => {
+                write!(f, "cannot read policy {}: {source}", path.display())
+            }
+            Self::TrustStore(e) => write!(f, "reading trust store: {e}"),
+            Self::Verify(e) => write!(f, "{e}"),
+            Self::Plan(e) => write!(f, "{e}"),
+            Self::WritableRedirectSource { source, writable } => write!(
+                f,
+                "redirect source {} is writable by the workload through {}; a source the \
+                 workload can write is a confused-deputy hole (fs.redirect.write-set)",
+                source.display(),
+                writable.display()
+            ),
+            Self::Group(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Read { source, .. } | Self::TrustStore(source) => Some(source),
+            Self::Verify(e) => Some(e),
+            Self::Plan(e) => Some(e),
+            Self::Group(e) => Some(e),
+            Self::WritableRedirectSource { .. } => None,
+        }
+    }
+}
+
+/// Why a supplementary group named in `[identity]` cannot be granted into the kennel (§7.4).
+#[derive(Debug)]
+pub enum GroupError {
+    /// The group database lookup failed.
+    Lookup {
+        /// The group name.
+        name: String,
+        /// What the lookup returned.
+        source: std::io::Error,
+    },
+    /// No group of that name exists on this host.
+    Unknown {
+        /// The group name.
+        name: String,
+    },
+    /// The operator is not a member of the group.
+    NotAMember {
+        /// The group name.
+        name: String,
+        /// Its gid on this host.
+        gid: u32,
+    },
+}
+
+impl std::fmt::Display for GroupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lookup { name, source } => {
+                write!(f, "[identity] resolving group `{name}`: {source}")
+            }
+            Self::Unknown { name } => {
+                write!(f, "[identity] group `{name}` does not exist on this host")
+            }
+            Self::NotAMember { name, gid } => write!(
+                f,
+                "[identity] group `{name}` (gid {gid}): the user is not a member; refusing to \
+                 grant it into the kennel"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GroupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Lookup { source, .. } => Some(source),
+            Self::Unknown { .. } | Self::NotAMember { .. } => None,
+        }
     }
 }
 
@@ -256,25 +370,24 @@ impl PolicyLoader for TrustStoreLoader {
 ///
 /// # Errors
 ///
-/// A human-readable reason if substitution leaves a placeholder unresolved, the plan cannot be
-/// built, or a supplementary group is not one the operator holds.
+/// The [`LoadError`] if substitution leaves a placeholder unresolved, the plan cannot be built,
+/// a redirect source is writable by the workload, or a supplementary group is not one the
+/// operator holds.
 pub fn loaded_from_settled(
     verified: &kennel_lib_policy::SettledPolicy,
     subst: &RuntimeSubstitutions,
-) -> Result<Loaded, String> {
-    let substituted = kennel_lib_spawn::substitute(verified, subst).map_err(|e| e.to_string())?;
+) -> Result<Loaded, LoadError> {
+    let substituted = kennel_lib_spawn::substitute(verified, subst).map_err(LoadError::Plan)?;
     let mut plan = Plan::from_policy(&substituted, subst.ctx, &subst.namespace, &subst.home)
-        .map_err(|e| e.to_string())?;
+        .map_err(LoadError::Plan)?;
     // The redirect floor again, on what will actually be mounted: the settle-time check saw
     // unsubstituted strings and no spawn patch. A redirected source the workload can write
     // through another bind is refused here, before anything is built.
     if let Some((source, writable)) = plan.writable_redirect_source() {
-        return Err(format!(
-            "redirect source {} is writable by the workload through {}; a source the workload \
-             can write is a confused-deputy hole (fs.redirect.write-set)",
-            source.display(),
-            writable.display()
-        ));
+        return Err(LoadError::WritableRedirectSource {
+            source: source.to_path_buf(),
+            writable: writable.to_path_buf(),
+        });
     }
     // Backstop the control-socket ungrantability at the privileged factory (W15 F1). The compiler
     // refuses an `fs` grant that would expose the control socket (the loud primary guard), but a
@@ -316,7 +429,7 @@ pub fn loaded_from_settled(
     // Resolve the policy's supplementary groups to GIDs and membership-check them (§7.4): kenneld
     // runs as the operator, so a group the operator is not in is refused — the privileged seal could
     // otherwise over-grant. The kennel always drops to exactly this set (empty ⇒ none at all).
-    let groups = resolve_groups(&substituted.identity.groups)?;
+    let groups = resolve_groups(&substituted.identity.groups).map_err(LoadError::Group)?;
     plan.supplementary_groups = Some(groups.iter().map(|(_, gid)| *gid).collect());
     // Re-derive the exec.deny footgun warnings (§7.3.4): a deny that falls inside an allowed
     // directory, or is set with no allow, cannot be enforced by the allow-only Landlock LSM.
@@ -365,19 +478,23 @@ pub fn loaded_from_settled(
 /// does not resolve, or resolves to a group the operator does not hold, is a
 /// fail-closed error: the privileged seal `setgroups` could otherwise grant a group
 /// the operator lacks (privilege escalation). De-duplicated, order-preserving.
-fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
+fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, GroupError> {
     use kennel_lib_syscall::unistd;
     let real_gid = unistd::real_gid();
     let held = unistd::supplementary_groups();
     let mut out: Vec<(String, u32)> = Vec::new();
     for name in names {
         let gid = unistd::group_gid(name)
-            .map_err(|e| format!("[identity] resolving group `{name}`: {e}"))?
-            .ok_or_else(|| format!("[identity] group `{name}` does not exist on this host"))?;
+            .map_err(|source| GroupError::Lookup {
+                name: name.clone(),
+                source,
+            })?
+            .ok_or_else(|| GroupError::Unknown { name: name.clone() })?;
         if gid != real_gid && !held.contains(&gid) {
-            return Err(format!(
-                "[identity] group `{name}` (gid {gid}): the user is not a member; refusing to grant it into the kennel"
-            ));
+            return Err(GroupError::NotAMember {
+                name: name.clone(),
+                gid,
+            });
         }
         if !out.iter().any(|(_, g)| *g == gid) {
             out.push((name.clone(), gid));
@@ -390,6 +507,40 @@ fn resolve_groups(names: &[String]) -> Result<Vec<(String, u32)>, String> {
 mod tests {
     use super::*;
     use kennel_lib_policy::SigningKey;
+
+    #[test]
+    fn a_group_refusal_names_the_group_and_the_rule() {
+        let err = resolve_groups(&["kennel-no-such-group-xyzzy".to_owned()]).expect_err("unknown");
+        assert!(
+            matches!(&err, GroupError::Unknown { name } if name == "kennel-no-such-group-xyzzy"),
+            "got {err}"
+        );
+        assert_eq!(
+            GroupError::Unknown {
+                name: "nobody-here".to_owned()
+            }
+            .to_string(),
+            "[identity] group `nobody-here` does not exist on this host"
+        );
+        assert_eq!(
+            GroupError::NotAMember {
+                name: "wheel".to_owned(),
+                gid: 10
+            }
+            .to_string(),
+            "[identity] group `wheel` (gid 10): the user is not a member; refusing to grant it \
+             into the kennel"
+        );
+        assert_eq!(
+            LoadError::WritableRedirectSource {
+                source: PathBuf::from("/a"),
+                writable: PathBuf::from("/b")
+            }
+            .to_string(),
+            "redirect source /a is writable by the workload through /b; a source the workload \
+             can write is a confused-deputy hole (fs.redirect.write-set)"
+        );
+    }
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
@@ -542,7 +693,13 @@ mod tests {
         let err = loader
             .load(Path::new("/nonexistent/policy"), &subst())
             .expect_err("must fail");
-        assert!(err.contains("cannot read policy"), "got {err}");
+        assert!(
+            matches!(&err, LoadError::Read { path, .. } if path == Path::new("/nonexistent/policy")),
+            "got {err}"
+        );
+        assert!(err
+            .to_string()
+            .starts_with("cannot read policy /nonexistent/policy: "));
     }
 
     #[test]
@@ -577,7 +734,7 @@ mod tests {
 
         let loader = TrustStoreLoader::from_keys(keys);
         assert!(
-            loader.load(&policy, &subst()).is_err(),
+            matches!(loader.load(&policy, &subst()), Err(LoadError::Verify(_))),
             "garbage must not verify"
         );
         let _ = std::fs::remove_dir_all(&dir);

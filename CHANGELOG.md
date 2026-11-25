@@ -142,6 +142,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The daemon's policy loader returns a typed error.** `PolicyLoader::load` and
+  `loaded_from_settled` returned a `String`. `LoadError` now says which step failed: reading
+  the file, reading the trust store, verification, building the plan, a redirect source the
+  workload can write, or a supplementary group (`GroupError`: lookup failed, unknown, not a
+  member). The text in the journal and the start-refused record is unchanged, with one
+  exception: on a host whose name service answers `ENOENT` or `ESRCH` for a missing group,
+  the refusal now reads "group `x` does not exist on this host" where it used to read
+  "resolving group `x`: No such file or directory". The group was refused either way.
 - **A mesh capability's name and key are types where the daemon builds host paths.**
   `MeshName` and `MeshKey` (in `kennel-lib-policy`) can only be built by parsing against the
   mesh token grammar, and the daemon's rendezvous path builder takes them. The builder used
