@@ -83,9 +83,10 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
         addr: req.addr,
         prefix: req.prefix,
     };
-    if let Err(r) = validate_addr(&areq, scope) {
-        return Response::refused(refusal_code(&r));
-    }
+    let scoped = match validate_addr(&areq, scope) {
+        Ok(scoped) => scoped,
+        Err(r) => return Response::refused(refusal_code(&r)),
+    };
     // The factory holds no CAP_NET_ADMIN; delegate the teardown netlink delete to the
     // kennel-privhelper-net sub-helper (which re-validates and performs it on the host `lo`).
     let net_helper = match kennel_lib_config::Deployment::load() {
@@ -95,9 +96,9 @@ fn perform_addr(req: &Request, scope: &ReservedScope) -> Response {
     match std::process::Command::new(net_helper)
         .args([
             "del",
-            &req.ctx.to_string(),
-            &req.addr.to_string(),
-            &req.prefix.to_string(),
+            &scoped.ctx().to_string(),
+            &scoped.addr().to_string(),
+            &scoped.prefix().to_string(),
         ])
         .status()
     {

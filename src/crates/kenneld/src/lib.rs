@@ -64,7 +64,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 
 use kennel_lib_policy::{NetMode, NetPolicy};
-use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError};
+use kennel_lib_spawn::{Plan, ProxyEndpoint, SpawnError, ViewPathError};
 use kennel_lib_syscall::namespace::Namespaces;
 use kennel_privhelper::addr::{loopback_v6, V6_PREFIX};
 use kennel_privhelper::validate::ReservedScope;
@@ -95,6 +95,8 @@ pub enum Error {
     Spawn(SpawnError),
     /// The egress dial delegate process could not be launched.
     Proxy(io::Error),
+    /// A path the daemon was about to bind into the view is not a valid in-view path.
+    ViewPath(ViewPathError),
 }
 
 impl core::fmt::Display for Error {
@@ -103,6 +105,7 @@ impl core::fmt::Display for Error {
             Self::Io(e) => write!(f, "cgroup filesystem operation failed: {e}"),
             Self::Spawn(e) => write!(f, "workload spawn failed: {e}"),
             Self::Proxy(e) => write!(f, "egress dial delegate could not be launched: {e}"),
+            Self::ViewPath(e) => write!(f, "cannot bind into the view: {e}"),
         }
     }
 }
@@ -112,7 +115,14 @@ impl std::error::Error for Error {
         match self {
             Self::Io(e) | Self::Proxy(e) => Some(e),
             Self::Spawn(e) => Some(e),
+            Self::ViewPath(e) => Some(e),
         }
+    }
+}
+
+impl From<ViewPathError> for Error {
+    fn from(e: ViewPathError) -> Self {
+        Self::ViewPath(e)
     }
 }
 
@@ -993,13 +1003,13 @@ fn bring_up<P: Privileged + Sync>(
             // The facade listens on the kennel's own loopback: `127.0.0.1`, isolated by the
             // kennel's net-ns, needs no per-kennel address.
             let listen = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
-            apply_socks5(plan, &setup.socks5, listen, command);
+            apply_socks5(plan, &setup.socks5, listen, command)?;
             // 3c-inbound. The in-kennel inbound facade (§7.5.7): when the policy mirrors any bind
             //     ports, bind facade-client into the view and launch it on those ports. It pulls
             //     each inbound conduit (BIND_INET) and connects the workload's native listener.
             if !mirror_ports.is_empty() {
                 let kennel_ip = listen.ip();
-                apply_facade_client(plan, &setup.facade_client, kennel_ip, &mirror_ports);
+                apply_facade_client(plan, &setup.facade_client, kennel_ip, &mirror_ports)?;
             }
         }
     }
@@ -1008,13 +1018,13 @@ fn bring_up<P: Privileged + Sync>(
     //     its shim path, set env vars, and grant Landlock. The shim model needs the
     //     constructed view (a mount namespace), so it engages only when pivoting.
     let unix_pivoting = view_root.is_some() && plan.view.is_some();
-    apply_afunix(plan, unix, command, unix_pivoting);
+    apply_afunix(plan, unix, command, unix_pivoting)?;
 
     // 3c-dbus. D-Bus mediation (§7.7): bind facade-dbus into the view, point the workload's
     //     DBUS_*_BUS_ADDRESS at the in-view sockets it presents, and grant the Landlock the facade
     //     needs to bind them. The standing dbus-broker mediates over the mesh, beside the
     //     other host delegates. Needs the constructed view, so it engages only when pivoting.
-    apply_dbus(plan, dbus, command, unix_pivoting);
+    apply_dbus(plan, dbus, command, unix_pivoting)?;
 
     // 3c-tun. UDP egress (§8, W2): bind facade-tun into the view for a `[net.udp]` consumer of the
     //     tun broker. It reaches the broker over the connector mesh (the device the `[[consumes]]`
@@ -1026,7 +1036,7 @@ fn bring_up<P: Privileged + Sync>(
     // node-0 handler gates the connect on.
     let tun_session: Option<Vec<u8>> = if tun_active {
         let tun_addr = kennel_privhelper::addr::tun_addr(scope.uid(), ctx);
-        apply_tun(plan, facade_tun, tun_addr, unix_pivoting);
+        apply_tun(plan, facade_tun, tun_addr, unix_pivoting)?;
         Some(encode_tun_session(tun_addr, &net.udp_allow_names))
     } else {
         None
@@ -1061,30 +1071,30 @@ fn bring_up<P: Privileged + Sync>(
                 // no host libc rides in; the dir over-mounts any image `/usr/libexec`, intended.
                 if let Some(dir) = oci.launcher_bin.as_deref().and_then(Path::parent) {
                     view.binds
-                        .push(read_only_bind(dir.to_path_buf(), dir.to_path_buf()));
+                        .push(read_only_bind(dir.to_path_buf(), dir.to_path_buf())?);
                 }
             } else {
                 for sub in crate::etc::essential_etc_subtrees() {
-                    view.binds.push(read_only_bind(sub.clone(), sub));
+                    view.binds.push(read_only_bind(sub.clone(), sub)?);
                 }
             }
             // Bind the ssh binder-dialer in at its own path (read-only) so the synthetic
             // ssh config's ProxyCommand can exec it.
             if let Some(bin) = &ssh.ssh_bin {
-                view.binds.push(read_only_bind(bin.clone(), bin.clone()));
+                view.binds.push(read_only_bind(bin.clone(), bin.clone())?);
             }
             // OCI launcher (§7.11): when the image's own entrypoint is run, bind the trusted
             // launcher in at its own path (= argv[0]) and the image's config.json read-only at
             // the launcher's known in-view path. Both read-only — the workload runs them, never
             // rewrites them.
             if let Some(bin) = &oci.launcher_bin {
-                view.binds.push(read_only_bind(bin.clone(), bin.clone()));
+                view.binds.push(read_only_bind(bin.clone(), bin.clone())?);
             }
             if let Some(cfg) = &oci.config_src {
                 view.binds.push(read_only_bind(
                     cfg.clone(),
                     PathBuf::from(OCI_CONFIG_VIEW_PATH),
-                ));
+                )?);
             }
             command.env("HOME", &view.shim_root);
         }
@@ -1512,15 +1522,21 @@ fn acquire_binder_node0(
 const IN_VIEW_BINDER_DEVICE: &str = "/dev/binderfs/binder";
 
 /// A read-only bind of the host path `source` at `target` in the view.
-const fn read_only_bind(source: PathBuf, target: PathBuf) -> kennel_lib_spawn::BindMount {
-    kennel_lib_spawn::BindMount {
+///
+/// # Errors
+/// The [`ViewPathError`] if `target` is not an absolute path free of `..`.
+fn read_only_bind(
+    source: PathBuf,
+    target: PathBuf,
+) -> Result<kennel_lib_spawn::BindMount, ViewPathError> {
+    Ok(kennel_lib_spawn::BindMount {
         source,
-        target,
+        target: kennel_lib_spawn::ViewPath::parse(target)?,
         writable: false,
         exclusive: false,
         redirected: false,
         mmap_exec: false,
-    }
+    })
 }
 
 /// Grant Landlock execute on the binary `bin` and on its dynamic loaders.
@@ -1542,12 +1558,13 @@ fn grant_exec(plan: &mut Plan, bin: &Path) {
 /// Make a framework binary runnable inside the view: bind it read-only at its own path and
 /// grant execute on it and its loaders ([`grant_exec`]). The one way every in-kennel facade
 /// (`facade-afunix`, `-tun`, `-socks5`, `-client`, `-dbus`) is put in place.
-fn install_facade_binary(plan: &mut Plan, bin: &Path) {
+fn install_facade_binary(plan: &mut Plan, bin: &Path) -> Result<(), ViewPathError> {
     if let Some(view) = plan.view.as_mut() {
         view.binds
-            .push(read_only_bind(bin.to_path_buf(), bin.to_path_buf()));
+            .push(read_only_bind(bin.to_path_buf(), bin.to_path_buf())?);
     }
     grant_exec(plan, bin);
+    Ok(())
 }
 
 /// Wire the `AF_UNIX` socket facade (§7.6 / `07-1` §7.1.5): launch the in-kennel
@@ -1564,17 +1581,22 @@ fn install_facade_binary(plan: &mut Plan, bin: &Path) {
 /// A no-op unless `pivoting` (the facade needs the constructed view + its binderfs) and
 /// the deployment provides the proxy binary. When grants exist but the binary is absent,
 /// it warns and serves nothing — fail-closed, never a silent host-socket bind.
-fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivoting: bool) {
+fn apply_afunix(
+    plan: &mut Plan,
+    unix: &UnixPrep,
+    command: &mut Command,
+    pivoting: bool,
+) -> Result<(), ViewPathError> {
     use kennel_lib_syscall::landlock::AccessFs;
     if unix.shims.is_empty() || !pivoting {
-        return;
+        return Ok(());
     }
     let Some(shim_bin) = unix.afunix_bin.clone() else {
         eprintln!(
             "kenneld: warning: kennel grants [unix] sockets but no facade-afunix binary is \
              configured (deployment `afunix`); the sockets will be unserved."
         );
-        return;
+        return Ok(());
     };
     for (var, val) in &unix.env {
         command.env(var, val);
@@ -1596,7 +1618,7 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
         }
     }
     // Bind the proxy binary into the view at its own path (read-only) and grant execute.
-    install_facade_binary(plan, &shim_bin);
+    install_facade_binary(plan, &shim_bin)?;
     // Register the proxy as a seal-launched aux: `facade-afunix <device>
     // <shim-path>=<name> ...`. It runs inside the sealed view, brokers by logical name
     // (which the facade resolves), and dies with the kennel's PID namespace.
@@ -1611,6 +1633,7 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
         // it signals that every listener is bound.
         signals_ready: true,
     });
+    Ok(())
 }
 
 /// Bind `facade-tun` into the view for a `[net.udp]` consumer and register it as a seal aux (§8, W2).
@@ -1623,19 +1646,24 @@ fn apply_afunix(plan: &mut Plan, unix: &UnixPrep, command: &mut Command, pivotin
 ///
 /// A no-op unless `pivoting` (the facade needs the constructed view); when the deployment provides no
 /// binary it warns and serves nothing — fail-closed, never a silent unserved tun.
-fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, pivoting: bool) {
+fn apply_tun(
+    plan: &mut Plan,
+    facade_tun: Option<&Path>,
+    tun_addr: Ipv6Addr,
+    pivoting: bool,
+) -> Result<(), ViewPathError> {
     if !pivoting {
-        return;
+        return Ok(());
     }
     let Some(bin) = facade_tun else {
         eprintln!(
             "kenneld: warning: kennel opts into [net.udp] and consumes the tun broker but no \
              facade-tun binary is configured (deployment `facade_tun`); UDP egress is unserved."
         );
-        return;
+        return Ok(());
     };
     // Bind the facade binary into the view (read-only) and grant execute + its loaders.
-    install_facade_binary(plan, bin);
+    install_facade_binary(plan, bin)?;
     // `facade-tun <binder-device> <kennel-tun-addr>`, run inside the sealed view. The tun fd is
     // inherited (TUN_FD); the broker channel comes from a CONNECT_AFUNIX on the per-kennel bus (the
     // seal-mounted binderfs), which kenneld answers with the broker's minted per-session fd.
@@ -1644,6 +1672,7 @@ fn apply_tun(plan: &mut Plan, facade_tun: Option<&Path>, tun_addr: Ipv6Addr, piv
         args: vec![IN_VIEW_BINDER_DEVICE.to_owned(), tun_addr.to_string()],
         signals_ready: false,
     });
+    Ok(())
 }
 
 /// Encode the [`DELIVER_TUN_SESSION`](kennel_lib_binder::service::verb::DELIVER_TUN_SESSION) payload
@@ -1684,9 +1713,14 @@ fn encode_tun_session(
 /// `facade-socks5` is the workload's SOCKS5 endpoint: it forwards each connect to binder node 0 as a
 /// `CONNECT_INET` transaction, which kenneld decides and dials via the host-side delegate. The
 /// `socks5h` scheme keeps name resolution on the proxy side (the kennel holds names, not addresses).
-fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command: &mut Command) {
+fn apply_socks5(
+    plan: &mut Plan,
+    socks5_bin: &Path,
+    listen: SocketAddr,
+    command: &mut Command,
+) -> Result<(), ViewPathError> {
     // Bind the binary into the view at its own path (read-only) and grant execute + its loaders.
-    install_facade_binary(plan, socks5_bin);
+    install_facade_binary(plan, socks5_bin)?;
     // `facade-socks5 <binder-device> <listen-addr>`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: socks5_bin.to_path_buf(),
@@ -1708,6 +1742,7 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
     for var in ["ALL_PROXY", "all_proxy"] {
         command.env(var, &socks_url);
     }
+    Ok(())
 }
 
 /// Bind `facade-client` into the view and launch it as a seal aux for the §7.5.7 inbound mirror.
@@ -1716,8 +1751,13 @@ fn apply_socks5(plan: &mut Plan, socks5_bin: &Path, listen: SocketAddr, command:
 /// node 0, and on a delivered conduit connects the workload's native listener at `<kennel-ip>:port`
 /// and splices. Sets no env (unlike the egress proxy) — the workload's own `bind()` is the trigger,
 /// not a client-side proxy setting. Mirrors `apply_socks5`'s view-bind + Landlock + loader grants.
-fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, ports: &[u16]) {
-    install_facade_binary(plan, client_bin);
+fn apply_facade_client(
+    plan: &mut Plan,
+    client_bin: &Path,
+    kennel_ip: IpAddr,
+    ports: &[u16],
+) -> Result<(), ViewPathError> {
+    install_facade_binary(plan, client_bin)?;
     // facade-client connects the workload's listener at <kennel-ip>:<port>; Landlock gates connect
     // per port, so each mirrored port needs a CONNECT_TCP grant (the BPF connect ACL is seeded with
     // the loopback /28 separately in stamp_proxy). Without this Landlock denies the in-kennel
@@ -1734,6 +1774,7 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
         args,
         signals_ready: false,
     });
+    Ok(())
 }
 
 /// Bind `facade-dbus` into the view, point the workload's `DBUS_*_BUS_ADDRESS` at the in-view
@@ -1744,21 +1785,26 @@ fn apply_facade_client(plan: &mut Plan, client_bin: &Path, kennel_ip: IpAddr, po
 /// A no-op unless `pivoting` (the facade needs the constructed view + its binderfs) and the kennel
 /// enables at least one bus. When a bus is enabled but no facade binary is configured, it warns and
 /// serves nothing — fail-closed, never a host bus socket exposed by other means.
-fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting: bool) {
+fn apply_dbus(
+    plan: &mut Plan,
+    dbus: &DbusPrep,
+    command: &mut Command,
+    pivoting: bool,
+) -> Result<(), ViewPathError> {
     use kennel_lib_syscall::landlock::AccessFs;
     let buses = [
         (dbus.session.as_ref(), "DBUS_SESSION_BUS_ADDRESS", "session"),
         (dbus.system.as_ref(), "DBUS_SYSTEM_BUS_ADDRESS", "system"),
     ];
     if !pivoting || buses.iter().all(|(b, _, _)| b.is_none()) {
-        return;
+        return Ok(());
     }
     let Some(facade_bin) = dbus.facade_bin.clone() else {
         eprintln!(
             "kenneld: warning: kennel grants [dbus] mediation but no facade-dbus binary is \
              configured (deployment `facade_dbus`); the bus(es) will be unserved."
         );
-        return;
+        return Ok(());
     };
     // Per enabled bus: point the workload's bus address at the in-view socket facade-dbus presents,
     // grant the facade the Landlock to create the socket's parent dir (it `create_dir_all`s it under
@@ -1789,7 +1835,7 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
         ));
     }
     // Bind the facade binary into the view (read-only) and grant execute + its loaders.
-    install_facade_binary(plan, &facade_bin);
+    install_facade_binary(plan, &facade_bin)?;
     // `facade-dbus <device> <listen-path>=<bus> ...`, run inside the sealed view.
     plan.aux.push(kennel_lib_spawn::AuxProcess {
         path: facade_bin,
@@ -1797,6 +1843,7 @@ fn apply_dbus(plan: &mut Plan, dbus: &DbusPrep, command: &mut Command, pivoting:
         // It serves the bus sockets: kennel-bin-init holds the workload until it signals ready.
         signals_ready: true,
     });
+    Ok(())
 }
 
 /// Best-effort reverse of bring-up: kill the proxy, remove the addresses, then the

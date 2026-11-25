@@ -87,14 +87,14 @@ fn apply_net_proxy_allow(policy: &mut SettledPolicy, value: &str) -> Result<(), 
         net.allow.push(NetRule {
             cidr: dest.host,
             prefix_len,
-            port_min: dest.port,
-            port_max: dest.port,
+            port_min: dest.port.get(),
+            port_max: dest.port.get(),
             protocol: Protocol::Tcp,
         });
     } else {
         net.allow_names.push(NameRule {
             name: dest.host,
-            ports: vec![dest.port],
+            ports: vec![dest.port.get()],
             protocol: Protocol::Tcp,
         });
     }

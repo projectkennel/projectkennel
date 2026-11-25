@@ -279,7 +279,7 @@ pub struct Destination {
     /// The destination host (a name or an IPv4 literal).
     pub host: String,
     /// The exact destination port.
-    pub port: u16,
+    pub port: Port,
 }
 
 /// Why a string is not a `host:port` destination, or not a destination pattern.
@@ -343,6 +343,41 @@ impl std::fmt::Display for PatternError {
 impl std::error::Error for DestFault {}
 impl std::error::Error for PatternError {}
 
+/// A TCP or UDP port a destination names: never 0.
+///
+/// It can only be built by [`Port::parse`], so a destination or a pattern cannot carry the
+/// wildcard port (CODING-STANDARDS.md §11.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Port(std::num::NonZeroU16);
+
+impl Port {
+    /// Parse a decimal port number.
+    ///
+    /// # Errors
+    /// [`DestFault::NotAPort`] if `text` is not a number that fits a `u16`, or
+    /// [`DestFault::PortZero`] if it is 0.
+    pub fn parse(text: &str) -> Result<Self, DestFault> {
+        let port: u16 = text
+            .parse()
+            .map_err(|_| DestFault::NotAPort(text.to_owned()))?;
+        std::num::NonZeroU16::new(port)
+            .map(Self)
+            .ok_or(DestFault::PortZero)
+    }
+
+    /// The port number.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Display for Port {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Destination {
     /// Parse `host:port`. The host is everything before the final `:`; the port is an exact `u16`.
     /// (IPv6 bracket syntax is out of scope for the pattern constraint — net patterns are names and
@@ -360,15 +395,9 @@ impl Destination {
         if host.contains(':') {
             return Err(DestFault::Ipv6Host);
         }
-        let port: u16 = port
-            .parse()
-            .map_err(|_| DestFault::NotAPort(port.to_owned()))?;
-        if port == 0 {
-            return Err(DestFault::PortZero);
-        }
         Ok(Self {
             host: host.to_owned(),
-            port,
+            port: Port::parse(port)?,
         })
     }
 }
@@ -381,7 +410,7 @@ impl Destination {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DestPattern {
     host: HostPattern,
-    port: u16,
+    port: Port,
 }
 
 /// The host half of a [`DestPattern`].
@@ -413,12 +442,7 @@ impl DestPattern {
 
     fn parse_parts(pattern: &str) -> Result<Self, DestFault> {
         let (host, port) = pattern.rsplit_once(':').ok_or(DestFault::MissingPort)?;
-        let port: u16 = port
-            .parse()
-            .map_err(|_| DestFault::NotAPort(port.to_owned()))?;
-        if port == 0 {
-            return Err(DestFault::PortZero);
-        }
+        let port = Port::parse(port)?;
         if host.is_empty() {
             return Err(DestFault::EmptyHost);
         }
@@ -622,5 +646,15 @@ mod tests {
         );
         assert_eq!(Destination::parse("[::1]:443"), Err(DestFault::Ipv6Host));
         assert_eq!(Destination::parse("h"), Err(DestFault::MissingPort));
+        // A port is never 0, and prints as its number.
+        assert_eq!(Port::parse("0"), Err(DestFault::PortZero));
+        assert_eq!(
+            Port::parse("65536"),
+            Err(DestFault::NotAPort("65536".to_owned()))
+        );
+        let port = Port::parse("443").expect("443");
+        assert_eq!(port.get(), 443);
+        assert_eq!(port.to_string(), "443");
+        assert_eq!(Destination::parse("h:443").map(|d| d.port), Ok(port));
     }
 }

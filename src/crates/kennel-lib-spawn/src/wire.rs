@@ -49,6 +49,8 @@ pub enum PlanWireError {
     BadString,
     /// A resource name did not resolve to a known `setrlimit` resource.
     BadResource,
+    /// A bind's in-view target is relative or has a `..` component.
+    BadViewPath,
 }
 
 // ---- writer ---------------------------------------------------------------
@@ -660,7 +662,7 @@ fn get_view(r: &mut Reader<'_>) -> Result<ShimView, PlanWireError> {
     let mut binds = Vec::new();
     for _ in 0..r.count()? {
         let source = r.path()?;
-        let target = r.path()?;
+        let target = crate::ViewPath::parse(r.path()?).map_err(|_| PlanWireError::BadViewPath)?;
         let writable = r.bool()?;
         let exclusive = r.bool()?;
         let redirected = r.bool()?;
@@ -1144,7 +1146,7 @@ mod tests {
             binds: vec![
                 BindMount {
                     source: PathBuf::from("/usr"),
-                    target: PathBuf::from("/usr"),
+                    target: crate::ViewPath::parse("/usr").expect("view path"),
                     writable: false,
                     exclusive: false,
                     redirected: false,
@@ -1152,7 +1154,8 @@ mod tests {
                 },
                 BindMount {
                     source: PathBuf::from("/home/op/stores/acme/cred.json"),
-                    target: PathBuf::from("/home/kennel/.app/cred.json"),
+                    target: crate::ViewPath::parse("/home/kennel/.app/cred.json")
+                        .expect("view path"),
                     writable: false,
                     exclusive: false,
                     redirected: true,
@@ -1160,7 +1163,7 @@ mod tests {
                 },
                 BindMount {
                     source: PathBuf::from("/home/op/work"),
-                    target: PathBuf::from("/home/kennel/work"),
+                    target: crate::ViewPath::parse("/home/kennel/work").expect("view path"),
                     writable: true,
                     exclusive: true,
                     redirected: false,
@@ -1631,6 +1634,30 @@ mod tests {
             .expect("name range")
             .copy_from_slice(b"zzzzzz");
         assert_eq!(decode_plan(&bytes), Err(PlanWireError::BadResource));
+    }
+
+    #[test]
+    fn a_bind_target_that_is_not_an_in_view_path_is_refused_at_decode() {
+        // A `ViewPath` cannot be built relative or with `..`, so such a target can only arrive
+        // over the wire. Rewrite a target in the encoded plan, same length, and decode.
+        let good = b"/home/kennel/.app/cred.json";
+        for bad in [
+            &b"home/kennel/.app/cred.jsonx"[..],
+            &b"/home/../etc/.app/cred.json"[..],
+        ] {
+            assert_eq!(good.len(), bad.len());
+            let mut bytes = encode_plan(&rich_plan());
+            let at = bytes
+                .windows(good.len())
+                .position(|w| w == good)
+                .expect("the encoded target is present");
+            let end = at + good.len();
+            bytes
+                .get_mut(at..end)
+                .expect("target range")
+                .copy_from_slice(bad);
+            assert_eq!(decode_plan(&bytes), Err(PlanWireError::BadViewPath));
+        }
     }
 
     #[test]

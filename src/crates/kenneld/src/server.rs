@@ -1660,7 +1660,9 @@ pub fn run_kennel<P, L>(
                     resolved.display()
                 ));
                 let mask_manifest = loaded.settled.effective_policy.trust.manifest;
-                loaded.plan.grant_cwd(resolved, writable, mask_manifest);
+                if let Err(reason) = loaded.plan.grant_cwd(resolved, writable, mask_manifest) {
+                    return fail(shared, kname, ctx, conn, StartStage::FsCwd, reason);
+                }
             }
             Err(reason) => return fail(shared, kname, ctx, conn, StartStage::FsCwd, reason),
         }
@@ -2017,9 +2019,16 @@ pub fn run_kennel<P, L>(
                 let Some(target) = std::path::Path::new(&p.endpoint).parent() else {
                     continue;
                 };
+                let Ok(target) = kennel_lib_spawn::ViewPath::parse(target) else {
+                    eprintln!(
+                        "kenneld: provider `{kname}`: endpoint `{}` is not an in-view path",
+                        p.endpoint
+                    );
+                    continue;
+                };
                 view.binds.push(kennel_lib_spawn::plan::BindMount {
                     source: host_dir,
-                    target: target.to_path_buf(),
+                    target,
                     writable: true,
                     exclusive: false,
                     redirected: false,
