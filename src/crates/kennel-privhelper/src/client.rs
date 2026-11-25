@@ -100,6 +100,97 @@ pub struct Constructed {
     pub stderr: HelperStderr,
 }
 
+/// Why a call to the privileged helper did not produce its result.
+///
+/// The first group are failures to run the exchange at all; each names the step. The second
+/// are a helper that ran and did not answer as the protocol requires.
+#[derive(Debug)]
+pub enum ClientError {
+    /// The socket pair to the helper could not be created.
+    Socket(io::Error),
+    /// The helper could not be started.
+    Spawn(io::Error),
+    /// The request could not be sent.
+    Send(io::Error),
+    /// The reply could not be received.
+    Receive(io::Error),
+    /// The helper was started without a standard input to write the request to.
+    NoStdin,
+    /// The factory did not return the 4-byte init pid. Carries the helper's last words on its
+    /// standard error, which may be empty.
+    NoInitPid(String),
+    /// The factory did not return the boot-sync socket. Carries the helper's last words.
+    NoSyncSocket(String),
+    /// The helper's response did not decode.
+    MalformedResponse(String),
+    /// `exclusive-unmount` exited unsuccessfully.
+    ExclusiveUnmount {
+        /// The host path whose over-mount was to be released.
+        host: std::path::PathBuf,
+        /// The helper's exit code, if it exited.
+        code: Option<i32>,
+    },
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let with_cause = |f: &mut std::fmt::Formatter<'_>, symptom: &str, cause: &str| {
+            if cause.is_empty() {
+                f.write_str(symptom)
+            } else {
+                write!(f, "{symptom}: {cause}")
+            }
+        };
+        match self {
+            Self::Socket(e) => write!(f, "creating the privhelper socket pair: {e}"),
+            Self::Spawn(e) => write!(f, "starting the privhelper: {e}"),
+            Self::Send(e) => write!(f, "sending the request to the privhelper: {e}"),
+            Self::Receive(e) => write!(f, "receiving the privhelper's reply: {e}"),
+            Self::NoStdin => f.write_str("privhelper stdin unavailable"),
+            Self::NoInitPid(cause) => {
+                with_cause(f, "factory did not return the 4-byte init pid", cause)
+            }
+            Self::NoSyncSocket(cause) => {
+                with_cause(f, "factory did not return the boot-sync socket", cause)
+            }
+            Self::MalformedResponse(detail) => {
+                write!(f, "malformed privhelper response: {detail}")
+            }
+            Self::ExclusiveUnmount { host, code } => write!(
+                f,
+                "kennel-privhelper exclusive-unmount {} exited with {code:?}",
+                host.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Socket(e) | Self::Spawn(e) | Self::Send(e) | Self::Receive(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+// The daemon's `Privileged` trait speaks `io::Error`; the kind is kept and the text names the step.
+impl From<ClientError> for io::Error {
+    fn from(e: ClientError) -> Self {
+        let kind = match &e {
+            ClientError::Socket(s)
+            | ClientError::Spawn(s)
+            | ClientError::Send(s)
+            | ClientError::Receive(s) => s.kind(),
+            ClientError::NoInitPid(_)
+            | ClientError::NoSyncSocket(_)
+            | ClientError::MalformedResponse(_) => io::ErrorKind::InvalidData,
+            ClientError::NoStdin | ClientError::ExclusiveUnmount { .. } => io::ErrorKind::Other,
+        };
+        Self::new(kind, e.to_string())
+    }
+}
+
 /// Invoke the privhelper **factory** to construct a kennel and hand off to `kennel-bin-init`.
 ///
 /// Returns the (short-lived) helper [`Child`], `kennel-bin-init`'s **host pid** (`07-2` §7.2.1), and
@@ -133,8 +224,8 @@ pub fn construct_kennel(
     pty_fd: Option<RawFd>,
     workload_fd: Option<RawFd>,
     stdio_fds: Option<[RawFd; 3]>,
-) -> io::Result<Constructed> {
-    let (ours, theirs) = seqpacket_pair()?;
+) -> Result<Constructed, ClientError> {
+    let (ours, theirs) = seqpacket_pair().map_err(ClientError::Socket)?;
     // Capture the factory's stderr (W15) rather than inherit it: a background thread forwards each
     // line to the journal (unchanged) and rings the last lines, so a construction failure can carry
     // the factory's (or a sub-helper's) own words, not just the transport symptom.
@@ -142,7 +233,8 @@ pub fn construct_kennel(
         .arg("construct")
         .stdin(Stdio::from(theirs))
         .stderr(Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(ClientError::Spawn)?;
     // `theirs` is consumed by the Command (dup'd to the child's stdin); our end stays.
     let helper_stderr = child
         .stderr
@@ -173,28 +265,19 @@ pub fn construct_kennel(
     if let Some(s) = stdio_fds {
         fds.extend(s);
     }
-    send_with_raw_fds(ours.as_fd(), &data, &fds)?;
+    send_with_raw_fds(ours.as_fd(), &data, &fds).map_err(ClientError::Send)?;
 
     // The reply is the 4-byte init pid plus, as SCM fds in a FIXED order, the kenneld end of the
     // boot-sync socket and then (when the kennel has a binderfs) the binder device handle.
     let mut buf = [0u8; 4];
-    let (n, mut reply_fds) = recv_with_fds(ours.as_fd(), &mut buf)?;
+    let (n, mut reply_fds) = recv_with_fds(ours.as_fd(), &mut buf).map_err(ClientError::Receive)?;
     if n != 4 {
         // The factory died before reporting (a missing cap, a sub-helper refusal, the BPF attach):
         // fold its captured stderr into the cause so the operator does not have to `strace`.
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            with_cause("factory did not return the 4-byte init pid", &helper_stderr),
-        ));
+        return Err(ClientError::NoInitPid(helper_stderr.recent()));
     }
     if reply_fds.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            with_cause(
-                "factory did not return the boot-sync socket",
-                &helper_stderr,
-            ),
-        ));
+        return Err(ClientError::NoSyncSocket(helper_stderr.recent()));
     }
     let sync = reply_fds.remove(0);
     // The second fd, when present, is the binder device handle (a kennel with no constructed view
@@ -209,50 +292,33 @@ pub fn construct_kennel(
     })
 }
 
-/// Append the factory's captured stderr (if any) to a transport-level `symptom` (W15).
-fn with_cause(symptom: &str, stderr: &HelperStderr) -> String {
-    let cause = stderr.recent();
-    if cause.is_empty() {
-        symptom.to_owned()
-    } else {
-        format!("{symptom}: {cause}")
-    }
-}
-
 /// Invoke `helper`, send `request`, and return the decoded response.
 ///
 /// # Errors
 ///
 /// Returns an OS error if the helper cannot be spawned or the exchange fails, or
 /// `InvalidData` if the helper's response is malformed.
-pub fn invoke(helper: &Path, request: &Request) -> io::Result<Response> {
+pub fn invoke(helper: &Path, request: &Request) -> Result<Response, ClientError> {
     exchange(helper, &request.encode())
 }
 
 /// Spawn `helper`, write `bytes` to its stdin (closing the pipe so it sees EOF),
 /// and return the decoded response.
-fn exchange(helper: &Path, bytes: &[u8]) -> io::Result<Response> {
+fn exchange(helper: &Path, bytes: &[u8]) -> Result<Response, ClientError> {
     let mut child = Command::new(helper)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()?;
+        .spawn()
+        .map_err(ClientError::Spawn)?;
     {
         use std::io::Write as _;
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| io::Error::other("privhelper stdin unavailable"))?;
-        stdin.write_all(bytes)?;
+        let mut stdin = child.stdin.take().ok_or(ClientError::NoStdin)?;
+        stdin.write_all(bytes).map_err(ClientError::Send)?;
         // `stdin` drops here, closing the helper's stdin so it sees EOF.
     }
-    let out = child.wait_with_output()?;
-    Response::decode(&out.stdout).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("malformed privhelper response: {e:?}"),
-        )
-    })
+    let out = child.wait_with_output().map_err(ClientError::Receive)?;
+    Response::decode(&out.stdout).map_err(|e| ClientError::MalformedResponse(format!("{e:?}")))
 }
 
 /// Ask the helper to remove `addr/prefix` on `interface` for kennel `ctx` (teardown).
@@ -269,7 +335,7 @@ pub fn del_address(
     interface: &str,
     addr: IpAddr,
     prefix: u8,
-) -> io::Result<Response> {
+) -> Result<Response, ClientError> {
     invoke(
         helper,
         &addr_request(Op::DelAddr, ctx, interface, addr, prefix),
@@ -283,19 +349,19 @@ pub fn del_address(
 ///
 /// # Errors
 /// An OS error if the helper cannot be spawned, or a non-zero exit (refused / unmount failed).
-pub fn release_exclusive(helper: &Path, host: &Path) -> io::Result<()> {
+pub fn release_exclusive(helper: &Path, host: &Path) -> Result<(), ClientError> {
     let status = Command::new(helper)
         .arg("exclusive-unmount")
         .arg(host)
-        .status()?;
+        .status()
+        .map_err(ClientError::Spawn)?;
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::other(format!(
-            "kennel-privhelper exclusive-unmount {} exited with {:?}",
-            host.display(),
-            status.code()
-        )))
+        Err(ClientError::ExclusiveUnmount {
+            host: host.to_path_buf(),
+            code: status.code(),
+        })
     }
 }
 
@@ -306,5 +372,54 @@ fn addr_request(op: Op, ctx: u16, interface: &str, addr: IpAddr, prefix: u8) -> 
         addr,
         prefix,
         interface: interface.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_error_names_its_step_and_keeps_the_kind() {
+        let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+        let spawn = ClientError::Spawn(denied());
+        assert!(spawn.to_string().starts_with("starting the privhelper: "));
+        assert_eq!(
+            io::Error::from(spawn).kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(ClientError::Send(denied())
+            .to_string()
+            .starts_with("sending the request to the privhelper: "));
+        // A factory that did not answer carries its last words when it had any.
+        assert_eq!(
+            ClientError::NoInitPid(String::new()).to_string(),
+            "factory did not return the 4-byte init pid"
+        );
+        assert_eq!(
+            ClientError::NoSyncSocket("mount: EPERM".to_owned()).to_string(),
+            "factory did not return the boot-sync socket: mount: EPERM"
+        );
+        assert_eq!(
+            io::Error::from(ClientError::NoInitPid(String::new())).kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            ClientError::ExclusiveUnmount {
+                host: std::path::PathBuf::from("/home/op/shared"),
+                code: Some(1)
+            }
+            .to_string(),
+            "kennel-privhelper exclusive-unmount /home/op/shared exited with Some(1)"
+        );
+    }
+
+    #[test]
+    fn a_helper_that_cannot_be_started_is_a_spawn_error() {
+        let missing = Path::new("/nonexistent/kennel-privhelper");
+        assert!(matches!(
+            release_exclusive(missing, Path::new("/tmp")),
+            Err(ClientError::Spawn(_))
+        ));
     }
 }

@@ -211,11 +211,20 @@ impl Privileged for HelperClient {
         addr: IpAddr,
         prefix: u8,
     ) -> io::Result<Response> {
-        kennel_privhelper::client::del_address(&self.helper, ctx, interface, addr, prefix)
+        Ok(kennel_privhelper::client::del_address(
+            &self.helper,
+            ctx,
+            interface,
+            addr,
+            prefix,
+        )?)
     }
 
     fn release_exclusive(&self, host: &Path) -> io::Result<()> {
-        kennel_privhelper::client::release_exclusive(&self.helper, host)
+        Ok(kennel_privhelper::client::release_exclusive(
+            &self.helper,
+            host,
+        )?)
     }
 
     fn construct_kennel(
@@ -226,14 +235,14 @@ impl Privileged for HelperClient {
         workload_fd: Option<std::os::fd::RawFd>,
         stdio_fds: Option<[std::os::fd::RawFd; 3]>,
     ) -> io::Result<kennel_privhelper::client::Constructed> {
-        kennel_privhelper::client::construct_kennel(
+        Ok(kennel_privhelper::client::construct_kennel(
             &self.helper,
             construction_half,
             egress,
             pty_fd,
             workload_fd,
             stdio_fds,
-        )
+        )?)
     }
 }
 
