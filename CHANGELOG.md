@@ -142,6 +142,15 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **The daemon's `run_kennel` is split into phases.** It was one 1046-line function with a
+  length exemption. It is now four phases, each a function: `admit` (the name and a context),
+  `settle` (load the policy, fix the command and its descriptors, apply the grants that depend
+  on the invocation), `assemble` (the facades, the mesh, the spec), then bring-up and
+  `supervise` (serve until the workload exits, then tear down). A stage that can refuse a
+  start returns a `Refused { stage, reason }` in place of an inline `return fail(…)`. The
+  exemption is gone, and with it the last of the four long functions. No behaviour change.
+  A new suite case, `workload-sha256`, runs a digest-pinned workload: the path where a
+  descriptor has to stay open across those phases, which no case covered.
 - **The daemon's `bring_up` is split into its stages.** It was one 588-line function with a
   length exemption. It is now two halves, `prepare_plan` (everything added to the plan before
   the kennel exists) and `construct_and_start` (the factory call and what follows it), each a
