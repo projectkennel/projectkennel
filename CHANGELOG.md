@@ -142,6 +142,10 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **No function in `kenneld` returns a `String` error.** The last four are converted: the
+  binary's startup (`StartupError`), the enablement scan's per-link load (`ProviderError`),
+  and the spawn path's narrowed-manifest check (`OutsideNarrowedManifest`). Messages are
+  unchanged.
 - **The `kennel` CLI returns a typed error.** All 97 functions that returned
   `Result<_, String>` now return `CliError`. It sorts failures by kind, not by message: a
   wrong command line (`Usage`), an operation on a named file (`File`), the daemon unreachable
@@ -152,8 +156,7 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
   floor, the workload merge, the digest pin, the command build and the SSH egress
   registration returned a `String`. They now return `CwdError`, `LandlockFloorError`,
   `WorkloadError` and `SshEgressError` (in `kenneld::start_error`), one variant per reason.
-  The text in the journal and the start-refused record is unchanged; tests pin it. In
-  `kenneld` only the binary's own `run` and `build_identity` still return a `String`.
+  The text in the journal and the start-refused record is unchanged; tests pin it.
 - **The daemon's policy loader returns a typed error.** `PolicyLoader::load` and
   `loaded_from_settled` returned a `String`. `LoadError` now says which step failed: reading
   the file, reading the trust store, verification, building the plan, a redirect source the

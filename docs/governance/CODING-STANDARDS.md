@@ -1120,8 +1120,8 @@ Recorded 2026-11-24 from the quality assessment in `docs/governance/audits/`. El
 
 | Rule | State of the code |
 |---|---|
-| §8.1: each crate defines its own error type; generic string errors are discouraged | The wire and policy crates define error enums by hand. Much of the privileged path still returns `io::Error` or `String` with formatted text. `thiserror` is not a dependency (a proc macro in the TCB's build); the enums are written out. |
-| §11.1: security-relevant values are newtypes | Kennel names, granted paths, ports and addresses are `String`, `PathBuf`, `u16` and the std address types, with public fields. Validation is by function, not by type. |
+| §8.1: each crate defines its own error type; generic string errors are discouraged | Mostly met (state at 2026-11-25). The wire and policy crates, the factory (`ConstructError`), the view build (`ViewError`), the daemon (`LoadError`, the `start_error` types, `StartupError`) and the CLI (`CliError`) define error enums by hand; `thiserror` is not a dependency (a proc macro in the TCB's build). `CliError` sorts by kind and carries the operator's message as text. Still returning `String`: `kennel-compose`, `kennel-bin-oci-entry`, and four parsers in `kennel-lib-policy` (`variant.rs`) and `kennel-lib-compile` (`validate_reference`). Still returning a bare `io::Error` where a caller cannot tell the step: parts of `kennel-lib-spawn` and the privhelper client. |
+| §11.1: security-relevant values are newtypes | Partly met (state at 2026-11-25). Kennel names (`KennelName`, which also keys the daemon's registry) and mesh capability names and keys (`MeshName`, `MeshKey`) are types that can only be built by parsing. Granted paths, ports, addresses and the kennel context are still `PathBuf`, `u16`, the std address types and `u16`, validated by function. |
 
 ---
 

@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::{fmt, io};
 
 use std::net::{IpAddr, Ipv6Addr};
 
@@ -29,19 +30,47 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Why the daemon could not start, or stopped serving.
+#[derive(Debug)]
+enum StartupError {
+    /// The process could not be made a child subreaper.
+    Subreaper(io::Error),
+    /// The root-owned deployment configuration could not be loaded.
+    Deployment(kennel_lib_config::ConfigError),
+    /// `HOME` is not set.
+    NoHome,
+    /// The daemon's own cgroup could not be found.
+    Cgroup(io::Error),
+    /// The control socket could not be opened.
+    ControlSocket(io::Error),
+    /// The accept loop failed.
+    Serve(io::Error),
+}
+
+impl fmt::Display for StartupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Subreaper(e) => write!(f, "set_child_subreaper: {e}"),
+            Self::Deployment(e) => write!(f, "loading deployment config: {e}"),
+            Self::NoHome => f.write_str("HOME is not set"),
+            Self::Cgroup(e) => write!(f, "locating own cgroup: {e}"),
+            Self::ControlSocket(e) => write!(f, "control socket: {e}"),
+            Self::Serve(e) => write!(f, "serving: {e}"),
+        }
+    }
+}
+
+fn run() -> Result<(), StartupError> {
     // Become a child subreaper so an orphaned `kennel-bin-init` reparents to us: the privhelper
     // factory exits as soon as it has reported the init pid (it is not a reaper proxy), and we
     // must remain able to `waitpid` the kennel for its exit status (`07-2`). Set once, before
     // any kennel is constructed.
-    kennel_lib_syscall::process::set_child_subreaper()
-        .map_err(|e| format!("set_child_subreaper: {e}"))?;
+    kennel_lib_syscall::process::set_child_subreaper().map_err(StartupError::Subreaper)?;
 
     // Deployment paths (helper binaries, the trust store) come from the
     // root-owned config cascade — never baked in, never user-overridable
     // (07-paths.md; kennel_lib_config::Deployment).
-    let deployment = kennel_lib_config::Deployment::load()
-        .map_err(|e| format!("loading deployment config: {e}"))?;
+    let deployment = kennel_lib_config::Deployment::load().map_err(StartupError::Deployment)?;
     let identity = build_identity(&deployment)?;
     let privileged = HelperClient::new(deployment.privhelper());
     // Settled run policies verify against the trust store: the vendor layer first (the
@@ -67,22 +96,21 @@ fn run() -> Result<(), String> {
     );
 
     let shared = Arc::new(Shared::new(identity, privileged, loader));
-    let listener = socket::listener().map_err(|e| format!("control socket: {e}"))?;
-    serve(&shared, &listener).map_err(|e| format!("serving: {e}"))
+    let listener = socket::listener().map_err(StartupError::ControlSocket)?;
+    serve(&shared, &listener).map_err(StartupError::Serve)
 }
 
 /// Build the user's identity from kernel-trusted sources, taking the
 /// helper-binary locations from the resolved [`kennel_lib_config::Deployment`].
-fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity, String> {
+fn build_identity(deployment: &kennel_lib_config::Deployment) -> Result<Identity, StartupError> {
     let uid = kennel_lib_syscall::unistd::real_uid();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or("HOME is not set")?;
+        .ok_or(StartupError::NoHome)?;
     // The reserved scope derives from the kernel-trusted real uid — no `/etc/kennel/subkennel`
     // allocation (W10). Every uid has a scope; there is no refuse-to-start.
     let scope = kennel_privhelper::validate::ReservedScope::new(uid);
-    let cgroup_base =
-        kenneld::cgroup::self_cgroup().map_err(|e| format!("locating own cgroup: {e}"))?;
+    let cgroup_base = kenneld::cgroup::self_cgroup().map_err(StartupError::Cgroup)?;
     // Vacate the base cgroup and enable the pids/memory controllers for the kennel children, so
     // each kennel can carry its own pids.max/memory.max. Best-effort: where the controllers are not
     // delegated the per-kennel caps no-op and the aggregate kenneld.service TasksMax is the backstop.
