@@ -36,7 +36,7 @@
 //! v6 address in the reserved ULA block. This module is pure and platform-
 //! independent; it is exercised by the unit tests below on any host.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use crate::addr::{uid_subnet, KENNEL_ULA};
 
@@ -91,6 +91,44 @@ pub struct AddrRequest {
     pub addr: IpAddr,
     /// The subnet prefix length.
     pub prefix: u8,
+}
+
+/// A loopback address that lies inside the caller's reserved per-kennel subnet, on an interface
+/// the helper may touch.
+///
+/// It can only be built by [`validate_addr`], so the code that hands an address to netlink, or
+/// to the sub-helper that does, cannot be given one nobody checked (CODING-STANDARDS.md §11.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedAddr {
+    ctx: u16,
+    interface: String,
+    addr: Ipv6Addr,
+}
+
+impl ScopedAddr {
+    /// The kennel context the address belongs to.
+    #[must_use]
+    pub const fn ctx(&self) -> u16 {
+        self.ctx
+    }
+
+    /// The interface: `lo` or a `kennel-<id>` dummy.
+    #[must_use]
+    pub fn interface(&self) -> &str {
+        &self.interface
+    }
+
+    /// The address.
+    #[must_use]
+    pub const fn addr(&self) -> Ipv6Addr {
+        self.addr
+    }
+
+    /// The prefix length, which is fixed for the family.
+    #[must_use]
+    pub const fn prefix(&self) -> u8 {
+        V6_PREFIX
+    }
 }
 
 /// Why a request was refused. Each variant names a specific out-of-scope
@@ -158,7 +196,7 @@ pub fn reserved_prefix(scope: &ReservedScope) -> [u8; 6] {
 /// Returns a [`Refusal`] if the address is not IPv6, the prefix length is not
 /// 64, the address falls outside the caller's per-kennel
 /// `fd6b:6e00:<uid_subnet>:<ctx>::/64`, or the interface name is not permitted.
-pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Refusal> {
+pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<ScopedAddr, Refusal> {
     validate_interface(&req.interface)?;
     let IpAddr::V6(v6) = req.addr else {
         // IPv4 loopback addressing was retired; only v6 ULA is in scope.
@@ -178,7 +216,11 @@ pub fn validate_addr(req: &AddrRequest, scope: &ReservedScope) -> Result<(), Ref
         && [b3, b4, b5] == uid_subnet(scope.uid)
         && addr_ctx == req.ctx
     {
-        Ok(())
+        Ok(ScopedAddr {
+            ctx: req.ctx,
+            interface: req.interface.clone(),
+            addr: v6,
+        })
     } else {
         Err(Refusal::AddrOutOfScope)
     }
@@ -212,7 +254,7 @@ fn validate_interface(interface: &str) -> Result<(), Refusal> {
 mod tests {
     use super::*;
     use crate::addr::loopback_v6;
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::net::Ipv4Addr;
 
     const UID: u32 = 1000;
 
@@ -247,6 +289,16 @@ mod tests {
     fn v6_high_ctx_is_ok() {
         let a = IpAddr::V6(loopback_v6(UID, 300, 1));
         assert!(validate_addr(&addr_req(300, "lo", a, 64), &scope()).is_ok());
+    }
+
+    #[test]
+    fn a_validated_address_carries_what_was_checked() {
+        let a = loopback_v6(UID, 5, 1);
+        let scoped = validate_addr(&addr_req(5, "lo", IpAddr::V6(a), 64), &scope()).expect("ok");
+        assert_eq!(scoped.ctx(), 5);
+        assert_eq!(scoped.interface(), "lo");
+        assert_eq!(scoped.addr(), a);
+        assert_eq!(scoped.prefix(), 64);
     }
 
     // ---- validate_addr: prefix ----

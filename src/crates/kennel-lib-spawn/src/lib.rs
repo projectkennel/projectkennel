@@ -34,6 +34,7 @@ pub mod mesh_rendezvous;
 pub mod plan;
 pub mod procfs;
 pub mod view_error;
+pub mod view_path;
 pub mod wire;
 
 use std::io;
@@ -50,6 +51,7 @@ pub use plan::{
     AuxProcess, BindMount, ConstructionHalf, ImageRoot, LoopbackAddr, Persistence, Plan, ProcView,
     ProxyEndpoint, ShimView, Supervision,
 };
+pub use view_path::{ViewPath, ViewPathError};
 
 /// The per-instance values the runtime fills into a settled policy's deferred
 /// placeholders.
@@ -1501,7 +1503,8 @@ mod tests {
             let p = substitute(&policy_with_placeholders(), &subst()).expect("substitute");
             let mut plan =
                 Plan::from_policy(&p, 7, "kennel-dev", Path::new("/home/dev")).expect("plan");
-            plan.grant_cwd(PathBuf::from("/work/project"), writable, manifest);
+            plan.grant_cwd(PathBuf::from("/work/project"), writable, manifest)
+                .expect("an absolute cwd");
             let view = plan.view.expect("constructed view");
             (
                 view.mask_paths

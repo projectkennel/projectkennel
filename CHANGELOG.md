@@ -142,6 +142,18 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **Three more security-relevant values are types** (CODING-STANDARDS.md §11.1).
+  - `ScopedAddr` (`kennel-privhelper`): a loopback address that lies inside the caller's
+    reserved per-kennel subnet. Only `validate_addr` builds one, and the factory and the net
+    sub-helper pass that, not the request, to netlink.
+  - `ViewPath` (`kennel-lib-spawn`): a bind's target inside the kennel, absolute and free of
+    `..`. The plan builder, the daemon and the plan decoder all parse into it, so the factory
+    refuses a plan whose bind target is relative or climbs (`PlanWireError::BadViewPath`)
+    before anything is mounted. The view build already resolved targets inside the new root
+    by descriptor; this states the rule at the boundary. A daemon-side bind whose target
+    fails the check now fails the start instead of being attempted.
+  - `Port` (`kennel-lib-policy`): the port of a destination or a destination pattern, never
+    0. One parser replaces the two copies that checked it.
 - **The last `String` errors outside the test code are typed.** `kennel-compose`
   (`ArgError`, `BinaryError`, `ProbeError`; its prompts return `io::Error`),
   `kennel-bin-oci-entry` (`EntryError`), the destination and pattern parsers in

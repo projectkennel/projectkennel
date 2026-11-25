@@ -77,10 +77,13 @@ fn run() -> Result<(), u8> {
         addr,
         prefix,
     };
-    if let Err(refusal) = validate_addr(&req, &scope) {
+    // From here on the address is only reachable as a `ScopedAddr`: the netlink call below
+    // cannot be handed the unchecked one.
+    let scoped = validate_addr(&req, &scope).map_err(|refusal| {
         eprintln!("kennel-privhelper-net: address {addr} refused: {refusal}");
-        return Err(REFUSED);
-    }
+        REFUSED
+    })?;
+    let (addr, prefix) = (IpAddr::V6(scoped.addr()), scoped.prefix());
 
     // Each address is kernel memory on the host's loopback, and the 64-bit host part of the
     // reserved subnet makes the space of valid addresses effectively unlimited. kenneld adds a

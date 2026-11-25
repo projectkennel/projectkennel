@@ -471,7 +471,7 @@ pub struct BindMount {
     /// The host path bound in.
     pub source: PathBuf,
     /// Where it appears inside the kennel (absolute, post-`pivot_root`).
-    pub target: PathBuf,
+    pub target: crate::ViewPath,
     /// Writable when true; read-only (bind, then RO remount) otherwise.
     pub writable: bool,
     /// **Exclusive** (`[fs].exclusive`, §2.7, T2.8): the kennel keeps the real inode through
@@ -1150,7 +1150,17 @@ impl Plan {
     /// With `mask_manifest` (the policy's `[trust].manifest`), a writable cwd gets the same
     /// trust-manifest mask every other writable bind gets: the workload must not read or
     /// rewrite the integrity pins of the workspace it is working in (T2.8).
-    pub fn grant_cwd(&mut self, host_dir: PathBuf, writable: bool, mask_manifest: bool) {
+    ///
+    /// # Errors
+    /// The [`crate::ViewPathError`] if `host_dir` is not an absolute path free of `..`. The
+    /// plan is unchanged in that case.
+    pub fn grant_cwd(
+        &mut self,
+        host_dir: PathBuf,
+        writable: bool,
+        mask_manifest: bool,
+    ) -> Result<(), crate::ViewPathError> {
+        let target = crate::ViewPath::parse(host_dir.clone())?;
         let access = if writable {
             write_access()
         } else {
@@ -1165,14 +1175,15 @@ impl Plan {
                 view.mask_dir_paths.push(host_dir.join(".trust-manifest.d"));
             }
             view.binds.push(BindMount {
-                source: host_dir.clone(),
-                target: host_dir,
+                source: host_dir,
+                target,
                 writable,
                 exclusive: false,
                 redirected: false,
                 mmap_exec: false,
             });
         }
+        Ok(())
     }
 
     /// Build the plan from a settled policy whose deferred placeholders have
@@ -1314,6 +1325,8 @@ impl Plan {
                 let (source, redirected) = redirects
                     .get(&granted)
                     .map_or((granted, false), |src| (src.clone(), true));
+                let target = crate::ViewPath::parse(target)
+                    .map_err(|e| SpawnError::InvalidPolicy(e.to_string()))?;
                 binds.push(BindMount {
                     source,
                     target,
