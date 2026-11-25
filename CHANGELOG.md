@@ -149,6 +149,14 @@ Per [CODING-STANDARDS.md](docs/governance/CODING-STANDARDS.md), changes that tou
 
 ### Internal / supply chain
 
+- **A wrong comment in the TOML tokenizer, and the daemon library's module docs.**
+  - A comment in `kennel-lib-toml`'s tokenizer said the branch that handles a CRLF inside a
+    multi-line string "never matches". It does: it is what keeps the `\r` out of the value.
+    The comment now says what the branch is for, and a test (`tests/crlf.rs`) reads CRLF
+    multi-line strings; with the branch removed the test fails. No code changed.
+  - The module docs of `kenneld/src/lib.rs` described a four-step bring-up from before the
+    factory existed ("the supporting daemons (not built yet)", "the setuid privhelper"). They
+    now describe what the code does: prepare the plan, construct through the factory, serve.
 - **The public functions that returned a bare `io::Error` say which step failed.**
   - `kennel-privhelper`'s client returns a `ClientError`: the socket pair, starting the
     helper, sending, receiving, a factory that did not return the init pid or the boot-sync
