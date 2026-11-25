@@ -94,35 +94,20 @@ pub fn compile(args: &[String]) -> Result<ExitCode, CliError> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--output" => {
-                output_path = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--output"))?
-                        .into(),
-                );
+                output_path = Some(crate::flag_value(&mut it, "--output")?.into());
             }
-            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
             "--key-id" => {
-                key_id = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--key-id"))?,
-                );
+                key_id = Some(crate::flag_value(&mut it, "--key-id")?);
             }
             "--unsigned" => unsigned = true,
             "--require-signed" => require_signed = true,
             "--no-lock" => no_lock = true,
             "--template-dir" => {
-                template_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                        .into(),
-                );
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
             }
             "--trust-dir" => {
-                trust_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                        .into(),
-                );
+                trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into());
             }
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value => {
@@ -514,17 +499,9 @@ pub fn validate(args: &[String]) -> Result<ExitCode, CliError> {
         match arg.as_str() {
             "--require-signed" => require_signed = true,
             "--template-dir" => {
-                template_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                        .into(),
-                );
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
             }
-            "--trust-dir" => trust_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                    .into(),
-            ),
+            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if policy_path.is_none() => policy_path = Some(value),
             _ => return Err(CliError::usage("only one <policy> may be given")),
@@ -591,17 +568,9 @@ pub fn policy_risks(args: &[String]) -> Result<ExitCode, CliError> {
         match arg.as_str() {
             "--json" => json = true,
             "--template-dir" => {
-                template_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                        .into(),
-                );
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
             }
-            "--trust-dir" => trust_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                    .into(),
-            ),
+            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if policy_path.is_none() => policy_path = Some(value),
             _ => return Err(CliError::usage("only one <policy> may be given")),
@@ -666,17 +635,9 @@ pub fn policy_diff(args: &[String]) -> Result<ExitCode, CliError> {
         match arg.as_str() {
             "--json" => json = true,
             "--template-dir" => {
-                template_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                        .into(),
-                );
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
             }
-            "--trust-dir" => trust_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                    .into(),
-            ),
+            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if positionals.len() < 2 => positionals.push(value),
             _ => return Err(CliError::usage("at most two policies may be given")),
@@ -1677,19 +1638,12 @@ pub fn template_sign(args: &[String]) -> Result<ExitCode, CliError> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
             "--key-id" => {
-                key_id = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--key-id"))?,
-                );
+                key_id = Some(crate::flag_value(&mut it, "--key-id")?);
             }
             "--output" => {
-                output = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--output"))?
-                        .into(),
-                );
+                output = Some(crate::flag_value(&mut it, "--output")?.into());
             }
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             value if path.is_none() => path = Some(value),
@@ -1958,7 +1912,7 @@ fn install_object(args: &[String], house: House) -> Result<ExitCode, CliError> {
         match arg.as_str() {
             "--host" => host = true,
             "--force" => force = true,
-            "--key" => key = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key" => key = Some(crate::flag_value(&mut it, "--key")?),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if file.is_none() => file = Some(v),
             _ => return Err(CliError::usage("only one <file.toml> may be given")),
@@ -2170,7 +2124,7 @@ fn clone_object(args: &[String], house: House) -> Result<ExitCode, CliError> {
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            "--key" => key = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key" => key = Some(crate::flag_value(&mut it, "--key")?),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if src_arg.is_none() => src_arg = Some(v),
             v if new_name.is_none() => new_name = Some(v),

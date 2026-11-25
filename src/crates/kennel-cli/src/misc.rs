@@ -178,16 +178,10 @@ pub fn audit(args: &[String]) -> Result<ExitCode, CliError> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--resource" => {
-                resource = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--resource"))?,
-                );
+                resource = Some(crate::flag_value(&mut it, "--resource")?);
             }
             "--since" => {
-                since = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--since"))?,
-                );
+                since = Some(crate::flag_value(&mut it, "--since")?);
             }
             "--novel-only" => novel_only = true,
             "--follow" => follow = true,

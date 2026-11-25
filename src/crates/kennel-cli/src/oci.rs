@@ -697,17 +697,11 @@ pub fn update(args: &[String]) -> Result<std::process::ExitCode, CliError> {
         match arg.as_str() {
             "--keep-state" => keep_state = true,
             "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
-            "--template-dir" => template_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                    .into(),
-            ),
-            "--trust-dir" => trust_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                    .into(),
-            ),
+            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
+            "--template-dir" => {
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
+            }
+            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if name.is_none() => name = Some(v),
             _ => return Err(CliError::usage("unexpected extra argument before `--`")),
@@ -1192,26 +1186,15 @@ pub fn build(args: &[String]) -> Result<std::process::ExitCode, CliError> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--image" => {
-                image = Some(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--image"))?,
-                );
+                image = Some(crate::flag_value(&mut it, "--image")?);
             }
             "--force" => force = true,
             "--no-fetch" => no_fetch = true,
-            "--key" => key_path = Some(it.next().ok_or_else(|| CliError::missing_value("--key"))?),
+            "--key" => key_path = Some(crate::flag_value(&mut it, "--key")?),
             "--template-dir" => {
-                template_dirs.push(
-                    it.next()
-                        .ok_or_else(|| CliError::missing_value("--template-dir"))?
-                        .into(),
-                );
+                template_dirs.push(crate::flag_value(&mut it, "--template-dir")?.into());
             }
-            "--trust-dir" => trust_dirs.push(
-                it.next()
-                    .ok_or_else(|| CliError::missing_value("--trust-dir"))?
-                    .into(),
-            ),
+            "--trust-dir" => trust_dirs.push(crate::flag_value(&mut it, "--trust-dir")?.into()),
             flag if flag.starts_with("--") => return Err(CliError::unknown_flag(flag)),
             v if name.is_none() => name = Some(v),
             _ => return Err(CliError::usage("unexpected extra argument")),

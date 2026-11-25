@@ -130,6 +130,17 @@ pub fn lexopt_value(p: &mut lexopt::Parser, flag: &str) -> Result<PathBuf, CliEr
         .map_err(|_| CliError::Usage(format!("{flag} needs a value")))
 }
 
+/// The value that follows `flag` on the command line.
+///
+/// # Errors
+/// A usage error naming `flag` if the arguments end before its value.
+pub fn flag_value<'a>(
+    it: &mut impl Iterator<Item = &'a String>,
+    flag: &str,
+) -> Result<&'a String, CliError> {
+    it.next().ok_or_else(|| CliError::missing_value(flag))
+}
+
 /// Format an unexpected lexopt arg into a usage error for `verb`.
 #[must_use]
 pub fn lexopt_unexpected(arg: &lexopt::Arg<'_>, table: &[CommandSpec], verb: &str) -> String {
